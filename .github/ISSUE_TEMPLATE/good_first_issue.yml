@@ -1,0 +1,55 @@
+name: Good first issue
+description: For maintainers, file a well-scoped task suitable for a first-time contributor
+title: "[good first issue]: "
+labels: ["difficulty:good-first-issue"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Use this template to file work that a newcomer can finish without deep context. Adapters, examples, docs, and dashboard widgets are the usual candidates. A good first issue spells out the finish line; nobody should have to guess what "done" means.
+  - type: dropdown
+    id: package
+    attributes:
+      label: Package
+      options:
+        - "@tollway/core"
+        - "@tollway/client"
+        - "@tollway/server"
+        - "@tollway/adapter-express"
+        - "@tollway/adapter-fastify"
+        - "@tollway/adapter-next"
+        - "@tollway/adapter-hono"
+        - "@tollway/channels"
+        - "@tollway/reconcile"
+        - "@tollway/observability"
+        - "@tollway/theme"
+        - apps/dashboard
+        - apps/web
+        - apps/demo
+    validations:
+      required: true
+  - type: textarea
+    id: task
+    attributes:
+      label: The task
+      description: What needs to be built or fixed, in plain terms.
+    validations:
+      required: true
+  - type: textarea
+    id: acceptance
+    attributes:
+      label: Acceptance criteria
+      description: A checklist that defines done.
+      placeholder: |
+        - [ ] The adapter exposes a paywall() function matching the server core signature
+        - [ ] A Vitest test covers the 402 challenge path
+        - [ ] pnpm lint and pnpm typecheck pass
+    validations:
+      required: true
+  - type: textarea
+    id: pointers
+    attributes:
+      label: Pointers
+      description: Files to read first, the relevant design.md section, and any similar code to copy from.
+    validations:
+      required: true

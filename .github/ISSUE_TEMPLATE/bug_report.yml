@@ -1,0 +1,66 @@
+name: Bug report
+description: Something in Tollway does not behave the way it should
+title: "[bug]: "
+labels: ["type:bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for taking the time to report this. A reproducible bug report saves everyone a round trip.
+
+        If this is a security issue (double charge, receipt forgery, policy bypass, reconciliation drift), do not file it here. Follow [SECURITY.md](../../SECURITY.md) instead.
+  - type: dropdown
+    id: package
+    attributes:
+      label: Package
+      description: Which package is affected?
+      options:
+        - "@tollway/core"
+        - "@tollway/client"
+        - "@tollway/server"
+        - "@tollway/adapter-express"
+        - "@tollway/adapter-fastify"
+        - "@tollway/adapter-next"
+        - "@tollway/adapter-hono"
+        - "@tollway/channels"
+        - "@tollway/reconcile"
+        - "@tollway/observability"
+        - "@tollway/theme"
+        - apps/dashboard
+        - apps/web
+        - apps/demo
+        - Not sure
+    validations:
+      required: true
+  - type: textarea
+    id: what-happened
+    attributes:
+      label: What happened
+      description: What did you expect, and what did you get instead?
+      placeholder: The middleware returned 200 without a PAYMENT-RESPONSE header when...
+    validations:
+      required: true
+  - type: textarea
+    id: reproduction
+    attributes:
+      label: Steps to reproduce
+      description: Minimal steps or a repo link. Mention whether MOCK_MODE was on.
+      placeholder: |
+        1. pnpm install
+        2. MOCK_MODE=true pnpm --filter @tollway/demo start
+        3. ...
+    validations:
+      required: true
+  - type: textarea
+    id: environment
+    attributes:
+      label: Environment
+      description: Node version, pnpm version, OS, and the network (testnet, mainnet, mock).
+      placeholder: Node 22.12, pnpm 10.28, macOS 15, testnet
+    validations:
+      required: true
+  - type: textarea
+    id: logs
+    attributes:
+      label: Relevant logs or output
+      render: shell
