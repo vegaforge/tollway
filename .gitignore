@@ -1,0 +1,31 @@
+# Dependencies
+node_modules/
+
+# Build outputs
+dist/
+.next/
+out/
+.turbo/
+
+# Test
+coverage/
+
+# Environment
+.env
+.env.local
+.env.*.local
+
+# Editor and OS
+.DS_Store
+.idea/
+.vscode/*
+!.vscode/extensions.json
+
+# Logs
+*.log
+npm-debug.log*
+pnpm-debug.log*
+
+# Misc
+*.tsbuildinfo
+.vercel
