@@ -21,6 +21,25 @@ importers:
         specifier: ^5.8.0
         version: 5.9.3
 
+  packages/core:
+    dependencies:
+      zod:
+        specifier: ^4.0.0
+        version: 4.4.3
+    devDependencies:
+      '@types/node':
+        specifier: ^22.19.20
+        version: 22.19.20
+      tsup:
+        specifier: ^8.5.0
+        version: 8.5.1(postcss@8.5.15)(typescript@5.9.3)
+      typescript:
+        specifier: ^5.8.0
+        version: 5.9.3
+      vitest:
+        specifier: ^3.2.0
+        version: 3.2.6(@types/node@22.19.20)
+
   packages/theme:
     devDependencies:
       '@types/node':
@@ -1198,6 +1217,9 @@ packages:
     engines: {node: '>=8'}
     hasBin: true
 
+  zod@4.4.3:
+    resolution: {integrity: sha512-ytENFjIJFl2UwYglde2jchW2Hwm4GJFLDiSXWdTrJQBIN9Fcyp7n4DhxJEiWNAJMV1/BqWfW/kkg71UDcHJyTQ==}
+
 snapshots:
 
   '@babel/runtime@7.29.7': {}
@@ -2249,3 +2271,5 @@ snapshots:
     dependencies:
       siginfo: 2.0.0
       stackback: 0.0.2
+
+  zod@4.4.3: {}
