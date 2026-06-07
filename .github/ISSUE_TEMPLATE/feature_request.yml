@@ -1,0 +1,58 @@
+name: Feature request
+description: Propose an addition or a change to Tollway
+title: "[feature]: "
+labels: ["type:feature"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Before proposing, skim the [design document](../../docs/design.md), especially the "What Tollway is not" section. Facilitator features, wallet features, and custody features are out of scope by design.
+  - type: dropdown
+    id: package
+    attributes:
+      label: Package
+      description: Where would this live?
+      options:
+        - "@tollway/core"
+        - "@tollway/client"
+        - "@tollway/server"
+        - "@tollway/adapter-express"
+        - "@tollway/adapter-fastify"
+        - "@tollway/adapter-next"
+        - "@tollway/adapter-hono"
+        - "@tollway/channels"
+        - "@tollway/reconcile"
+        - "@tollway/observability"
+        - "@tollway/theme"
+        - apps/dashboard
+        - apps/web
+        - apps/demo
+        - New package
+        - Not sure
+    validations:
+      required: true
+  - type: textarea
+    id: problem
+    attributes:
+      label: The problem
+      description: What can you not do today, or what is harder than it should be?
+    validations:
+      required: true
+  - type: textarea
+    id: proposal
+    attributes:
+      label: Proposed solution
+      description: How you would solve it. Sketches and pseudo-code welcome.
+    validations:
+      required: true
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternatives considered
+      description: Other approaches you thought about and why you set them aside.
+  - type: checkboxes
+    id: willing
+    attributes:
+      label: Contribution
+      options:
+        - label: I would like to implement this myself
