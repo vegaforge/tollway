@@ -5,7 +5,7 @@ import { LogoMark } from "./logo";
 export function SiteFooter() {
   return (
     <footer className="border-t border-border">
-      <div className="mx-auto flex max-w-[1200px] flex-wrap items-center justify-between gap-6 px-6 py-[34px]">
+      <div className="mx-auto flex max-w-[1320px] flex-wrap items-center justify-between gap-6 px-6 py-[34px]">
         <div className="flex flex-wrap items-center gap-[18px]">
           <Link href="/" aria-label="Tollway home" className="inline-flex items-center gap-[11px]">
             <LogoMark className="h-[34px] w-[26px] text-foreground" />

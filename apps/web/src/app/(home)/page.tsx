@@ -66,10 +66,10 @@ export default function Page() {
     <>
       <SiteHeader />
 
-      <div className="mx-auto max-w-[1200px] border-x border-border" id="top">
+      <div className="mx-auto max-w-[1320px] border-x border-border" id="top">
         <main>
           {/* HERO */}
-          <div className="mx-auto max-w-[1200px] px-6">
+          <div className="mx-auto max-w-[1320px] px-6">
             <div className="grid grid-cols-1 lg:grid-cols-[1.05fr_0.95fr]">
               <div className="flex flex-col items-start gap-[26px] py-14 lg:py-[78px] lg:pr-12">
                 <span className="inline-flex items-center gap-2 font-mono text-[12px] uppercase tracking-[0.12em] text-muted">
@@ -129,7 +129,7 @@ export default function Page() {
                   </a>
                 </div>
 
-                <span className="inline-flex items-center gap-[10px] pt-[6px] font-mono text-[12.5px] text-muted">
+                <span className="inline-flex flex-wrap items-center gap-[10px] pt-[6px] font-mono text-[12.5px] text-muted">
                   Composes
                   <code className="rounded-md border border-border bg-surface-2 px-[7px] py-[2px] text-[12px] text-foreground">
                     @x402/stellar
@@ -149,7 +149,7 @@ export default function Page() {
 
           {/* CAPABILITIES */}
           <section className="border-t border-border" aria-labelledby="cap-h">
-            <div className="mx-auto max-w-[1200px] px-6 py-20 md:py-[84px]">
+            <div className="mx-auto max-w-[1320px] px-6 py-20 md:py-[84px]">
               <SectionLabel
                 index="/ capabilities"
                 title="Six jobs, one layer"
@@ -161,7 +161,7 @@ export default function Page() {
 
           {/* WHAT TOLLWAY IS NOT */}
           <section className="border-t border-border bg-surface-2" aria-labelledby="isnot-h">
-            <div className="mx-auto max-w-[1200px] px-6 py-20 md:py-[84px]">
+            <div className="mx-auto max-w-[1320px] px-6 py-20 md:py-[84px]">
               <SectionLabel
                 index="/ scope"
                 title="What Tollway is not"
@@ -193,7 +193,7 @@ export default function Page() {
 
           {/* WHO IT IS FOR */}
           <section className="border-t border-border" aria-labelledby="aud-h">
-            <div className="mx-auto max-w-[1200px] px-6 py-20 md:py-[84px]">
+            <div className="mx-auto max-w-[1320px] px-6 py-20 md:py-[84px]">
               <SectionLabel index="/ who it is for" title="Built for both sides of the meter" />
               <div className="reveal grid grid-cols-1 gap-x-7 md:grid-cols-3">
                 {audiences.map((a, i) => (
@@ -219,7 +219,7 @@ export default function Page() {
 
           {/* CLOSING CTA */}
           <section className="border-t border-border" aria-labelledby="cta-h">
-            <div className="mx-auto max-w-[1200px] px-6 py-20 md:py-[84px]">
+            <div className="mx-auto max-w-[1320px] px-6 py-20 md:py-[84px]">
               <div className="reveal flex flex-col items-center gap-5 rounded-2xl border border-border bg-surface-2 px-8 py-16 text-center max-[560px]:px-[22px] max-[560px]:py-11">
                 <span className="inline-flex items-center gap-2 font-mono text-[12px] uppercase tracking-[0.12em] text-muted">
                   <span className="inline-flex gap-[3px]" aria-hidden="true">

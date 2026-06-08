@@ -1,20 +1,13 @@
 @import "tailwindcss";
-@import "fumadocs-ui/css/neutral.css";
-@import "fumadocs-ui/css/preset.css";
 @import "@tollway/theme/tokens.css";
 
-/* Let Tailwind scan the Fumadocs UI components for the classes they use. */
-@source "../../node_modules/fumadocs-ui/dist/**/*.js";
-
-/* The landing components also key dark styling off the .dark class that
-   next-themes (via Fumadocs RootProvider) sets on <html>. */
+/* The shell keys dark styling off the .dark class that next-themes sets. */
 @custom-variant dark (&:where(.dark, .dark *, [data-theme="dark"], [data-theme="dark"] *));
 
 /* Bridge the Tollway tokens (single source of truth in @tollway/theme) into the
-   short names the landing components reference, then into Tailwind's color
-   space. Everything resolves to --tollway-*, which flips under .dark via
-   tokens.css, so no hex lives in this app. Fumadocs keeps its own --color-fd-*
-   tokens, so the docs theme is untouched. */
+   class names the dashboard uses, then into Tailwind's color space. Everything
+   resolves to --tollway-*, which flips under .dark via tokens.css, so no hex
+   lives in this app. */
 :root {
   --background: var(--tollway-background);
   --foreground: var(--tollway-foreground);
@@ -44,34 +37,7 @@
   --font-mono: var(--font-ibm-mono), ui-monospace, "SFMono-Regular", monospace;
 }
 
-html {
-  scroll-behavior: smooth;
-}
-
 ::selection {
   background: var(--primary);
   color: var(--primary-foreground);
-}
-
-/* Scroll-triggered reveal with zero client JS. Content is visible by default;
-   the entrance only runs where view() timelines are supported and the user has
-   not asked to reduce motion. */
-@media (prefers-reduced-motion: no-preference) {
-  @supports (animation-timeline: view()) {
-    .reveal {
-      animation: tollway-reveal linear both;
-      animation-timeline: view();
-      animation-range: entry 0% entry 42%;
-    }
-    @keyframes tollway-reveal {
-      from {
-        opacity: 0;
-        transform: translateY(14px);
-      }
-      to {
-        opacity: 1;
-        transform: none;
-      }
-    }
-  }
 }
