@@ -1,0 +1,21 @@
+version: 2
+updates:
+  # Workspace dependencies. Dependabot reads the pnpm workspace from the root
+  # lockfile and covers every package under it.
+  - package-ecosystem: npm
+    directory: "/"
+    schedule:
+      interval: weekly
+    open-pull-requests-limit: 10
+    groups:
+      dev-dependencies:
+        dependency-type: development
+      production-dependencies:
+        dependency-type: production
+
+  # Keep the GitHub Actions in our workflows current.
+  - package-ecosystem: github-actions
+    directory: "/"
+    schedule:
+      interval: weekly
+    open-pull-requests-limit: 5
