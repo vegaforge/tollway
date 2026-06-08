@@ -39,11 +39,9 @@ export interface FacilitatorClient {
 }
 
 /**
- * Offline facilitator for tests and the demo. It treats any non-empty
- * payment signature as valid and derives a stable payer, nonce, and
- * transaction hash from it, so repeated runs and repeated submissions are
- * deterministic. The nonce is a hash of the signature, which makes the
- * duplicate-protection cache testable without a network.
+ * Offline facilitator for tests and the demo. Any non-empty signature is
+ * valid; payer, nonce, and tx hash are derived from it, so runs and retries
+ * are deterministic with no network.
  */
 export function createMockFacilitator(): FacilitatorClient {
   return {
@@ -67,13 +65,11 @@ export function createMockFacilitator(): FacilitatorClient {
 }
 
 /**
- * Calls a real facilitator over HTTP. The endpoint names (/verify, /settle,
- * /supported) are stable, but the exact request and response bodies belong
- * to @x402/stellar and are not pinned here.
+ * Calls a real facilitator over HTTP. The endpoints are stable; the request
+ * and response bodies belong to @x402/stellar and are not pinned here yet.
  *
- * TODO(phase 0+): align these payloads with @x402/stellar once the wire
- * format is fixed, rather than guessing it. See docs/design.md, "What
- * Tollway is not", and the x402 facilitator reference.
+ * TODO: align verify and settle with @x402/stellar's payload format. Until
+ * then they throw, so run with MOCK_MODE=true. See docs/design.md.
  */
 export function createHttpFacilitator(baseUrl: string): FacilitatorClient {
   const endpoint = (path: string) => new URL(path, baseUrl).toString();

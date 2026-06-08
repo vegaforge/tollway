@@ -201,7 +201,7 @@ Defined as typed interfaces with tracked implementation work:
 - Observability collection, exports, and webhooks.
 - The Fastify, Next.js, and Hono adapters (Express is the reference implementation).
 
-See [SEED_ISSUES.md](SEED_ISSUES.md) for scoped, claimable tasks and [docs/design.md](docs/design.md) for the full design and the planned sequence of work.
+Browse the [open issues](https://github.com/vegaforge/tollway/issues) for claimable work, especially the [good first issues](https://github.com/vegaforge/tollway/issues?q=is%3Aissue+is%3Aopen+label%3Adifficulty%3Agood-first-issue). The full design and the planned sequence of work are in [docs/design.md](docs/design.md).
 
 ## Security
 

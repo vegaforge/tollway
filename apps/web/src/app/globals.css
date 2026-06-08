@@ -10,11 +10,9 @@
    next-themes (via Fumadocs RootProvider) sets on <html>. */
 @custom-variant dark (&:where(.dark, .dark *, [data-theme="dark"], [data-theme="dark"] *));
 
-/* Bridge the Tollway tokens (single source of truth in @tollway/theme) into the
-   short names the landing components reference, then into Tailwind's color
-   space. Everything resolves to --tollway-*, which flips under .dark via
-   tokens.css, so no hex lives in this app. Fumadocs keeps its own --color-fd-*
-   tokens, so the docs theme is untouched. */
+/* Bridge the @tollway/theme tokens into the names the components use, then into
+   Tailwind's color space. Everything resolves to --tollway-*, which flips under
+   .dark via tokens.css. Fumadocs keeps its own --color-fd-* tokens. */
 :root {
   --background: var(--tollway-background);
   --foreground: var(--tollway-foreground);

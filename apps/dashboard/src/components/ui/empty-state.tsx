@@ -1,10 +1,8 @@
 import type { ReactNode } from "react";
 
 /**
- * The placeholder a widget shows until the data layer is wired. It names the
- * source so a contributor knows exactly what to connect and where the data
- * comes from. Replace the EmptyState with the real visualization; keep the
- * Panel around it.
+ * The placeholder a widget shows until its data is wired, naming the source to
+ * connect. Replace it with the real visualization and keep the Panel around it.
  */
 export function EmptyState({
   title,

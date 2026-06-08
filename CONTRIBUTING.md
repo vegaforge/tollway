@@ -30,8 +30,8 @@ Useful commands:
 
 ## Where to start
 
-- Issues labeled `difficulty:good-first-issue` are scoped for first-time contributors, biased toward the framework adapters and example apps.
-- [SEED_ISSUES.md](SEED_ISSUES.md) maps the open work to packages with acceptance criteria.
+- Browse the [open issues](https://github.com/vegaforge/tollway/issues). Each is scoped to a package, carries acceptance criteria, and notes any prerequisite it depends on.
+- Issues labeled [`difficulty:good-first-issue`](https://github.com/vegaforge/tollway/issues?q=is%3Aissue+is%3Aopen+label%3Adifficulty%3Agood-first-issue) are the friendliest starting points, biased toward the framework adapters and example apps.
 - The [design document](docs/design.md) is the source of truth for architecture and scope. Stub code carries TODO comments pointing at the relevant section.
 
 ## Project conventions

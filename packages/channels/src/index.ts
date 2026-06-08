@@ -72,10 +72,10 @@ export interface ChannelManager {
 }
 
 /**
- * TODO(phase 2): implement the lifecycle against the MPP one-way-channel
- * contract on testnet, recovery path included as a first-class case. The
- * recovery and dispute surface of @stellar/mpp is still an open question;
- * see docs/design.md, "Open questions", item 1.
+ * TODO: implement the lifecycle against the MPP one-way-channel contract on
+ * testnet, with recovery as a first-class case. The recovery and dispute
+ * surface of @stellar/mpp is still an open question; see docs/design.md,
+ * "Open questions", item 1.
  */
 export function createChannelManager(_closePolicy?: ClosePolicy): ChannelManager {
   throw new NotImplementedError(

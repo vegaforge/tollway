@@ -1,10 +1,6 @@
 /**
- * Shared domain types for Tollway.
- *
- * The settlement models and the offer/payload shapes here mirror the
- * architecture section of docs/design.md. Where the exact wire format
- * belongs to an upstream SDK (@x402/stellar, @stellar/mpp), the field is
- * kept opaque on purpose rather than guessed at.
+ * Shared domain types. Fields owned by an upstream SDK (@x402/stellar,
+ * @stellar/mpp) are left opaque rather than guessed at.
  */
 
 /** The three ways a payment can settle. See docs/design.md, "The model router". */
@@ -52,10 +48,7 @@ export type X402Payment = {
 
 export type MppChargePayment = {
   model: "mpp-charge";
-  /**
-   * TODO(phase 1): replace with the real charge proof once @stellar/mpp's
-   * charge shape is wired in. See docs/design.md, "Build plan".
-   */
+  /** TODO: the real charge proof, once @stellar/mpp's charge shape is wired in. */
   payload: string;
 };
 
@@ -66,10 +59,7 @@ export type MppChannelPayment = {
   sequence: number;
   /** Total committed so far, as an integer string. Cumulative, not a delta. */
   cumulativeAmount: string;
-  /**
-   * TODO(phase 2): the funder-signed commitment, in whatever encoding
-   * @stellar/mpp uses. See docs/design.md, "The channel lifecycle manager".
-   */
+  /** TODO: the funder-signed commitment, in @stellar/mpp's encoding. */
   commitment: string;
 };
 

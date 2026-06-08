@@ -41,14 +41,12 @@ export interface ModelRouter {
 const preferenceOrder: readonly SettlementModel[] = ["x402", "mpp-charge", "mpp-channel"];
 
 /**
- * The phase 0 router: honors overrides, picks the first mutually acceptable
- * model from an offer, and otherwise defaults to x402 per-request, which is
- * the right answer for unknown counterparties.
+ * The default router: an override wins, otherwise the first model both the
+ * offer and policy accept, otherwise x402 for an unknown counterparty.
  *
- * TODO(phase 2): promote counterparties into channel mode when traffic
- * crosses the threshold, once @tollway/channels can run the lifecycle.
- * The default threshold is an open question; see docs/design.md,
- * "Open questions", item 5.
+ * TODO: promote a counterparty to channel mode once traffic crosses the
+ * threshold and @tollway/channels can run the lifecycle. The threshold is an
+ * open question; see docs/design.md, "Open questions", item 5.
  */
 export function createDefaultRouter(): ModelRouter {
   return {
