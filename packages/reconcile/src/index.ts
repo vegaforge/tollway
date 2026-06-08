@@ -51,10 +51,9 @@ export interface Reconciler {
 }
 
 /**
- * TODO(phase 3): implement deterministic reconciliation with drift
- * detection, plus a suppression mechanism to keep false positives low.
- * Property tests will feed random commitment streams. See docs/design.md,
- * "Reconciliation" and "Testing".
+ * TODO: implement deterministic reconciliation with drift detection and a
+ * suppression mechanism to keep false positives low. See docs/design.md,
+ * "Reconciliation".
  */
 export function createReconciler(): Reconciler {
   throw new NotImplementedError("the reconciliation engine", 'docs/design.md, "Reconciliation"');

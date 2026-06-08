@@ -4,10 +4,9 @@ import { PageHeader } from "@/components/ui/page-header";
 import { Panel } from "@/components/ui/panel";
 import { StatCard } from "@/components/ui/stat-card";
 
-// Overview is the worked example of the dashboard's composition: stat cards on
-// top, then panels for each observability view. Every value is a placeholder
-// until the data layer is wired. Each empty state names its source so a
-// contributor knows exactly what to connect. See docs/design.md, "Observability".
+// Overview shows how the dashboard composes: stat cards over panels, one per
+// observability view. Values are placeholders until the data is wired, and each
+// empty state names its source. See docs/design.md, "Observability".
 
 const modelLabels: Record<string, string> = {
   x402: "x402 per-request",

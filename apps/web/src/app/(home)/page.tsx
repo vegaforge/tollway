@@ -1,7 +1,5 @@
-// Tollway landing page. React Server Component; the only client island is the
-// theme toggle (components/theme-toggle.tsx). No hardcoded hex: every color
-// comes from the token utilities defined in app/globals.css, which trace back
-// to @tollway/theme.
+// Landing page. A Server Component; the theme toggle is the only client piece.
+// Colors come from the token utilities in globals.css, never hardcoded hex.
 
 import type { Metadata } from "next";
 import Link from "next/link";

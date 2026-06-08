@@ -54,9 +54,9 @@ export interface PolicyEngine {
 }
 
 /**
- * TODO(phase 3): enforce budgets, per-service caps, per-model constraints,
- * rate limits, and anomaly stops, and map what we can down to OpenZeppelin
- * smart-account policies. See docs/design.md, "Policy and budgets".
+ * TODO: enforce budgets, per-service caps, per-model constraints, rate limits,
+ * and anomaly stops, mapping what we can onto OpenZeppelin smart-account
+ * policies. See docs/design.md, "Policy and budgets".
  */
 export function createPolicyEngine(_policy: Policy): PolicyEngine {
   throw new NotImplementedError("the policy engine", 'docs/design.md, "Policy and budgets"');

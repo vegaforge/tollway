@@ -4,10 +4,9 @@
 /* The shell keys dark styling off the .dark class that next-themes sets. */
 @custom-variant dark (&:where(.dark, .dark *, [data-theme="dark"], [data-theme="dark"] *));
 
-/* Bridge the Tollway tokens (single source of truth in @tollway/theme) into the
-   class names the dashboard uses, then into Tailwind's color space. Everything
-   resolves to --tollway-*, which flips under .dark via tokens.css, so no hex
-   lives in this app. */
+/* Bridge the @tollway/theme tokens into the names the dashboard uses, then into
+   Tailwind's color space. Everything resolves to --tollway-*, which flips under
+   .dark via tokens.css. */
 :root {
   --background: var(--tollway-background);
   --foreground: var(--tollway-foreground);
