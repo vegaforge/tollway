@@ -16,40 +16,52 @@ export const brand = {
 
 export type BrandColor = keyof typeof brand;
 
-/** The semantic roles every surface in dashboard, web, and docs consumes. */
+/** The semantic roles every surface in web, dashboard, and docs consumes. */
 export interface SemanticTokens {
   background: string;
   foreground: string;
+  /** Secondary foreground for supporting copy. */
+  muted: string;
   primary: string;
   primaryForeground: string;
   accent: string;
   accentForeground: string;
+  /** Base card surface, one step off the background. */
   surface: string;
+  /** Raised surface, one step above the base card. */
+  surfaceElevated: string;
   border: string;
+  /** Higher-contrast border for emphasis and dividers. */
+  borderStrong: string;
 }
 
 export const light: SemanticTokens = {
   background: brand.offWhite,
   foreground: brand.ink,
+  muted: "#6A6675",
   primary: brand.vermilion,
-  primaryForeground: brand.offWhite,
+  primaryForeground: "#FFFFFF",
   accent: brand.amber,
   accentForeground: brand.ink,
   surface: "#FFFFFF",
-  // Ink at low opacity, so borders pick up whatever sits behind them.
-  border: "rgb(35 35 49 / 0.12)",
+  surfaceElevated: "#F1EEF7",
+  border: "#E4E0EC",
+  borderStrong: "#D6D1E0",
 };
 
 export const dark: SemanticTokens = {
-  background: brand.ink,
-  foreground: brand.offWhite,
-  primary: brand.vermilion,
-  primaryForeground: brand.offWhite,
-  accent: brand.amber,
+  background: "#141017",
+  foreground: "#F4F2F8",
+  muted: "#A39FB0",
+  // A lifted vermilion holds contrast against the near-black background.
+  primary: "#E2563F",
+  primaryForeground: "#1A1119",
+  accent: "#E9A648",
   accentForeground: brand.ink,
-  // A step lighter than ink, enough for cards to read as raised.
-  surface: "#2C2C3E",
-  border: "rgb(248 246 251 / 0.14)",
+  surface: "#1D1924",
+  surfaceElevated: "#24202D",
+  border: "#2C2836",
+  borderStrong: "#3A3546",
 };
 
 /** Prefix shared by every CSS custom property this package emits. */

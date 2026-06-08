@@ -11,17 +11,36 @@ describe("brand palette", () => {
     expect(brand.offWhite).toBe("#F8F6FB");
   });
 
-  it("assigns roles from the palette, not new hex values", () => {
+  it("anchors the light theme on the brand palette", () => {
     expect(light.background).toBe(brand.offWhite);
+    expect(light.foreground).toBe(brand.ink);
     expect(light.primary).toBe(brand.vermilion);
-    expect(dark.background).toBe(brand.ink);
-    expect(dark.accent).toBe(brand.amber);
+    expect(light.accent).toBe(brand.amber);
+  });
+
+  it("defines a near-black dark theme that keeps brand accents", () => {
+    expect(dark.background).toBe("#141017");
+    expect(dark.foreground).toBe("#F4F2F8");
+    // A lifted vermilion and amber, tuned for contrast on the dark background.
+    expect(dark.primary).toBe("#E2563F");
+    expect(dark.accent).toBe("#E9A648");
+  });
+
+  it("carries the extended surface, border, and muted roles", () => {
+    expect(light.surfaceElevated).toBe("#F1EEF7");
+    expect(light.borderStrong).toBe("#D6D1E0");
+    expect(light.muted).toBe("#6A6675");
+    expect(dark.surfaceElevated).toBe("#24202D");
+    expect(dark.borderStrong).toBe("#3A3546");
+    expect(dark.muted).toBe("#A39FB0");
   });
 });
 
 describe("css variable naming", () => {
   it("converts camelCase tokens to kebab-case custom properties", () => {
     expect(cssVarName("primaryForeground")).toBe("--tollway-primary-foreground");
+    expect(cssVarName("surfaceElevated")).toBe("--tollway-surface-elevated");
+    expect(cssVarName("borderStrong")).toBe("--tollway-border-strong");
     expect(cssVar("background")).toBe("var(--tollway-background)");
   });
 });
@@ -33,13 +52,16 @@ describe("renderTokensCss", () => {
     expect(css).toContain(":root {");
     expect(css).toContain("--tollway-background: #F8F6FB;");
     expect(css).toContain("--tollway-primary: #CF432F;");
-    expect(css).toContain("--tollway-border: rgb(35 35 49 / 0.12);");
+    expect(css).toContain("--tollway-border: #E4E0EC;");
+    expect(css).toContain("--tollway-muted: #6A6675;");
+    expect(css).toContain("--tollway-surface-elevated: #F1EEF7;");
   });
 
   it("declares dark tokens under .dark and data-theme", () => {
     expect(css).toContain('[data-theme="dark"]');
-    expect(css).toContain("--tollway-surface: #2C2C3E;");
-    expect(css).toContain("--tollway-border: rgb(248 246 251 / 0.14);");
+    expect(css).toContain("--tollway-background: #141017;");
+    expect(css).toContain("--tollway-surface: #1D1924;");
+    expect(css).toContain("--tollway-border-strong: #3A3546;");
   });
 
   it("exposes the raw brand palette", () => {
