@@ -67,9 +67,9 @@ export interface ObservabilityHub {
 }
 
 /**
- * TODO(phase 4): implement metric collection, the spend rollups, exports,
- * and webhook dispatch behind this interface, then feed the dashboard from
- * it. See docs/design.md, "Observability".
+ * TODO: implement metric collection, the spend rollups, exports, and webhook
+ * dispatch behind this interface, then feed the dashboard from it. See
+ * docs/design.md, "Observability".
  */
 export function createObservabilityHub(): ObservabilityHub {
   throw new NotImplementedError("the observability hub", 'docs/design.md, "Observability"');

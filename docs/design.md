@@ -194,7 +194,7 @@ Unit tests on the router, the policy engine, and the receipt format. Integration
 
 These are genuinely open. If you have answers or partial answers, open an issue.
 
-1. What exactly does the `@stellar/mpp` channel API expose for the recovery and dispute path, and what timeouts does the one-way-channel contract enforce?
+1. ~~What exactly does the `@stellar/mpp` channel API expose for the recovery and dispute path, and what timeouts does the one-way-channel contract enforce?~~ Answered against `@stellar/mpp@0.6.0`: the `channel` module (`@stellar/mpp/channel`) exposes `open`, `commitment`, `close`, and `claim`, and the recovery path is `claim` gated by `closeEffectiveAtLedger` plus a `fundWaitingPeriod`. Recovery work tracks under the channel issues.
 2. Which OpenZeppelin smart-account policy constraints can be expressed on chain today, and which must Tollway enforce at the application layer?
 3. What is the x402 V2 service-discovery format, and should Tollway consume it for routing hints?
 4. Should Tollway ship a hosted shared service in v1, or stay library-only, given the trust and operational implications?

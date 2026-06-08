@@ -1,10 +1,9 @@
 import { base64UrlToBytes, bytesToBase64Url } from "../encoding.js";
 
 /**
- * Signing is behind an interface so deployments can choose where the key
- * lives: in process, in a KMS, behind an HSM. The Ed25519 pair below is the
- * batteries-included option and runs on WebCrypto, so it works in Node and
- * edge runtimes without native modules.
+ * Signing sits behind an interface so the key can live wherever a deployment
+ * needs it: in process, a KMS, an HSM. Ed25519 over WebCrypto is the default
+ * and runs in both Node and edge runtimes.
  */
 
 export interface ReceiptSigner {
@@ -37,9 +36,8 @@ export class Ed25519Signer implements ReceiptSigner {
   }
 
   /**
-   * Creates a fresh keypair. The keyId defaults to the base64url public key,
-   * which makes the id self-describing; pass a name if you rotate keys and
-   * want stable ids in your records.
+   * Generates a keypair. keyId defaults to the base64url public key; pass a
+   * name if you rotate keys and want stable ids.
    */
   static async generate(keyId?: string): Promise<Ed25519Signer> {
     const pair = (await crypto.subtle.generateKey(ED25519, true, [
@@ -58,9 +56,8 @@ export class Ed25519Signer implements ReceiptSigner {
 }
 
 /**
- * Verifies against a set of trusted public keys, keyed by keyId. Unknown
- * keys and foreign algorithms verify as false rather than throwing, since
- * a receipt from an untrusted signer is simply not valid here.
+ * Verifies against a set of trusted public keys by keyId. An unknown key or a
+ * different algorithm returns false rather than throwing.
  */
 export class Ed25519Verifier implements ReceiptVerifier {
   private readonly keys = new Map<string, Uint8Array>();
