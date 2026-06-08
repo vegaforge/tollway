@@ -27,6 +27,7 @@ export const tollwayPreset: TollwayTailwindPreset = {
       colors: {
         background: cssVar("background"),
         foreground: cssVar("foreground"),
+        muted: cssVar("muted"),
         primary: {
           DEFAULT: cssVar("primary"),
           foreground: cssVar("primaryForeground"),
@@ -35,8 +36,14 @@ export const tollwayPreset: TollwayTailwindPreset = {
           DEFAULT: cssVar("accent"),
           foreground: cssVar("accentForeground"),
         },
-        surface: cssVar("surface"),
-        border: cssVar("border"),
+        surface: {
+          DEFAULT: cssVar("surface"),
+          elevated: cssVar("surfaceElevated"),
+        },
+        border: {
+          DEFAULT: cssVar("border"),
+          strong: cssVar("borderStrong"),
+        },
       },
     },
   },

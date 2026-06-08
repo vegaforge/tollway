@@ -1,0 +1,17 @@
+---
+title: Introduction
+description: What Tollway is and why it exists
+---
+
+Tollway sits above Stellar's two agent-payment primitives, x402 and MPP, and gives a service one coherent way to charge agents and an agent one coherent way to pay.
+
+It routes each interaction to the right settlement model, runs the MPP channel lifecycle, enforces spending policy, normalizes every payment into one signed receipt, reconciles off-chain commitments against on-chain settlement, and exposes observability across all of it.
+
+Tollway is not a facilitator and not a base SDK. It composes `@x402/stellar` and `@stellar/mpp`, and it never custodies funds.
+
+## Where to go next
+
+- [Getting started](/docs/getting-started) runs the x402 demo end to end.
+- The design document in the repository covers the architecture and the build plan in full.
+
+This documentation is an early scaffold. Expanding it is a good first contribution.
