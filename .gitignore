@@ -4,6 +4,7 @@ node_modules/
 # Build outputs
 dist/
 .next/
+next-env.d.ts
 out/
 .turbo/
 
@@ -29,3 +30,6 @@ pnpm-debug.log*
 # Misc
 *.tsbuildinfo
 .vercel
+
+# Fumadocs generated source
+.source/

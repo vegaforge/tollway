@@ -1,0 +1,32 @@
+---
+title: Getting started
+description: Install the workspace and run the x402 demo
+---
+
+## Prerequisites
+
+Node 22 or later and pnpm 10 or later.
+
+## Install and verify
+
+```bash
+git clone https://github.com/vegaforge/tollway.git
+cd tollway
+pnpm install
+pnpm build
+pnpm test
+```
+
+## Run the demo
+
+The demo drives one paid x402 request from challenge to signed receipt, with no network needed:
+
+```bash
+MOCK_MODE=true pnpm --filter @tollway/demo start
+```
+
+To run against a real testnet facilitator instead, unset `MOCK_MODE` and optionally set `FACILITATOR_URL`.
+
+## What is built today
+
+The canonical receipt, the model router interface, and the x402 per-request path are implemented. MPP charge and channel modes, the policy engine, reconciliation, and observability are typed stubs with open issues. See the repository for the current set.
