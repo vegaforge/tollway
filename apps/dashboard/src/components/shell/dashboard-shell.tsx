@@ -13,9 +13,7 @@ export function DashboardShell({ children }: { children: ReactNode }) {
       <Sidebar />
       <div className="flex min-w-0 flex-1 flex-col">
         <Topbar />
-        <main className="mx-auto w-full max-w-[1400px] flex-1 px-5 py-8 md:px-8">
-          {children}
-        </main>
+        <main className="mx-auto w-full max-w-[1400px] flex-1 px-5 py-8 md:px-8">{children}</main>
       </div>
     </div>
   );
