@@ -34,11 +34,9 @@ function resolveFacilitator(): { facilitator: FacilitatorClient; mock: boolean }
 }
 
 /**
- * Runs the full x402 per-request happy path through core, server, and the
- * Express adapter: a service exposes a paid quote, an agent hits it, gets a
- * 402, pays, and receives the quote plus a canonical receipt that we then
- * verify. This is the Phase 0 exit criterion from docs/design.md,
- * "Build plan".
+ * Runs the x402 per-request happy path through core, server, and the Express
+ * adapter: a service exposes a paid quote; an agent hits it, gets a 402, pays,
+ * and receives the quote plus a canonical receipt, which we verify.
  */
 export async function runDemo(): Promise<DemoResult> {
   const { facilitator, mock } = resolveFacilitator();

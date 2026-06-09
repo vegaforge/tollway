@@ -1,8 +1,7 @@
 /**
- * Deterministic, dependency-free hashing for the mock facilitator. This is
- * not cryptographic and is never used on a real settlement path; it only
- * gives the mock stable, reproducible transaction hashes and account ids so
- * tests and the offline demo behave the same way every run.
+ * Deterministic, non-cryptographic hashing for the mock facilitator only. It
+ * gives the mock stable tx hashes and account ids so tests and the offline
+ * demo are reproducible. Never used on a real settlement path.
  */
 
 function fnv1a(input: string): number {

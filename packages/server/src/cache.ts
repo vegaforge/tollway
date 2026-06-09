@@ -14,10 +14,9 @@ export interface SettlementCache {
 type Entry = { receipt: SignedReceipt; expiresAt: number };
 
 /**
- * In-memory cache with time-based eviction. The default window is a few
- * Stellar ledger closes, long enough to absorb a retry storm and short
- * enough to stay small. Multi-process deployments should back this with a
- * shared store instead; the interface is the seam for that.
+ * In-memory cache with TTL eviction. The default window covers a few ledger
+ * closes, enough to absorb a retry. Back it with a shared store for
+ * multi-process deployments; the interface is the seam.
  */
 export function createInMemorySettlementCache(ttlMs = 30_000): SettlementCache {
   const entries = new Map<string, Entry>();
