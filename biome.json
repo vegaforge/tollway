@@ -6,7 +6,8 @@
     "useIgnoreFile": true
   },
   "files": {
-    "ignoreUnknown": true
+    "ignoreUnknown": true,
+    "includes": ["**", "!**/globals.css", "!**/global.css"]
   },
   "formatter": {
     "enabled": true,
@@ -36,5 +37,22 @@
         "organizeImports": "on"
       }
     }
-  }
+  },
+  "css": {
+    "linter": {
+      "enabled": true
+    }
+  },
+  "overrides": [
+    {
+      "includes": ["**/*.css"],
+      "linter": {
+        "rules": {
+          "suspicious": {
+            "noUnknownAtRules": "off"
+          }
+        }
+      }
+    }
+  ]
 }

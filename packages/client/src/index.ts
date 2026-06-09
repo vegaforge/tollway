@@ -56,12 +56,10 @@ export interface TollwayClient {
 }
 
 /**
- * TODO(phase 0+): wire the agent-side x402 flow (read the 402 challenge,
- * sign the Soroban authorization entry via @x402/stellar, resubmit, and
- * record the receipt), then extend to MPP charge and channel modes. The
- * exact @x402/stellar and @stellar/mpp calls are intentionally left out
- * until they are pinned. See docs/design.md, "Architecture" and
- * "Build plan".
+ * TODO: wire the agent-side x402 flow (read the 402 challenge, sign the
+ * Soroban authorization via @x402/stellar, resubmit, record the receipt),
+ * then add MPP charge and channel modes. The exact SDK calls are left out
+ * until they are pinned. See docs/design.md, "Architecture".
  */
 export function createClient(_options: TollwayClientOptions): TollwayClient {
   throw new NotImplementedError("the agent client", 'docs/design.md, "Architecture"');

@@ -74,12 +74,11 @@ export type GateOutcome =
 export type Gate = (request: TollwayRequest) => Promise<GateOutcome>;
 
 /**
- * Builds a gate from a paywall config and its dependencies. Phase 0 settles
- * x402 per-request; other models are routed but not yet executed, so a
- * decision for them is rejected rather than mishandled.
+ * Builds the gate from a paywall config. It settles x402 per-request today; a
+ * routing decision for another model is rejected rather than mishandled.
  *
- * TODO(phase 1+): execute MPP charge and channel settlement once their
- * packages can. See docs/design.md, "Build plan".
+ * TODO: settle MPP charge and channel once their packages can. See
+ * docs/design.md, "Build plan".
  */
 export function createPaywall(config: PaywallConfig, deps: PaywallDeps): Gate {
   const acceptedModels = config.models ?? ["x402"];
