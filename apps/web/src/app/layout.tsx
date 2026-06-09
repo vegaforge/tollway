@@ -18,12 +18,22 @@ const mono = IBM_Plex_Mono({
   display: "swap",
 });
 
+const description = "Orchestration, policy, and observability for agent payments on Stellar";
+
 export const metadata: Metadata = {
+  metadataBase: new URL("https://usetollway.vercel.app"),
   title: {
     default: "Tollway",
     template: "%s · Tollway",
   },
-  description: "Orchestration, policy, and observability for agent payments on Stellar",
+  description,
+  openGraph: {
+    type: "website",
+    siteName: "Tollway",
+    url: "https://usetollway.vercel.app",
+    title: "Tollway",
+    description,
+  },
 };
 
 export default function RootLayout({ children }: { children: ReactNode }) {

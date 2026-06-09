@@ -1,0 +1,13 @@
+node_modules
+**/node_modules
+.next
+**/.next
+.turbo
+**/.turbo
+.source
+**/.source
+dist
+**/dist
+coverage
+.git
+.vercel
