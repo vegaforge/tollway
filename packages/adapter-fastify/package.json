@@ -37,10 +37,10 @@
     "fastify": "^5.0.0"
   },
   "devDependencies": {
-    "@types/node": "^22.19.20",
+    "@types/node": "^25.9.2",
     "fastify": "^5.2.0",
     "tsup": "^8.5.0",
-    "typescript": "^5.8.0",
+    "typescript": "^6.0.3",
     "vitest": "^4.1.8"
   },
   "publishConfig": {
