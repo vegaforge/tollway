@@ -53,33 +53,33 @@ export interface PolicyEngine {
   record(intent: PaymentIntent): Promise<void>;
 }
 
-function utcDate(): string {
-  return new Date().toISOString().slice(0, 10);
+function utcDate(clock: () => number): string {
+  return new Date(clock()).toISOString().slice(0, 10);
 }
 
-function parseAmount(s: string): number {
-  const n = Number(s);
-  if (!Number.isFinite(n) || n < 0) {
-    throw new TollwayError("invalid-receipt", `invalid amount: ${s}`);
+function parseAmount(s: string): bigint {
+  if (!/^[0-9]+$/.test(s)) {
+    throw new TollwayError("invalid-amount", `invalid amount: ${s}`);
   }
-  return n;
+  return BigInt(s);
 }
 
 /**
  * Creates a policy engine that enforces budgets, per-service caps, per-model
- * constraints, rate limits, and anomaly stops.  All state is held in memory;
+ * constraints, rate limits, and anomaly stops. All state is held in memory;
  * see docs/design.md, "Policy and budgets".
  */
-export function createPolicyEngine(policy: Policy): PolicyEngine {
-  const dailySpend = new Map<string, number>();
-  const totalSpend = new Map<string, number>();
-  const serviceSpend = new Map<string, number>();
+export function createPolicyEngine(policy: Policy, opts?: { clock?: () => number }): PolicyEngine {
+  const clock = opts?.clock ?? Date.now;
+  const dailySpend = new Map<string, bigint>();
+  const totalSpend = new Map<string, bigint>();
+  const serviceSpend = new Map<string, bigint>();
   const requestTimestamps: number[] = [];
-  const anomalySamples: { amount: number; ts: number }[] = [];
-  let lastResetDay = utcDate();
+  const anomalySamples: { amount: bigint; ts: number }[] = [];
+  let lastResetDay = utcDate(clock);
 
   function resetDailyIfNeeded(): void {
-    const today = utcDate();
+    const today = utcDate(clock);
     if (today !== lastResetDay) {
       dailySpend.clear();
       lastResetDay = today;
@@ -90,11 +90,12 @@ export function createPolicyEngine(policy: Policy): PolicyEngine {
     resetDailyIfNeeded();
     const amount = parseAmount(intent.amount);
 
-    dailySpend.set(intent.asset, (dailySpend.get(intent.asset) ?? 0) + amount);
-    totalSpend.set(intent.asset, (totalSpend.get(intent.asset) ?? 0) + amount);
-    serviceSpend.set(intent.payee, (serviceSpend.get(intent.payee) ?? 0) + amount);
+    dailySpend.set(intent.asset, (dailySpend.get(intent.asset) ?? 0n) + amount);
+    totalSpend.set(intent.asset, (totalSpend.get(intent.asset) ?? 0n) + amount);
+    const svcKey = `${intent.payee}:${intent.asset}`;
+    serviceSpend.set(svcKey, (serviceSpend.get(svcKey) ?? 0n) + amount);
 
-    const now = Date.now();
+    const now = clock();
     requestTimestamps.push(now);
     anomalySamples.push({ amount, ts: now });
   }
@@ -114,45 +115,7 @@ export function createPolicyEngine(policy: Policy): PolicyEngine {
       resetDailyIfNeeded();
       const amount = parseAmount(intent.amount);
 
-      // 1. Daily budget
-      if (policy.budgets?.daily != null) {
-        const budget = parseAmount(policy.budgets.daily);
-        const current = dailySpend.get(intent.asset) ?? 0;
-        if (current + amount > budget) {
-          throw new TollwayError(
-            "budget-exceeded",
-            `daily budget exceeded for ${intent.asset}: ${current + amount} > ${budget}`,
-          );
-        }
-      }
-
-      // 2. Total budget
-      if (policy.budgets?.total != null) {
-        const budget = parseAmount(policy.budgets.total);
-        const current = totalSpend.get(intent.asset) ?? 0;
-        if (current + amount > budget) {
-          throw new TollwayError(
-            "budget-exceeded",
-            `total budget exceeded for ${intent.asset}: ${current + amount} > ${budget}`,
-          );
-        }
-      }
-
-      // 3. Per-service cap
-      const svcCap = policy.perService?.[intent.payee]?.cap;
-      if (svcCap != null) {
-        const cap = parseAmount(svcCap);
-        const current = serviceSpend.get(intent.payee) ?? 0;
-        if (current + amount > cap) {
-          return {
-            allowed: false,
-            rule: "per-service",
-            detail: `per-service cap exceeded for ${intent.payee}: ${current + amount} > ${cap}`,
-          };
-        }
-      }
-
-      // 4. Per-model constraints
+      // 1. Per-model constraints (static checks first)
       const modelCfg = policy.perModel?.[intent.model];
       if (modelCfg) {
         if (modelCfg.enabled === false) {
@@ -174,9 +137,50 @@ export function createPolicyEngine(policy: Policy): PolicyEngine {
         }
       }
 
+      // 2. Daily budget
+      if (policy.budgets?.daily != null) {
+        const budget = parseAmount(policy.budgets.daily);
+        const current = dailySpend.get(intent.asset) ?? 0n;
+        if (current + amount > budget) {
+          return {
+            allowed: false,
+            rule: "budget",
+            detail: `daily budget exceeded for ${intent.asset}: ${current + amount} > ${budget}`,
+          };
+        }
+      }
+
+      // 3. Total budget
+      if (policy.budgets?.total != null) {
+        const budget = parseAmount(policy.budgets.total);
+        const current = totalSpend.get(intent.asset) ?? 0n;
+        if (current + amount > budget) {
+          return {
+            allowed: false,
+            rule: "budget",
+            detail: `total budget exceeded for ${intent.asset}: ${current + amount} > ${budget}`,
+          };
+        }
+      }
+
+      // 4. Per-service cap
+      const svcCap = policy.perService?.[intent.payee]?.cap;
+      if (svcCap != null) {
+        const cap = parseAmount(svcCap);
+        const key = `${intent.payee}:${intent.asset}`;
+        const current = serviceSpend.get(key) ?? 0n;
+        if (current + amount > cap) {
+          return {
+            allowed: false,
+            rule: "per-service",
+            detail: `per-service cap exceeded for ${intent.payee}: ${current + amount} > ${cap}`,
+          };
+        }
+      }
+
       // 5. Rate limit
       if (policy.rateLimit?.requestsPerMinute != null) {
-        const now = Date.now();
+        const now = clock();
         pruneWindow(now);
         if (requestTimestamps.length >= policy.rateLimit.requestsPerMinute) {
           return {
@@ -190,9 +194,11 @@ export function createPolicyEngine(policy: Policy): PolicyEngine {
       // 6. Anomaly stop
       if (policy.anomaly?.maxSpendPerMinute != null) {
         const maxSpend = parseAmount(policy.anomaly.maxSpendPerMinute);
-        const now = Date.now();
+        const now = clock();
         pruneWindow(now);
-        const recentSpend = anomalySamples.reduce((sum, s) => sum + s.amount, 0);
+        const recentSpend = anomalySamples
+          .filter((s) => s.ts >= now - 60_000)
+          .reduce((sum, s) => sum + s.amount, 0n);
         if (recentSpend + amount > maxSpend) {
           return {
             allowed: false,
@@ -207,7 +213,7 @@ export function createPolicyEngine(policy: Policy): PolicyEngine {
 
     async record(intent: PaymentIntent): Promise<void> {
       applyRecord(intent);
-      const now = Date.now();
+      const now = clock();
       pruneWindow(now);
     },
   };
