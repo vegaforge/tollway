@@ -22,24 +22,28 @@ describe("createPolicyEngine", () => {
       expect(result).toEqual({ allowed: true });
     });
 
-    it("throws TollwayError when daily budget is exceeded", async () => {
+    it("blocks when daily budget is exceeded", async () => {
       const engine = createPolicyEngine({ budgets: { daily: "150" } });
       await engine.check(intent({ amount: "100" }));
       await engine.record(intent({ amount: "100" }));
-      await expect(engine.check(intent({ amount: "100" }))).rejects.toThrow(TollwayError);
+      const result = await engine.check(intent({ amount: "100" }));
+      expect(result).toEqual({
+        allowed: false,
+        rule: "budget",
+        detail: expect.stringContaining("daily budget exceeded"),
+      });
     });
 
-    it("includes budget-exceeded code in the error", async () => {
-      const engine = createPolicyEngine({ budgets: { daily: "150" } });
-      await engine.check(intent({ amount: "100" }));
+    it("resets daily spend on a new UTC day", async () => {
+      let now = new Date("2026-06-10T12:00:00Z").getTime();
+      const engine = createPolicyEngine({ budgets: { daily: "150" } }, { clock: () => now });
       await engine.record(intent({ amount: "100" }));
-      try {
-        await engine.check(intent({ amount: "100" }));
-        expect.fail("should have thrown");
-      } catch (e) {
-        expect(e).toBeInstanceOf(TollwayError);
-        expect((e as TollwayError).code).toBe("budget-exceeded");
-      }
+      const before = await engine.check(intent({ amount: "100" }));
+      expect(before).toEqual({ allowed: false, rule: "budget", detail: expect.any(String) });
+
+      now = new Date("2026-06-11T00:01:00Z").getTime();
+      const after = await engine.check(intent({ amount: "100" }));
+      expect(after).toEqual({ allowed: true });
     });
   });
 
@@ -50,13 +54,18 @@ describe("createPolicyEngine", () => {
       expect(result).toEqual({ allowed: true });
     });
 
-    it("throws TollwayError when total budget is exceeded", async () => {
+    it("blocks when total budget is exceeded", async () => {
       const engine = createPolicyEngine({ budgets: { total: "250" } });
       await engine.check(intent({ amount: "100" }));
       await engine.record(intent({ amount: "100" }));
       await engine.check(intent({ amount: "100" }));
       await engine.record(intent({ amount: "100" }));
-      await expect(engine.check(intent({ amount: "100" }))).rejects.toThrow(TollwayError);
+      const result = await engine.check(intent({ amount: "100" }));
+      expect(result).toEqual({
+        allowed: false,
+        rule: "budget",
+        detail: expect.stringContaining("total budget exceeded"),
+      });
     });
   });
 
@@ -81,6 +90,15 @@ describe("createPolicyEngine", () => {
         rule: "per-service",
         detail: expect.stringContaining("per-service cap exceeded"),
       });
+    });
+
+    it("tracks per-service spend per asset", async () => {
+      const engine = createPolicyEngine({
+        perService: { GSERVICE: { cap: "150" } },
+      });
+      await engine.record(intent({ amount: "100", asset: "USDC:GA5Z" }));
+      const result = await engine.check(intent({ amount: "100", asset: "EURC:GBBB" }));
+      expect(result).toEqual({ allowed: true });
     });
   });
 
@@ -124,6 +142,19 @@ describe("createPolicyEngine", () => {
       const result = await engine.check(intent({ model: "mpp-channel", amount: "100" }));
       expect(result).toEqual({ allowed: true });
     });
+
+    it("reports a disabled model before budget", async () => {
+      const engine = createPolicyEngine({
+        budgets: { daily: "50" },
+        perModel: { "mpp-channel": { enabled: false } },
+      });
+      const result = await engine.check(intent({ model: "mpp-channel", amount: "100" }));
+      expect(result).toEqual({
+        allowed: false,
+        rule: "per-model-disabled",
+        detail: expect.any(String),
+      });
+    });
   });
 
   describe("rate limit", () => {
@@ -150,6 +181,22 @@ describe("createPolicyEngine", () => {
         detail: expect.stringContaining("rate limit exceeded"),
       });
     });
+
+    it("allows requests after the window rolls", async () => {
+      let now = new Date("2026-06-10T12:00:00Z").getTime();
+      const engine = createPolicyEngine(
+        { rateLimit: { requestsPerMinute: 2 } },
+        { clock: () => now },
+      );
+      await engine.record(intent({ amount: "10" }));
+      await engine.record(intent({ amount: "10" }));
+      const blocked = await engine.check(intent({ amount: "10" }));
+      expect(blocked).toEqual({ allowed: false, rule: "rate-limit", detail: expect.any(String) });
+
+      now = new Date("2026-06-10T12:01:05Z").getTime();
+      const allowed = await engine.check(intent({ amount: "10" }));
+      expect(allowed).toEqual({ allowed: true });
+    });
   });
 
   describe("anomaly stop", () => {
@@ -175,15 +222,46 @@ describe("createPolicyEngine", () => {
     });
   });
 
+  describe("invalid amount", () => {
+    it("rejects a non-numeric amount", async () => {
+      const engine = createPolicyEngine({});
+      await expect(engine.check(intent({ amount: "abc" }))).rejects.toThrow(TollwayError);
+    });
+
+    it("rejects a decimal amount", async () => {
+      const engine = createPolicyEngine({});
+      await expect(engine.check(intent({ amount: "1.5" }))).rejects.toThrow(TollwayError);
+    });
+
+    it("rejects a negative amount", async () => {
+      const engine = createPolicyEngine({});
+      await expect(engine.check(intent({ amount: "-10" }))).rejects.toThrow(TollwayError);
+    });
+
+    it("uses the invalid-amount error code", async () => {
+      const engine = createPolicyEngine({});
+      try {
+        await engine.check(intent({ amount: "abc" }));
+        expect.fail("should have thrown");
+      } catch (e) {
+        expect(e).toBeInstanceOf(TollwayError);
+        expect((e as TollwayError).code).toBe("invalid-amount");
+      }
+    });
+  });
+
   describe("combined policies", () => {
-    it("checks rules in order: budget before per-service", async () => {
+    it("checks per-model before budget", async () => {
       const engine = createPolicyEngine({
-        budgets: { daily: "150" },
-        perService: { GSERVICE: { cap: "500" } },
+        budgets: { daily: "50" },
+        perModel: { "mpp-channel": { enabled: false } },
       });
-      await engine.check(intent({ amount: "100" }));
-      await engine.record(intent({ amount: "100" }));
-      await expect(engine.check(intent({ amount: "100" }))).rejects.toThrow(TollwayError);
+      const result = await engine.check(intent({ model: "mpp-channel", amount: "100" }));
+      expect(result).toEqual({
+        allowed: false,
+        rule: "per-model-disabled",
+        detail: expect.any(String),
+      });
     });
 
     it("passes all rules when within all limits", async () => {
