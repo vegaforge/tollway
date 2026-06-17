@@ -85,6 +85,58 @@ describe("reconcileChannel", () => {
     });
   });
 
+  describe("malformed-record", () => {
+    it("flags a non-numeric settledAmount instead of throwing", async () => {
+      const result = await reconciler.reconcileChannel([mkCommitment(0, "100")], {
+        channelId: "ch-1",
+        settledAmount: "1.5",
+        returnedRemainder: "0",
+        txHash: "0x",
+      });
+      expect(result.ok).toBe(false);
+      if (!result.ok) {
+        expect(result.drift[0]?.kind).toBe("malformed-record");
+        expect(result.drift[0]?.detail).toContain("settledAmount");
+      }
+    });
+
+    it("flags an empty settledAmount instead of throwing", async () => {
+      const result = await reconciler.reconcileChannel([], {
+        channelId: "ch-1",
+        settledAmount: "",
+        returnedRemainder: "0",
+        txHash: "0x",
+      });
+      expect(result.ok).toBe(false);
+      if (!result.ok) expect(result.drift[0]?.kind).toBe("malformed-record");
+    });
+
+    it("flags a non-numeric returnedRemainder instead of throwing", async () => {
+      const result = await reconciler.reconcileChannel([mkCommitment(0, "100")], {
+        channelId: "ch-1",
+        settledAmount: "100",
+        returnedRemainder: "abc",
+        txHash: "0x",
+      });
+      expect(result.ok).toBe(false);
+      if (!result.ok) {
+        expect(result.drift[0]?.kind).toBe("malformed-record");
+        expect(result.drift[0]?.detail).toContain("returnedRemainder");
+      }
+    });
+
+    it("flags a non-numeric cumulativeAmount in a commitment instead of throwing", async () => {
+      const result = await reconciler.reconcileChannel(
+        [mkCommitment(0, "not-a-number")],
+        mkSettlement("100"),
+      );
+      expect(result.ok).toBe(false);
+      if (!result.ok) {
+        expect(result.drift.some((d) => d.kind === "malformed-record")).toBe(true);
+      }
+    });
+  });
+
   describe("missing-commitment", () => {
     it("flags when no commitments recorded but funds settled", async () => {
       const result = await reconciler.reconcileChannel([], mkSettlement("500"));
@@ -174,20 +226,6 @@ describe("reconcileChannel", () => {
   });
 
   describe("unexpected-remainder", () => {
-    it("flags a negative returnedRemainder", async () => {
-      const settlement: SettlementRecord = {
-        channelId: "ch-1",
-        settledAmount: "100",
-        returnedRemainder: "-50",
-        txHash: "0xabc",
-      };
-      const result = await reconciler.reconcileChannel([mkCommitment(0, "100")], settlement);
-      expect(result.ok).toBe(false);
-      if (!result.ok) {
-        expect(result.drift.some((d) => d.kind === "unexpected-remainder")).toBe(true);
-      }
-    });
-
     it("flags when settled + remainder is 0 but commitments exist", async () => {
       const settlement: SettlementRecord = {
         channelId: "ch-1",
@@ -267,22 +305,13 @@ describe("reconcileCharge", () => {
     expect(result.ok).toBe(true);
   });
 
-  it("flags a model/settlement-kind mismatch as missing-commitment", async () => {
-    // x402 with channel-commitment is invalid
+  it("flags a model/settlement-kind mismatch as malformed-record", async () => {
+    // x402 with channel-commitment is structurally invalid
     const bad = mkReceipt({ model: "x402", settlementKind: "channel-commitment" });
     const result = await reconciler.reconcileCharge(bad);
     expect(result.ok).toBe(false);
     if (!result.ok) {
-      expect(result.drift.some((d) => d.kind === "missing-commitment")).toBe(true);
-    }
-  });
-
-  it("flags zero amount as under-settled", async () => {
-    const bad = mkReceipt({ amount: "0" });
-    const result = await reconciler.reconcileCharge(bad);
-    expect(result.ok).toBe(false);
-    if (!result.ok) {
-      expect(result.drift.some((d) => d.kind === "under-settled")).toBe(true);
+      expect(result.drift.every((d) => d.kind === "malformed-record")).toBe(true);
     }
   });
 

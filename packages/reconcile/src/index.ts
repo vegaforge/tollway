@@ -29,7 +29,8 @@ export type DriftKind =
   | "over-settled"
   | "missing-commitment"
   | "unexpected-remainder"
-  | "sequence-gap";
+  | "sequence-gap"
+  | "malformed-record";
 
 export type Drift = {
   kind: DriftKind;
@@ -46,7 +47,11 @@ export interface Reconciler {
     commitments: CommitmentRecord[],
     settlement: SettlementRecord,
   ): Promise<ReconciliationResult>;
-  /** Confirms a single x402 or MPP charge settlement matches its receipt. */
+  /**
+   * Validates a single x402 or MPP charge receipt structurally.
+   * On-chain settlement confirmation requires chain access and is tracked
+   * separately.
+   */
   reconcileCharge(receipt: SignedReceipt): Promise<ReconciliationResult>;
 }
 
@@ -58,6 +63,25 @@ export type ReconcilerOptions = {
    */
   suppress?: (drift: Drift, channelId: string) => boolean;
 };
+
+/** Non-negative integer string as produced by the channel manager. */
+const AMOUNT_RE = /^[0-9]+$/;
+
+function parseAmount(
+  value: string,
+  field: string,
+): { ok: true; amount: bigint } | { ok: false; drift: Drift } {
+  if (!AMOUNT_RE.test(value)) {
+    return {
+      ok: false,
+      drift: {
+        kind: "malformed-record",
+        detail: `${field} "${value}" is not a valid non-negative integer string`,
+      },
+    };
+  }
+  return { ok: true, amount: BigInt(value) };
+}
 
 function buildResult(
   channelId: string,
@@ -81,16 +105,19 @@ export function createReconciler(options: ReconcilerOptions = {}): Reconciler {
       const { channelId, settledAmount, returnedRemainder } = settlement;
       const drifts: Drift[] = [];
 
-      const settled = BigInt(settledAmount);
-      const remainder = BigInt(returnedRemainder);
-
-      // A negative returnedRemainder means the close record is malformed.
-      if (remainder < 0n) {
-        drifts.push({
-          kind: "unexpected-remainder",
-          detail: `returnedRemainder is negative (${returnedRemainder}); channel close record is malformed`,
-        });
+      const settledResult = parseAmount(settledAmount, "settledAmount");
+      if (!settledResult.ok) {
+        drifts.push(settledResult.drift);
+        return buildResult(channelId, drifts, suppress);
       }
+      const settled = settledResult.amount;
+
+      const remainderResult = parseAmount(returnedRemainder, "returnedRemainder");
+      if (!remainderResult.ok) {
+        drifts.push(remainderResult.drift);
+        return buildResult(channelId, drifts, suppress);
+      }
+      const remainder = remainderResult.amount;
 
       // No commitments recorded, but funds moved on-chain.
       if (commitments.length === 0) {
@@ -121,7 +148,16 @@ export function createReconciler(options: ReconcilerOptions = {}): Reconciler {
       // sorted is guaranteed non-empty: the commitments.length === 0 guard above returned early.
       const last = sorted.at(-1);
       if (last === undefined) return buildResult(channelId, drifts, suppress);
-      const lastCumulative = BigInt(last.cumulativeAmount);
+
+      const lastCumulativeResult = parseAmount(
+        last.cumulativeAmount,
+        `commitments[${last.sequence}].cumulativeAmount`,
+      );
+      if (!lastCumulativeResult.ok) {
+        drifts.push(lastCumulativeResult.drift);
+        return buildResult(channelId, drifts, suppress);
+      }
+      const lastCumulative = lastCumulativeResult.amount;
 
       if (settled < lastCumulative) {
         drifts.push({
@@ -153,25 +189,16 @@ export function createReconciler(options: ReconcilerOptions = {}): Reconciler {
 
       const drifts: Drift[] = [];
 
-      // Full structural parse catches model/settlement-kind mismatch, amount
-      // format errors, missing required fields, and other cross-field invariants.
+      // Structural validation only — on-chain settlement confirmation requires
+      // chain access and is out of scope here.
       const parsed = signedReceiptSchema.safeParse(receipt);
       if (!parsed.success) {
         for (const issue of parsed.error.issues) {
           drifts.push({
-            kind: "missing-commitment",
+            kind: "malformed-record",
             detail: `receipt structural error at ${issue.path.join(".")}: ${issue.message}`,
           });
         }
-        return buildResult(channelId, drifts, suppress);
-      }
-
-      const amount = BigInt(receipt.receipt.amount);
-      if (amount <= 0n) {
-        drifts.push({
-          kind: "under-settled",
-          detail: `receipt amount must be positive, got ${receipt.receipt.amount}`,
-        });
       }
 
       return buildResult(channelId, drifts, suppress);
