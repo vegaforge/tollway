@@ -7,7 +7,7 @@
  * and matches its receipt. See docs/design.md, "Reconciliation".
  */
 
-import { signedReceiptSchema, type SignedReceipt } from "@tollway/core";
+import { type SignedReceipt, signedReceiptSchema } from "@tollway/core";
 
 /** One stored cumulative commitment, as the channel manager recorded it. */
 export type CommitmentRecord = {
@@ -64,9 +64,7 @@ function buildResult(
   drifts: Drift[],
   suppress: ReconcilerOptions["suppress"],
 ): ReconciliationResult {
-  const active = suppress
-    ? drifts.filter((d) => !suppress(d, channelId))
-    : drifts;
+  const active = suppress ? drifts.filter((d) => !suppress(d, channelId)) : drifts;
 
   if (active.length === 0) return { ok: true, channelId };
   return { ok: false, channelId, drift: active };
@@ -110,8 +108,7 @@ export function createReconciler(options: ReconcilerOptions = {}): Reconciler {
 
       // Sequences must start at 0 and be contiguous. Report only the first gap
       // so the detail stays actionable.
-      for (let i = 0; i < sorted.length; i++) {
-        const entry = sorted[i]!;
+      for (const [i, entry] of sorted.entries()) {
         if (entry.sequence !== i) {
           drifts.push({
             kind: "sequence-gap",
@@ -121,7 +118,9 @@ export function createReconciler(options: ReconcilerOptions = {}): Reconciler {
         }
       }
 
-      const last = sorted[sorted.length - 1]!;
+      // sorted is guaranteed non-empty: the commitments.length === 0 guard above returned early.
+      const last = sorted.at(-1);
+      if (last === undefined) return buildResult(channelId, drifts, suppress);
       const lastCumulative = BigInt(last.cumulativeAmount);
 
       if (settled < lastCumulative) {
@@ -150,8 +149,7 @@ export function createReconciler(options: ReconcilerOptions = {}): Reconciler {
 
     async reconcileCharge(receipt: SignedReceipt): Promise<ReconciliationResult> {
       const ref = receipt.receipt.settlement;
-      const channelId =
-        ref.kind === "channel-commitment" ? ref.channelId : ref.txHash;
+      const channelId = ref.kind === "channel-commitment" ? ref.channelId : ref.txHash;
 
       const drifts: Drift[] = [];
 

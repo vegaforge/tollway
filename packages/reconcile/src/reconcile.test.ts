@@ -1,6 +1,6 @@
-import { describe, expect, it } from "vitest";
-import { createReconciler, type CommitmentRecord, type SettlementRecord } from "./index.js";
 import type { SignedReceipt } from "@tollway/core";
+import { describe, expect, it } from "vitest";
+import { type CommitmentRecord, createReconciler, type SettlementRecord } from "./index.js";
 
 // ── helpers ──────────────────────────────────────────────────────────────────
 
@@ -8,10 +8,7 @@ function mkCommitment(sequence: number, cumulativeAmount: string): CommitmentRec
   return { channelId: "ch-1", sequence, cumulativeAmount };
 }
 
-function mkSettlement(
-  settledAmount: string,
-  returnedRemainder = "0",
-): SettlementRecord {
+function mkSettlement(settledAmount: string, returnedRemainder = "0"): SettlementRecord {
   return {
     channelId: "ch-1",
     settledAmount,
@@ -20,14 +17,16 @@ function mkSettlement(
   };
 }
 
-function mkReceipt(overrides: Partial<{
-  model: "x402" | "mpp-charge" | "mpp-channel";
-  settlementKind: "transaction" | "channel-commitment";
-  amount: string;
-  txHash: string;
-  channelId: string;
-  sequence: number;
-}>): SignedReceipt {
+function mkReceipt(
+  overrides: Partial<{
+    model: "x402" | "mpp-charge" | "mpp-channel";
+    settlementKind: "transaction" | "channel-commitment";
+    amount: string;
+    txHash: string;
+    channelId: string;
+    sequence: number;
+  }>,
+): SignedReceipt {
   const model = overrides.model ?? "x402";
   const settlementKind = overrides.settlementKind ?? "transaction";
   const settlement =
@@ -68,30 +67,19 @@ const reconciler = createReconciler();
 describe("reconcileChannel", () => {
   describe("ok path", () => {
     it("returns ok when settled amount equals last commitment", async () => {
-      const commitments = [
-        mkCommitment(0, "100"),
-        mkCommitment(1, "200"),
-        mkCommitment(2, "300"),
-      ];
+      const commitments = [mkCommitment(0, "100"), mkCommitment(1, "200"), mkCommitment(2, "300")];
       const result = await reconciler.reconcileChannel(commitments, mkSettlement("300", "700"));
       expect(result.ok).toBe(true);
       if (result.ok) expect(result.channelId).toBe("ch-1");
     });
 
     it("returns ok for a single commitment that matches settlement", async () => {
-      const result = await reconciler.reconcileChannel(
-        [mkCommitment(0, "50")],
-        mkSettlement("50"),
-      );
+      const result = await reconciler.reconcileChannel([mkCommitment(0, "50")], mkSettlement("50"));
       expect(result.ok).toBe(true);
     });
 
     it("processes commitments in deterministic order regardless of input order", async () => {
-      const shuffled = [
-        mkCommitment(2, "300"),
-        mkCommitment(0, "100"),
-        mkCommitment(1, "200"),
-      ];
+      const shuffled = [mkCommitment(2, "300"), mkCommitment(0, "100"), mkCommitment(1, "200")];
       const result = await reconciler.reconcileChannel(shuffled, mkSettlement("300"));
       expect(result.ok).toBe(true);
     });
@@ -103,7 +91,7 @@ describe("reconcileChannel", () => {
       expect(result.ok).toBe(false);
       if (!result.ok) {
         expect(result.drift).toHaveLength(1);
-        expect(result.drift[0]!.kind).toBe("missing-commitment");
+        expect(result.drift[0]?.kind).toBe("missing-commitment");
       }
     });
 
@@ -180,7 +168,7 @@ describe("reconcileChannel", () => {
       if (!result.ok) {
         const gaps = result.drift.filter((d) => d.kind === "sequence-gap");
         expect(gaps).toHaveLength(1);
-        expect(gaps[0]!.detail).toContain("expected sequence 1");
+        expect(gaps[0]?.detail).toContain("expected sequence 1");
       }
     });
   });
@@ -246,12 +234,12 @@ describe("reconcileChannel", () => {
     it("passes channelId to suppressor", async () => {
       const seen: string[] = [];
       const withSuppression = createReconciler({
-        suppress: (_drift, channelId) => { seen.push(channelId); return false; },
+        suppress: (_drift, channelId) => {
+          seen.push(channelId);
+          return false;
+        },
       });
-      await withSuppression.reconcileChannel(
-        [mkCommitment(0, "100")],
-        mkSettlement("50"),
-      );
+      await withSuppression.reconcileChannel([mkCommitment(0, "100")], mkSettlement("50"));
       expect(seen).toContain("ch-1");
     });
   });
