@@ -220,6 +220,15 @@ describe("createPolicyEngine", () => {
         detail: expect.stringContaining("anomaly stop"),
       });
     });
+
+    it("tracks anomaly spend per asset", async () => {
+      const engine = createPolicyEngine({
+        anomaly: { maxSpendPerMinute: "150" },
+      });
+      await engine.record(intent({ amount: "100", asset: "USDC:GA5Z" }));
+      const result = await engine.check(intent({ amount: "100", asset: "EURC:GBBB" }));
+      expect(result).toEqual({ allowed: true });
+    });
   });
 
   describe("invalid amount", () => {

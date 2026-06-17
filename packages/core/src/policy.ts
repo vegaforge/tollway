@@ -75,7 +75,7 @@ export function createPolicyEngine(policy: Policy, opts?: { clock?: () => number
   const totalSpend = new Map<string, bigint>();
   const serviceSpend = new Map<string, bigint>();
   const requestTimestamps: number[] = [];
-  const anomalySamples: { amount: bigint; ts: number }[] = [];
+  const anomalySamples: { amount: bigint; asset: string; ts: number }[] = [];
   let lastResetDay = utcDate(clock);
 
   function resetDailyIfNeeded(): void {
@@ -97,7 +97,7 @@ export function createPolicyEngine(policy: Policy, opts?: { clock?: () => number
 
     const now = clock();
     requestTimestamps.push(now);
-    anomalySamples.push({ amount, ts: now });
+    anomalySamples.push({ amount, asset: intent.asset, ts: now });
   }
 
   function pruneWindow(now: number): void {
@@ -197,7 +197,7 @@ export function createPolicyEngine(policy: Policy, opts?: { clock?: () => number
         const now = clock();
         pruneWindow(now);
         const recentSpend = anomalySamples
-          .filter((s) => s.ts >= now - 60_000)
+          .filter((s) => s.ts >= now - 60_000 && s.asset === intent.asset)
           .reduce((sum, s) => sum + s.amount, 0n);
         if (recentSpend + amount > maxSpend) {
           return {
