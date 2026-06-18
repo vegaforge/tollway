@@ -367,3 +367,38 @@ describe("ChannelManager unimplemented methods", () => {
     await expect(manager.recover("CTEST001")).rejects.toBeInstanceOf(NotImplementedError);
   });
 });
+
+// ── typed error codes ─────────────────────────────────────────────────────────
+
+describe("typed error codes are distinguishable on .code", () => {
+  // Callers branch on TollwayError.code rather than parsing messages, so
+  // every channel error class must report its own dedicated code. See
+  // packages/core/src/errors.ts for the TollwayErrorCode union.
+  it("ChannelNotFoundError reports code 'channel-not-found'", () => {
+    expect(new ChannelNotFoundError("CTEST001").code).toBe("channel-not-found");
+  });
+
+  it("ChannelNotOpenError reports code 'channel-not-open'", () => {
+    expect(new ChannelNotOpenError("CTEST001", "closed").code).toBe("channel-not-open");
+  });
+
+  it("CommitmentExceedsDepositError reports code 'commitment-exceeds-deposit'", () => {
+    expect(new CommitmentExceedsDepositError("CTEST001", "101", "100").code).toBe(
+      "commitment-exceeds-deposit",
+    );
+  });
+
+  it("InvalidAmountError keeps code 'invalid-amount' for bad-amount inputs", () => {
+    expect(new InvalidAmountError("oops", "deposit").code).toBe("invalid-amount");
+  });
+
+  it("the four channel error codes are pairwise distinct", () => {
+    const codes = new Set([
+      new ChannelNotFoundError("CTEST001").code,
+      new ChannelNotOpenError("CTEST001", "closed").code,
+      new CommitmentExceedsDepositError("CTEST001", "101", "100").code,
+      new InvalidAmountError("oops", "deposit").code,
+    ]);
+    expect(codes.size).toBe(4);
+  });
+});

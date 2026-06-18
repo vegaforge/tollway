@@ -10,7 +10,10 @@ export type TollwayErrorCode =
   | "invalid-amount"
   | "canonicalization-failed"
   | "budget-exceeded"
-  | "payment-failed";
+  | "payment-failed"
+  | "channel-not-found"
+  | "channel-not-open"
+  | "commitment-exceeds-deposit";
 
 export class TollwayError extends Error {
   readonly code: TollwayErrorCode;

@@ -5,7 +5,7 @@ export class ChannelNotFoundError extends TollwayError {
   readonly channelId: string;
 
   constructor(channelId: string) {
-    super("invalid-amount", `channel "${channelId}" is not tracked by this manager`);
+    super("channel-not-found", `channel "${channelId}" is not tracked by this manager`);
     this.name = "ChannelNotFoundError";
     this.channelId = channelId;
   }
@@ -19,7 +19,7 @@ export class CommitmentExceedsDepositError extends TollwayError {
 
   constructor(channelId: string, attemptedCumulative: string, deposit: string) {
     super(
-      "invalid-amount",
+      "commitment-exceeds-deposit",
       `commit on channel "${channelId}" would advance cumulative to ${attemptedCumulative}, ` +
         `which exceeds the channel deposit of ${deposit}`,
     );
@@ -45,7 +45,7 @@ export class ChannelNotOpenError extends TollwayError {
 
   constructor(channelId: string, status: string) {
     super(
-      "invalid-amount",
+      "channel-not-open",
       `channel "${channelId}" is in status "${status}"; commit requires status "open"`,
     );
     this.name = "ChannelNotOpenError";
