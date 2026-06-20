@@ -1,6 +1,8 @@
 import { NotImplementedError } from "@tollway/core";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type {
+  CloseAdapterInput,
+  CloseAdapterResult,
   MppChannelAdapter,
   OpenAdapterInput,
   OpenAdapterResult,
@@ -8,10 +10,12 @@ import type {
   SignedCommitment,
 } from "./adapter.js";
 import {
+  ChannelAlreadyClosedError,
   ChannelNotFoundError,
   ChannelNotOpenError,
   CommitmentExceedsDepositError,
   InvalidAmountError,
+  SettlementMismatchError,
 } from "./errors.js";
 import { createChannelManager } from "./manager.js";
 import { createMemoryCommitmentStore } from "./store.js";
@@ -21,14 +25,17 @@ import { createMemoryCommitmentStore } from "./store.js";
 type FakeAdapterCalls = {
   openChannel: OpenAdapterInput[];
   signCommitment: SignCommitmentInput[];
+  closeChannel: CloseAdapterInput[];
 };
 
 function createFakeAdapter(overrides?: {
   open?: (input: OpenAdapterInput) => OpenAdapterResult | Promise<OpenAdapterResult>;
   sign?: (input: SignCommitmentInput) => SignedCommitment | Promise<SignedCommitment>;
+  close?: (input: CloseAdapterInput) => CloseAdapterResult | Promise<CloseAdapterResult>;
 }): { adapter: MppChannelAdapter; calls: FakeAdapterCalls } {
-  const calls: FakeAdapterCalls = { openChannel: [], signCommitment: [] };
+  const calls: FakeAdapterCalls = { openChannel: [], signCommitment: [], closeChannel: [] };
   let openCount = 0;
+  let closeCount = 0;
 
   const adapter: MppChannelAdapter = {
     async openChannel(input) {
@@ -45,6 +52,18 @@ function createFakeAdapter(overrides?: {
       if (overrides?.sign) return overrides.sign(input);
       return {
         commitment: `sig:${input.channelId}:${input.cumulativeAmount}`,
+      };
+    },
+    async closeChannel(input) {
+      calls.closeChannel.push(input);
+      if (overrides?.close) return overrides.close(input);
+      closeCount += 1;
+      // Default behaviour: settle the whole cumulative, return deposit - cumulative.
+      const remainder = BigInt(input.deposit) - BigInt(input.cumulativeAmount);
+      return {
+        settlementTxHash: `tx-close-${closeCount}`,
+        settledAmount: input.cumulativeAmount,
+        returnedRemainder: remainder.toString(),
       };
     },
   };
@@ -313,7 +332,12 @@ describe("ChannelManager off-chain invariant", () => {
       runningCumulative = BigInt(input.cumulativeAmount);
       return { commitment: `sig:${input.cumulativeAmount}` };
     });
-    const adapter: MppChannelAdapter = { openChannel, signCommitment };
+    const closeChannel = vi.fn(async () => ({
+      settlementTxHash: "tx-close-strict",
+      settledAmount: "0",
+      returnedRemainder: "0",
+    }));
+    const adapter: MppChannelAdapter = { openChannel, signCommitment, closeChannel };
 
     const manager = createChannelManager({ adapter });
     const channel = await manager.open({
@@ -330,8 +354,445 @@ describe("ChannelManager off-chain invariant", () => {
     }
 
     expect(openChannel).not.toHaveBeenCalled();
+    expect(closeChannel).not.toHaveBeenCalled();
     expect(signCommitment).toHaveBeenCalledTimes(250);
     expect(runningCumulative).toBe(500n);
+  });
+});
+
+// ── shouldClose ───────────────────────────────────────────────────────────────
+
+describe("ChannelManager.shouldClose", () => {
+  it("returns false when no closePolicy is configured", async () => {
+    const { adapter } = createFakeAdapter();
+    const manager = createChannelManager({ adapter });
+    const channel = await manager.open({
+      counterparty: "GR",
+      asset: "USDC",
+      deposit: "1000",
+      network: "testnet",
+    });
+
+    await manager.commit(channel.id, "999");
+    expect(await manager.shouldClose(channel.id)).toBe(false);
+  });
+
+  it("returns true when committed reaches the drawdown threshold", async () => {
+    const { adapter } = createFakeAdapter();
+    const manager = createChannelManager({
+      adapter,
+      closePolicy: { drawdownThreshold: 0.9 },
+    });
+    const channel = await manager.open({
+      counterparty: "GR",
+      asset: "USDC",
+      deposit: "1000",
+      network: "testnet",
+    });
+
+    await manager.commit(channel.id, "800");
+    expect(await manager.shouldClose(channel.id)).toBe(false);
+
+    await manager.commit(channel.id, "100");
+    expect(await manager.shouldClose(channel.id)).toBe(true);
+  });
+
+  it("uses integer arithmetic so it tolerates large deposits without float error", async () => {
+    const { adapter } = createFakeAdapter();
+    const manager = createChannelManager({
+      adapter,
+      closePolicy: { drawdownThreshold: 0.5 },
+    });
+    // 10^18 base units (plausible for tokens with 18 decimals); float math
+    // would lose precision but the BigInt comparison must not.
+    const channel = await manager.open({
+      counterparty: "GR",
+      asset: "USDC",
+      deposit: "1000000000000000000",
+      network: "testnet",
+    });
+
+    await manager.commit(channel.id, "499999999999999999");
+    expect(await manager.shouldClose(channel.id)).toBe(false);
+
+    await manager.commit(channel.id, "1");
+    expect(await manager.shouldClose(channel.id)).toBe(true);
+  });
+
+  it("returns true when the channel has been idle longer than the timeout", async () => {
+    // Advance a controllable clock between open and the shouldClose check.
+    let nowMs = Date.parse("2026-06-20T00:00:00Z");
+    const now = () => new Date(nowMs).toISOString();
+
+    const { adapter } = createFakeAdapter();
+    const manager = createChannelManager({
+      adapter,
+      closePolicy: { idleTimeoutSeconds: 60 },
+      now,
+    });
+
+    const channel = await manager.open({
+      counterparty: "GR",
+      asset: "USDC",
+      deposit: "1000",
+      network: "testnet",
+    });
+    await manager.commit(channel.id, "100");
+
+    // 59 seconds later, still inside the window.
+    nowMs += 59_000;
+    expect(await manager.shouldClose(channel.id)).toBe(false);
+
+    // One more second pushes us past the timeout.
+    nowMs += 1_000;
+    expect(await manager.shouldClose(channel.id)).toBe(true);
+  });
+
+  it("uses the open timestamp as the idle baseline when no commit has landed", async () => {
+    let nowMs = Date.parse("2026-06-20T00:00:00Z");
+    const now = () => new Date(nowMs).toISOString();
+
+    const { adapter } = createFakeAdapter();
+    const manager = createChannelManager({
+      adapter,
+      closePolicy: { idleTimeoutSeconds: 30 },
+      now,
+    });
+
+    const channel = await manager.open({
+      counterparty: "GR",
+      asset: "USDC",
+      deposit: "1000",
+      network: "testnet",
+    });
+
+    nowMs += 29_000;
+    expect(await manager.shouldClose(channel.id)).toBe(false);
+
+    nowMs += 2_000;
+    expect(await manager.shouldClose(channel.id)).toBe(true);
+  });
+
+  it("returns true when either heuristic fires (drawdown wins)", async () => {
+    let nowMs = Date.parse("2026-06-20T00:00:00Z");
+    const now = () => new Date(nowMs).toISOString();
+
+    const { adapter } = createFakeAdapter();
+    const manager = createChannelManager({
+      adapter,
+      closePolicy: { drawdownThreshold: 0.9, idleTimeoutSeconds: 3_600 },
+      now,
+    });
+
+    const channel = await manager.open({
+      counterparty: "GR",
+      asset: "USDC",
+      deposit: "1000",
+      network: "testnet",
+    });
+    await manager.commit(channel.id, "950");
+    nowMs += 10_000; // not idle
+
+    expect(await manager.shouldClose(channel.id)).toBe(true);
+  });
+
+  it("returns true when either heuristic fires (idle wins)", async () => {
+    let nowMs = Date.parse("2026-06-20T00:00:00Z");
+    const now = () => new Date(nowMs).toISOString();
+
+    const { adapter } = createFakeAdapter();
+    const manager = createChannelManager({
+      adapter,
+      closePolicy: { drawdownThreshold: 0.99, idleTimeoutSeconds: 60 },
+      now,
+    });
+
+    const channel = await manager.open({
+      counterparty: "GR",
+      asset: "USDC",
+      deposit: "1000",
+      network: "testnet",
+    });
+    await manager.commit(channel.id, "10"); // well under drawdown
+    nowMs += 61_000;
+
+    expect(await manager.shouldClose(channel.id)).toBe(true);
+  });
+
+  it("returns false for any channel that is not open", async () => {
+    const { adapter } = createFakeAdapter();
+    const store = createMemoryCommitmentStore();
+    const manager = createChannelManager({
+      adapter,
+      store,
+      closePolicy: { drawdownThreshold: 0.1, idleTimeoutSeconds: 1 },
+    });
+    const channel = await manager.open({
+      counterparty: "GR",
+      asset: "USDC",
+      deposit: "1000",
+      network: "testnet",
+    });
+
+    await store.updateChannel(channel.id, { status: "closed" });
+    expect(await manager.shouldClose(channel.id)).toBe(false);
+
+    await store.updateChannel(channel.id, { status: "recovering" });
+    expect(await manager.shouldClose(channel.id)).toBe(false);
+  });
+
+  it("throws ChannelNotFoundError for an unknown channel", async () => {
+    const { adapter } = createFakeAdapter();
+    const manager = createChannelManager({
+      adapter,
+      closePolicy: { drawdownThreshold: 0.5 },
+    });
+    await expect(manager.shouldClose("CNOPE")).rejects.toBeInstanceOf(ChannelNotFoundError);
+  });
+
+  it("rejects nonsensical policy values with InvalidAmountError", async () => {
+    const { adapter } = createFakeAdapter();
+    const channel = await createChannelManager({ adapter }).open({
+      counterparty: "GR",
+      asset: "USDC",
+      deposit: "1000",
+      network: "testnet",
+    });
+
+    // The first manager opened the channel; this one shares the same default
+    // in-memory store only conceptually, so build a fresh manager for the
+    // policy check that owns its own channel via the store.
+    const store = createMemoryCommitmentStore();
+    await store.putChannel({ ...channel });
+
+    const negativeDrawdown = createChannelManager({
+      adapter,
+      store,
+      closePolicy: { drawdownThreshold: -0.1 },
+    });
+    await expect(negativeDrawdown.shouldClose(channel.id)).rejects.toBeInstanceOf(
+      InvalidAmountError,
+    );
+
+    const negativeIdle = createChannelManager({
+      adapter,
+      store,
+      closePolicy: { idleTimeoutSeconds: -5 },
+    });
+    await expect(negativeIdle.shouldClose(channel.id)).rejects.toBeInstanceOf(InvalidAmountError);
+  });
+});
+
+// ── close ─────────────────────────────────────────────────────────────────────
+
+describe("ChannelManager.close", () => {
+  it("submits a single settlement and reports the returned remainder", async () => {
+    const { adapter, calls } = createFakeAdapter();
+    const manager = createChannelManager({ adapter });
+    const channel = await manager.open({
+      counterparty: "GR",
+      asset: "USDC",
+      deposit: "1000",
+      network: "testnet",
+    });
+
+    await manager.commit(channel.id, "300");
+    await manager.commit(channel.id, "400");
+
+    const result = await manager.close(channel.id);
+
+    expect(calls.closeChannel).toHaveLength(1);
+    expect(calls.closeChannel[0]).toMatchObject({
+      channelId: channel.id,
+      cumulativeAmount: "700",
+      deposit: "1000",
+    });
+    expect(result.channelId).toBe(channel.id);
+    expect(result.settlementTxHash).toBe("tx-close-1");
+    expect(result.returnedRemainder).toBe("300");
+
+    const refreshed = await manager.get(channel.id);
+    expect(refreshed?.status).toBe("closed");
+    expect(refreshed?.settlementTxHash).toBe("tx-close-1");
+    expect(refreshed?.returnedRemainder).toBe("300");
+  });
+
+  it("hands the adapter the latest commitment blob, not an earlier one", async () => {
+    const { adapter, calls } = createFakeAdapter();
+    const manager = createChannelManager({ adapter });
+    const channel = await manager.open({
+      counterparty: "GR",
+      asset: "USDC",
+      deposit: "1000",
+      network: "testnet",
+    });
+
+    await manager.commit(channel.id, "100");
+    await manager.commit(channel.id, "100");
+    const last = await manager.commit(channel.id, "100");
+
+    await manager.close(channel.id);
+    expect(calls.closeChannel[0]?.commitment).toBe(last.commitment);
+    expect(calls.closeChannel[0]?.cumulativeAmount).toBe(last.cumulativeAmount);
+  });
+
+  it("returns the full deposit when no commitments were ever signed", async () => {
+    const { adapter, calls } = createFakeAdapter();
+    const manager = createChannelManager({ adapter });
+    const channel = await manager.open({
+      counterparty: "GR",
+      asset: "USDC",
+      deposit: "1000",
+      network: "testnet",
+    });
+
+    const result = await manager.close(channel.id);
+
+    expect(calls.closeChannel).toHaveLength(1);
+    expect(calls.closeChannel[0]).toMatchObject({
+      cumulativeAmount: "0",
+      commitment: "",
+    });
+    expect(result.returnedRemainder).toBe("1000");
+  });
+
+  it("refuses to close an unknown channel", async () => {
+    const { adapter } = createFakeAdapter();
+    const manager = createChannelManager({ adapter });
+    await expect(manager.close("CNOPE")).rejects.toBeInstanceOf(ChannelNotFoundError);
+  });
+
+  it("refuses to close a channel that is not open", async () => {
+    const { adapter, calls } = createFakeAdapter();
+    const manager = createChannelManager({ adapter });
+    const channel = await manager.open({
+      counterparty: "GR",
+      asset: "USDC",
+      deposit: "1000",
+      network: "testnet",
+    });
+
+    await manager.close(channel.id);
+    await expect(manager.close(channel.id)).rejects.toBeInstanceOf(ChannelAlreadyClosedError);
+    // Adapter was called exactly once across the two close attempts.
+    expect(calls.closeChannel).toHaveLength(1);
+  });
+
+  it("rolls the channel status back to open and surfaces the adapter error on failure", async () => {
+    const sentinel = new Error("network unreachable");
+    const { adapter, calls } = createFakeAdapter({
+      close: () => {
+        throw sentinel;
+      },
+    });
+    const manager = createChannelManager({ adapter });
+    const channel = await manager.open({
+      counterparty: "GR",
+      asset: "USDC",
+      deposit: "1000",
+      network: "testnet",
+    });
+    await manager.commit(channel.id, "100");
+
+    await expect(manager.close(channel.id)).rejects.toBe(sentinel);
+    expect(calls.closeChannel).toHaveLength(1);
+
+    const refreshed = await manager.get(channel.id);
+    expect(refreshed?.status).toBe("open");
+    expect(refreshed?.settlementTxHash).toBeUndefined();
+  });
+
+  it("throws SettlementMismatchError when the adapter under-settles the latest commitment", async () => {
+    const { adapter } = createFakeAdapter({
+      close: (input) => ({
+        settlementTxHash: "tx-mismatch",
+        settledAmount: "1", // ≠ requested cumulative
+        returnedRemainder: BigInt(input.deposit).toString(),
+      }),
+    });
+    const manager = createChannelManager({ adapter });
+    const channel = await manager.open({
+      counterparty: "GR",
+      asset: "USDC",
+      deposit: "1000",
+      network: "testnet",
+    });
+    await manager.commit(channel.id, "500");
+
+    await expect(manager.close(channel.id)).rejects.toBeInstanceOf(SettlementMismatchError);
+    const refreshed = await manager.get(channel.id);
+    expect(refreshed?.status).toBe("open");
+  });
+
+  it("transitions through closing on the way to closed", async () => {
+    const observedStatuses: string[] = [];
+    const store = createMemoryCommitmentStore();
+    const origUpdate = store.updateChannel.bind(store);
+    store.updateChannel = async (id, patch) => {
+      const next = await origUpdate(id, patch);
+      if (next) observedStatuses.push(next.status);
+      return next;
+    };
+
+    const { adapter } = createFakeAdapter();
+    const manager = createChannelManager({ adapter, store });
+    const channel = await manager.open({
+      counterparty: "GR",
+      asset: "USDC",
+      deposit: "1000",
+      network: "testnet",
+    });
+    await manager.commit(channel.id, "100");
+
+    observedStatuses.length = 0;
+    await manager.close(channel.id);
+    expect(observedStatuses).toContain("closing");
+    expect(observedStatuses.at(-1)).toBe("closed");
+  });
+});
+
+// ── high-frequency demo ───────────────────────────────────────────────────────
+
+describe("high-frequency channel demo", () => {
+  // Headline acceptance test for #34: hundreds of commitments off chain,
+  // one close on chain. See docs/design.md, "The channel lifecycle manager".
+  it("runs 500 commitments and one close, settling the full cumulative", async () => {
+    const { adapter, calls } = createFakeAdapter();
+    const manager = createChannelManager({
+      adapter,
+      // 500 commits of 1000 land at 500_000 of 1_000_000 = 0.5 drawdown,
+      // so a threshold of 0.5 fires exactly when the loop is done.
+      closePolicy: { drawdownThreshold: 0.5 },
+    });
+
+    const channel = await manager.open({
+      counterparty: "GRECIPIENT",
+      asset: "USDC",
+      deposit: "1000000",
+      network: "testnet",
+    });
+
+    const COMMITS = 500;
+    const PER_COMMIT = "1000";
+    for (let i = 0; i < COMMITS; i += 1) {
+      await manager.commit(channel.id, PER_COMMIT);
+    }
+
+    const closing = await manager.shouldClose(channel.id);
+    expect(closing).toBe(true);
+
+    const result = await manager.close(channel.id);
+
+    expect(calls.openChannel).toHaveLength(1);
+    expect(calls.signCommitment).toHaveLength(COMMITS);
+    expect(calls.closeChannel).toHaveLength(1);
+    expect(result.settlementTxHash).toBe("tx-close-1");
+    expect(result.returnedRemainder).toBe("500000");
+
+    const finalChannel = await manager.get(channel.id);
+    expect(finalChannel?.status).toBe("closed");
+    expect(finalChannel?.committed).toBe("500000");
+    expect(finalChannel?.sequence).toBe(COMMITS - 1);
   });
 });
 
@@ -349,22 +810,14 @@ describe("ChannelManager unimplemented methods", () => {
     vi.restoreAllMocks();
   });
 
-  it("shouldClose throws NotImplementedError referencing the design doc", async () => {
+  it("recover throws NotImplementedError referencing the design doc", async () => {
     try {
-      await manager.shouldClose("CTEST001");
-      expect.unreachable("expected shouldClose to throw");
+      await manager.recover("CTEST001");
+      expect.unreachable("expected recover to throw");
     } catch (error) {
       expect(error).toBeInstanceOf(NotImplementedError);
       expect((error as NotImplementedError).reference).toContain("design.md");
     }
-  });
-
-  it("close throws NotImplementedError", async () => {
-    await expect(manager.close("CTEST001")).rejects.toBeInstanceOf(NotImplementedError);
-  });
-
-  it("recover throws NotImplementedError", async () => {
-    await expect(manager.recover("CTEST001")).rejects.toBeInstanceOf(NotImplementedError);
   });
 });
 
@@ -382,23 +835,33 @@ describe("typed error codes are distinguishable on .code", () => {
     expect(new ChannelNotOpenError("CTEST001", "closed").code).toBe("channel-not-open");
   });
 
+  it("ChannelAlreadyClosedError reports code 'channel-already-closed'", () => {
+    expect(new ChannelAlreadyClosedError("CTEST001", "closed").code).toBe("channel-already-closed");
+  });
+
   it("CommitmentExceedsDepositError reports code 'commitment-exceeds-deposit'", () => {
     expect(new CommitmentExceedsDepositError("CTEST001", "101", "100").code).toBe(
       "commitment-exceeds-deposit",
     );
   });
 
+  it("SettlementMismatchError reports code 'settlement-mismatch'", () => {
+    expect(new SettlementMismatchError("CTEST001", "100", "50").code).toBe("settlement-mismatch");
+  });
+
   it("InvalidAmountError keeps code 'invalid-amount' for bad-amount inputs", () => {
     expect(new InvalidAmountError("oops", "deposit").code).toBe("invalid-amount");
   });
 
-  it("the four channel error codes are pairwise distinct", () => {
+  it("the six channel error codes are pairwise distinct", () => {
     const codes = new Set([
       new ChannelNotFoundError("CTEST001").code,
       new ChannelNotOpenError("CTEST001", "closed").code,
+      new ChannelAlreadyClosedError("CTEST001", "closed").code,
       new CommitmentExceedsDepositError("CTEST001", "101", "100").code,
+      new SettlementMismatchError("CTEST001", "100", "50").code,
       new InvalidAmountError("oops", "deposit").code,
     ]);
-    expect(codes.size).toBe(4);
+    expect(codes.size).toBe(6);
   });
 });

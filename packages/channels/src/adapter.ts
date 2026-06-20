@@ -40,13 +40,40 @@ export type SignedCommitment = {
   commitment: string;
 };
 
+export type CloseAdapterInput = {
+  channelId: string;
+  network: StellarNetwork;
+  /** Latest cumulative commitment to settle with, as an integer string in base units. */
+  cumulativeAmount: string;
+  /**
+   * Funder-signed commitment blob for `cumulativeAmount`. Empty string when
+   * the channel has no commits and the close is effectively a refund.
+   */
+  commitment: string;
+  /** Original deposit recorded at open time, in base units. */
+  deposit: string;
+};
+
+export type CloseAdapterResult = {
+  /** On-chain transaction hash of the settlement. */
+  settlementTxHash: string;
+  /**
+   * Amount actually settled to the recipient, as an integer string. Should
+   * equal `cumulativeAmount`; the manager's close path verifies this.
+   */
+  settledAmount: string;
+  /** Amount returned to the funder after settlement, as an integer string. */
+  returnedRemainder: string;
+};
+
 /**
  * The minimum surface the manager needs from @stellar/mpp.
  *
  * Implementations:
  * - `stellarMppAdapter` — real adapter against the one-way-channel contract
- *   on testnet or mainnet. Submits on chain in `openChannel`, runs a
- *   read-only simulate + local ed25519 sign in `signCommitment`.
+ *   on testnet or mainnet. Submits on chain in `openChannel` and
+ *   `closeChannel`, runs a read-only simulate + local ed25519 sign in
+ *   `signCommitment`.
  * - test doubles — used by the manager's own tests to assert off-chain
  *   behaviour without standing up a testnet.
  */
@@ -58,4 +85,10 @@ export interface MppChannelAdapter {
    * channel mode (docs/design.md, "The channel lifecycle manager").
    */
   signCommitment(input: SignCommitmentInput): Promise<SignedCommitment>;
+  /**
+   * Submits the single on-chain settlement for the channel using the latest
+   * cumulative commitment. Returns the settlement tx hash, the settled
+   * amount, and the remainder returned to the funder.
+   */
+  closeChannel(input: CloseAdapterInput): Promise<CloseAdapterResult>;
 }

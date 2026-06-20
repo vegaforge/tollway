@@ -2,24 +2,31 @@
  * The MPP channel lifecycle manager. See docs/design.md,
  * "The channel lifecycle manager".
  *
- * Scope of this implementation: `open` and `commit`. `close`, `recover`,
- * and `shouldClose` are tracked under separate issues and remain as
- * typed stubs.
+ * Scope of this release: `open`, `commit`, `shouldClose`, and `close`.
+ * `recover` is tracked under #38 and remains a typed stub.
  */
 
 import { NotImplementedError } from "@tollway/core";
-import type { MppChannelAdapter, OpenAdapterResult, SignedCommitment } from "./adapter.js";
+import type {
+  CloseAdapterResult,
+  MppChannelAdapter,
+  OpenAdapterResult,
+  SignedCommitment,
+} from "./adapter.js";
 import {
+  ChannelAlreadyClosedError,
   ChannelNotFoundError,
   ChannelNotOpenError,
   CommitmentExceedsDepositError,
   InvalidAmountError,
+  SettlementMismatchError,
 } from "./errors.js";
 import { type CommitmentStore, createMemoryCommitmentStore } from "./store.js";
 import type {
   Channel,
   ChannelManager,
   ClosePolicy,
+  CloseResult,
   Commitment,
   OpenChannelInput,
 } from "./types.js";
@@ -35,10 +42,21 @@ export type CreateChannelManagerOptions = {
   adapter: MppChannelAdapter;
   store?: CommitmentStore;
   closePolicy?: ClosePolicy;
+  /**
+   * Clock function returning the current time as an ISO-8601 string. Defaults
+   * to `() => new Date().toISOString()`. Override in tests to make
+   * idle-timeout assertions deterministic.
+   */
+  now?: () => string;
 };
 
 export function createChannelManager(options: CreateChannelManagerOptions): ChannelManager {
-  const { adapter, store = createMemoryCommitmentStore() } = options;
+  const {
+    adapter,
+    store = createMemoryCommitmentStore(),
+    closePolicy,
+    now = () => new Date().toISOString(),
+  } = options;
 
   return {
     async open(input: OpenChannelInput): Promise<Channel> {
@@ -62,6 +80,7 @@ export function createChannelManager(options: CreateChannelManagerOptions): Chan
         status: "open",
         network: input.network,
         openTxHash: opened.openTxHash,
+        openedAt: now(),
       };
 
       await store.putChannel(channel);
@@ -110,6 +129,7 @@ export function createChannelManager(options: CreateChannelManagerOptions): Chan
       await store.updateChannel(channelId, {
         committed: cumulativeAmount,
         sequence: nextSequence,
+        lastCommitAt: now(),
       });
 
       return commitment;
@@ -125,18 +145,105 @@ export function createChannelManager(options: CreateChannelManagerOptions): Chan
       return store.listCommitments(channelId);
     },
 
-    async shouldClose(_channelId: string): Promise<boolean> {
-      throw new NotImplementedError(
-        "ChannelManager.shouldClose",
-        'docs/design.md, "The channel lifecycle manager"',
-      );
+    async shouldClose(channelId: string): Promise<boolean> {
+      const channel = await store.getChannel(channelId);
+      if (!channel) throw new ChannelNotFoundError(channelId);
+      // Only open channels are candidates for closing. Once a close has
+      // started (closing/closed/recovering/recovered) the answer is no.
+      if (channel.status !== "open") return false;
+
+      if (!closePolicy) return false;
+
+      const { drawdownThreshold, idleTimeoutSeconds } = closePolicy;
+
+      if (drawdownThreshold !== undefined) {
+        if (!Number.isFinite(drawdownThreshold) || drawdownThreshold < 0 || drawdownThreshold > 1) {
+          throw new InvalidAmountError(String(drawdownThreshold), "closePolicy.drawdownThreshold");
+        }
+        const committed = parseAmount(channel.committed, "committed");
+        const deposit = parseAmount(channel.deposit, "deposit");
+        if (deposit > 0n) {
+          // Compare without floats: committed/deposit >= threshold
+          //   ⇔ committed * SCALE >= deposit * round(threshold * SCALE).
+          const SCALE = 1_000_000n;
+          const scaledThreshold = BigInt(Math.round(drawdownThreshold * Number(SCALE)));
+          if (committed * SCALE >= deposit * scaledThreshold) return true;
+        }
+      }
+
+      if (idleTimeoutSeconds !== undefined) {
+        if (!Number.isFinite(idleTimeoutSeconds) || idleTimeoutSeconds < 0) {
+          throw new InvalidAmountError(
+            String(idleTimeoutSeconds),
+            "closePolicy.idleTimeoutSeconds",
+          );
+        }
+        // When no commit has landed yet, fall back to the open timestamp;
+        // a channel that sits idle from the start should still age out.
+        const baselineIso = channel.lastCommitAt ?? channel.openedAt;
+        const baseline = Date.parse(baselineIso);
+        const current = Date.parse(now());
+        if (Number.isFinite(baseline) && Number.isFinite(current)) {
+          const idleSeconds = Math.floor((current - baseline) / 1000);
+          if (idleSeconds >= idleTimeoutSeconds) return true;
+        }
+      }
+
+      return false;
     },
 
-    async close(_channelId: string) {
-      throw new NotImplementedError(
-        "ChannelManager.close",
-        'docs/design.md, "The channel lifecycle manager"',
-      );
+    async close(channelId: string): Promise<CloseResult> {
+      const current = await store.getChannel(channelId);
+      if (!current) throw new ChannelNotFoundError(channelId);
+      if (current.status !== "open") {
+        throw new ChannelAlreadyClosedError(channelId, current.status);
+      }
+
+      const stream = await store.listCommitments(channelId);
+      const latest = stream.at(-1);
+      const cumulativeAmount = latest?.cumulativeAmount ?? "0";
+      const commitmentBlob = latest?.commitment ?? "";
+
+      // Transition to closing before reaching the adapter so a concurrent
+      // close on the same channel sees the in-progress state and bails.
+      await store.updateChannel(channelId, { status: "closing" });
+
+      let settlement: CloseAdapterResult;
+      try {
+        settlement = await adapter.closeChannel({
+          channelId,
+          network: current.network,
+          cumulativeAmount,
+          commitment: commitmentBlob,
+          deposit: current.deposit,
+        });
+      } catch (error) {
+        // Roll the channel back to open so the caller can retry. The
+        // adapter is responsible for not leaving a half-submitted tx on
+        // chain; the manager just hands back a consistent local state.
+        await store.updateChannel(channelId, { status: "open" });
+        throw error;
+      }
+
+      // The adapter's settled amount must match the last commitment.
+      // The reconcile engine in #50 catches under/over-settlement at the
+      // off-chain/on-chain seam; this guard is an in-process belt-and-braces.
+      if (settlement.settledAmount !== cumulativeAmount) {
+        await store.updateChannel(channelId, { status: "open" });
+        throw new SettlementMismatchError(channelId, cumulativeAmount, settlement.settledAmount);
+      }
+
+      await store.updateChannel(channelId, {
+        status: "closed",
+        settlementTxHash: settlement.settlementTxHash,
+        returnedRemainder: settlement.returnedRemainder,
+      });
+
+      return {
+        channelId,
+        settlementTxHash: settlement.settlementTxHash,
+        returnedRemainder: settlement.returnedRemainder,
+      };
     },
 
     async recover(_channelId: string) {
