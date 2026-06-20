@@ -6,11 +6,13 @@
  * single settlement, and recover when a counterparty goes quiet. See
  * docs/design.md, "The channel lifecycle manager".
  *
- * This release ships `open` and `commit`. `close` and `recover` are tracked
- * under #34 and #38 and remain typed stubs.
+ * This release ships `open`, `commit`, `shouldClose`, and `close`.
+ * `recover` is tracked under #38 and remains a typed stub.
  */
 
 export type {
+  CloseAdapterInput,
+  CloseAdapterResult,
   MppChannelAdapter,
   OpenAdapterInput,
   OpenAdapterResult,
@@ -18,10 +20,12 @@ export type {
   SignedCommitment,
 } from "./adapter.js";
 export {
+  ChannelAlreadyClosedError,
   ChannelNotFoundError,
   ChannelNotOpenError,
   CommitmentExceedsDepositError,
   InvalidAmountError,
+  SettlementMismatchError,
 } from "./errors.js";
 export { type CreateChannelManagerOptions, createChannelManager } from "./manager.js";
 export { type CommitmentStore, createMemoryCommitmentStore } from "./store.js";

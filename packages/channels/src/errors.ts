@@ -53,3 +53,41 @@ export class ChannelNotOpenError extends TollwayError {
     this.status = status;
   }
 }
+
+/** Thrown when close is attempted on a channel that is already closing, closed, or in recovery. */
+export class ChannelAlreadyClosedError extends TollwayError {
+  readonly channelId: string;
+  readonly status: string;
+
+  constructor(channelId: string, status: string) {
+    super(
+      "channel-already-closed",
+      `channel "${channelId}" cannot be closed from status "${status}"; close requires status "open"`,
+    );
+    this.name = "ChannelAlreadyClosedError";
+    this.channelId = channelId;
+    this.status = status;
+  }
+}
+
+/**
+ * Thrown when the on-chain settlement reports an amount that is inconsistent
+ * with the latest cumulative commitment recorded off chain. This is the
+ * manager's last-line check that the adapter delivered what was asked for.
+ */
+export class SettlementMismatchError extends TollwayError {
+  readonly channelId: string;
+  readonly expectedSettled: string;
+  readonly actualSettled: string;
+
+  constructor(channelId: string, expectedSettled: string, actualSettled: string) {
+    super(
+      "settlement-mismatch",
+      `channel "${channelId}" settled ${actualSettled} but the last commitment was ${expectedSettled}`,
+    );
+    this.name = "SettlementMismatchError";
+    this.channelId = channelId;
+    this.expectedSettled = expectedSettled;
+    this.actualSettled = actualSettled;
+  }
+}

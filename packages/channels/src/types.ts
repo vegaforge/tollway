@@ -31,6 +31,17 @@ export type Channel = {
   network: StellarNetwork;
   /** On-chain transaction hash that opened the channel. */
   openTxHash: string;
+  /** ISO-8601 timestamp the channel was opened. */
+  openedAt: string;
+  /**
+   * ISO-8601 timestamp of the most recent successful commit. Absent before
+   * the first commit lands. Used by the idle-timeout close heuristic.
+   */
+  lastCommitAt?: string;
+  /** On-chain settlement tx hash; set when the channel transitions to closed. */
+  settlementTxHash?: string;
+  /** Amount returned to the funder on close; set when the channel transitions to closed. */
+  returnedRemainder?: string;
 };
 
 export type Commitment = {

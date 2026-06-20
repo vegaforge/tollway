@@ -13,7 +13,9 @@ export type TollwayErrorCode =
   | "payment-failed"
   | "channel-not-found"
   | "channel-not-open"
-  | "commitment-exceeds-deposit";
+  | "channel-already-closed"
+  | "commitment-exceeds-deposit"
+  | "settlement-mismatch";
 
 export class TollwayError extends Error {
   readonly code: TollwayErrorCode;
