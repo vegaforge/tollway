@@ -40,8 +40,10 @@ export type PaymentOffer = {
 export type X402Payment = {
   model: "x402";
   /**
-   * Contents of the PAYMENT-SIGNATURE header: the signed Soroban
-   * authorization entry. Opaque to Tollway; @x402/stellar owns the format.
+   * The agent's signed payment from the PAYMENT-SIGNATURE header: a base64
+   * Stellar transaction envelope (x402 V2's `ExactStellarPayloadV2.transaction`),
+   * carrying the signed Soroban authorization entry. Opaque to Tollway;
+   * @x402/stellar owns the format.
    */
   paymentSignature: string;
 };
