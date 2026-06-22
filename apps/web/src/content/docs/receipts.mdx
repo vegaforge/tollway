@@ -1,0 +1,34 @@
+---
+title: Receipts
+description: The canonical payment artifact shared across settlement models
+---
+
+Tollway normalizes x402 settlements, MPP charge settlements, and MPP channel
+commitments into one receipt format. That gives accounting, analytics, and
+dispute tooling one shape to consume.
+
+Read the source design section: [One receipt format](https://github.com/vegaforge/tollway/blob/main/docs/design.md#one-receipt-format).
+
+## Fields
+
+A receipt records:
+
+- Counterparties.
+- Amount and asset.
+- URL or resource id.
+- Settlement model.
+- Settlement reference.
+- Timestamp.
+- Tollway signature.
+
+## Settlement references
+
+For x402 and MPP charge, the settlement reference is a Stellar transaction hash.
+For MPP channel mode, it is the channel id plus the cumulative commitment
+sequence.
+
+## Why signatures matter
+
+Signed receipts provide a stable artifact for exports, dashboards, and dispute
+evidence. Hosted deployments should rotate receipt signing keys safely and store
+which key signed each receipt.

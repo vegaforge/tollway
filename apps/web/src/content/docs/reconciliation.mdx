@@ -1,0 +1,28 @@
+---
+title: Reconciliation
+description: Matching receipts, commitments, and on-chain settlement
+---
+
+Reconciliation is the safety net that checks Tollway's off-chain records against
+on-chain settlement. It is most important for channel mode because most channel
+payments are cumulative off-chain commitments until close.
+
+Read the source design section: [Reconciliation](https://github.com/vegaforge/tollway/blob/main/docs/design.md#reconciliation).
+
+## Channel reconciliation
+
+For MPP channel mode, Tollway compares the stored commitment stream with the
+channel contract state and final close transaction. It should detect drift such
+as a missing commitment, an unexpected remainder, or an under-settlement.
+
+## Per-request reconciliation
+
+For x402 and MPP charge, reconciliation is simpler: each receipt should map to a
+settled transaction, and that transaction should match the receipt amount,
+asset, counterparty, and resource reference.
+
+## Response to drift
+
+When reconciliation finds drift, Tollway should flag the event, stop additional
+commitments for the counterparty when appropriate, and make the evidence
+available to operators through exports or webhooks.

@@ -1,0 +1,32 @@
+---
+title: Policy
+description: Spending limits, caps, rate limits, and anomaly stops
+---
+
+Policy is data, not application code. Tollway uses policy to decide whether a
+payment may proceed, which models are allowed, and when an agent should stop
+spending.
+
+Read the source design section: [Policy and budgets](https://github.com/vegaforge/tollway/blob/main/docs/design.md#policy-and-budgets).
+
+## Scope
+
+Policies can describe:
+
+- Daily and total budgets per agent.
+- Per-service caps.
+- Per-model constraints for x402, MPP charge, or MPP channel mode.
+- Rate limits.
+- Anomaly stops for sudden spend spikes.
+
+## Enforcement layers
+
+When an agent uses an OpenZeppelin smart account, Tollway maps supported
+constraints to on-chain policy where possible. When a constraint cannot be
+represented on chain, Tollway enforces it at the application layer.
+
+## Failure behavior
+
+Policy failures should be explicit. Budget exhaustion or a blocked model should
+return a typed error instead of silently skipping payment or falling through to a
+less safe model.
