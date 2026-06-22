@@ -1,0 +1,164 @@
+---
+title: Receipt format
+description: Canonical signed receipt fields, settlement references, and signature verification
+---
+
+Every Tollway settlement produces one `SignedReceipt` from `@tollway/core`.
+The shape is shared by x402, MPP charge, and MPP channel payments so
+accounting, disputes, reconciliation, and analytics can consume one format.
+
+## Example
+
+```json
+{
+  "receipt": {
+    "version": 1,
+    "id": "rcpt_01HZX8F2E7Q4C7H5A3W9P8M1K6",
+    "payer": "GAGENTXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX",
+    "payee": "GSERVICEXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX",
+    "amount": "10000",
+    "asset": "USDC:GA5ZSEJYB37JRC5AVCIA5MOP4RHTM335X2KGX3IHOJAPP5RE34K4KZVN",
+    "resource": "https://api.example.com/quotes/latest",
+    "model": "x402",
+    "settlement": {
+      "kind": "transaction",
+      "txHash": "b1c2d3e4f5"
+    },
+    "network": "testnet",
+    "issuedAt": "2026-06-22T12:00:00.000Z"
+  },
+  "signature": {
+    "keyId": "service-key-2026-06",
+    "algorithm": "Ed25519",
+    "value": "mJ6PqZPlBvjJZcQfYwQe6h6x49ZcGwQFZfYlR5vGxBr8w8bW2cPQHh4eeoS9t_x9zjKZ_Nklv0smj4WQwQhAA"
+  }
+}
+```
+
+## Receipt body
+
+| Field | Type | Description |
+| ----- | ---- | ----------- |
+| `version` | `1` | Receipt schema version. `buildReceipt` always emits version `1`. |
+| `id` | string | Unique receipt id. It is covered by the signature, so replayed or substituted receipts are detectable. |
+| `payer` | string | Stellar address for the agent or account that paid. |
+| `payee` | string | Stellar address for the service that received settlement. |
+| `amount` | string | Integer string in the asset's smallest unit. Decimal strings and negative values are invalid. |
+| `asset` | string | Asset identifier, for example `USDC:<issuer>`. |
+| `resource` | string | URL or stable resource id describing what was purchased. |
+| `model` | enum | Settlement model: `x402`, `mpp-charge`, or `mpp-channel`. |
+| `settlement` | object | On-chain settlement reference. Its variant must match `model`. |
+| `network` | enum | Stellar network: `testnet` or `mainnet`. |
+| `issuedAt` | string | ISO 8601 datetime for when Tollway issued the receipt. |
+
+`buildReceipt` fills `version`, `id`, and `issuedAt` when they are not
+provided, then validates the body with `receiptBodySchema`.
+
+## Settlement references
+
+x402 and MPP charge receipts settle through a Stellar transaction:
+
+```json
+{
+  "model": "x402",
+  "settlement": {
+    "kind": "transaction",
+    "txHash": "b1c2d3e4f5"
+  }
+}
+```
+
+```json
+{
+  "model": "mpp-charge",
+  "settlement": {
+    "kind": "transaction",
+    "txHash": "f5e4d3c2b1"
+  }
+}
+```
+
+MPP channel receipts point to a channel and a cumulative commitment sequence:
+
+```json
+{
+  "model": "mpp-channel",
+  "settlement": {
+    "kind": "channel-commitment",
+    "channelId": "channel_123",
+    "sequence": 41
+  }
+}
+```
+
+The schema rejects mismatched pairs. A receipt with `model: "x402"` cannot use
+`kind: "channel-commitment"`, and a receipt with `model: "mpp-channel"` cannot
+use `kind: "transaction"`.
+
+## Signature
+
+| Field | Type | Description |
+| ----- | ---- | ----------- |
+| `keyId` | string | Identifier for the signing key. Verifiers use it to select the trusted public key. |
+| `algorithm` | string | Signature algorithm. The built-in signer emits `Ed25519`. |
+| `value` | string | Base64url-encoded signature over the canonical receipt body bytes. |
+
+The signature covers only the `receipt` object, not the surrounding
+`signature` object. Tollway canonicalizes the receipt body before signing:
+object keys are sorted at every level, no whitespace is emitted, and
+`undefined` properties are omitted in the same way as `JSON.stringify`.
+
+## Signing and verification
+
+The signing API is intentionally swappable. Any deployment can provide a
+`ReceiptSigner` backed by an in-process key, a KMS, or an HSM as long as it
+returns the signature bytes for the canonical receipt body.
+
+```ts
+import {
+  Ed25519Signer,
+  Ed25519Verifier,
+  buildReceipt,
+  signReceipt,
+  verifyReceipt,
+} from "@tollway/core";
+
+const signer = await Ed25519Signer.generate("service-key-2026-06");
+
+const body = buildReceipt({
+  payer: "GAGENTXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX",
+  payee: "GSERVICEXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX",
+  amount: "10000",
+  asset: "USDC:GA5ZSEJYB37JRC5AVCIA5MOP4RHTM335X2KGX3IHOJAPP5RE34K4KZVN",
+  resource: "https://api.example.com/quotes/latest",
+  model: "x402",
+  settlement: { kind: "transaction", txHash: "b1c2d3e4f5" },
+  network: "testnet",
+});
+
+const signed = await signReceipt(body, signer);
+const verifier = Ed25519Verifier.forSigner(signer);
+
+await verifyReceipt(signed, verifier);
+```
+
+`verifyReceipt` first checks `signedReceiptSchema`, then verifies the
+canonical body bytes against the trusted public key for `signature.keyId`.
+Unknown keys, unsupported algorithms, malformed receipt bodies, and tampered
+fields all fail verification.
+
+## Key rotation
+
+Every signature carries `keyId`, so deployments can rotate signing keys
+without orphaning old receipts:
+
+- Give each production signing key a stable id, such as `service-key-2026-06`.
+- Publish or configure verifiers with both the active key and any retired keys
+  needed for the receipt retention window.
+- Sign new receipts with the active key only.
+- Keep old receipts unchanged. Their `signature.keyId` continues to point at
+  the public key that can verify them.
+
+The default `Ed25519Signer.generate()` uses the base64url public key as
+`keyId` when no id is supplied. Passing an explicit id is clearer for
+production rotation schedules.
