@@ -18,6 +18,13 @@
   --primary: var(--tollway-primary);
   --primary-foreground: var(--tollway-primary-foreground);
   --accent: var(--tollway-accent);
+  --accent-foreground: var(--tollway-accent-foreground);
+  --success: var(--tollway-success);
+  --success-foreground: var(--tollway-success-foreground);
+  --warning: var(--tollway-warning);
+  --warning-foreground: var(--tollway-warning-foreground);
+  --danger: var(--tollway-danger);
+  --danger-foreground: var(--tollway-danger-foreground);
 }
 
 @theme inline {
@@ -31,6 +38,13 @@
   --color-primary: var(--primary);
   --color-primary-foreground: var(--primary-foreground);
   --color-accent: var(--accent);
+  --color-accent-foreground: var(--accent-foreground);
+  --color-success: var(--success);
+  --color-success-foreground: var(--success-foreground);
+  --color-warning: var(--warning);
+  --color-warning-foreground: var(--warning-foreground);
+  --color-danger: var(--danger);
+  --color-danger-foreground: var(--danger-foreground);
 
   --font-sans: var(--font-ibm-sans), ui-sans-serif, system-ui, sans-serif;
   --font-mono: var(--font-ibm-mono), ui-monospace, "SFMono-Regular", monospace;

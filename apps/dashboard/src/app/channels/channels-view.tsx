@@ -165,7 +165,7 @@ function ChannelsTable({
                 data-testid={`channel-row-${row.id}`}
                 data-nearing-close={nearing ? "true" : undefined}
                 className={`border-b border-border last:border-b-0 ${
-                  nearing ? "border-l-2 border-l-amber-500 bg-amber-500/5" : ""
+                  nearing ? "border-l-2 border-l-accent bg-accent/5" : ""
                 }`}
               >
                 <td className="px-3 py-3">
@@ -174,7 +174,7 @@ function ChannelsTable({
                     {nearing ? (
                       <span
                         data-testid={`nearing-close-${row.id}`}
-                        className="rounded-full bg-amber-500/15 px-2 py-0.5 text-[10px] font-medium uppercase tracking-wide text-amber-700 dark:text-amber-300"
+                        className="rounded-full bg-accent/15 px-2 py-0.5 text-[10px] font-medium uppercase tracking-wide text-accent"
                       >
                         Nearing close
                       </span>
@@ -217,11 +217,11 @@ function DrawdownCell({ row, ratio }: { row: OpenChannelRow; ratio: number }) {
 }
 
 const STATUS_PILL_CLASSES: Record<ChannelStatus, string> = {
-  open: "bg-emerald-500/15 text-emerald-700 dark:text-emerald-300",
-  closing: "bg-amber-500/15 text-amber-700 dark:text-amber-300",
+  open: "bg-success/15 text-success",
+  closing: "bg-warning/15 text-warning",
   closed: "bg-surface-2 text-muted",
-  recovering: "bg-red-500/15 text-red-700 dark:text-red-300",
-  recovered: "bg-emerald-500/15 text-emerald-700 dark:text-emerald-300",
+  recovering: "bg-danger/15 text-danger",
+  recovered: "bg-success/15 text-success",
 };
 
 function StatusPill({ status }: { status: ChannelStatus }) {

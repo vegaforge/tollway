@@ -33,6 +33,15 @@ export interface SemanticTokens {
   border: string;
   /** Higher-contrast border for emphasis and dividers. */
   borderStrong: string;
+  /** Positive status: healthy, open, recovered. */
+  success: string;
+  successForeground: string;
+  /** Cautionary status: closing, draining, nearing a limit. */
+  warning: string;
+  warningForeground: string;
+  /** Adverse status: failed, recovering, anomalous. */
+  danger: string;
+  dangerForeground: string;
 }
 
 export const light: SemanticTokens = {
@@ -47,6 +56,12 @@ export const light: SemanticTokens = {
   surfaceElevated: "#F1EEF7",
   border: "#E4E0EC",
   borderStrong: "#D6D1E0",
+  success: "#1E8754",
+  successForeground: "#FFFFFF",
+  warning: brand.amber,
+  warningForeground: brand.ink,
+  danger: "#B5341F",
+  dangerForeground: "#FFFFFF",
 };
 
 export const dark: SemanticTokens = {
@@ -62,6 +77,13 @@ export const dark: SemanticTokens = {
   surfaceElevated: "#24202D",
   border: "#2C2836",
   borderStrong: "#3A3546",
+  // Lifted greens, ambers, and vermilions hold contrast on the near-black bg.
+  success: "#54CB95",
+  successForeground: "#0F2A1C",
+  warning: "#E9A648",
+  warningForeground: brand.ink,
+  danger: "#E5654E",
+  dangerForeground: "#2A0E08",
 };
 
 /** Prefix shared by every CSS custom property this package emits. */
