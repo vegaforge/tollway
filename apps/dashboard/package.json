@@ -13,6 +13,7 @@
     "typecheck": "tsc --noEmit"
   },
   "dependencies": {
+    "@tollway/channels": "workspace:*",
     "@tollway/core": "workspace:*",
     "@tollway/observability": "workspace:*",
     "@tollway/theme": "workspace:*",

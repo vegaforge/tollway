@@ -26,6 +26,9 @@ importers:
 
   apps/dashboard:
     dependencies:
+      '@tollway/channels':
+        specifier: workspace:*
+        version: link:../../packages/channels
       '@tollway/core':
         specifier: workspace:*
         version: link:../../packages/core
