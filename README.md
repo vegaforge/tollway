@@ -132,6 +132,8 @@ Every settlement, on any model, produces one signed receipt. Downstream accounti
 
 Receipts are signed through a swappable signer interface, so the key can live in process, in a KMS, or behind an HSM. Canonicalization sorts object keys at every level, so the same receipt body always produces the same bytes and the same signature.
 
+See [docs/receipts.md](docs/receipts.md) for the full receipt field reference, settlement reference variants, signing, verification, and key rotation guidance.
+
 ## Packages
 
 Tollway is a pnpm and Turborepo monorepo. Each package is independently buildable, so you can work on one without building the rest.
