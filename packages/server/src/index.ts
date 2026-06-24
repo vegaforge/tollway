@@ -33,3 +33,14 @@ export {
   PAYMENT_SIGNATURE_HEADER,
   readHeader,
 } from "./headers.js";
+export {
+  createMockMppChargeHandler,
+  createMppChargeHandler,
+  deriveMppChargeNonce,
+  type MppChargeHandler,
+  type MppChargeOptions,
+  type MppChargeSettleInput,
+  type MppChargeSettleResult,
+  type MppChargeVerifyInput,
+  type MppChargeVerifyResult,
+} from "./mpp-charge.js";
