@@ -1,4 +1,4 @@
-import type { PaymentOffer, SettlementModel, StellarNetwork, X402Payment } from "@tollway/core";
+import type { MppChargePayment, PaymentOffer, SettlementModel, StellarNetwork, X402Payment } from "@tollway/core";
 import { bytesToBase64Url, TollwayError, utf8Bytes } from "@tollway/core";
 import { x402Version } from "@x402/core";
 import { type FacilitatorConfig, HTTPFacilitatorClient } from "@x402/core/http";
@@ -27,7 +27,7 @@ import { mockAccount, mockHex } from "./hash.js";
  */
 
 export type VerifyInput = {
-  payment: X402Payment;
+  payment: X402Payment | MppChargePayment;
   offer: PaymentOffer;
 };
 
@@ -36,7 +36,7 @@ export type VerifyResult =
   | { valid: false; reason: string };
 
 export type SettleInput = {
-  payment: X402Payment;
+  payment: X402Payment | MppChargePayment;
   offer: PaymentOffer;
   payer: string;
   nonce: string;
@@ -63,20 +63,31 @@ export interface FacilitatorClient {
 export function createMockFacilitator(): FacilitatorClient {
   return {
     async verify({ payment }) {
-      if (!payment.paymentSignature) {
-        return { valid: false, reason: "empty payment signature" };
+      if (payment.model === "x402") {
+        if (!payment.paymentSignature) {
+          return { valid: false, reason: "empty payment signature" };
+        }
+        return {
+          valid: true,
+          payer: mockAccount(payment.paymentSignature),
+          nonce: mockHex(payment.paymentSignature, 32),
+        };
+      }
+      // mpp-charge
+      if (!payment.payload) {
+        return { valid: false, reason: "empty mpp charge payload" };
       }
       return {
         valid: true,
-        payer: mockAccount(payment.paymentSignature),
-        nonce: mockHex(payment.paymentSignature, 32),
+        payer: mockAccount(payment.payload),
+        nonce: mockHex(payment.payload, 32),
       };
     },
     async settle({ nonce, offer }) {
       return { settled: true, txHash: mockHex(`${nonce}:${offer.resource}`) };
     },
     async supported() {
-      return { models: ["x402"], assets: [] };
+      return { models: ["x402", "mpp-charge"], assets: [] };
     },
   };
 }
