@@ -82,11 +82,9 @@ export type MppChargeOptions = {
 export function createMppChargeHandler(
   options: MppChargeOptions = {},
 ): MppChargeHandler {
-  // TODO: Implement real MPP charge handler using @stellar/mpp
-  // For Phase 1, we use the mock handler to satisfy the acceptance criteria
-  // that the gate settles mpp-charge and produces a canonical receipt.
-  // The real @stellar/mpp integration will be added in a follow-up.
-  return createMockMppChargeHandler();
+  throw new Error(
+    "createMppChargeHandler is not implemented yet. Use createMockMppChargeHandler for testing.",
+  );
 }
 
 /**

@@ -76,6 +76,70 @@ export type PaywallDeps = {
   cache?: SettlementCache;
 };
 
+type Handler<TPayment> = {
+  verify(input: { payment: TPayment; offer: PaymentOffer }): Promise<{ valid: true; payer: string; nonce: string } | { valid: false; reason: string }>;
+  settle(input: { payment: TPayment; offer: PaymentOffer; payer: string; nonce: string }): Promise<{ settled: true; txHash: string } | { settled: false; reason: string }>;
+};
+
+async function settleWithHandler<TPayment>(
+  payment: TPayment,
+  offer: PaymentOffer,
+  model: SettlementModel,
+  handler: Handler<TPayment>,
+  signer: ReceiptSigner,
+  cache?: SettlementCache,
+): Promise<GateOutcome> {
+  const verification = await handler.verify({ payment, offer });
+  if (!verification.valid) {
+    return { kind: "rejected", status: 402, reason: verification.reason };
+  }
+
+  const cached = cache?.get(verification.nonce);
+  if (cached) {
+    return {
+      kind: "settled",
+      status: 200,
+      headers: { [PAYMENT_RESPONSE_HEADER]: encodeHeader(cached) },
+      receipt: cached,
+      replayed: true,
+    };
+  }
+
+  const settlement = await handler.settle({
+    payment,
+    offer,
+    payer: verification.payer,
+    nonce: verification.nonce,
+  });
+  if (!settlement.settled) {
+    return { kind: "rejected", status: 502, reason: settlement.reason };
+  }
+
+  const receipt = await signReceipt(
+    buildReceipt({
+      payer: verification.payer,
+      payee: offer.payTo,
+      amount: offer.amount,
+      asset: offer.asset,
+      resource: offer.resource,
+      model,
+      settlement: { kind: "transaction", txHash: settlement.txHash },
+      network: offer.network,
+    }),
+    signer,
+  );
+
+  cache?.set(verification.nonce, receipt);
+
+  return {
+    kind: "settled",
+    status: 200,
+    headers: { [PAYMENT_RESPONSE_HEADER]: encodeHeader(receipt) },
+    receipt,
+    replayed: false,
+  };
+}
+
 /**
  * Builds the gate from a paywall config. It settles x402 per-request and
  * mpp-charge; a routing decision for another model is rejected rather than
@@ -111,55 +175,7 @@ export function createPaywall(config: PaywallConfig, deps: PaywallDeps): Gate {
 
     if (decision.model === "x402") {
       const payment: X402Payment = { model: "x402", paymentSignature: signatureHeader };
-      const verification = await deps.facilitator.verify({ payment, offer });
-      if (!verification.valid) {
-        return { kind: "rejected", status: 402, reason: verification.reason };
-      }
-
-      const cached = deps.cache?.get(verification.nonce);
-      if (cached) {
-        return {
-          kind: "settled",
-          status: 200,
-          headers: { [PAYMENT_RESPONSE_HEADER]: encodeHeader(cached) },
-          receipt: cached,
-          replayed: true,
-        };
-      }
-
-      const settlement = await deps.facilitator.settle({
-        payment,
-        offer,
-        payer: verification.payer,
-        nonce: verification.nonce,
-      });
-      if (!settlement.settled) {
-        return { kind: "rejected", status: 502, reason: settlement.reason };
-      }
-
-      const receipt = await signReceipt(
-        buildReceipt({
-          payer: verification.payer,
-          payee: offer.payTo,
-          amount: offer.amount,
-          asset: offer.asset,
-          resource: offer.resource,
-          model: "x402",
-          settlement: { kind: "transaction", txHash: settlement.txHash },
-          network: offer.network,
-        }),
-        deps.signer,
-      );
-
-      deps.cache?.set(verification.nonce, receipt);
-
-      return {
-        kind: "settled",
-        status: 200,
-        headers: { [PAYMENT_RESPONSE_HEADER]: encodeHeader(receipt) },
-        receipt,
-        replayed: false,
-      };
+      return settleWithHandler(payment, offer, "x402", deps.facilitator, deps.signer, deps.cache);
     }
 
     if (decision.model === "mpp-charge") {
@@ -172,55 +188,7 @@ export function createPaywall(config: PaywallConfig, deps: PaywallDeps): Gate {
       }
 
       const payment: MppChargePayment = { model: "mpp-charge", payload: signatureHeader };
-      const verification = await deps.mppChargeHandler.verify({ payment, offer });
-      if (!verification.valid) {
-        return { kind: "rejected", status: 402, reason: verification.reason };
-      }
-
-      const cached = deps.cache?.get(verification.nonce);
-      if (cached) {
-        return {
-          kind: "settled",
-          status: 200,
-          headers: { [PAYMENT_RESPONSE_HEADER]: encodeHeader(cached) },
-          receipt: cached,
-          replayed: true,
-        };
-      }
-
-      const settlement = await deps.mppChargeHandler.settle({
-        payment,
-        offer,
-        payer: verification.payer,
-        nonce: verification.nonce,
-      });
-      if (!settlement.settled) {
-        return { kind: "rejected", status: 502, reason: settlement.reason };
-      }
-
-      const receipt = await signReceipt(
-        buildReceipt({
-          payer: verification.payer,
-          payee: offer.payTo,
-          amount: offer.amount,
-          asset: offer.asset,
-          resource: offer.resource,
-          model: "mpp-charge",
-          settlement: { kind: "transaction", txHash: settlement.txHash },
-          network: offer.network,
-        }),
-        deps.signer,
-      );
-
-      deps.cache?.set(verification.nonce, receipt);
-
-      return {
-        kind: "settled",
-        status: 200,
-        headers: { [PAYMENT_RESPONSE_HEADER]: encodeHeader(receipt) },
-        receipt,
-        replayed: false,
-      };
+      return settleWithHandler(payment, offer, "mpp-charge", deps.mppChargeHandler, deps.signer, deps.cache);
     }
 
     return {
