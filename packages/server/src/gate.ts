@@ -1,7 +1,7 @@
 import {
   buildReceipt,
-  type MppChargePayment,
   type ModelRouter,
+  type MppChargePayment,
   type PaymentOffer,
   type ReceiptSigner,
   type SettlementModel,
@@ -10,6 +10,8 @@ import {
   signReceipt,
   type X402Payment,
 } from "@tollway/core";
+import type { SettlementCache } from "./cache.js";
+import type { FacilitatorClient } from "./facilitator.js";
 import {
   encodeHeader,
   PAYMENT_REQUIRED_HEADER,
@@ -18,8 +20,6 @@ import {
   readHeader,
 } from "./headers.js";
 import type { MppChargeHandler } from "./mpp-charge.js";
-import type { SettlementCache } from "./cache.js";
-import type { FacilitatorClient } from "./facilitator.js";
 
 /**
  * The gating molecule. It sits between a request and the resource: with a
@@ -77,8 +77,16 @@ export type PaywallDeps = {
 };
 
 type Handler<TPayment> = {
-  verify(input: { payment: TPayment; offer: PaymentOffer }): Promise<{ valid: true; payer: string; nonce: string } | { valid: false; reason: string }>;
-  settle(input: { payment: TPayment; offer: PaymentOffer; payer: string; nonce: string }): Promise<{ settled: true; txHash: string } | { settled: false; reason: string }>;
+  verify(input: {
+    payment: TPayment;
+    offer: PaymentOffer;
+  }): Promise<{ valid: true; payer: string; nonce: string } | { valid: false; reason: string }>;
+  settle(input: {
+    payment: TPayment;
+    offer: PaymentOffer;
+    payer: string;
+    nonce: string;
+  }): Promise<{ settled: true; txHash: string } | { settled: false; reason: string }>;
 };
 
 async function settleWithHandler<TPayment>(
@@ -188,7 +196,14 @@ export function createPaywall(config: PaywallConfig, deps: PaywallDeps): Gate {
       }
 
       const payment: MppChargePayment = { model: "mpp-charge", payload: signatureHeader };
-      return settleWithHandler(payment, offer, "mpp-charge", deps.mppChargeHandler, deps.signer, deps.cache);
+      return settleWithHandler(
+        payment,
+        offer,
+        "mpp-charge",
+        deps.mppChargeHandler,
+        deps.signer,
+        deps.cache,
+      );
     }
 
     return {

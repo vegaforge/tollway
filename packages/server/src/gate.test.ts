@@ -2,9 +2,9 @@ import { Ed25519Signer, Ed25519Verifier, verifyReceipt } from "@tollway/core";
 import { beforeAll, describe, expect, it } from "vitest";
 import { createInMemorySettlementCache } from "./cache.js";
 import { createMockFacilitator } from "./facilitator.js";
-import { createMockMppChargeHandler } from "./mpp-charge.js";
 import { createPaywall, type PaywallConfig, type TollwayRequest } from "./gate.js";
 import { decodeHeader, PAYMENT_REQUIRED_HEADER, PAYMENT_SIGNATURE_HEADER } from "./headers.js";
+import { createMockMppChargeHandler } from "./mpp-charge.js";
 
 const config: PaywallConfig = {
   amount: "10000",

@@ -1,5 +1,5 @@
 import type { MppChargePayment, PaymentOffer } from "@tollway/core";
-import { utf8Bytes } from "@tollway/core";
+import { NotImplementedError, utf8Bytes } from "@tollway/core";
 import { mockAccount, mockHex } from "./hash.js";
 
 /**
@@ -79,12 +79,8 @@ export type MppChargeOptions = {
   simulationTimeoutMs?: number;
 };
 
-export function createMppChargeHandler(
-  options: MppChargeOptions = {},
-): MppChargeHandler {
-  throw new Error(
-    "createMppChargeHandler is not implemented yet. Use createMockMppChargeHandler for testing.",
-  );
+export function createMppChargeHandler(_options: MppChargeOptions = {}): MppChargeHandler {
+  throw new NotImplementedError("createMppChargeHandler", 'docs/design.md, "Build plan", Phase 1');
 }
 
 /**
