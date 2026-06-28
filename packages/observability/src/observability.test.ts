@@ -261,6 +261,94 @@ describe("observability hub: retry and failure surfacing", () => {
     expect(report.failures[0]?.error).toBeInstanceOf(Error);
     expect(report.failures[0]?.error.message).toBe("literal string");
   });
+
+  it("aborts a stalled fetch after requestTimeoutMs and surfaces it like any other failure", async () => {
+    const fetcher = vi.fn().mockImplementation((_url: unknown, init?: RequestInit) => {
+      return new Promise((_resolve, reject) => {
+        const signal = init?.signal as AbortSignal | undefined;
+        if (!signal) {
+          // Without a signal the fetch would hang the test forever; assert
+          // the hub always passes one through so this branch is unreachable.
+          reject(new Error("expected AbortSignal to be supplied by the hub"));
+          return;
+        }
+        signal.addEventListener("abort", () => {
+          reject(new DOMException("The operation was aborted.", "AbortError"));
+        });
+      });
+    });
+
+    const hub = createObservabilityHub({
+      sleep: noSleep,
+      fetch: fetcher,
+      requestTimeoutMs: 25,
+      retry: { maxAttempts: 2, initialDelayMs: 0, backoffFactor: 1 },
+      webhooks: [{ url: "https://stalls.test/hook" }],
+    });
+
+    const report = await hub.emit(makeEvent("receipt.created"));
+
+    expect(fetcher).toHaveBeenCalledTimes(2);
+    expect(report.failures).toHaveLength(1);
+    expect(report.failures[0]?.target).toEqual({
+      kind: "webhook",
+      url: "https://stalls.test/hook",
+    });
+    expect(report.failures[0]?.attempts).toBe(2);
+    expect(report.failures[0]?.error.message).toContain("timed out after 25ms");
+  });
+
+  it("recovers when a stalled attempt is followed by a successful one within timeout", async () => {
+    let call = 0;
+    const fetcher = vi.fn().mockImplementation((_url: unknown, init?: RequestInit) => {
+      call += 1;
+      if (call === 1) {
+        return new Promise((_resolve, reject) => {
+          const signal = init?.signal as AbortSignal | undefined;
+          signal?.addEventListener("abort", () => {
+            reject(new DOMException("The operation was aborted.", "AbortError"));
+          });
+        });
+      }
+      return Promise.resolve(new Response(null, { status: 204 }));
+    });
+
+    const hub = createObservabilityHub({
+      sleep: noSleep,
+      fetch: fetcher,
+      requestTimeoutMs: 25,
+      retry: { maxAttempts: 2, initialDelayMs: 0, backoffFactor: 1 },
+      webhooks: [{ url: "https://recovers.test/hook" }],
+    });
+
+    const report = await hub.emit(makeEvent("channel.opened"));
+
+    expect(fetcher).toHaveBeenCalledTimes(2);
+    expect(report.failures).toEqual([]);
+    expect(report.webhooksDispatched).toBe(1);
+  });
+
+  it("disables the timeout when requestTimeoutMs is zero", async () => {
+    let captured: AbortSignal | undefined;
+    const fetcher = vi.fn().mockImplementation((_url: unknown, init?: RequestInit) => {
+      captured = init?.signal as AbortSignal | undefined;
+      return Promise.resolve(new Response(null, { status: 204 }));
+    });
+
+    const hub = createObservabilityHub({
+      sleep: noSleep,
+      fetch: fetcher,
+      requestTimeoutMs: 0,
+      webhooks: [{ url: "https://noop.test/hook" }],
+    });
+
+    await hub.emit(makeEvent("budget.warning"));
+
+    expect(fetcher).toHaveBeenCalledTimes(1);
+    // The hub still passes a signal so callers can manually abort, but it must
+    // never fire on its own when timeouts are disabled.
+    expect(captured?.aborted).toBe(false);
+  });
 });
 
 describe("observability hub: metric methods", () => {

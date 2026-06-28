@@ -104,6 +104,13 @@ export type ObservabilityHubOptions = {
   /** Inject a custom fetch implementation; defaults to `globalThis.fetch`. */
   fetch?: typeof globalThis.fetch;
   /**
+   * Per-attempt webhook request timeout in milliseconds. When the underlying
+   * `fetch` does not resolve within this window, the request is aborted via
+   * `AbortController` and the failure is fed back into the retry pipeline like
+   * any other delivery error. Defaults to 5000ms. Set to `0` to disable.
+   */
+  requestTimeoutMs?: number;
+  /**
    * Invoked once per delivery target that exhausts its retry budget. Useful
    * for surfacing failures to an alerting pipeline without inspecting every
    * `DeliveryReport`.
@@ -142,6 +149,8 @@ const DEFAULT_RETRY: RetryPolicy = {
   initialDelayMs: 100,
   backoffFactor: 2,
 };
+
+const DEFAULT_REQUEST_TIMEOUT_MS = 5000;
 
 const realSleep = (ms: number) =>
   new Promise<void>((resolve) => {
@@ -192,15 +201,35 @@ async function deliverWebhook(
   fetcher: typeof globalThis.fetch,
   subscription: WebhookSubscription,
   event: TollwayEvent,
+  timeoutMs: number,
 ): Promise<void> {
-  const response = await fetcher(subscription.url, {
-    method: "POST",
-    headers: {
-      "Content-Type": "application/json",
-      ...(subscription.headers ?? {}),
-    },
-    body: JSON.stringify(event),
-  });
+  const controller = typeof AbortController !== "undefined" ? new AbortController() : null;
+  const timer =
+    controller && timeoutMs > 0
+      ? setTimeout(() => {
+          controller.abort();
+        }, timeoutMs)
+      : null;
+
+  let response: Response;
+  try {
+    response = await fetcher(subscription.url, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        ...(subscription.headers ?? {}),
+      },
+      body: JSON.stringify(event),
+      signal: controller?.signal,
+    });
+  } catch (cause) {
+    if (controller?.signal.aborted) {
+      throw new Error(`webhook ${subscription.url} timed out after ${timeoutMs}ms`);
+    }
+    throw cause;
+  } finally {
+    if (timer) clearTimeout(timer);
+  }
 
   if (!response.ok) {
     throw new Error(
@@ -213,10 +242,13 @@ async function deliverWebhook(
  * Build an `ObservabilityHub` wired for webhook dispatch. Local handlers
  * registered via {@link ObservabilityHub.on} and HTTP subscriptions registered
  * via {@link ObservabilityHub.addWebhook} (or the `webhooks` constructor
- * option) both receive every matching {@link TollwayEvent}. Delivery failures
- * are retried per the configured {@link RetryPolicy}; surviving failures are
- * surfaced via the returned {@link DeliveryReport} and the optional
- * `onDeliveryFailure` callback rather than being swallowed.
+ * option) both receive every matching {@link TollwayEvent}. Each webhook
+ * request is bounded by `requestTimeoutMs` (default 5s) via `AbortController`
+ * so a stalled subscriber socket cannot hang `emit`; a timeout is treated
+ * exactly like any other delivery failure. Delivery failures are retried per
+ * the configured {@link RetryPolicy}; surviving failures are surfaced via the
+ * returned {@link DeliveryReport} and the optional `onDeliveryFailure`
+ * callback rather than being swallowed.
  *
  * Metric collection (`record`, `summarize`, `export`) is the scope of #31 and
  * currently throws `NotImplementedError` from those methods.
@@ -238,6 +270,8 @@ export function createObservabilityHub(options: ObservabilityHubOptions = {}): O
   const fetcher = options.fetch ?? globalThis.fetch;
   const sleep = options.sleep ?? realSleep;
   const onDeliveryFailure = options.onDeliveryFailure;
+  const requestTimeoutMs =
+    options.requestTimeoutMs !== undefined ? options.requestTimeoutMs : DEFAULT_REQUEST_TIMEOUT_MS;
 
   function notImplemented(feature: string): never {
     throw new NotImplementedError(feature, 'docs/design.md, "Observability" (#31)');
@@ -318,9 +352,11 @@ export function createObservabilityHub(options: ObservabilityHubOptions = {}): O
       const webhookResults = activeFetcher
         ? await Promise.all(
             matchingSubs.map((sub) =>
-              withRetry(() => deliverWebhook(activeFetcher, sub, event), retry, sleep).then(
-                (result) => ({ result, url: sub.url }),
-              ),
+              withRetry(
+                () => deliverWebhook(activeFetcher, sub, event, requestTimeoutMs),
+                retry,
+                sleep,
+              ).then((result) => ({ result, url: sub.url })),
             ),
           )
         : [];
