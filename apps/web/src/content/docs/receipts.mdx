@@ -1,0 +1,55 @@
+---
+title: Receipts
+description: One canonical signed receipt for every settlement model
+---
+
+Every settlement path in Tollway ends in exactly one shape: a signed receipt. x402 per-request, MPP charge, and MPP channel commitments all converge here. Downstream accounting, dispute evidence, and analytics consume one shape instead of three.
+
+## What is on a receipt
+
+A receipt body carries the counterparties (`payer`, `payee`), the amount and asset (integer strings in the smallest unit), the resource (URL or stable identifier), the model that produced the receipt, a settlement reference, the network, and an ISO 8601 `issuedAt`. The signature carries a `keyId`, an algorithm name, and a base64url signature over the canonical bytes of the body.
+
+The settlement reference is a discriminated union. x402 and MPP charge use a Stellar transaction hash; MPP channel uses a `channelId` plus a `sequence` within the cumulative commitment stream. The schema rejects a mismatched pair (a channel receipt with a `txHash`, an x402 receipt with a `channelId`) before any signature check runs.
+
+## Why signing sits behind an interface
+
+`ReceiptSigner` is the seam between Tollway and the key. The default `Ed25519Signer` uses WebCrypto so it runs unchanged in Node and in edge runtimes, but the same interface accepts a KMS-backed or HSM-backed signer with no other change. Any object that satisfies the interface is a valid signer.
+
+## Key rotation
+
+Every signature carries `keyId`, and `Ed25519Verifier` accepts a `keyId -> publicKey` map. Rotation is therefore additive: when a new key is introduced, both keys live in the verifier until every receipt signed by the old key has aged out of the window you care about (the settlement cache, the dispute window, the audit retention period). New receipts use the new `keyId`; old receipts still verify against the old key. An unknown `keyId` or a different algorithm returns false rather than throwing, so a verifier that lacks the key fails closed.
+
+## In the code
+
+```ts
+import {
+  Ed25519Signer,
+  Ed25519Verifier,
+  buildReceipt,
+  signReceipt,
+  verifyReceipt,
+} from "@tollway/core";
+
+const signer = await Ed25519Signer.generate("tollway-2026-q2");
+
+const receipt = await signReceipt(
+  buildReceipt({
+    payer: "GA5Z...",
+    payee: "GSERVICE...",
+    amount: "10000",
+    asset: "USDC:GA5Z...",
+    resource: "/quotes/latest",
+    model: "x402",
+    settlement: { kind: "transaction", txHash: "ad21..." },
+    network: "testnet",
+  }),
+  signer,
+);
+
+const verifier = Ed25519Verifier.forSigner(signer);
+const result = await verifyReceipt(receipt, verifier);
+```
+
+## Reference
+
+For the field-by-field walk through every property on the receipt body, the signature shape, and the canonical-bytes serialization that signatures cover, see [`docs/receipt-format.md`](https://github.com/vegaforge/tollway/blob/main/docs/receipt-format.md). The architectural context is in [`docs/design.md`, "One receipt format"](https://github.com/vegaforge/tollway/blob/main/docs/design.md#one-receipt-format).

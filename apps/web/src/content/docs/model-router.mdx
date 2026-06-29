@@ -1,0 +1,41 @@
+---
+title: Model router
+description: How Tollway picks x402, MPP charge, or MPP channel per interaction
+---
+
+The router is the conceptual core of the project. Per interaction or per counterparty, it picks which of the three settlement models a payment runs through: x402 per-request, MPP charge, or MPP channel.
+
+## The three models
+
+x402 per-request is the default for unknown counterparties, and the right answer when access is occasional and per-URL accountability matters. Each request gets its own on-chain settlement, signed via a Soroban authorization entry, with the facilitator's `/verify` and `/settle` doing the heavy lifting.
+
+MPP charge mode applies when the service has standardized on MPP but the traffic is still per-request. Same on-chain footprint as x402, different verify and settle protocol.
+
+MPP channel mode kicks in when sustained high-frequency access to a single counterparty crosses a configurable threshold, measured as requests per minute over a rolling window. At that point the router opens a one-way channel, routes subsequent payments as off-chain commitments, and schedules the close. Most payments do not touch the chain.
+
+## What the router reads
+
+Four inputs:
+
+1. Declared hints on the offer the service returned, such as `mppSessionSupported` and the service's model preferences.
+2. Observed traffic shape, from a per-counterparty rolling counter.
+3. Explicit configuration on the agent or the route, which always wins.
+4. Policy constraints: a budget that only permits channel mode above a minimum deposit, for example.
+
+The decision returns the chosen model and a short reason, so audit trails can explain why a given payment ran through one model rather than another.
+
+## Overrides
+
+Routing is overridable per route and per agent. A heuristic that cannot be overridden is a bug waiting for a workaround, so the router accepts an explicit `model` on the request that bypasses every other input.
+
+## In the code
+
+The interface and the default implementation live in `packages/core/src/router.ts`:
+
+```ts
+import type { ModelRouter, RouteDecision } from "@tollway/core";
+```
+
+## Reference
+
+[`docs/design.md`, "The model router"](https://github.com/vegaforge/tollway/blob/main/docs/design.md#the-model-router) is the architectural reference.
