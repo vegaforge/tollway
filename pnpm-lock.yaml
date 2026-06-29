@@ -195,13 +195,13 @@ importers:
 
   packages/adapter-fastify:
     dependencies:
-      '@tollway/core':
-        specifier: workspace:*
-        version: link:../core
       '@tollway/server':
         specifier: workspace:*
         version: link:../server
     devDependencies:
+      '@tollway/core':
+        specifier: workspace:*
+        version: link:../core
       '@types/node':
         specifier: ^22.19.20
         version: 22.19.20
