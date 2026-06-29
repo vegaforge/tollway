@@ -38,7 +38,7 @@
   "devDependencies": {
     "@tollway/core": "workspace:*",
     "@types/node": "^22.19.20",
-    "hono": "^4.6.0",
+    "hono": "^4.12.25",
     "tsup": "^8.5.0",
     "typescript": "^5.8.0",
     "vitest": "^4.1.8"
