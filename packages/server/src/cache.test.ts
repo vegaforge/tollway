@@ -94,6 +94,31 @@ describe("createRedisSettlementCache", () => {
     await expect(cache.get("nonce-ttl")).resolves.toBeUndefined();
   });
 
+  it("treats a corrupted Redis entry as a miss instead of poisoning settlement", async () => {
+    // A shared store can hold a value that the cache did not write (key
+    // collision with a foreign tenant, a manual debug write, a partial
+    // deploy). The cache should return undefined on any value that does not
+    // round-trip through signedReceiptSchema rather than letting bad data
+    // either throw out of JSON.parse or be served as the receipt.
+    const client = new RedisMock() as unknown as RedisLikeClient;
+    const cache = createRedisSettlementCache({ client });
+
+    await client.set("tollway:settlement:nonce-bad-json", "{not valid json", "EX", 30);
+    await expect(cache.get("nonce-bad-json")).resolves.toBeUndefined();
+
+    await client.set(
+      "tollway:settlement:nonce-foreign",
+      JSON.stringify({ hello: "world" }),
+      "EX",
+      30,
+    );
+    await expect(cache.get("nonce-foreign")).resolves.toBeUndefined();
+
+    // The cache still returns its own entries.
+    await cache.set("nonce-good", receipt);
+    await expect(cache.get("nonce-good")).resolves.toEqual(receipt);
+  });
+
   it("applies a custom key prefix", async () => {
     const client = new RedisMock() as unknown as RedisLikeClient;
     const cache = createRedisSettlementCache({ client, keyPrefix: "custom:" });

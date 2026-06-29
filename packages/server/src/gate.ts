@@ -158,6 +158,12 @@ export function createPaywall(config: PaywallConfig, deps: PaywallDeps): Gate {
       deps.signer,
     );
 
+    // Awaiting set ensures a peer process or retry on this process cannot
+    // race past the cache write and double-settle. The trade-off: a cache
+    // failure after on-chain settlement bubbles up and the retry triggers a
+    // second settle (the agent has paid but lost the receipt). Surfacing
+    // that failure via the observability hub and swallowing the error in
+    // the gate is tracked as a follow-up.
     await deps.cache?.set(verification.nonce, receipt);
 
     return {

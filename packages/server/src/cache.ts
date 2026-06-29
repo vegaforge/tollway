@@ -1,4 +1,4 @@
-import type { SignedReceipt } from "@tollway/core";
+import { type SignedReceipt, signedReceiptSchema } from "@tollway/core";
 
 /**
  * Short-lived idempotency cache keyed by settlement nonce. Facilitators are
@@ -95,7 +95,18 @@ export function createRedisSettlementCache(options: RedisSettlementCacheOptions)
       if (raw === null) {
         return undefined;
       }
-      return JSON.parse(raw) as SignedReceipt;
+      // A shared store can hold corrupted or foreign entries (a key collision
+      // with another tenant, a manual write, a partial deploy). Treat any
+      // value that does not round-trip as a canonical SignedReceipt as a miss
+      // rather than letting it break the settlement.
+      let candidate: unknown;
+      try {
+        candidate = JSON.parse(raw);
+      } catch {
+        return undefined;
+      }
+      const parsed = signedReceiptSchema.safeParse(candidate);
+      return parsed.success ? (parsed.data as SignedReceipt) : undefined;
     },
     async set(nonce, receipt) {
       await client.set(`${keyPrefix}${nonce}`, JSON.stringify(receipt), "EX", ttlSeconds);
