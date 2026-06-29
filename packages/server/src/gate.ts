@@ -102,7 +102,7 @@ async function settleWithHandler<TPayment>(
     return { kind: "rejected", status: 402, reason: verification.reason };
   }
 
-  const cached = cache?.get(verification.nonce);
+  const cached = await cache?.get(verification.nonce);
   if (cached) {
     return {
       kind: "settled",
