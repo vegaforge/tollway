@@ -1,0 +1,31 @@
+---
+title: Channels
+description: How MPP channel lifecycle management works in Tollway
+---
+
+Channels are Tollway's high-frequency payment path. Instead of settling every
+request on chain, an agent opens a one-way MPP channel, sends cumulative
+off-chain commitments, and closes the channel with one on-chain settlement.
+
+Read the source design section: [The channel lifecycle manager](https://github.com/vegaforge/tollway/blob/main/docs/design.md#the-channel-lifecycle-manager).
+
+## Lifecycle
+
+- Open: fund a one-way channel contract from the agent budget and predicted
+  demand.
+- Commit: sign and store each cumulative commitment for a paid interaction.
+- Close: settle the final cumulative amount and return the remainder.
+- Recover: follow the contract timeout or dispute path if a counterparty stops
+  responding.
+
+## Why lifecycle management matters
+
+The MPP SDK provides the primitive, but production systems still need storage,
+timeouts, recovery, budget exhaustion handling, and clear events. Tollway owns
+that lifecycle so application teams do not rebuild it for each service.
+
+## Events
+
+Channel operations should emit events such as `channel:opened`,
+`payment`, `budget:warning`, `channel:closed`, and `error` so operators can
+trace each state transition.

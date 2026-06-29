@@ -1,0 +1,35 @@
+---
+title: Model router
+description: How Tollway chooses x402, MPP charge, or MPP channel mode
+---
+
+The model router is the decision point that chooses the right settlement model
+for each paid interaction. It lets services and agents use one Tollway surface
+while still taking advantage of the different cost and accountability profiles
+of x402, MPP charge, and MPP channel mode.
+
+Read the source design section: [The model router](https://github.com/vegaforge/tollway/blob/main/docs/design.md#the-model-router).
+
+## Inputs
+
+The router evaluates four inputs:
+
+- Offer hints, such as whether the service supports MPP sessions.
+- Observed traffic shape, such as requests per minute for a counterparty.
+- Explicit route or agent configuration.
+- Policy constraints, such as caps that only allow channel mode above a minimum
+  deposit.
+
+## Decision model
+
+x402 is the default for unknown counterparties and occasional access because it
+keeps each request independently accountable. MPP charge mode is used when a
+service standardizes on MPP but still wants per-request settlement. MPP channel
+mode is used when sustained high-frequency traffic makes per-request settlement
+too expensive or too slow.
+
+## Overrides
+
+Routing must be overridable per route and per agent. A heuristic that cannot be
+overridden eventually becomes a workaround in user code, so Tollway treats
+manual model selection as a first-class configuration path.
