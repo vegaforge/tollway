@@ -120,6 +120,8 @@ This engine is the safety net that catches a counterparty who under-settles rela
 
 A dashboard and an exporter. Per-agent and per-service spend over time, model mix, latency per model, failure and retry rates, open channels and their remaining budget, and anomaly events. Machine-readable exports in JSON and CSV, and webhooks (`receipt.created`, `channel.opened`, `channel.closed`, `budget.warning`, `anomaly.detected`) for whatever you want to wire up.
 
+For how the dashboard views actually consume this data, including the three UI primitives every widget composes from and the data-layer seam each wired view holds with its source, see `docs/dashboard-data-contracts.md`.
+
 ## Design notes
 
 A few decisions worth recording, since each one came up early and will come up again.
