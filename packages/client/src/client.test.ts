@@ -6,6 +6,7 @@ import {
   type PaymentOffer,
   type SignedReceipt,
   signReceipt,
+  TollwayError,
 } from "@tollway/core";
 import { beforeAll, describe, expect, it, vi } from "vitest";
 import {
@@ -174,13 +175,29 @@ describe("createClient policy + budget exhaustion", () => {
       client.pay({ resource: OFFER.resource, offer: OFFER, model: "mpp-channel" }),
     ).rejects.toMatchObject({
       name: "PolicyBlockedError",
+      code: "policy-blocked",
       rule: "per-model-disabled",
     });
+  });
+
+  it("composes with the TollwayError code model so cross-package callers can branch on .code", async () => {
+    const policy = createPolicyEngine({ budgets: { daily: "5000" } });
+    const client = createClient({ network: "testnet", settler: mockSettler(), policy });
+
+    const error = await client.pay({ resource: OFFER.resource, offer: OFFER }).then(
+      () => null,
+      (e: unknown) => e,
+    );
+    expect(error).toBeInstanceOf(PolicyBlockedError);
+    expect(error).toBeInstanceOf(TollwayError);
+    if (error instanceof TollwayError) {
+      expect(error.code).toBe("policy-blocked");
+    }
   });
 });
 
 describe("createClient receipt verification", () => {
-  it("throws ReceiptVerificationError when the returned receipt is tampered", async () => {
+  it("throws ReceiptVerificationError with the receipt-verification-failed code when tampered", async () => {
     // Mutate the body after signing so the signature no longer covers the canonical bytes.
     const tampered: SignedReceipt = {
       ...baselineReceipt,
@@ -192,9 +209,15 @@ describe("createClient receipt verification", () => {
       verifier,
     });
 
-    await expect(client.pay({ resource: OFFER.resource, offer: OFFER })).rejects.toBeInstanceOf(
-      ReceiptVerificationError,
+    const error = await client.pay({ resource: OFFER.resource, offer: OFFER }).then(
+      () => null,
+      (e: unknown) => e,
     );
+    expect(error).toBeInstanceOf(ReceiptVerificationError);
+    expect(error).toBeInstanceOf(TollwayError);
+    if (error instanceof TollwayError) {
+      expect(error.code).toBe("receipt-verification-failed");
+    }
   });
 
   it("skips verification when no verifier is configured (best-effort default)", async () => {

@@ -25,6 +25,7 @@ import {
   type SettlementModel,
   type SignedReceipt,
   type StellarNetwork,
+  TollwayError,
   verifyReceipt,
 } from "@tollway/core";
 
@@ -64,7 +65,14 @@ export type TollwayClientOptions = {
   policy?: PolicyEngine;
   /** Optional router. When omitted, defaults to x402 unless `model` is on the request. */
   router?: ModelRouter;
-  /** Optional verifier. When provided, the returned receipt is checked before pay() resolves. */
+  /**
+   * Optional verifier. When provided, the returned receipt is checked
+   * against the verifier's trusted public keys before `pay()` resolves;
+   * a tampered or unknown-key receipt produces a `TollwayError` with
+   * code `"receipt-verification-failed"`. Recommended in production: the
+   * receipt is the service's signature, and skipping verification leaves
+   * a tampered receipt undetected on the agent side.
+   */
   verifier?: ReceiptVerifier;
   /** Default facilitator URL when an offer does not name one. */
   facilitatorUrl?: string;
@@ -164,23 +172,36 @@ export function createClient(options: TollwayClientOptions): TollwayClient {
   };
 }
 
-/** Thrown when the policy engine blocks a payment before settlement. */
-export class PolicyBlockedError extends Error {
+/**
+ * Thrown when the policy engine blocks a payment before settlement.
+ * Extends `TollwayError` with code `"policy-blocked"` so a caller branching
+ * on `error.code` across Tollway picks this up uniformly with the rest of
+ * the typed errors. `rule` and `detail` carry the specific policy decision
+ * so the caller can branch on the rule that fired (budget, per-service,
+ * rate-limit, etc.).
+ */
+export class PolicyBlockedError extends TollwayError {
   readonly rule: string;
   readonly detail: string;
   constructor(rule: string, detail: string) {
-    super(`policy blocked payment: ${rule} (${detail})`);
+    super("policy-blocked", `policy blocked payment: ${rule} (${detail})`);
     this.name = "PolicyBlockedError";
     this.rule = rule;
     this.detail = detail;
   }
 }
 
-/** Thrown when the returned receipt fails verification against the configured verifier. */
-export class ReceiptVerificationError extends Error {
+/**
+ * Thrown when the returned receipt fails verification against the
+ * configured verifier. Extends `TollwayError` with code
+ * `"receipt-verification-failed"` so it composes with the rest of the
+ * typed-error model; `reason` carries the underlying verifier message
+ * (schema mismatch, signature did not verify, unknown key, etc.).
+ */
+export class ReceiptVerificationError extends TollwayError {
   readonly reason: string;
   constructor(reason: string) {
-    super(`receipt failed verification: ${reason}`);
+    super("receipt-verification-failed", `receipt failed verification: ${reason}`);
     this.name = "ReceiptVerificationError";
     this.reason = reason;
   }
