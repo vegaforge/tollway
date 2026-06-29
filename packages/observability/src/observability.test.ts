@@ -1,8 +1,8 @@
-import { NotImplementedError } from "@tollway/core";
 import { describe, expect, it, vi } from "vitest";
 import {
   createObservabilityHub,
   type DeliveryFailure,
+  type PaymentMetric,
   type TollwayEvent,
   type WebhookEvent,
   type WebhookHandler,
@@ -351,24 +351,186 @@ describe("observability hub: retry and failure surfacing", () => {
   });
 });
 
-describe("observability hub: metric methods", () => {
-  it("throws NotImplementedError for record/summarize/export until #31 lands", () => {
+function metric(overrides: Partial<PaymentMetric> = {}): PaymentMetric {
+  return {
+    payer: overrides.payer ?? "GAGENTAAA",
+    payee: overrides.payee ?? "GSERVICEAAA",
+    model: overrides.model ?? "x402",
+    amount: overrides.amount ?? "1000",
+    asset: overrides.asset ?? "USDC:GA5Z",
+    latencyMs: overrides.latencyMs ?? 42,
+    outcome: overrides.outcome ?? "settled",
+    at: overrides.at ?? "2026-06-26T10:00:00.000Z",
+  };
+}
+
+describe("observability hub: record + summarize", () => {
+  it("returns an empty summary when no metrics have been recorded", () => {
     const hub = createObservabilityHub({ sleep: noSleep });
+    const summary = hub.summarize();
+    expect(summary).toEqual({
+      totalAmount: "0",
+      count: 0,
+      byModel: {},
+      byPayer: {},
+      byPayee: {},
+    });
+  });
 
-    expect(() =>
-      hub.record({
-        payer: "agent",
-        payee: "service",
-        model: "x402",
-        amount: "1",
-        asset: "USDC",
-        latencyMs: 100,
-        outcome: "settled",
-        at: "2026-06-26T10:00:00.000Z",
-      }),
-    ).toThrow(NotImplementedError);
+  it("collects a single metric and reports it in the rollups", () => {
+    const hub = createObservabilityHub({ sleep: noSleep });
+    hub.record(metric({ amount: "1500" }));
+    const summary = hub.summarize();
+    expect(summary.totalAmount).toBe("1500");
+    expect(summary.count).toBe(1);
+    expect(summary.byModel).toEqual({ x402: "1500" });
+    expect(summary.byPayer).toEqual({ GAGENTAAA: "1500" });
+    expect(summary.byPayee).toEqual({ GSERVICEAAA: "1500" });
+  });
 
-    expect(() => hub.summarize()).toThrow(NotImplementedError);
-    expect(() => hub.export("json")).toThrow(NotImplementedError);
+  it("aggregates per-model totals across mixed settlement models", () => {
+    const hub = createObservabilityHub({ sleep: noSleep });
+    hub.record(metric({ model: "x402", amount: "1000" }));
+    hub.record(metric({ model: "x402", amount: "2500" }));
+    hub.record(metric({ model: "mpp-charge", amount: "4000" }));
+    hub.record(metric({ model: "mpp-channel", amount: "9999" }));
+
+    const summary = hub.summarize();
+    expect(summary.totalAmount).toBe("17499");
+    expect(summary.count).toBe(4);
+    expect(summary.byModel).toEqual({
+      x402: "3500",
+      "mpp-charge": "4000",
+      "mpp-channel": "9999",
+    });
+  });
+
+  it("aggregates per-payer and per-payee totals across distinct counterparties", () => {
+    const hub = createObservabilityHub({ sleep: noSleep });
+    hub.record(metric({ payer: "GAGENT1", payee: "GSERVICE1", amount: "1000" }));
+    hub.record(metric({ payer: "GAGENT1", payee: "GSERVICE2", amount: "500" }));
+    hub.record(metric({ payer: "GAGENT2", payee: "GSERVICE1", amount: "750" }));
+
+    const summary = hub.summarize();
+    expect(summary.byPayer).toEqual({ GAGENT1: "1500", GAGENT2: "750" });
+    expect(summary.byPayee).toEqual({ GSERVICE1: "1750", GSERVICE2: "500" });
+  });
+
+  it("uses bigint arithmetic so amounts larger than Number.MAX_SAFE_INTEGER round-trip exactly", () => {
+    const hub = createObservabilityHub({ sleep: noSleep });
+    // Two payments of 2^53 each: a plain Number addition would lose precision.
+    hub.record(metric({ amount: "9007199254740992" }));
+    hub.record(metric({ amount: "9007199254740992" }));
+    const summary = hub.summarize();
+    expect(summary.totalAmount).toBe("18014398509481984");
+    expect(summary.byModel.x402).toBe("18014398509481984");
+  });
+
+  it("filters by payer", () => {
+    const hub = createObservabilityHub({ sleep: noSleep });
+    hub.record(metric({ payer: "GAGENT1", amount: "100" }));
+    hub.record(metric({ payer: "GAGENT2", amount: "200" }));
+    expect(hub.summarize({ payer: "GAGENT1" })).toMatchObject({
+      totalAmount: "100",
+      count: 1,
+    });
+  });
+
+  it("filters by payee", () => {
+    const hub = createObservabilityHub({ sleep: noSleep });
+    hub.record(metric({ payee: "GSERVICE1", amount: "100" }));
+    hub.record(metric({ payee: "GSERVICE2", amount: "200" }));
+    expect(hub.summarize({ payee: "GSERVICE2" })).toMatchObject({
+      totalAmount: "200",
+      count: 1,
+    });
+  });
+
+  it("filters by model", () => {
+    const hub = createObservabilityHub({ sleep: noSleep });
+    hub.record(metric({ model: "x402", amount: "100" }));
+    hub.record(metric({ model: "mpp-channel", amount: "9000" }));
+    expect(hub.summarize({ model: "mpp-channel" })).toMatchObject({
+      totalAmount: "9000",
+      count: 1,
+    });
+  });
+
+  it("filters by inclusive [from, to] timestamp window", () => {
+    const hub = createObservabilityHub({ sleep: noSleep });
+    hub.record(metric({ at: "2026-06-26T09:00:00.000Z", amount: "1" }));
+    hub.record(metric({ at: "2026-06-26T10:00:00.000Z", amount: "10" }));
+    hub.record(metric({ at: "2026-06-26T11:00:00.000Z", amount: "100" }));
+
+    const summary = hub.summarize({
+      from: "2026-06-26T10:00:00.000Z",
+      to: "2026-06-26T10:30:00.000Z",
+    });
+    expect(summary).toMatchObject({ totalAmount: "10", count: 1 });
+  });
+
+  it("skips non-integer amounts in rollups but counts them in the matched window", () => {
+    const hub = createObservabilityHub({ sleep: noSleep });
+    hub.record(metric({ amount: "100" }));
+    hub.record(metric({ amount: "not-a-number" }));
+    const summary = hub.summarize();
+    // The garbage row is still counted, but it does not poison the sum.
+    expect(summary.totalAmount).toBe("100");
+    expect(summary.count).toBe(2);
+  });
+});
+
+describe("observability hub: export", () => {
+  it("exports an empty JSON array when no metrics match", () => {
+    const hub = createObservabilityHub({ sleep: noSleep });
+    expect(hub.export("json")).toBe("[]");
+  });
+
+  it("exports matched metrics as a JSON array of objects", () => {
+    const hub = createObservabilityHub({ sleep: noSleep });
+    hub.record(metric({ amount: "100" }));
+    hub.record(metric({ amount: "200" }));
+    const parsed = JSON.parse(hub.export("json")) as PaymentMetric[];
+    expect(parsed).toHaveLength(2);
+    expect(parsed[0]?.amount).toBe("100");
+    expect(parsed[1]?.amount).toBe("200");
+  });
+
+  it("exports a CSV with the column header even when there are no rows", () => {
+    const hub = createObservabilityHub({ sleep: noSleep });
+    expect(hub.export("csv")).toBe("payer,payee,model,amount,asset,latencyMs,outcome,at");
+  });
+
+  it("exports matched metrics as a CSV with one row per metric", () => {
+    const hub = createObservabilityHub({ sleep: noSleep });
+    hub.record(metric({ amount: "100", at: "2026-06-26T10:00:00.000Z" }));
+    hub.record(metric({ amount: "200", at: "2026-06-26T11:00:00.000Z" }));
+    const csv = hub.export("csv");
+    const lines = csv.split("\r\n");
+    expect(lines).toHaveLength(3);
+    expect(lines[0]).toBe("payer,payee,model,amount,asset,latencyMs,outcome,at");
+    expect(lines[1]).toContain('"100"');
+    expect(lines[1]).toContain('"2026-06-26T10:00:00.000Z"');
+    expect(lines[2]).toContain('"200"');
+  });
+
+  it("escapes embedded double-quotes in CSV per RFC 4180", () => {
+    const hub = createObservabilityHub({ sleep: noSleep });
+    hub.record(metric({ payee: 'service-with-"quote"', amount: "100" }));
+    const csv = hub.export("csv");
+    expect(csv).toContain('"service-with-""quote"""');
+  });
+
+  it("applies the same query filter to export as to summarize", () => {
+    const hub = createObservabilityHub({ sleep: noSleep });
+    hub.record(metric({ model: "x402", amount: "100" }));
+    hub.record(metric({ model: "mpp-channel", amount: "9000" }));
+
+    const json = JSON.parse(hub.export("json", { model: "mpp-channel" })) as PaymentMetric[];
+    expect(json).toHaveLength(1);
+    expect(json[0]?.amount).toBe("9000");
+
+    const csv = hub.export("csv", { model: "mpp-channel" });
+    expect(csv.split("\r\n")).toHaveLength(2);
   });
 });
