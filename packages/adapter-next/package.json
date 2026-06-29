@@ -42,10 +42,10 @@
   },
   "devDependencies": {
     "@tollway/core": "workspace:*",
-    "@types/node": "^22.19.20",
+    "@types/node": "^26.0.1",
     "tsup": "^8.5.0",
-    "typescript": "^5.8.0",
-    "vitest": "^4.1.8"
+    "typescript": "^6.0.3",
+    "vitest": "^4.1.9"
   },
   "publishConfig": {
     "access": "public"
