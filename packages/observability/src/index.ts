@@ -6,7 +6,7 @@
  * up. See docs/design.md, "Observability".
  */
 
-import { NotImplementedError, type SettlementModel } from "@tollway/core";
+import type { SettlementModel } from "@tollway/core";
 
 /** Webhook event names, matching docs/design.md, "Observability". */
 export const webhookEvents = [
@@ -48,10 +48,20 @@ export type MetricsQuery = {
   to?: string;
 };
 
+/**
+ * Aggregated spend over a query window. Amounts are integer strings in the
+ * asset's smallest unit (same convention as `PaymentMetric.amount` and the
+ * canonical receipt). Per-group buckets only carry the amount; per-group
+ * counts and averages can be derived by combining with the `count` rollups
+ * via a future query-side helper. Keys for `byPayer` / `byPayee` are the
+ * payer / payee addresses exactly as they appear on the recorded metrics.
+ */
 export type SpendSummary = {
   totalAmount: string;
   count: number;
   byModel: Partial<Record<SettlementModel, string>>;
+  byPayer: Record<string, string>;
+  byPayee: Record<string, string>;
 };
 
 export type ExportFormat = "json" | "csv";
@@ -162,6 +172,66 @@ function normalizeError(value: unknown): Error {
   return new Error(typeof value === "string" ? value : JSON.stringify(value));
 }
 
+function filterMetrics(metrics: PaymentMetric[], query?: MetricsQuery): PaymentMetric[] {
+  if (!query) return metrics.slice();
+  return metrics.filter((m) => {
+    if (query.payer !== undefined && m.payer !== query.payer) return false;
+    if (query.payee !== undefined && m.payee !== query.payee) return false;
+    if (query.model !== undefined && m.model !== query.model) return false;
+    // `at` is ISO 8601; string comparison is order-preserving for that grammar.
+    if (query.from !== undefined && m.at < query.from) return false;
+    if (query.to !== undefined && m.at > query.to) return false;
+    return true;
+  });
+}
+
+function stringifyBigintMap<K extends string>(
+  source: Partial<Record<K, bigint>> | Record<K, bigint>,
+): Record<K, string> {
+  const out = {} as Record<K, string>;
+  for (const [key, value] of Object.entries(source) as Array<[K, bigint | undefined]>) {
+    if (value !== undefined) {
+      out[key] = value.toString();
+    }
+  }
+  return out;
+}
+
+/** RFC 4180 escaping: wrap in quotes, double-up embedded quotes. */
+function csvEscape(value: string): string {
+  return `"${value.replace(/"/g, '""')}"`;
+}
+
+const CSV_COLUMNS = [
+  "payer",
+  "payee",
+  "model",
+  "amount",
+  "asset",
+  "latencyMs",
+  "outcome",
+  "at",
+] as const;
+
+function toCsv(metrics: PaymentMetric[]): string {
+  const lines: string[] = [CSV_COLUMNS.join(",")];
+  for (const m of metrics) {
+    lines.push(
+      [
+        csvEscape(m.payer),
+        csvEscape(m.payee),
+        csvEscape(m.model),
+        csvEscape(m.amount),
+        csvEscape(m.asset),
+        m.latencyMs.toString(),
+        csvEscape(m.outcome),
+        csvEscape(m.at),
+      ].join(","),
+    );
+  }
+  return lines.join("\r\n");
+}
+
 function subscriptionMatches(subscription: WebhookSubscription, event: WebhookEvent): boolean {
   if (!subscription.events || subscription.events.length === 0) return true;
   return subscription.events.includes(event);
@@ -250,12 +320,17 @@ async function deliverWebhook(
  * returned {@link DeliveryReport} and the optional `onDeliveryFailure`
  * callback rather than being swallowed.
  *
- * Metric collection (`record`, `summarize`, `export`) is the scope of #31 and
- * currently throws `NotImplementedError` from those methods.
+ * Metric collection (`record`, `summarize`, `export`) keeps an in-memory
+ * array of `PaymentMetric` values. The hub holds the rollup primitives a
+ * service-side dashboard or exporter actually consumes; the storage is
+ * deliberately ephemeral so production deployments can swap it for a
+ * persistent backend through the same interface (the optional shared
+ * service in `docs/design.md`, "Architecture").
  */
 export function createObservabilityHub(options: ObservabilityHubOptions = {}): ObservabilityHub {
   const handlers = new Map<WebhookEvent, WebhookHandler[]>();
   const subscriptions: WebhookSubscription[] = [];
+  const metrics: PaymentMetric[] = [];
 
   if (options.webhooks) {
     for (const sub of options.webhooks) {
@@ -273,19 +348,53 @@ export function createObservabilityHub(options: ObservabilityHubOptions = {}): O
   const requestTimeoutMs =
     options.requestTimeoutMs !== undefined ? options.requestTimeoutMs : DEFAULT_REQUEST_TIMEOUT_MS;
 
-  function notImplemented(feature: string): never {
-    throw new NotImplementedError(feature, 'docs/design.md, "Observability" (#31)');
-  }
-
   return {
-    record() {
-      notImplemented("metric recording");
+    record(metric) {
+      metrics.push({ ...metric });
     },
-    summarize() {
-      notImplemented("spend summarization");
+    summarize(query) {
+      const matched = filterMetrics(metrics, query);
+      let totalAmount = 0n;
+      const byModel: Partial<Record<SettlementModel, bigint>> = {};
+      const byPayer: Record<string, bigint> = {};
+      const byPayee: Record<string, bigint> = {};
+
+      for (const m of matched) {
+        let amount: bigint;
+        try {
+          amount = BigInt(m.amount);
+        } catch {
+          // A non-integer amount cannot be summed safely; skip it rather
+          // than poison the rollups for the whole window. The metric is
+          // still visible via export().
+          continue;
+        }
+        totalAmount += amount;
+        byModel[m.model] = (byModel[m.model] ?? 0n) + amount;
+        byPayer[m.payer] = (byPayer[m.payer] ?? 0n) + amount;
+        byPayee[m.payee] = (byPayee[m.payee] ?? 0n) + amount;
+      }
+
+      return {
+        totalAmount: totalAmount.toString(),
+        count: matched.length,
+        byModel: stringifyBigintMap(byModel) as Partial<Record<SettlementModel, string>>,
+        byPayer: stringifyBigintMap(byPayer),
+        byPayee: stringifyBigintMap(byPayee),
+      };
     },
-    export() {
-      notImplemented("metrics export");
+    export(format, query) {
+      const matched = filterMetrics(metrics, query);
+      if (format === "json") {
+        return JSON.stringify(matched);
+      }
+      if (format === "csv") {
+        return toCsv(matched);
+      }
+      // The ExportFormat type already restricts this at compile time; this
+      // branch is the runtime guard for callers that crossed the boundary
+      // with an unchecked string.
+      throw new Error(`unsupported export format: ${format as string}`);
     },
     on(event, handler) {
       const existing = handlers.get(event);
