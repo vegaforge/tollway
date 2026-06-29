@@ -123,7 +123,7 @@ export function createPaywall(config: PaywallConfig, deps: PaywallDeps): Gate {
       return { kind: "rejected", status: 402, reason: verification.reason };
     }
 
-    const cached = deps.cache?.get(verification.nonce);
+    const cached = await deps.cache?.get(verification.nonce);
     if (cached) {
       return {
         kind: "settled",
@@ -158,7 +158,7 @@ export function createPaywall(config: PaywallConfig, deps: PaywallDeps): Gate {
       deps.signer,
     );
 
-    deps.cache?.set(verification.nonce, receipt);
+    await deps.cache?.set(verification.nonce, receipt);
 
     return {
       kind: "settled",
