@@ -245,9 +245,6 @@ importers:
 
   packages/adapter-next:
     dependencies:
-      '@tollway/core':
-        specifier: workspace:*
-        version: link:../core
       '@tollway/server':
         specifier: workspace:*
         version: link:../server
@@ -255,6 +252,9 @@ importers:
         specifier: ^14.0.0 || ^15.0.0
         version: 15.5.19(react-dom@19.2.7(react@19.2.7))(react@19.2.7)
     devDependencies:
+      '@tollway/core':
+        specifier: workspace:*
+        version: link:../core
       '@types/node':
         specifier: ^22.19.20
         version: 22.19.20
