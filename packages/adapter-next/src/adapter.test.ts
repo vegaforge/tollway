@@ -57,7 +57,9 @@ describe("withPaywall", () => {
       facilitator: createMockFacilitator(),
       router: {
         async decide() {
-          return { model: "mpp-channel", reason: "force-reject" };
+          // RouteReason is a closed union; "override" fits the intent of a
+          // stub router that pins the model regardless of the offer.
+          return { model: "mpp-channel", reason: "override" };
         },
       },
     });
