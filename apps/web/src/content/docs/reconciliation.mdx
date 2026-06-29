@@ -1,0 +1,34 @@
+---
+title: Reconciliation
+description: The safety net that catches under-settlement relative to commitments
+---
+
+Reconciliation is the engine that makes channel mode trustworthy. Most payments in a channel are off-chain commitments that never touch the contract; the close is a single transaction that should reflect the latest commitment. Reconciliation continuously compares the stored stream of cumulative commitments against the contract state and at close against the on-chain settlement.
+
+## What it checks
+
+For channel mode, the engine looks for two classes of drift.
+
+The first is a commitment that does not show up at close. The agent has a signed commitment for sequence N; the channel closed at sequence N - 2. That gap is the counterparty under-settling relative to what was committed, and it is exactly the case channel mode opens the door to.
+
+The second is an unexpected remainder. The contract returns the difference between the deposit and the committed amount; if that arithmetic does not match what the agent has on record, something is off (a missing commitment in the stream, a contract that paid out somewhere unexpected, a mismatched asset).
+
+For x402 and MPP charge, reconciliation is simpler. Each settlement is its own transaction, so the check is "did the transaction land on chain and does it match the receipt." No commitment stream to walk, no drift to detect.
+
+## Why it gets property tests
+
+Reconciliation has to be trustworthy. A handful of example tests would only cover the cases the author thought of; the realistic failure modes look like adversarial commitment streams (out-of-order, gapped, replayed) that hand-crafted tests miss.
+
+The reconciliation engine therefore gets property tests against randomly generated commitment streams. The invariant: a stream and its on-chain close either reconcile cleanly or flag a specific drift, deterministically. Random inputs are the only way to be confident that the engine catches the cases it was never explicitly shown.
+
+## What it does when drift fires
+
+A flagged drift event surfaces through the observability hub (`anomaly.detected`) so the operator sees it immediately, and the engine can block further commitments to a counterparty that is behaving inconsistently. Closing the channel and recovering what is reflected on chain becomes the next step.
+
+## In the code
+
+The reconciliation engine lives in `packages/reconcile/src/`. The property test suite covers the random-commitment-stream invariant per `packages/reconcile/src/reconcile.property.test.ts`.
+
+## Reference
+
+[`docs/design.md`, "Reconciliation"](https://github.com/vegaforge/tollway/blob/main/docs/design.md#reconciliation) is the architectural reference.
