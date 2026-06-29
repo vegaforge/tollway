@@ -6,7 +6,13 @@
  * the payment logic. See docs/design.md, "Architecture" (service side).
  */
 
-export { createInMemorySettlementCache, type SettlementCache } from "./cache.js";
+export {
+  createInMemorySettlementCache,
+  createRedisSettlementCache,
+  type RedisLikeClient,
+  type RedisSettlementCacheOptions,
+  type SettlementCache,
+} from "./cache.js";
 export {
   createHttpFacilitator,
   createMockFacilitator,
