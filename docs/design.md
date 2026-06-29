@@ -110,6 +110,8 @@ Where the agent uses an OpenZeppelin smart account, Tollway maps as many constra
 
 Every settlement, regardless of model, produces one canonical signed receipt: the counterparties, amount, asset, URL or resource id, the model used, a settlement reference, a timestamp, and a Tollway signature. The settlement reference is a Stellar transaction hash for x402 and MPP charge, and a channel id plus commitment sequence for channel mode. Downstream accounting, dispute evidence, and analytics consume one shape instead of three.
 
+For the field-by-field reference, the settlement-reference variants, and the signing / verification model (including swappable signers and key rotation), see `docs/receipt-format.md`.
+
 ### Reconciliation
 
 For channel mode, the engine continuously compares the stored stream of cumulative commitments against the channel contract state, and at close against the on-chain settlement. It detects drift, such as a commitment not reflected on close or an unexpected remainder, flags it, and can block further commitments to a counterparty that is behaving inconsistently. For x402 and MPP charge, reconciliation is simpler: confirm each `/settle` landed on chain and matches the receipt.
