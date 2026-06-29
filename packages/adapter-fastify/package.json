@@ -30,13 +30,13 @@
     "typecheck": "tsc --noEmit"
   },
   "dependencies": {
-    "@tollway/core": "workspace:*",
     "@tollway/server": "workspace:*"
   },
   "peerDependencies": {
     "fastify": "^5.0.0"
   },
   "devDependencies": {
+    "@tollway/core": "workspace:*",
     "@types/node": "^22.19.20",
     "fastify": "^5.2.0",
     "tsup": "^8.5.0",
