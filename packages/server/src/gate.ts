@@ -179,7 +179,7 @@ export function createPaywall(config: PaywallConfig, deps: PaywallDeps): Gate {
 
     const decision = deps.router
       ? await deps.router.decide({ counterparty: offer.payTo, resource: offer.resource, offer })
-      : ({ model: "x402", reason: "default" } as const);
+      : ({ model: acceptedModels[0], reason: "default" } as const);
 
     if (decision.model === "x402") {
       const payment: X402Payment = { model: "x402", paymentSignature: signatureHeader };
