@@ -1,6 +1,7 @@
 import {
   buildReceipt,
   type ModelRouter,
+  type MppChargePayment,
   type PaymentOffer,
   type ReceiptSigner,
   type SettlementModel,
@@ -18,6 +19,7 @@ import {
   PAYMENT_SIGNATURE_HEADER,
   readHeader,
 } from "./headers.js";
+import type { MppChargeHandler } from "./mpp-charge.js";
 
 /**
  * The gating molecule. It sits between a request and the resource: with a
@@ -47,13 +49,6 @@ export type PaywallConfig = {
   facilitatorUrl?: string;
 };
 
-export type PaywallDeps = {
-  signer: ReceiptSigner;
-  facilitator: FacilitatorClient;
-  router?: ModelRouter;
-  cache?: SettlementCache;
-};
-
 export type GateOutcome =
   | {
       kind: "payment-required";
@@ -73,12 +68,90 @@ export type GateOutcome =
 
 export type Gate = (request: TollwayRequest) => Promise<GateOutcome>;
 
+export type PaywallDeps = {
+  signer: ReceiptSigner;
+  facilitator: FacilitatorClient;
+  mppChargeHandler?: MppChargeHandler;
+  router?: ModelRouter;
+  cache?: SettlementCache;
+};
+
+type Handler<TPayment> = {
+  verify(input: {
+    payment: TPayment;
+    offer: PaymentOffer;
+  }): Promise<{ valid: true; payer: string; nonce: string } | { valid: false; reason: string }>;
+  settle(input: {
+    payment: TPayment;
+    offer: PaymentOffer;
+    payer: string;
+    nonce: string;
+  }): Promise<{ settled: true; txHash: string } | { settled: false; reason: string }>;
+};
+
+async function settleWithHandler<TPayment>(
+  payment: TPayment,
+  offer: PaymentOffer,
+  model: SettlementModel,
+  handler: Handler<TPayment>,
+  signer: ReceiptSigner,
+  cache?: SettlementCache,
+): Promise<GateOutcome> {
+  const verification = await handler.verify({ payment, offer });
+  if (!verification.valid) {
+    return { kind: "rejected", status: 402, reason: verification.reason };
+  }
+
+  const cached = await cache?.get(verification.nonce);
+  if (cached) {
+    return {
+      kind: "settled",
+      status: 200,
+      headers: { [PAYMENT_RESPONSE_HEADER]: encodeHeader(cached) },
+      receipt: cached,
+      replayed: true,
+    };
+  }
+
+  const settlement = await handler.settle({
+    payment,
+    offer,
+    payer: verification.payer,
+    nonce: verification.nonce,
+  });
+  if (!settlement.settled) {
+    return { kind: "rejected", status: 502, reason: settlement.reason };
+  }
+
+  const receipt = await signReceipt(
+    buildReceipt({
+      payer: verification.payer,
+      payee: offer.payTo,
+      amount: offer.amount,
+      asset: offer.asset,
+      resource: offer.resource,
+      model,
+      settlement: { kind: "transaction", txHash: settlement.txHash },
+      network: offer.network,
+    }),
+    signer,
+  );
+
+  cache?.set(verification.nonce, receipt);
+
+  return {
+    kind: "settled",
+    status: 200,
+    headers: { [PAYMENT_RESPONSE_HEADER]: encodeHeader(receipt) },
+    receipt,
+    replayed: false,
+  };
+}
+
 /**
- * Builds the gate from a paywall config. It settles x402 per-request today; a
- * routing decision for another model is rejected rather than mishandled.
- *
- * TODO: settle MPP charge and channel once their packages can. See
- * docs/design.md, "Build plan".
+ * Builds the gate from a paywall config. It settles x402 per-request and
+ * mpp-charge; a routing decision for another model is rejected rather than
+ * mishandled. See docs/design.md, "Build plan", Phase 1.
  */
 export function createPaywall(config: PaywallConfig, deps: PaywallDeps): Gate {
   const acceptedModels = config.models ?? ["x402"];
@@ -106,72 +179,37 @@ export function createPaywall(config: PaywallConfig, deps: PaywallDeps): Gate {
 
     const decision = deps.router
       ? await deps.router.decide({ counterparty: offer.payTo, resource: offer.resource, offer })
-      : ({ model: "x402", reason: "default" } as const);
+      : ({ model: acceptedModels[0], reason: "default" } as const);
 
-    if (decision.model !== "x402") {
-      return {
-        kind: "rejected",
-        status: 501,
-        reason: `model "${decision.model}" routing is selected but settlement is not implemented yet`,
-      };
+    if (decision.model === "x402") {
+      const payment: X402Payment = { model: "x402", paymentSignature: signatureHeader };
+      return settleWithHandler(payment, offer, "x402", deps.facilitator, deps.signer, deps.cache);
     }
 
-    const payment: X402Payment = { model: "x402", paymentSignature: signatureHeader };
+    if (decision.model === "mpp-charge") {
+      if (!deps.mppChargeHandler) {
+        return {
+          kind: "rejected",
+          status: 500,
+          reason: "mpp-charge handler not configured",
+        };
+      }
 
-    const verification = await deps.facilitator.verify({ payment, offer });
-    if (!verification.valid) {
-      return { kind: "rejected", status: 402, reason: verification.reason };
+      const payment: MppChargePayment = { model: "mpp-charge", payload: signatureHeader };
+      return settleWithHandler(
+        payment,
+        offer,
+        "mpp-charge",
+        deps.mppChargeHandler,
+        deps.signer,
+        deps.cache,
+      );
     }
-
-    const cached = await deps.cache?.get(verification.nonce);
-    if (cached) {
-      return {
-        kind: "settled",
-        status: 200,
-        headers: { [PAYMENT_RESPONSE_HEADER]: encodeHeader(cached) },
-        receipt: cached,
-        replayed: true,
-      };
-    }
-
-    const settlement = await deps.facilitator.settle({
-      payment,
-      offer,
-      payer: verification.payer,
-      nonce: verification.nonce,
-    });
-    if (!settlement.settled) {
-      return { kind: "rejected", status: 502, reason: settlement.reason };
-    }
-
-    const receipt = await signReceipt(
-      buildReceipt({
-        payer: verification.payer,
-        payee: offer.payTo,
-        amount: offer.amount,
-        asset: offer.asset,
-        resource: offer.resource,
-        model: "x402",
-        settlement: { kind: "transaction", txHash: settlement.txHash },
-        network: offer.network,
-      }),
-      deps.signer,
-    );
-
-    // Awaiting set ensures a peer process or retry on this process cannot
-    // race past the cache write and double-settle. The trade-off: a cache
-    // failure after on-chain settlement bubbles up and the retry triggers a
-    // second settle (the agent has paid but lost the receipt). Surfacing
-    // that failure via the observability hub and swallowing the error in
-    // the gate is tracked as a follow-up.
-    await deps.cache?.set(verification.nonce, receipt);
 
     return {
-      kind: "settled",
-      status: 200,
-      headers: { [PAYMENT_RESPONSE_HEADER]: encodeHeader(receipt) },
-      receipt,
-      replayed: false,
+      kind: "rejected",
+      status: 501,
+      reason: `model "${decision.model}" routing is selected but settlement is not implemented yet`,
     };
   };
 }
