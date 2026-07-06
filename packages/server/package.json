@@ -31,8 +31,8 @@
   },
   "dependencies": {
     "@tollway/core": "workspace:*",
-    "@x402/core": "^2.16.0",
-    "@x402/stellar": "^2.16.0"
+    "@x402/core": "^2.17.0",
+    "@x402/stellar": "^2.17.0"
   },
   "devDependencies": {
     "@types/ioredis-mock": "^8.2.5",
