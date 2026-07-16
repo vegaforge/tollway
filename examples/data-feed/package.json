@@ -1,0 +1,24 @@
+{
+  "name": "@tollway/example-data-feed",
+  "version": "0.0.0",
+  "private": true,
+  "description": "Express data feed paywall example for Tollway",
+  "license": "Apache-2.0",
+  "type": "module",
+  "scripts": {
+    "start": "tsx src/server.ts",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "@tollway/adapter-express": "workspace:*",
+    "@tollway/core": "workspace:*",
+    "@tollway/server": "workspace:*",
+    "express": "^5.1.0"
+  },
+  "devDependencies": {
+    "@types/express": "^5.0.0",
+    "@types/node": "^22.19.20",
+    "tsx": "^4.19.0",
+    "typescript": "^5.8.0"
+  }
+}
