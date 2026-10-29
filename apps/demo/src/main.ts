@@ -1,3 +1,4 @@
+import { DemoConfigError } from "./config.js";
 import { runDemo } from "./demo.js";
 
 async function main(): Promise<void> {
@@ -17,12 +18,26 @@ async function main(): Promise<void> {
   console.log("");
   console.log(`Receipt signature valid: ${result.receiptValid}`);
 
+  const { settlement } = result.receipt.receipt;
+  if (!result.mock && settlement.kind === "transaction") {
+    console.log(`Settlement transaction: ${settlement.txHash}`);
+  }
+
   if (!result.receiptValid) {
     process.exitCode = 1;
   }
 }
 
-main().catch((error) => {
-  console.error("Demo failed:", error);
+main().catch((error: unknown) => {
+  // A configuration problem is the user's to fix, so print the list without
+  // a stack trace. Anything else is a bug or an upstream failure: keep the stack.
+  if (error instanceof DemoConfigError) {
+    console.error("Live mode is not configured. Set MOCK_MODE=true to run offline, or fix:");
+    for (const problem of error.problems) {
+      console.error(`  - ${problem}`);
+    }
+  } else {
+    console.error("Demo failed:", error);
+  }
   process.exitCode = 1;
 });

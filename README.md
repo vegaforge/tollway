@@ -170,7 +170,16 @@ Run the x402 demo with no network, from challenge to a verified receipt:
 MOCK_MODE=true pnpm --filter @tollway/demo start
 ```
 
-Drop `MOCK_MODE` to run against a real testnet facilitator; set `FACILITATOR_URL` to override the default.
+Without `MOCK_MODE`, the demo pays 0.001 testnet USDC through the OpenZeppelin Channels testnet facilitator and prints the settlement transaction hash. It needs two testnet accounts with a USDC trustline (the payer also needs testnet USDC from the [Circle faucet](https://faucet.circle.com/)) and an API key from [channels.openzeppelin.com/testnet/gen](https://channels.openzeppelin.com/testnet/gen). Use testnet keys only: the payer's secret key sits in an environment variable.
+
+```bash
+OZ_API_KEY=... \
+STELLAR_RECIPIENT=G... \
+STELLAR_SECRET_KEY=S... \
+pnpm --filter @tollway/demo start
+```
+
+If a setting is missing or invalid, the demo lists every problem and exits with code 1. `FACILITATOR_URL` overrides the facilitator. `STELLAR_NETWORK=mainnet` switches to mainnet and then also needs `STELLAR_RPC_URL`.
 
 Gate a route on the service side:
 
