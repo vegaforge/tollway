@@ -1,7 +1,7 @@
 import { Ed25519Signer, Ed25519Verifier, verifyReceipt } from "@tollway/core";
 import { beforeAll, describe, expect, it } from "vitest";
-import { createInMemorySettlementCache } from "./cache.js";
-import { createMockFacilitator } from "./facilitator.js";
+import { createInMemorySettlementCache, type SettlementCache } from "./cache.js";
+import { createMockFacilitator, type FacilitatorClient } from "./facilitator.js";
 import { createPaywall, type PaywallConfig, type TollwayRequest } from "./gate.js";
 import { decodeHeader, PAYMENT_REQUIRED_HEADER, PAYMENT_SIGNATURE_HEADER } from "./headers.js";
 import { createMockMppChargeHandler } from "./mpp-charge.js";
@@ -141,5 +141,129 @@ describe("createPaywall", () => {
       expect(outcome.status).toBe(500);
       expect(outcome.reason).toBe("mpp-charge handler not configured");
     });
+  });
+});
+
+describe("settlement cache binding", () => {
+  const headers = { [PAYMENT_SIGNATURE_HEADER]: "mock-signed-auth-entry" };
+
+  function gateFor(overrides: Partial<PaywallConfig>, cache: SettlementCache) {
+    return createPaywall(
+      { ...config, ...overrides },
+      {
+        signer,
+        facilitator: createMockFacilitator(),
+        mppChargeHandler: createMockMppChargeHandler(),
+        cache,
+      },
+    );
+  }
+
+  it("rejects a payment settled for one resource when replayed on another", async () => {
+    const cache = createInMemorySettlementCache();
+    const first = await gateFor({ resource: "/a" }, cache)({ ...baseRequest, headers });
+    expect(first.kind).toBe("settled");
+
+    const replay = await gateFor({ resource: "/b" }, cache)({ ...baseRequest, headers });
+    expect(replay).toEqual({
+      kind: "rejected",
+      status: 409,
+      reason: "payment already settled for a different offer",
+    });
+  });
+
+  it("rejects a replay on an offer with a different amount", async () => {
+    const cache = createInMemorySettlementCache();
+    const first = await gateFor({ resource: "/a" }, cache)({ ...baseRequest, headers });
+    expect(first.kind).toBe("settled");
+
+    const replay = await gateFor(
+      { resource: "/a", amount: "99999999" },
+      cache,
+    )({
+      ...baseRequest,
+      headers,
+    });
+    expect(replay).toEqual({
+      kind: "rejected",
+      status: 409,
+      reason: "payment already settled for a different offer",
+    });
+  });
+
+  it("does not serve an x402 receipt to an mpp-charge offer that shares the cache", async () => {
+    // Both mock handlers derive the nonce from the raw header, so the same
+    // header value gives the same nonce under either model.
+    const cache = createInMemorySettlementCache();
+    const x402 = await gateFor({ models: ["x402"] }, cache)({ ...baseRequest, headers });
+    expect(x402.kind).toBe("settled");
+
+    const mpp = await gateFor({ models: ["mpp-charge"] }, cache)({ ...baseRequest, headers });
+    expect(mpp.kind).toBe("settled");
+    if (mpp.kind !== "settled") return;
+    expect(mpp.replayed).toBe(false);
+    expect(mpp.receipt.receipt.model).toBe("mpp-charge");
+  });
+
+  it("settles concurrent identical payments once", async () => {
+    const inner = createMockFacilitator();
+    let settleCalls = 0;
+    const slowFacilitator: FacilitatorClient = {
+      ...inner,
+      async settle(input) {
+        settleCalls++;
+        await new Promise((resolve) => setTimeout(resolve, 20));
+        return inner.settle(input);
+      },
+    };
+    const gate = createPaywall(config, {
+      signer,
+      facilitator: slowFacilitator,
+      cache: createInMemorySettlementCache(),
+    });
+
+    const [first, second] = await Promise.all([
+      gate({ ...baseRequest, headers }),
+      gate({ ...baseRequest, headers }),
+    ]);
+
+    expect(settleCalls).toBe(1);
+    expect(first.kind).toBe("settled");
+    expect(second.kind).toBe("settled");
+    if (first.kind !== "settled" || second.kind !== "settled") return;
+    expect(second.receipt).toEqual(first.receipt);
+  });
+
+  it("does not leave a cache write rejection unhandled", async () => {
+    const writeError = new Error("redis down");
+    const failingCache: SettlementCache = {
+      async get() {
+        return undefined;
+      },
+      async set() {
+        throw writeError;
+      },
+    };
+    const unhandled: unknown[] = [];
+    const onUnhandled = (reason: unknown) => {
+      unhandled.push(reason);
+    };
+    process.on("unhandledRejection", onUnhandled);
+    try {
+      const outcome = await createPaywall(config, {
+        signer,
+        facilitator: createMockFacilitator(),
+        cache: failingCache,
+      })({ ...baseRequest, headers });
+      // Give a floating rejection time to surface before checking.
+      await new Promise((resolve) => setImmediate(resolve));
+
+      expect(unhandled).toEqual([]);
+      expect(outcome.kind).toBe("settled");
+      if (outcome.kind !== "settled") return;
+      expect(outcome.cacheError).toBe(writeError);
+    } finally {
+      process.off("unhandledRejection", onUnhandled);
+    }
   });
 });
