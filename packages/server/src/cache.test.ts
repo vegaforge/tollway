@@ -141,5 +141,6 @@ describe("createRedisSettlementCache settlement lock", () => {
 
     await first.release("x402:nonce-lock");
     await expect(second.acquire("x402:nonce-lock", 30_000)).resolves.toBe(true);
+    await second.release("x402:nonce-lock");
   });
 });

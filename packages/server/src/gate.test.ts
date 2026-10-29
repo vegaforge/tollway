@@ -1,6 +1,12 @@
 import { Ed25519Signer, Ed25519Verifier, verifyReceipt } from "@tollway/core";
+import RedisMock from "ioredis-mock";
 import { beforeAll, describe, expect, it } from "vitest";
-import { createInMemorySettlementCache, type SettlementCache } from "./cache.js";
+import {
+  createInMemorySettlementCache,
+  createRedisSettlementCache,
+  type RedisLikeClient,
+  type SettlementCache,
+} from "./cache.js";
 import { createMockFacilitator, type FacilitatorClient } from "./facilitator.js";
 import { createPaywall, type PaywallConfig, type TollwayRequest } from "./gate.js";
 import { decodeHeader, PAYMENT_REQUIRED_HEADER, PAYMENT_SIGNATURE_HEADER } from "./headers.js";
@@ -265,5 +271,89 @@ describe("settlement cache binding", () => {
     } finally {
       process.off("unhandledRejection", onUnhandled);
     }
+  });
+});
+
+describe("settlement lock across processes", () => {
+  const headers = { [PAYMENT_SIGNATURE_HEADER]: "mock-signed-auth-entry" };
+
+  function countingFacilitator() {
+    const inner = createMockFacilitator();
+    const calls = { settle: 0 };
+    const facilitator: FacilitatorClient = {
+      ...inner,
+      async settle(input) {
+        calls.settle++;
+        return inner.settle(input);
+      },
+    };
+    return { facilitator, calls };
+  }
+
+  // ioredis-mock instances share one store, so each test uses its own prefix.
+  it("answers 409 and does not settle while another process holds the lock", async () => {
+    const client = new RedisMock() as unknown as RedisLikeClient;
+    const keyPrefix = "gate-test:held-lock:";
+    const { facilitator, calls } = countingFacilitator();
+    const gate = createPaywall(config, {
+      signer,
+      facilitator,
+      cache: createRedisSettlementCache({ client, keyPrefix }),
+    });
+
+    // The mock facilitator's nonce for this header, as the gate keys it.
+    const verification = await facilitator.verify({
+      payment: { model: "x402", paymentSignature: headers[PAYMENT_SIGNATURE_HEADER] },
+      offer: { ...config, resource: baseRequest.url, models: ["x402"] },
+    });
+    if (!verification.valid) throw new Error("expected the mock to accept the payment");
+    const otherProcess = createRedisSettlementCache({ client, keyPrefix });
+    await expect(otherProcess.acquire(`x402:${verification.nonce}`, 30_000)).resolves.toBe(true);
+
+    const outcome = await gate({ ...baseRequest, headers });
+    expect(outcome).toEqual({ kind: "rejected", status: 409, reason: "settlement in progress" });
+    expect(calls.settle).toBe(0);
+  });
+
+  it("releases the lock after settling so a retry replays the receipt", async () => {
+    const client = new RedisMock() as unknown as RedisLikeClient;
+    const { facilitator, calls } = countingFacilitator();
+    const cache = createRedisSettlementCache({ client, keyPrefix: "gate-test:release:" });
+    const gate = createPaywall(config, { signer, facilitator, cache });
+
+    const first = await gate({ ...baseRequest, headers });
+    const second = await gate({ ...baseRequest, headers });
+    expect(first.kind).toBe("settled");
+    expect(second.kind).toBe("settled");
+    if (first.kind !== "settled" || second.kind !== "settled") return;
+    expect(second.replayed).toBe(true);
+    expect(second.receipt).toEqual(first.receipt);
+    expect(calls.settle).toBe(1);
+  });
+
+  it("reports a cache write failure to onCacheError with the cache key", async () => {
+    const writeError = new Error("redis down");
+    const reported: Array<{ error: Error; key: string }> = [];
+    const gate = createPaywall(config, {
+      signer,
+      facilitator: createMockFacilitator(),
+      cache: {
+        async get() {
+          return undefined;
+        },
+        async set() {
+          throw writeError;
+        },
+      },
+      onCacheError: (error, key) => {
+        reported.push({ error, key });
+      },
+    });
+
+    const outcome = await gate({ ...baseRequest, headers });
+    expect(outcome.kind).toBe("settled");
+    expect(reported).toHaveLength(1);
+    expect(reported[0]?.error).toBe(writeError);
+    expect(reported[0]?.key).toMatch(/^x402:/);
   });
 });
