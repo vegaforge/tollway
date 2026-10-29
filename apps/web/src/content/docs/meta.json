@@ -1,4 +1,13 @@
 {
   "title": "Documentation",
-  "pages": ["index", "getting-started"]
+  "pages": [
+    "index",
+    "getting-started",
+    "---Concepts---",
+    "model-router",
+    "channels",
+    "policy",
+    "receipts",
+    "reconciliation"
+  ]
 }

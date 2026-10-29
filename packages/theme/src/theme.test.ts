@@ -34,6 +34,26 @@ describe("brand palette", () => {
     expect(dark.borderStrong).toBe("#3A3546");
     expect(dark.muted).toBe("#A39FB0");
   });
+
+  it("carries semantic status roles distinct from primary and accent", () => {
+    // Each role + its foreground must be defined in both themes, and the
+    // light/dark values must differ so the role flips with the theme.
+    for (const role of ["success", "warning", "danger"] as const) {
+      const foreground = `${role}Foreground` as const;
+      expect(light[role]).toMatch(/^#[0-9A-F]{6}$/i);
+      expect(dark[role]).toMatch(/^#[0-9A-F]{6}$/i);
+      expect(light[foreground]).toMatch(/^#[0-9A-F]{6}$/i);
+      expect(dark[foreground]).toMatch(/^#[0-9A-F]{6}$/i);
+      expect(light[role]).not.toBe(dark[role]);
+    }
+    // Warning reuses the brand amber in light mode so accent-ish surfaces and
+    // warning surfaces stay visually coherent.
+    expect(light.warning).toBe(brand.amber);
+    // Danger must not collide with primary, otherwise destructive UI looks
+    // identical to a default CTA.
+    expect(light.danger).not.toBe(light.primary);
+    expect(dark.danger).not.toBe(dark.primary);
+  });
 });
 
 describe("css variable naming", () => {
@@ -62,6 +82,17 @@ describe("renderTokensCss", () => {
     expect(css).toContain("--tollway-background: #141017;");
     expect(css).toContain("--tollway-surface: #1D1924;");
     expect(css).toContain("--tollway-border-strong: #3A3546;");
+  });
+
+  it("declares the semantic status roles in both themes", () => {
+    // Light values.
+    expect(css).toContain("--tollway-success: #1E8754;");
+    expect(css).toContain("--tollway-warning: #E59B35;");
+    expect(css).toContain("--tollway-danger: #B5341F;");
+    // Dark values.
+    expect(css).toContain("--tollway-success: #54CB95;");
+    expect(css).toContain("--tollway-warning: #E9A648;");
+    expect(css).toContain("--tollway-danger: #E5654E;");
   });
 
   it("exposes the raw brand palette", () => {

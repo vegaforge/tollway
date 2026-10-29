@@ -6,7 +6,13 @@
  * the payment logic. See docs/design.md, "Architecture" (service side).
  */
 
-export { createInMemorySettlementCache, type SettlementCache } from "./cache.js";
+export {
+  createInMemorySettlementCache,
+  createRedisSettlementCache,
+  type RedisLikeClient,
+  type RedisSettlementCacheOptions,
+  type SettlementCache,
+} from "./cache.js";
 export {
   createHttpFacilitator,
   createMockFacilitator,
@@ -33,3 +39,14 @@ export {
   PAYMENT_SIGNATURE_HEADER,
   readHeader,
 } from "./headers.js";
+export {
+  createMockMppChargeHandler,
+  createMppChargeHandler,
+  deriveMppChargeNonce,
+  type MppChargeHandler,
+  type MppChargeOptions,
+  type MppChargeSettleInput,
+  type MppChargeSettleResult,
+  type MppChargeVerifyInput,
+  type MppChargeVerifyResult,
+} from "./mpp-charge.js";

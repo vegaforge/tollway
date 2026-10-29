@@ -1,0 +1,32 @@
+---
+title: Channels
+description: The MPP one-way channel lifecycle Tollway runs for sustained traffic
+---
+
+Channel mode is the right answer when one agent hits one service often enough that paying per request would dominate the on-chain footprint. A one-way payment channel lives in a Soroban contract; the funder deposits once, then makes many off-chain payments by signing cumulative commitments. Closing the channel submits one transaction that transfers the cumulative committed amount to the recipient and returns the remainder to the funder.
+
+The raw `@stellar/mpp` SDK gives you the primitive. Tollway runs the lifecycle.
+
+## The four phases
+
+**Open.** Deposit into the one-way channel contract, sized from the agent's budget and predicted demand. The open transaction is the only required on-chain settlement until close.
+
+**Commit.** For each paid interaction, produce and store the next cumulative commitment, advancing the off-chain counter with no on-chain transaction. The commitment is the agent's signature over the new cumulative total plus a monotonically increasing sequence number; replaying an older commitment is a no-op because the contract only honors the highest one at close.
+
+**Close.** Decide timing from heuristics: budget nearly drawn down, idle timeout reached, end-of-session signal received. Submit the single settlement, which transfers the latest committed amount to the recipient and returns the remainder to the funder.
+
+**Recover.** If the counterparty stops responding mid-channel, follow the contract's dispute or timeout path to get the committed funds back. This event is surfaced loudly: silent recovery is the worst failure mode for channel mode.
+
+Recovery is a first-class feature here, not an afterthought. The edge cases live in that path, and so do the tests.
+
+## Why the order matters
+
+Per the design notes, channel mode is naturally idempotent: a repeated commitment at the same sequence is a no-op. Tollway enforces that property at the commit step so a retry storm does not double-commit.
+
+## In the code
+
+The lifecycle manager lives in `packages/channels/src/`. The relevant `@stellar/mpp` surface is the `channel` module (`@stellar/mpp/channel`), which exposes `open`, `commitment`, `close`, and `claim`. Recovery is `claim` gated by `closeEffectiveAtLedger` plus a `fundWaitingPeriod`.
+
+## Reference
+
+[`docs/design.md`, "The channel lifecycle manager"](https://github.com/vegaforge/tollway/blob/main/docs/design.md#the-channel-lifecycle-manager) is the architectural reference.

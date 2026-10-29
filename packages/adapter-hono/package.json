@@ -30,13 +30,13 @@
     "typecheck": "tsc --noEmit"
   },
   "dependencies": {
-    "@tollway/core": "workspace:*",
     "@tollway/server": "workspace:*"
   },
   "peerDependencies": {
     "hono": "^4.0.0"
   },
   "devDependencies": {
+    "@tollway/core": "workspace:*",
     "@types/node": "^22.19.20",
     "hono": "^4.6.0",
     "tsup": "^8.5.0",

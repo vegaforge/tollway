@@ -1,0 +1,68 @@
+---
+title: Policy and budgets
+description: The declarative schema Tollway enforces across every settlement model
+---
+
+Policy is data, not code: a small declarative schema the policy engine enforces across every settlement model. Enforcement applies the same way whether the payment runs through x402, MPP charge, or MPP channel, because policy sits above the router.
+
+## The schema
+
+```ts
+type Policy = {
+  budgets?: {
+    daily?: string;   // spend ceiling per UTC day, integer string in smallest unit
+    total?: string;   // lifetime ceiling for this policy
+  };
+  perService?: Record<string, { cap?: string }>;
+  perModel?: Partial<Record<SettlementModel, {
+    enabled?: boolean;
+    minChannelDeposit?: string;
+  }>>;
+  rateLimit?: { requestsPerMinute?: number };
+  anomaly?: { maxSpendPerMinute?: string };
+};
+```
+
+Every amount is an integer string in the asset's smallest unit, the same convention used on the canonical receipt. That is what lets the engine compose with bigint arithmetic and keep 64-bit amounts exact.
+
+## What each field does
+
+**`budgets.daily`** is the per-UTC-day ceiling. The engine resets at the day boundary derived from the configured clock.
+
+**`budgets.total`** is the lifetime ceiling for this policy. Useful for a fixed credit allocation.
+
+**`perService`** lets the agent cap exposure to a single counterparty independently of the global budget. The key is the payee address (or service id).
+
+**`perModel`** turns a model off (`enabled: false`) or sets a minimum deposit for channel mode (`minChannelDeposit`). Channel mode below the minimum deposit cannot pay back the open cost, so the engine refuses to route there.
+
+**`rateLimit.requestsPerMinute`** is a sliding-window cap. The window is one minute.
+
+**`anomaly.maxSpendPerMinute`** is the per-minute spend ceiling. Crossing it trips the anomaly stop, which the agent surfaces as a hard error: a sudden burst of spending is the most common signal of a compromised key or a runaway agent, and the engine fails closed rather than rationalize the spike.
+
+## Two layers of enforcement
+
+Where the agent uses an OpenZeppelin smart account, Tollway maps as many constraints as possible down to the on-chain smart-account policy, so the chain itself backs the limit. Where it does not, Tollway enforces at the application layer. Defense in depth, with the honest caveat that application-layer enforcement is only as strong as the process running it.
+
+## In the code
+
+The policy types and the in-memory engine live in `packages/core/src/policy.ts`:
+
+```ts
+import { createPolicyEngine, type Policy } from "@tollway/core";
+
+const engine = createPolicyEngine({
+  budgets: { daily: "1000000000" },
+  perModel: { "mpp-channel": { minChannelDeposit: "500000000" } },
+});
+
+const decision = await engine.check(intent);
+if (!decision.allowed) {
+  console.warn(`policy blocked: ${decision.rule} - ${decision.detail}`);
+}
+```
+
+After a settlement lands, the agent calls `engine.record(intent)` so daily and per-service totals advance.
+
+## Reference
+
+[`docs/design.md`, "Policy and budgets"](https://github.com/vegaforge/tollway/blob/main/docs/design.md#policy-and-budgets) is the architectural reference.

@@ -11,6 +11,8 @@ export type TollwayErrorCode =
   | "canonicalization-failed"
   | "budget-exceeded"
   | "payment-failed"
+  | "policy-blocked"
+  | "receipt-verification-failed"
   | "channel-not-found"
   | "channel-not-open"
   | "channel-already-closed"

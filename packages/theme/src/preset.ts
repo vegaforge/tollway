@@ -44,6 +44,18 @@ export const tollwayPreset: TollwayTailwindPreset = {
           DEFAULT: cssVar("border"),
           strong: cssVar("borderStrong"),
         },
+        success: {
+          DEFAULT: cssVar("success"),
+          foreground: cssVar("successForeground"),
+        },
+        warning: {
+          DEFAULT: cssVar("warning"),
+          foreground: cssVar("warningForeground"),
+        },
+        danger: {
+          DEFAULT: cssVar("danger"),
+          foreground: cssVar("dangerForeground"),
+        },
       },
     },
   },

@@ -1,26 +1,60 @@
 /**
  * @tollway/adapter-fastify
  *
- * Fastify adapter for the Tollway payment gate. The shape mirrors
- * @tollway/adapter-express, the worked reference: a thin map from Fastify
- * requests into the gate and gate outcomes back out. See docs/design.md,
- * "Repository layout".
- *
- * TODO(good first issue): implement fastifyPaywall as a preHandler hook,
- * following packages/adapter-express/src/index.ts. On a settled outcome set
- * the PAYMENT-RESPONSE header and let the handler run; on payment-required
- * answer 402 with the challenge; on rejected answer the rejection status.
- * Expose the verified receipt to downstream handlers, and cover the flow
- * with a test using Fastify's inject().
+ * A thin translation between Fastify and the framework-agnostic gate in
+ * @tollway/server. All the payment logic lives in the gate; this adapter
+ * only maps Fastify requests in and gate outcomes out, exactly the same
+ * shape as @tollway/adapter-express, @tollway/adapter-hono, and
+ * @tollway/adapter-next. See docs/design.md, "Repository layout".
  */
 
-import { NotImplementedError } from "@tollway/core";
-import type { Gate } from "@tollway/server";
-import type { preHandlerHookHandler } from "fastify";
+import type { Gate, GateOutcome } from "@tollway/server";
+import type { FastifyReply, FastifyRequest, preHandlerHookHandler } from "fastify";
 
-export function fastifyPaywall(_gate: Gate): preHandlerHookHandler {
-  throw new NotImplementedError(
-    "the Fastify adapter",
-    'docs/design.md, "Repository layout"; see @tollway/adapter-express for the reference',
-  );
+type SettledReceipt = Extract<GateOutcome, { kind: "settled" }>["receipt"];
+
+/** Where the verified receipt is stashed on the Fastify request for downstream handlers. */
+export const RECEIPT_REQUEST_KEY = "tollwayReceipt";
+
+declare module "fastify" {
+  interface FastifyRequest {
+    tollwayReceipt?: SettledReceipt;
+  }
+}
+
+/**
+ * Wraps a gate as a Fastify `preHandler` hook. On a settled payment it
+ * sets the PAYMENT-RESPONSE header, attaches the receipt to
+ * `request.tollwayReceipt`, and returns so the downstream route handler
+ * runs. Otherwise it answers the request itself (402 with the challenge,
+ * or the rejection status).
+ */
+export function fastifyPaywall(gate: Gate): preHandlerHookHandler {
+  return async function preHandler(request: FastifyRequest, reply: FastifyReply): Promise<void> {
+    const outcome = await gate({
+      method: request.method,
+      url: request.url,
+      headers: request.headers,
+    });
+
+    if (outcome.kind === "settled") {
+      applyHeaders(reply, outcome.headers);
+      request.tollwayReceipt = outcome.receipt;
+      return;
+    }
+
+    if (outcome.kind === "payment-required") {
+      applyHeaders(reply, outcome.headers);
+      await reply.status(outcome.status).send(outcome.challenge);
+      return;
+    }
+
+    await reply.status(outcome.status).send({ error: outcome.reason });
+  };
+}
+
+function applyHeaders(reply: FastifyReply, headers: Record<string, string>): void {
+  for (const [name, value] of Object.entries(headers)) {
+    reply.header(name, value);
+  }
 }
