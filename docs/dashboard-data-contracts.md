@@ -1,6 +1,6 @@
 # Dashboard data contracts
 
-A contributor guide for the Tollway observability dashboard (`apps/dashboard`). Every view here renders against `@tollway/observability` once that package's metric side ships (tracked in #31); until then, each view either reads from a typed local seam under `apps/dashboard/src/data/` or shows a placeholder naming the source it will eventually consume. This document records both the primitives every view composes from and the contracts each view holds with its data source so new views stay consistent.
+A contributor guide for the Tollway observability dashboard (`apps/dashboard`). Every view here is meant to render against `@tollway/observability`. The hub itself shipped in #31, but nothing feeds it gate outcomes yet (tracked in #106), so for now each view either reads from a typed local seam under `apps/dashboard/src/data/` or shows a placeholder naming the source it will eventually consume. This document records both the primitives every view composes from and the contracts each view holds with its data source so new views stay consistent.
 
 See also `docs/design.md`, "Observability", which lists what the dashboard is supposed to show and the webhook event set it consumes.
 
