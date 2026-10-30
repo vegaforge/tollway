@@ -1,0 +1,97 @@
+# Malicious-behaviour rules for Go. Tests: gateway.go in this folder.
+
+rules:
+  - id: go-init-side-effects
+    languages: [go]
+    severity: ERROR
+    message: >-
+      An init() function that makes network calls or starts programs. init()
+      runs as soon as the package is imported, including in tests.
+    patterns:
+      - pattern-inside: |
+          func init() { ... }
+      - pattern-either:
+          - pattern: http.Get(...)
+          - pattern: http.Post(...)
+          - pattern: http.Head(...)
+          - pattern: http.PostForm(...)
+          - pattern: http.NewRequest(...)
+          - pattern: http.NewRequestWithContext(...)
+          - pattern: $C.Do(...)
+          - pattern: net.Dial(...)
+          - pattern: net.DialTimeout(...)
+          - pattern: exec.Command(...)
+          - pattern: exec.CommandContext(...)
+          - pattern: os.StartProcess(...)
+
+  - id: go-os-exec
+    languages: [go]
+    severity: ERROR
+    message: >-
+      Starts another program through os/exec, syscall or os.StartProcess. The gateway does not start other programs. If a
+      maintainer adds code that genuinely needs it, narrow this rule in the
+      same pull request.
+    pattern-either:
+      - pattern: exec.Command(...)
+      - pattern: exec.CommandContext(...)
+      - pattern: syscall.Exec(...)
+      - pattern: os.StartProcess(...)
+
+  - id: go-decoded-or-remote-execution
+    languages: [go]
+    severity: ERROR
+    mode: taint
+    message: >-
+      Decoded or downloaded data flows into a program launch or a file write.
+      This is the signature of a dropper.
+    pattern-sources:
+      - pattern: base64.StdEncoding.DecodeString(...)
+      - pattern: base64.URLEncoding.DecodeString(...)
+      - pattern: base64.RawStdEncoding.DecodeString(...)
+      - pattern: hex.DecodeString(...)
+      - pattern: http.Get(...)
+      - pattern: $C.Do(...)
+      - pattern: io.ReadAll(...)
+    pattern-sinks:
+      - pattern: exec.Command(...)
+      - pattern: exec.CommandContext(...)
+      - pattern: syscall.Exec(...)
+      - pattern: os.StartProcess(...)
+      - pattern: os.WriteFile(...)
+      - pattern: plugin.Open(...)
+
+  - id: go-environment-exfiltration
+    languages: [go]
+    severity: ERROR
+    mode: taint
+    message: >-
+      The whole environment, or a secret-named environment variable, flows
+      into a network request URL or body.
+    pattern-sources:
+      - pattern: os.Environ()
+      - patterns:
+          - pattern-either:
+              - pattern: os.Getenv($K)
+              - pattern: os.LookupEnv($K)
+          - metavariable-regex:
+              metavariable: $K
+              regex: (?i).*(TOKEN|SECRET|PASSW|SEED|MNEMONIC|PRIVATE|CREDENTIAL|GITHUB_|SSH).*
+    pattern-sinks:
+      - patterns:
+          - pattern-inside: http.Post($U, $T, $B)
+          - pattern-either:
+              - pattern: $U
+              - pattern: $B
+      - patterns:
+          - pattern-inside: http.NewRequest($M, $U, $B)
+          - pattern-either:
+              - pattern: $U
+              - pattern: $B
+      - patterns:
+          - pattern-inside: http.NewRequestWithContext($CTX, $M, $U, $B)
+          - pattern-either:
+              - pattern: $U
+              - pattern: $B
+      - pattern: http.Get(...)
+      - pattern: net.Dial(...)
+      - pattern: $CONN.Write(...)

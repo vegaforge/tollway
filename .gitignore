@@ -41,3 +41,6 @@ pnpm-debug.log*
 # the maintainer at the repository root. scripts/*.sh is not affected.
 .worktrees/
 /*.sh
+
+# Python bytecode from scripts/security
+__pycache__/

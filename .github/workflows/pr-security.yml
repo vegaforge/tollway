@@ -1,0 +1,413 @@
+# Security gate for pull requests. Decision record:
+# docs/adr/ADR-2026-10-29-pr-security-gate.md
+#
+# Every job reads the pull request as data. Nothing here installs its
+# dependencies, builds it, or runs its code. The checks themselves (scripts,
+# Semgrep rules, allowlists) are taken from the base branch, so a pull request
+# cannot weaken the checks that judge it. Changes to this file and to the
+# checks are sensitive paths: they need a maintainer's review on the exact
+# commit, enforced by the `sensitive-paths` job and by CODEOWNERS.
+#
+# The `security` job at the end is the required status check.
+
+name: PR security
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened, ready_for_review]
+  # A review can turn `sensitive-paths` green, so re-run when one is submitted
+  # or dismissed.
+  pull_request_review:
+    types: [submitted, dismissed]
+
+permissions: {}
+
+concurrency:
+  group: pr-security-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+env:
+  PYTHONDONTWRITEBYTECODE: '1'
+  # Tool versions. Each one is pinned and verified before it runs.
+  OSV_SCANNER_VERSION: v2.7.0
+  OSV_SCANNER_SHA256: 160c6253e2922e9e0a6a9771c5c4c40a4b3c6090b34a3cdd5e80c96cc2e4218b
+  CARGO_DENY_VERSION: 0.20.2
+  CARGO_DENY_SHA256: 9f12ed4c49936e09b48bf862b595cde2fe64fcbd9d74dfacac6131ca824c8d5f
+  GOVULNCHECK_VERSION: v1.9.0
+
+jobs:
+  diff-scan:
+    name: diff scan
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    permissions:
+      contents: read
+    steps:
+      - name: Check out the pull request as data
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          path: pr
+          fetch-depth: 2
+          persist-credentials: false
+      - name: Check out the checks from the base branch
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.event.pull_request.base.sha }}
+          path: trusted
+          persist-credentials: false
+          # Cone mode also brings the root files, which is where deny.toml lives.
+          sparse-checkout: |
+            scripts/security
+            .github/semgrep
+            .github/security
+      - name: Use the base branch copy of the checks
+        run: |
+          if [ -f trusted/scripts/security/scan_diff.py ]; then
+            echo "CHECKS=$GITHUB_WORKSPACE/trusted" >> "$GITHUB_ENV"
+          else
+            echo "::warning::The base branch has no security checks yet, so this first install uses the copies in the pull request."
+            echo "CHECKS=$GITHUB_WORKSPACE/pr" >> "$GITHUB_ENV"
+          fi
+      - name: Test the checks
+        run: python3 -m unittest discover -s "$CHECKS/scripts/security"
+      - name: Scan the changed files
+        env:
+          AUTHOR_ASSOCIATION: ${{ github.event.pull_request.author_association }}
+        run: |
+          python3 -I "$CHECKS/scripts/security/scan_diff.py" \
+            --repo pr --base HEAD^1 --head HEAD \
+            --author-association "$AUTHOR_ASSOCIATION" \
+            --allowlist "$CHECKS/.github/security/allowed-binaries.txt"
+
+  malicious-patterns:
+    name: malicious patterns
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    permissions:
+      contents: read
+    steps:
+      - name: Check out the pull request as data
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          path: pr
+          fetch-depth: 2
+          persist-credentials: false
+      - name: Check out the checks from the base branch
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.event.pull_request.base.sha }}
+          path: trusted
+          persist-credentials: false
+          sparse-checkout: |
+            scripts/security
+            .github/semgrep
+            .github/security
+      - name: Use the base branch copy of the checks
+        run: |
+          if [ -f trusted/scripts/security/scan_diff.py ]; then
+            echo "CHECKS=$GITHUB_WORKSPACE/trusted" >> "$GITHUB_ENV"
+          else
+            echo "::warning::The base branch has no security checks yet, so this first install uses the copies in the pull request."
+            echo "CHECKS=$GITHUB_WORKSPACE/pr" >> "$GITHUB_ENV"
+          fi
+      - name: Install Semgrep from hash-pinned requirements
+        run: |
+          python3 -m venv "$RUNNER_TEMP/tools"
+          "$RUNNER_TEMP/tools/bin/pip" install --quiet --require-hashes --no-deps \
+            -r "$CHECKS/.github/security/requirements.txt"
+      - name: Test the rules
+        run: '"$RUNNER_TEMP/tools/bin/semgrep" --test --metrics=off --disable-version-check "$CHECKS/.github/semgrep"'
+      - name: Scan the changed files
+        working-directory: pr
+        run: |
+          # Every added or modified file, passed explicitly so that
+          # .semgrepignore and .gitignore cannot hide any of them. The rule
+          # tests are skipped: they are deliberate samples, and changing them
+          # needs a maintainer's review.
+          mapfile -d '' files < <(git diff --name-only -z --no-renames --diff-filter=AMT HEAD^1 HEAD -- . ':(exclude).github/semgrep/**')
+          if [ "${#files[@]}" -eq 0 ]; then
+            echo "No changed files to scan."
+            exit 0
+          fi
+          "$RUNNER_TEMP/tools/bin/semgrep" scan \
+            --metrics=off --disable-version-check \
+            --config "$CHECKS/.github/semgrep" \
+            --x-ignore-semgrepignore-files \
+            --timeout 60 --max-target-bytes 0 \
+            --json --output "$RUNNER_TEMP/semgrep.json" \
+            "${files[@]}" || true
+          python3 -I "$CHECKS/scripts/security/semgrep_report.py" "$RUNNER_TEMP/semgrep.json"
+
+  sensitive-paths:
+    name: sensitive paths
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    permissions:
+      contents: read
+      pull-requests: read # read the reviews on this pull request
+    steps:
+      - name: Check out the pull request as data
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          path: pr
+          fetch-depth: 2
+          persist-credentials: false
+      - name: Check out the checks from the base branch
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.event.pull_request.base.sha }}
+          path: trusted
+          persist-credentials: false
+          sparse-checkout: |
+            scripts/security
+            .github/semgrep
+            .github/security
+      - name: Use the base branch copy of the checks
+        run: |
+          if [ -f trusted/scripts/security/scan_diff.py ]; then
+            echo "CHECKS=$GITHUB_WORKSPACE/trusted" >> "$GITHUB_ENV"
+          else
+            echo "::warning::The base branch has no security checks yet, so this first install uses the copies in the pull request."
+            echo "CHECKS=$GITHUB_WORKSPACE/pr" >> "$GITHUB_ENV"
+          fi
+      - name: Require a maintainer review for sensitive changes
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          PR_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          PR_AUTHOR: ${{ github.event.pull_request.user.login }}
+          PR_AUTHOR_TYPE: ${{ github.event.pull_request.user.type }}
+          PR_AUTHOR_ASSOCIATION: ${{ github.event.pull_request.author_association }}
+        run: |
+          python3 -I "$CHECKS/scripts/security/check_review.py" \
+            --repo pr --base HEAD^1 --head HEAD \
+            --paths "$CHECKS/.github/security/sensitive-paths.txt"
+
+  dependencies:
+    name: dependencies
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    permissions:
+      contents: read
+    steps:
+      - name: Check out the pull request as data
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          path: pr
+          fetch-depth: 2
+          persist-credentials: false
+      - name: Check out the checks from the base branch
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.event.pull_request.base.sha }}
+          path: trusted
+          persist-credentials: false
+          sparse-checkout: |
+            scripts/security
+            .github/semgrep
+            .github/security
+      - name: Use the base branch copy of the checks
+        run: |
+          if [ -f trusted/scripts/security/scan_diff.py ]; then
+            echo "CHECKS=$GITHUB_WORKSPACE/trusted" >> "$GITHUB_ENV"
+          else
+            echo "::warning::The base branch has no security checks yet, so this first install uses the copies in the pull request."
+            echo "CHECKS=$GITHUB_WORKSPACE/pr" >> "$GITHUB_ENV"
+          fi
+      - name: Lay out the base commit next to the pull request
+        run: git -C pr worktree add --detach "$RUNNER_TEMP/base" HEAD^1
+
+      - name: Install OSV-Scanner and verify its checksum
+        run: |
+          curl -fsSLo "$RUNNER_TEMP/osv-scanner" \
+            "https://github.com/google/osv-scanner/releases/download/${OSV_SCANNER_VERSION}/osv-scanner_linux_amd64"
+          echo "${OSV_SCANNER_SHA256}  $RUNNER_TEMP/osv-scanner" | sha256sum --check --strict
+          chmod +x "$RUNNER_TEMP/osv-scanner"
+      - name: Malicious packages and new vulnerabilities (OSV)
+        run: |
+          # Exit code 0 means clean, 1 means findings, 128 means no lockfiles.
+          # Anything else is a scanner failure and fails the job.
+          for side in base pr; do
+            dir="$GITHUB_WORKSPACE/pr"
+            [ "$side" = base ] && dir="$RUNNER_TEMP/base"
+            set +e
+            "$RUNNER_TEMP/osv-scanner" scan source --recursive --format json \
+              --config "$CHECKS/.github/security/osv-scanner.toml" \
+              --output "$RUNNER_TEMP/osv-$side.json" "$dir" > /dev/null
+            code=$?
+            set -e
+            case "$code" in
+              0|1|128) ;;
+              *) echo "::error::osv-scanner failed on the $side tree (exit $code)"; exit 1 ;;
+            esac
+          done
+          python3 -I "$CHECKS/scripts/security/compare_vulns.py" osv \
+            "$RUNNER_TEMP/osv-base.json" "$RUNNER_TEMP/osv-pr.json"
+
+      - name: Dependency review (new vulnerable or denied-licence dependencies)
+        uses: actions/dependency-review-action@a1d282b36b6f3519aa1f3fc636f609c47dddb294 # v5.0.0
+        with:
+          base-ref: ${{ github.event.pull_request.base.sha }}
+          head-ref: ${{ github.event.pull_request.head.sha }}
+          fail-on-severity: moderate
+          comment-summary-in-pr: never
+          deny-licenses: >-
+            AGPL-1.0-only, AGPL-1.0-or-later, AGPL-3.0-only, AGPL-3.0-or-later,
+            GPL-2.0-only, GPL-2.0-or-later, GPL-3.0-only, GPL-3.0-or-later,
+            SSPL-1.0, BUSL-1.1
+
+      - name: Rust dependency sources and bans (cargo-deny)
+        if: hashFiles('pr/Cargo.lock') != ''
+        env:
+          # Ignore any rust-toolchain file in the pull request: it can point
+          # cargo at a toolchain binary the pull request supplies.
+          RUSTUP_TOOLCHAIN: stable
+        run: |
+          curl -fsSLo "$RUNNER_TEMP/cargo-deny.tgz" \
+            "https://github.com/EmbarkStudios/cargo-deny/releases/download/${CARGO_DENY_VERSION}/cargo-deny-${CARGO_DENY_VERSION}-x86_64-unknown-linux-musl.tar.gz"
+          echo "${CARGO_DENY_SHA256}  $RUNNER_TEMP/cargo-deny.tgz" | sha256sum --check --strict
+          tar -xzf "$RUNNER_TEMP/cargo-deny.tgz" -C "$RUNNER_TEMP"
+          # The config comes from the base branch, like the other checks.
+          config="$GITHUB_WORKSPACE/trusted/deny.toml"
+          if [ ! -f "$config" ]; then
+            echo "::warning::The base branch has no deny.toml yet, so this first install uses the one in the pull request."
+            config="$GITHUB_WORKSPACE/pr/deny.toml"
+          fi
+          "$RUNNER_TEMP/cargo-deny-${CARGO_DENY_VERSION}-x86_64-unknown-linux-musl/cargo-deny" \
+            --manifest-path pr/Cargo.toml --config "$config" check bans sources
+
+      - name: Set up Go
+        if: hashFiles('pr/**/go.mod') != ''
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version: '1.25'
+          cache: false
+      - name: Go module checksums and reachable vulnerabilities (govulncheck)
+        if: hashFiles('pr/**/go.mod') != ''
+        env:
+          # Use the Go installed above, never a toolchain the go.mod asks for,
+          # and never run cgo (it would compile C from the pull request).
+          GOTOOLCHAIN: local
+          CGO_ENABLED: '0'
+        run: |
+          GOBIN="$RUNNER_TEMP/bin" go install "golang.org/x/vuln/cmd/govulncheck@${GOVULNCHECK_VERSION}"
+          status=0
+          while IFS= read -r -d '' mod; do
+            dir=$(dirname "$mod")
+            rel=${dir#pr/}
+            echo "::group::$rel"
+            (cd "$dir" && go mod verify) || status=1
+            (cd "$dir" && "$RUNNER_TEMP/bin/govulncheck" -format json ./... > "$RUNNER_TEMP/gv-pr.json") || true
+            if [ -f "$RUNNER_TEMP/base/$rel/go.mod" ]; then
+              (cd "$RUNNER_TEMP/base/$rel" && "$RUNNER_TEMP/bin/govulncheck" -format json ./... > "$RUNNER_TEMP/gv-base.json") || true
+            else
+              : > "$RUNNER_TEMP/gv-base.json"
+            fi
+            python3 -I "$CHECKS/scripts/security/compare_vulns.py" govulncheck \
+              "$RUNNER_TEMP/gv-base.json" "$RUNNER_TEMP/gv-pr.json" || status=1
+            echo "::endgroup::"
+          done < <(find pr -name go.mod -not -path '*/node_modules/*' -print0)
+          exit "$status"
+
+  workflows:
+    name: workflows
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    permissions:
+      contents: read
+    steps:
+      - name: Check out the pull request as data
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          path: pr
+          persist-credentials: false
+      - name: Check out the checks from the base branch
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.event.pull_request.base.sha }}
+          path: trusted
+          persist-credentials: false
+          sparse-checkout: |
+            scripts/security
+            .github/semgrep
+            .github/security
+      - name: Use the base branch copy of the checks
+        run: |
+          if [ -f trusted/scripts/security/scan_diff.py ]; then
+            echo "CHECKS=$GITHUB_WORKSPACE/trusted" >> "$GITHUB_ENV"
+          else
+            echo "::warning::The base branch has no security checks yet, so this first install uses the copies in the pull request."
+            echo "CHECKS=$GITHUB_WORKSPACE/pr" >> "$GITHUB_ENV"
+          fi
+      - name: Install zizmor from hash-pinned requirements
+        run: |
+          python3 -m venv "$RUNNER_TEMP/tools"
+          "$RUNNER_TEMP/tools/bin/pip" install --quiet --require-hashes --no-deps \
+            -r "$CHECKS/.github/security/requirements.txt"
+      - name: Audit every workflow (zizmor)
+        # --no-config: a zizmor.yml in the pull request cannot switch audits off.
+        run: '"$RUNNER_TEMP/tools/bin/zizmor" --offline --no-config --min-severity=medium --format=github pr/.github/workflows'
+
+  malware-signatures:
+    name: malware signatures
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    permissions:
+      contents: read
+    steps:
+      - name: Check out the pull request as data
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          path: pr
+          fetch-depth: 2
+          persist-credentials: false
+      - name: Install ClamAV and fetch current signatures
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq clamav clamav-freshclam > /dev/null
+          sudo systemctl stop clamav-freshclam || true
+          for attempt in 1 2 3; do
+            sudo freshclam --quiet && break
+            [ "$attempt" = 3 ] && { echo "::error::Could not download ClamAV signatures."; exit 1; }
+            sleep 20
+          done
+      - name: Scan the changed files
+        working-directory: pr
+        run: |
+          git diff --name-only -z --no-renames --diff-filter=AMT HEAD^1 HEAD > "$RUNNER_TEMP/changed"
+          if [ ! -s "$RUNNER_TEMP/changed" ]; then
+            echo "No changed files to scan."
+            exit 0
+          fi
+          tr '\0' '\n' < "$RUNNER_TEMP/changed" > "$RUNNER_TEMP/changed.txt"
+          # Exit code 0 is clean, 1 is a detection, 2 is an error. Both of the
+          # last two fail the job.
+          clamscan --infected --no-summary \
+            --follow-dir-symlinks=0 --follow-file-symlinks=0 \
+            --scan-archive=yes --alert-encrypted=yes --alert-exceeds-max=yes \
+            --max-filesize=100M --max-scansize=400M \
+            --file-list="$RUNNER_TEMP/changed.txt"
+
+  security:
+    name: security
+    if: always()
+    needs:
+      [diff-scan, malicious-patterns, sensitive-paths, dependencies, workflows, malware-signatures]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 2
+    permissions: {}
+    steps:
+      - name: Require every security job to pass
+        env:
+          RESULTS: ${{ toJSON(needs) }}
+        run: |
+          python3 -I -c '
+          import json, os, sys
+          results = {job: info["result"] for job, info in json.loads(os.environ["RESULTS"]).items()}
+          for job, result in sorted(results.items()):
+              print(f"{job}: {result}")
+          failed = [job for job, result in results.items() if result != "success"]
+          if failed:
+              print("::error title=security::These checks did not pass: " + ", ".join(sorted(failed)))
+              sys.exit(1)
+          '
