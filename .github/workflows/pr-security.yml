@@ -261,6 +261,12 @@ jobs:
           head-ref: ${{ github.event.pull_request.head.sha }}
           fail-on-severity: moderate
           comment-summary-in-pr: never
+          # The same advisories as .github/security/osv-scanner.toml, which
+          # gives the reason for each: they are in Semgrep's own pinned
+          # dependencies and do not apply to how the gate runs it.
+          allow-ghsas: >-
+            GHSA-5h93-6whr-6q8j, GHSA-84m7-p3x7-pcfv, GHSA-rwrf-2pqf-9j8j,
+            GHSA-w4fh-qvv9-3v23, GHSA-xcq7-p3pf-p88h
           deny-licenses: >-
             AGPL-1.0-only, AGPL-1.0-or-later, AGPL-3.0-only, AGPL-3.0-or-later,
             GPL-2.0-only, GPL-2.0-or-later, GPL-3.0-only, GPL-3.0-or-later,
