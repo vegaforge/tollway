@@ -1,0 +1,1 @@
+MZ is just two letters here, and this file is long enough to have an e_lfanew slot.
