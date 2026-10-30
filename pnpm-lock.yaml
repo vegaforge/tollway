@@ -1,0 +1,3 @@
+packages:
+  evil@1.0.0:
+    resolution: {tarball: https://example.invalid/evil.tgz}
