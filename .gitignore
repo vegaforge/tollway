@@ -11,10 +11,9 @@ out/
 # Test
 coverage/
 
-# Environment
-.env
-.env.local
-.env.*.local
+# Environment. Every .env variant stays local; only the example is shared.
+.env*
+!.env.example
 
 # Editor and OS
 .DS_Store
@@ -33,4 +32,12 @@ pnpm-debug.log*
 
 # Fumadocs generated source
 .source/
-scripts
+
+# Maintainer-only helper that seeds labels and issues. It is never committed;
+# everything else under scripts/ is tracked.
+/scripts/create-issues.sh
+
+# Governance: worktrees for every branch, and ship-*.sh scripts prepared for
+# the maintainer at the repository root. scripts/*.sh is not affected.
+.worktrees/
+/*.sh

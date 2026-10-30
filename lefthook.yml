@@ -1,0 +1,25 @@
+# Git hooks for Tollway, managed by lefthook (https://lefthook.dev).
+#
+# pnpm install runs lefthook's postinstall, which writes these hooks into
+# .git/hooks. Editing this file does not need a reinstall: lefthook reads it
+# every time a hook runs.
+#
+# pre-commit: format and lint only the staged files, then re-stage the fixes.
+# pre-push:   the full preflight without the build. CI runs the build.
+#
+# Skip once with LEFTHOOK=0 git commit ... and say why in the pull request.
+
+# Standard ** behaviour: matches files at the root and at any depth.
+glob_matcher: doublestar
+
+pre-commit:
+  jobs:
+    - name: biome
+      glob: "**/*.{js,jsx,mjs,cjs,ts,tsx,mts,cts,json,jsonc,css}"
+      run: pnpm exec biome check --write --error-on-warnings --no-errors-on-unmatched --files-ignore-unknown=true {staged_files}
+      stage_fixed: true
+
+pre-push:
+  jobs:
+    - name: preflight
+      run: ./scripts/preflight.sh --fast
