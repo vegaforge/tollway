@@ -9,6 +9,7 @@
 export {
   createInMemorySettlementCache,
   createRedisSettlementCache,
+  type LockingSettlementCache,
   type RedisLikeClient,
   type RedisSettlementCacheOptions,
   type SettlementCache,

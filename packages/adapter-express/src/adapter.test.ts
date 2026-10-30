@@ -1,5 +1,6 @@
 import { Ed25519Signer } from "@tollway/core";
 import {
+  createInMemorySettlementCache,
   createMockFacilitator,
   createPaywall,
   PAYMENT_SIGNATURE_HEADER,
@@ -63,6 +64,51 @@ describe("expressPaywall", () => {
       expect(body.receiptId).toBeTruthy();
     } finally {
       await app.close();
+    }
+  });
+});
+
+describe("expressPaywall with a shared settlement cache", () => {
+  it("does not serve a second route for a payment made on the first", async () => {
+    const signer = await Ed25519Signer.generate("test-key");
+    const gate = createPaywall(config, {
+      signer,
+      facilitator: createMockFacilitator(),
+      cache: createInMemorySettlementCache(),
+    });
+
+    const served: string[] = [];
+    const app = express();
+    app.get("/quotes/latest", expressPaywall(gate), (_req, res) => {
+      served.push("latest");
+      res.json({ quote: 42 });
+    });
+    app.get("/quotes/history", expressPaywall(gate), (_req, res) => {
+      served.push("history");
+      res.json({ quotes: [40, 41, 42] });
+    });
+
+    const server = app.listen(0);
+    await new Promise((resolve) => server.once("listening", resolve));
+    try {
+      const address = server.address();
+      if (!address || typeof address === "string") {
+        throw new Error("expected a TCP address");
+      }
+      const base = `http://127.0.0.1:${address.port}`;
+      const headers = { [PAYMENT_SIGNATURE_HEADER]: "mock-signed-auth-entry" };
+
+      const paid = await fetch(`${base}/quotes/latest`, { headers });
+      expect(paid.status).toBe(200);
+
+      const replay = await fetch(`${base}/quotes/history`, { headers });
+      expect(replay.status).toBe(409);
+      expect(await replay.json()).toEqual({
+        error: "payment already settled for a different offer",
+      });
+      expect(served).toEqual(["latest"]);
+    } finally {
+      await new Promise((resolve) => server.close(resolve));
     }
   });
 });

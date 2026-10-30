@@ -129,3 +129,18 @@ describe("createRedisSettlementCache", () => {
     expect(JSON.parse(direct ?? "null")).toEqual(receipt);
   });
 });
+
+describe("createRedisSettlementCache settlement lock", () => {
+  it("acquire is exclusive across two Redis caches on one client", async () => {
+    const client = new RedisMock() as unknown as RedisLikeClient;
+    const first = createRedisSettlementCache({ client });
+    const second = createRedisSettlementCache({ client });
+
+    await expect(first.acquire("x402:nonce-lock", 30_000)).resolves.toBe(true);
+    await expect(second.acquire("x402:nonce-lock", 30_000)).resolves.toBe(false);
+
+    await first.release("x402:nonce-lock");
+    await expect(second.acquire("x402:nonce-lock", 30_000)).resolves.toBe(true);
+    await second.release("x402:nonce-lock");
+  });
+});
