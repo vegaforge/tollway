@@ -170,7 +170,16 @@ Run the x402 demo with no network, from challenge to a verified receipt:
 MOCK_MODE=true pnpm --filter @tollway/demo start
 ```
 
-Mock mode is the only demo path that works today. Without `MOCK_MODE`, the demo calls the mainnet OpenZeppelin facilitator URL, sends no API key, and uses placeholder addresses, so a real testnet run fails. Fixing those defaults is tracked in [#113](https://github.com/vegaforge/tollway/issues/113).
+Without `MOCK_MODE`, the demo pays 0.001 testnet USDC through the OpenZeppelin Channels testnet facilitator and prints the settlement transaction hash. It needs two testnet accounts with a USDC trustline (the payer also needs testnet USDC from the [Circle faucet](https://faucet.circle.com/)) and an API key from [channels.openzeppelin.com/testnet/gen](https://channels.openzeppelin.com/testnet/gen). Use testnet keys only: the payer's secret key sits in an environment variable.
+
+```bash
+OZ_API_KEY=... \
+STELLAR_RECIPIENT=G... \
+STELLAR_SECRET_KEY=S... \
+pnpm --filter @tollway/demo start
+```
+
+If a setting is missing or invalid, the demo lists every problem and exits with code 1. `FACILITATOR_URL` overrides the facilitator. `STELLAR_NETWORK=mainnet` switches to mainnet and then also needs `STELLAR_RPC_URL`.
 
 Gate a route on the service side:
 
@@ -220,7 +229,6 @@ Open work:
 - Feeding gate outcomes into `@tollway/observability` ([#106](https://github.com/vegaforge/tollway/issues/106)) and signing webhook deliveries ([#104](https://github.com/vegaforge/tollway/issues/104)).
 - A shared conformance suite for the four adapters ([#107](https://github.com/vegaforge/tollway/issues/107)).
 - Dashboard services and exports views ([#108](https://github.com/vegaforge/tollway/issues/108), [#109](https://github.com/vegaforge/tollway/issues/109)). The overview and anomalies pages are placeholders.
-- Working real-facilitator defaults in the demo ([#113](https://github.com/vegaforge/tollway/issues/113)).
 
 Browse the [open issues](https://github.com/vegaforge/tollway/issues) for claimable work, especially the [good first issues](https://github.com/vegaforge/tollway/issues?q=is%3Aissue+is%3Aopen+label%3Adifficulty%3Agood-first-issue). The full design and the planned sequence of work are in [docs/design.md](docs/design.md).
 

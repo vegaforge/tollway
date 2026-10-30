@@ -8,15 +8,25 @@ import { createHttpFacilitator } from "./facilitator.js";
  *
  *   TOLLWAY_FACILITATOR_INTEGRATION=true pnpm --filter @tollway/server test
  *
+ * OpenZeppelin Channels requires an API key on testnet and mainnet. Set
+ * OZ_API_KEY (generate one at https://channels.openzeppelin.com/testnet/gen);
+ * it is sent as a Bearer token on every call.
+ *
  * Override the facilitator with TOLLWAY_FACILITATOR_URL. The default is the
- * OpenZeppelin Stellar facilitator from docs/design.md, live on testnet.
+ * OpenZeppelin Channels testnet facilitator from docs/design.md.
  */
 const RUN = process.env.TOLLWAY_FACILITATOR_INTEGRATION === "true";
 const FACILITATOR_URL =
-  process.env.TOLLWAY_FACILITATOR_URL ?? "https://channels.openzeppelin.com/x402";
+  process.env.TOLLWAY_FACILITATOR_URL ?? "https://channels.openzeppelin.com/x402/testnet";
+const API_KEY = process.env.OZ_API_KEY;
 
 describe.skipIf(!RUN)("createHttpFacilitator (integration)", () => {
-  const facilitator = createHttpFacilitator(FACILITATOR_URL);
+  const auth = { Authorization: `Bearer ${API_KEY}` };
+  const facilitator = createHttpFacilitator(FACILITATOR_URL, {
+    createAuthHeaders: API_KEY
+      ? async () => ({ verify: auth, settle: auth, supported: auth })
+      : undefined,
+  });
 
   it("reads /supported from a live testnet facilitator", async () => {
     const supported = await facilitator.supported();

@@ -90,6 +90,9 @@ importers:
 
   apps/demo:
     dependencies:
+      '@stellar/stellar-sdk':
+        specifier: ^14.6.1
+        version: 14.6.1
       '@tollway/adapter-express':
         specifier: workspace:*
         version: link:../../packages/adapter-express
@@ -99,6 +102,9 @@ importers:
       '@tollway/server':
         specifier: workspace:*
         version: link:../../packages/server
+      '@x402/stellar':
+        specifier: ^2.16.0
+        version: 2.16.0
       express:
         specifier: ^5.1.0
         version: 5.2.1
