@@ -25,8 +25,25 @@ The demo drives one paid x402 request from challenge to signed receipt, with no 
 MOCK_MODE=true pnpm --filter @tollway/demo start
 ```
 
-To run against a real testnet facilitator instead, unset `MOCK_MODE` and optionally set `FACILITATOR_URL`.
+Mock mode is the only demo path that works today. Without `MOCK_MODE`, the demo calls the mainnet OpenZeppelin facilitator URL, sends no API key, and uses placeholder addresses, so a real testnet run fails. Fixing those defaults is tracked in [#113](https://github.com/vegaforge/tollway/issues/113).
 
 ## What is built today
 
-The canonical receipt, the model router interface, and the x402 per-request path are implemented. MPP charge and channel modes, the policy engine, reconciliation, and observability are typed stubs with open issues. See the repository for the current set.
+Tollway is pre-release and no package is published to npm yet.
+
+Implemented and tested:
+
+- `@tollway/core`: the canonical receipt with an Ed25519 signer, the policy and budget engine, and the default model router.
+- `@tollway/server`: the payment gate for x402 and MPP charge, an HTTP facilitator client, a mock facilitator and MPP charge handler, and in-memory and Redis settlement caches.
+- The Express, Fastify, Next.js, and Hono adapters.
+- `@tollway/client` orchestration (policy, routing, receipt verification). You supply the payment signer.
+- `@tollway/channels` open, commit, and close against an injected channel adapter.
+- `@tollway/reconcile` drift detection and `@tollway/observability` metrics, exports, and webhooks.
+
+Still open, each with a tracking issue:
+
+- Real MPP charge settlement ([#100](https://github.com/vegaforge/tollway/issues/100)) and a real MPP channel adapter ([#101](https://github.com/vegaforge/tollway/issues/101)).
+- Channel recovery ([#38](https://github.com/vegaforge/tollway/issues/38)) and router promotion to channel mode ([#105](https://github.com/vegaforge/tollway/issues/105)).
+- x402 V2 wire compatibility ([#43](https://github.com/vegaforge/tollway/issues/43)) and a production x402 client signer ([#102](https://github.com/vegaforge/tollway/issues/102)).
+
+The README's Status section has the full list.
