@@ -1,3 +1,0 @@
-packages:
-  evil@git+https://github.com/x/y:
-    resolution: {type: git, repo: https://github.com/x/y, commit: abc}
