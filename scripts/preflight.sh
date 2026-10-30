@@ -43,14 +43,18 @@ echo -e "${BLUE}=== Tollway preflight ===${NC}"
 echo -e "\n${BLUE}[1/5] Format check (biome format)${NC}"
 pnpm format:check
 
-echo -e "\n${BLUE}[2/5] Lint (biome check, warnings fail)${NC}"
+echo -e "\n${BLUE}[2/5] Lint (biome check, warnings fail; knip)${NC}"
 pnpm lint
+# Knip fails on dependencies nothing imports and imports nothing declares.
+pnpm knip
 
 echo -e "\n${BLUE}[3/5] Typecheck${NC}"
 pnpm typecheck
 
 echo -e "\n${BLUE}[4/5] Tests${NC}"
 pnpm test
+# The PR security checks have their own tests (standard library only).
+PYTHONDONTWRITEBYTECODE=1 python3 -m unittest discover -s scripts/security -q
 
 if [ "$SKIP_BUILD" = "true" ]; then
   echo -e "\n${BLUE}[5/5] Build skipped (--fast). CI runs it on every pull request.${NC}"

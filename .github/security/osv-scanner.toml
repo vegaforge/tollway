@@ -1,0 +1,37 @@
+# OSV-Scanner exceptions for the `dependencies` job in pr-security.yml.
+#
+# Each entry names one advisory, why it does not apply, and an expiry date
+# after which it is reported again. This file is a sensitive path: adding an
+# entry needs a maintainer's review. Never add one to let a contributor's
+# dependency through.
+
+# The five below are in the Python tools the gate itself installs from
+# requirements.txt. Every Semgrep release up to 1.183.0 pins mcp==1.29.0 and
+# opentelemetry-api~=1.37.0, so they cannot be upgraded yet. The gate runs
+# `semgrep scan` and `semgrep --test` offline: it never starts an MCP client or
+# server, and never parses incoming trace headers. Remove these once Semgrep
+# ships with patched versions.
+[[IgnoredVulns]]
+id = "GHSA-5h93-6whr-6q8j"
+ignoreUntil = 2027-01-31
+reason = "mcp 1.29.0 (Semgrep tool dependency): HTTP client transport redirect handling; the gate never uses MCP transports."
+
+[[IgnoredVulns]]
+id = "GHSA-84m7-p3x7-pcfv"
+ignoreUntil = 2027-01-31
+reason = "mcp 1.29.0 (Semgrep tool dependency): StreamableHTTP session accumulation; the gate never runs an MCP server."
+
+[[IgnoredVulns]]
+id = "GHSA-rwrf-2pqf-9j8j"
+ignoreUntil = 2027-01-31
+reason = "mcp 1.29.0 (Semgrep tool dependency): client $ref fetching; the gate never runs an MCP client."
+
+[[IgnoredVulns]]
+id = "GHSA-w4fh-qvv9-3v23"
+ignoreUntil = 2027-01-31
+reason = "mcp 1.29.0 (Semgrep tool dependency): server bearer-token authentication; the gate never runs an MCP server."
+
+[[IgnoredVulns]]
+id = "GHSA-xcq7-p3pf-p88h"
+ignoreUntil = 2027-01-31
+reason = "opentelemetry-api 1.37.0 (Semgrep tool dependency): tracestate parsing; the gate never ingests trace headers."

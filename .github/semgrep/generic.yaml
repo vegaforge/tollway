@@ -1,0 +1,74 @@
+# Language-independent rules: they read source and config files as text.
+# Tests: generic.sh in this folder.
+
+rules:
+  - id: credential-file-access
+    languages: [generic]
+    severity: ERROR
+    message: >-
+      Refers to a credential or wallet location ($CRED). Code in this
+      repository has no reason to touch SSH keys, registry tokens, cloud
+      credentials, browser profiles or wallets on the machine it runs on.
+    paths: &code
+      include:
+        - "*.js"
+        - "*.mjs"
+        - "*.cjs"
+        - "*.jsx"
+        - "*.ts"
+        - "*.mts"
+        - "*.cts"
+        - "*.tsx"
+        - "*.rs"
+        - "*.go"
+        - "*.py"
+        - "*.sh"
+        - "*.bash"
+        - "*.zsh"
+        - "*.ps1"
+        - "*.yml"
+        - "*.yaml"
+        - "*.toml"
+        - "*.json"
+        - "Makefile"
+        - "Dockerfile*"
+        - "*.html"
+      exclude:
+        # The security checks name these paths and hosts in order to detect
+        # them. They are a sensitive path, so they only change with a
+        # maintainer's review.
+        - "scripts/security/**"
+        - "pnpm-lock.yaml"
+        - "package-lock.json"
+        - "Cargo.lock"
+        - "go.sum"
+    patterns:
+      - pattern-regex: (?i)(?P<CRED>[~/\\'"`]\.ssh\b|\bid_(?:rsa|ed25519|ecdsa|dsa)\b|[~/\\'"`]\.npmrc\b|[~/\\'"`]\.yarnrc|[~/\\'"`]\.gitconfig\b|\.git-credentials|[~/\\'"`]\.netrc\b|\.config/gh\b|\.cargo/credentials|\.aws/(?:credentials|config)\b|\.azure/|\.config/gcloud|\.kube/config|\.docker/config\.json|\.gnupg\b|Login Data|Local State|\bCookies\b.{0,20}\bsqlite|\.mozilla/firefox|Library/Application Support/(?:Google/Chrome|BraveSoftware|Firefox)|AppData[\\/](?:Local|Roaming)[\\/](?:Google|BraveSoftware|Mozilla|Exodus|atomic)|\bwallet\.dat\b|\bkeystore/UTC--|\.config/solana/id\.json|\.config/stellar/identity|\.stellar/identity|\bMetaMask\b|nkbihfbeogaeaoehlefnkodbefgpgknn|bfnaelmomeimhlpmgjnjophhpkkoljpa)
+
+  - id: exfiltration-endpoint
+    languages: [generic]
+    severity: ERROR
+    message: >-
+      Contains an address used to receive stolen data ($HOST): chat
+      webhooks, paste sites, tunnels, request catchers, out-of-band testing
+      domains or a bare public IP address.
+    paths: *code
+    patterns:
+      - pattern-regex: (?i)(?P<HOST>discord(?:app)?\.com/api/webhooks|hooks\.slack\.com|api\.telegram\.org/bot|\b(?:pastebin\.com|paste\.ee|hastebin\.com|ghostbin\.|rentry\.co|dpaste\.)|transfer\.sh|file\.io/|\b(?:ngrok\.io|ngrok-free\.app|ngrok\.app|trycloudflare\.com|loca\.lt|serveo\.net|localhost\.run)\b|webhook\.site|requestbin|pipedream\.net|\.oast\.(?:fun|pro|live|site|online|me)|interact\.sh|burpcollaborator\.net|canarytokens|\bhttps?://(?!(?:127\.|0\.0\.0\.0|10\.|192\.168\.|172\.(?:1[6-9]|2\d|3[01])\.|169\.254\.))\d{1,3}(?:\.\d{1,3}){3}\b)
+
+  - id: download-and-execute
+    languages: [generic]
+    severity: ERROR
+    message: >-
+      Downloads or decodes something and runs it in one step. Install tools
+      from pinned releases with a checksum instead.
+    paths: *code
+    pattern-either:
+      - pattern-regex: (?i)\b(?:curl|wget)\b[^\n|;]*\|\s*(?:sudo\s+)?(?:ba|z|da|k)?sh\b
+      - pattern-regex: (?i)\b(?:curl|wget)\b[^\n|;]*\|\s*(?:sudo\s+)?(?:node|python3?|perl|ruby)\b
+      - pattern-regex: (?i)\b(?:ba|z)?sh\s+-c\s+["']?\$\(\s*(?:curl|wget)\b
+      - pattern-regex: (?i)\b(?:ba|z)?sh\s+<\(\s*(?:curl|wget)\b
+      - pattern-regex: (?i)\bbase64\s+(?:-d|--decode|-D)\b[^\n]*\|\s*(?:ba|z)?sh\b
+      - pattern-regex: (?i)\b(?:iex|Invoke-Expression)\b[^\n]*\b(?:iwr|irm|Invoke-WebRequest|Invoke-RestMethod|DownloadString|Net\.WebClient)\b
+      - pattern-regex: (?i)\b(?:iwr|irm|Invoke-WebRequest|Invoke-RestMethod)\b[^\n]*\|\s*(?:iex|Invoke-Expression)\b
+      - pattern-regex: (?i)\bpowershell(?:\.exe)?\b[^\n]*-(?:e|enc|encodedcommand)\s
