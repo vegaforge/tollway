@@ -1,1 +1,1 @@
-{"name": "x", "scripts": {"prepare": "lefthook install"}}
+{"name": "x", "scripts": {"prepare": "lefthook install", "test": "vitest"}}
