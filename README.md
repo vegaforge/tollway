@@ -93,7 +93,7 @@ Its inputs are declared offer hints, observed traffic shape, explicit configurat
 
 ### The x402 request path
 
-The implemented Phase 0 slice runs end to end through `@tollway/core`, `@tollway/server`, an adapter, and a facilitator:
+The x402 path runs end to end through `@tollway/core`, `@tollway/server`, an adapter, and a facilitator. The header encoding and payload shapes do not yet match the x402 V2 wire format that stock x402 clients send; that work is tracked in [#43](https://github.com/vegaforge/tollway/issues/43).
 
 ```mermaid
 sequenceDiagram
@@ -201,19 +201,34 @@ app.get("/quotes/latest", expressPaywall(gate), (_req, res) => {
 
 ## Status
 
-Implemented and tested today:
+Tollway is pre-release. No package is published to npm yet; build from this repository.
 
-- The canonical signed receipt: build, sign, and verify, with a swappable Ed25519 signer.
-- The shared domain types and the model-router interface, with x402 routing.
-- The x402 per-request path end to end, through the server gate, the Express adapter, and a facilitator, with an idempotency cache.
+Implemented and tested:
 
-Defined as typed interfaces with tracked implementation work:
+| Package or app | What works |
+| -------------- | ---------- |
+| `@tollway/core` | Canonical receipt (build, sign, verify) with a swappable Ed25519 signer, zod schemas, the policy engine (`createPolicyEngine`: budgets, per-service caps, rate limits, and anomaly stops, held in memory), and the default model router. |
+| `@tollway/server` | The payment gate (`createPaywall`) for x402 and MPP charge, an HTTP facilitator client built on `@x402/core` and `@x402/stellar`, a mock facilitator, a mock MPP charge handler, and in-memory and Redis settlement caches. |
+| `@tollway/adapter-express`, `-fastify`, `-next`, `-hono` | All four adapters wrap the gate, each with its own tests. |
+| `@tollway/client` | Agent-side orchestration: policy check, routing, receipt verification, and events. You supply the `ClientSettler` that signs payments. |
+| `@tollway/channels` | Channel `open`, `commit`, `shouldClose`, and `close` against an injected `MppChannelAdapter`. |
+| `@tollway/reconcile` | The reconciler and drift detection, with unit and property tests. |
+| `@tollway/observability` | Metric recording, spend summaries, JSON and CSV export, and webhook delivery with retry and timeout. |
+| `@tollway/theme` | Shared design tokens. |
+| `apps/dashboard` | Agents, channels, and receipts views over typed hooks backed by stub data. |
+| `apps/demo` | The x402 round trip in mock mode. |
 
-- MPP charge and MPP channel settlement.
-- The channel lifecycle manager: open, commit, close, recover.
-- The policy and budget engine, reconciliation, and anomaly stops.
-- Observability collection, exports, and webhooks.
-- The Fastify, Next.js, and Hono adapters (Express is the reference implementation).
+Open work:
+
+- Real MPP charge settlement with `@stellar/mpp`: `createMppChargeHandler` throws `NotImplementedError` today ([#100](https://github.com/vegaforge/tollway/issues/100)).
+- A real `MppChannelAdapter` backed by `@stellar/mpp/channel` ([#101](https://github.com/vegaforge/tollway/issues/101)).
+- `ChannelManager.recover`, which throws `NotImplementedError` today ([#38](https://github.com/vegaforge/tollway/issues/38)).
+- Router promotion to `mpp-channel` under sustained traffic ([#105](https://github.com/vegaforge/tollway/issues/105)). The gate answers `501` if a router selects `mpp-channel`.
+- x402 V2 wire compatibility for the gate's headers ([#43](https://github.com/vegaforge/tollway/issues/43)).
+- A production x402 `ClientSettler` for `@tollway/client` ([#102](https://github.com/vegaforge/tollway/issues/102)).
+- Feeding gate outcomes into `@tollway/observability` ([#106](https://github.com/vegaforge/tollway/issues/106)) and signing webhook deliveries ([#104](https://github.com/vegaforge/tollway/issues/104)).
+- A shared conformance suite for the four adapters ([#107](https://github.com/vegaforge/tollway/issues/107)).
+- Dashboard services and exports views ([#108](https://github.com/vegaforge/tollway/issues/108), [#109](https://github.com/vegaforge/tollway/issues/109)). The overview and anomalies pages are placeholders.
 
 Browse the [open issues](https://github.com/vegaforge/tollway/issues) for claimable work, especially the [good first issues](https://github.com/vegaforge/tollway/issues?q=is%3Aissue+is%3Aopen+label%3Adifficulty%3Agood-first-issue). The full design and the planned sequence of work are in [docs/design.md](docs/design.md).
 

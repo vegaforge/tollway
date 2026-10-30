@@ -30,7 +30,7 @@ Routing is overridable per route and per agent. A heuristic that cannot be overr
 
 ## In the code
 
-The interface and the default implementation live in `packages/core/src/router.ts`:
+The interface and the default implementation live in `packages/core/src/router.ts`. The default router picks the first model that both the offer and the policy accept, and honors overrides. It does not yet promote a counterparty to channel mode based on traffic; that is tracked in [#105](https://github.com/vegaforge/tollway/issues/105).
 
 ```ts
 import type { ModelRouter, RouteDecision } from "@tollway/core";

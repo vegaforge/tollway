@@ -25,7 +25,7 @@ Per the design notes, channel mode is naturally idempotent: a repeated commitmen
 
 ## In the code
 
-The lifecycle manager lives in `packages/channels/src/`. The relevant `@stellar/mpp` surface is the `channel` module (`@stellar/mpp/channel`), which exposes `open`, `commitment`, `close`, and `claim`. Recovery is `claim` gated by `closeEffectiveAtLedger` plus a `fundWaitingPeriod`.
+The lifecycle manager lives in `packages/channels/src/`. Open, commit, and close are implemented against an injected `MppChannelAdapter`. Recover throws `NotImplementedError` today ([#38](https://github.com/vegaforge/tollway/issues/38)), and no adapter backed by `@stellar/mpp/channel` ships yet ([#101](https://github.com/vegaforge/tollway/issues/101)). The relevant `@stellar/mpp` surface is the `channel` module (`@stellar/mpp/channel`), which exposes `open`, `commitment`, `close`, and `claim`. Recovery is `claim` gated by `closeEffectiveAtLedger` plus a `fundWaitingPeriod`.
 
 ## Reference
 
