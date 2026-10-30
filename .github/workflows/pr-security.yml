@@ -33,7 +33,11 @@ env:
   OSV_SCANNER_SHA256: 160c6253e2922e9e0a6a9771c5c4c40a4b3c6090b34a3cdd5e80c96cc2e4218b
   CARGO_DENY_VERSION: 0.20.2
   CARGO_DENY_SHA256: 9f12ed4c49936e09b48bf862b595cde2fe64fcbd9d74dfacac6131ca824c8d5f
-  GOVULNCHECK_VERSION: v1.9.0
+  # v1.7.0 is the newest govulncheck that builds with Go 1.25, the gateway's
+  # Go version. Scanning with a newer Go would hide standard-library
+  # vulnerabilities the gateway really has. The vulnerability database is
+  # fetched fresh on every run.
+  GOVULNCHECK_VERSION: v1.7.0
 
 jobs:
   diff-scan:
