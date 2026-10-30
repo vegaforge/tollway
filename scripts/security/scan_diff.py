@@ -19,14 +19,15 @@ Checks, each of which fails the run:
   dependency      package.json and Cargo.toml dependencies declared with git,
                   URL, file or link specifiers.
   lifecycle       New or changed install-time scripts in package.json, unless
-                  the author is an organization owner or member.
+                  the author is an organization owner or member, or has the
+                  admin or maintain role on the repository.
   obfuscation     Very long lines, long base64 or hex blobs, files made
                   mostly of escape sequences, and source files too large for
                   the pattern scanner to analyse in time.
 
 Usage:
   scan_diff.py --repo DIR --base REV --head REV [--author-association A]
-               [--allowlist FILE]
+               [--author-role ROLE] [--allowlist FILE]
   scan_diff.py --repo DIR --head REV --all [--allowlist FILE]
 
 --all scans every file in the head tree instead of the diff. It is used to
@@ -53,16 +54,26 @@ from pathlib import PurePosixPath
 # ---------------------------------------------------------------------------
 
 
+def git_env() -> dict[str, str]:
+    """The environment without inherited GIT_* variables.
+
+    Git exports GIT_DIR, GIT_INDEX_FILE and others while it runs a hook. If
+    they leak into these commands, `git -C <repo>` silently works on the
+    repository that ran the hook instead of <repo>.
+    """
+    return {k: v for k, v in os.environ.items() if not k.startswith("GIT_")}
+
+
 def git(repo: str, *args: str) -> bytes:
     return subprocess.run(
-        ["git", "-C", repo, *args], check=True, capture_output=True
+        ["git", "-C", repo, *args], check=True, capture_output=True, env=git_env()
     ).stdout
 
 
 def read_blob(repo: str, rev: str, path: str) -> bytes | None:
     """Return the file's bytes at `rev`, or None if it does not exist there."""
     proc = subprocess.run(
-        ["git", "-C", repo, "show", f"{rev}:{path}"], capture_output=True
+        ["git", "-C", repo, "show", f"{rev}:{path}"], capture_output=True, env=git_env()
     )
     return proc.stdout if proc.returncode == 0 else None
 
@@ -483,6 +494,9 @@ def line_of(text: str, needle: str) -> int:
 
 LIFECYCLE = ("preinstall", "install", "postinstall", "prepare", "prepublish", "prepublishOnly", "prepack", "postpack", "preprepare", "postprepare", "dependencies")
 TRUSTED_ASSOCIATIONS = {"OWNER", "MEMBER"}
+# Private organization membership shows up as CONTRIBUTOR in workflow events,
+# so the repository role is checked as well.
+TRUSTED_ROLES = {"admin", "maintain"}
 
 
 def scripts_of(data: bytes | None) -> dict[str, str]:
@@ -495,8 +509,8 @@ def scripts_of(data: bytes | None) -> dict[str, str]:
     return scripts if isinstance(scripts, dict) else {}
 
 
-def check_lifecycle(change: Change, base_data: bytes | None, head_text: str, association: str) -> list[Finding]:
-    if association in TRUSTED_ASSOCIATIONS:
+def check_lifecycle(change: Change, base_data: bytes | None, head_text: str, association: str, author_role: str = "") -> list[Finding]:
+    if association in TRUSTED_ASSOCIATIONS or author_role in TRUSTED_ROLES:
         return []
     before = scripts_of(base_data)
     after = scripts_of(head_text.encode())
@@ -561,7 +575,7 @@ def check_obfuscation(change: Change, text: str, lines: list[tuple[int, str]]) -
 # ---------------------------------------------------------------------------
 
 
-def scan(repo: str, base: str | None, head: str, association: str, allowlist: list[str]) -> list[Finding]:
+def scan(repo: str, base: str | None, head: str, association: str, allowlist: list[str], author_role: str = "") -> list[Finding]:
     changes = all_files(repo, head) if base is None else changed_files(repo, base, head)
     findings: list[Finding] = []
     for change in changes:
@@ -599,7 +613,7 @@ def scan(repo: str, base: str | None, head: str, association: str, allowlist: li
         elif name == "package.json":
             findings += check_package_json(change, text)
             if base is not None:
-                findings += check_lifecycle(change, read_blob(repo, base, change.path), text, association)
+                findings += check_lifecycle(change, read_blob(repo, base, change.path), text, association, author_role)
     return findings
 
 
@@ -624,13 +638,14 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--base", help="Revision to diff against")
     parser.add_argument("--all", action="store_true", help="Scan every file in --head")
     parser.add_argument("--author-association", default="NONE", help="GitHub author_association of the pull request author")
+    parser.add_argument("--author-role", default="", help="The author's role on the repository (admin, maintain, write, ...)")
     parser.add_argument("--allowlist", help="File of path globs where images and fonts are allowed")
     args = parser.parse_args(argv)
     if not args.all and not args.base:
         parser.error("--base is required unless --all is given")
 
     base = None if args.all else args.base
-    findings = scan(args.repo, base, args.head, args.author_association.upper(), load_allowlist(args.allowlist))
+    findings = scan(args.repo, base, args.head, args.author_association.upper(), load_allowlist(args.allowlist), args.author_role.lower())
     for f in findings:
         print(annotate(f))
     scanned = f"every file at {args.head}" if args.all else f"{args.base}..{args.head}"

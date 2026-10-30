@@ -4,7 +4,8 @@
 A pull request that adds, changes or deletes a path listed in
 .github/security/sensitive-paths.txt passes only when:
 
-  * its author is an organization owner or member, or
+  * its author is an organization owner or member, or has the admin or
+    maintain role on the repository, or
   * its author is Dependabot and every sensitive file is a manifest or
     lockfile, or
   * a user with the admin or maintain role has APPROVED the pull request on
@@ -36,7 +37,7 @@ from pathlib import PurePosixPath
 from typing import Callable
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from scan_diff import glob_match, load_allowlist  # noqa: E402
+from scan_diff import git_env, glob_match, load_allowlist  # noqa: E402
 
 TRUSTED_ASSOCIATIONS = {"OWNER", "MEMBER"}
 MAINTAINER_ROLES = {"admin", "maintain"}
@@ -59,7 +60,7 @@ def touched_paths(repo: str, base: str, head: str) -> list[str]:
     """Every path the pull request adds, changes or deletes."""
     out = subprocess.run(
         ["git", "-C", repo, "diff", "--name-only", "-z", "--no-renames", base, head],
-        check=True, capture_output=True,
+        check=True, capture_output=True, env=git_env(),
     ).stdout
     return [p for p in out.decode().split("\0") if p]
 
@@ -102,8 +103,24 @@ def decide(pr: PullRequest, touched: list[str], globs: list[str], api: Api, repo
         return True, ["No sensitive paths changed."]
     lines = ["Sensitive paths in this pull request:", *[f"- `{p}`" for p in hits], ""]
 
+    role_cache: dict[str, str] = {}
+
+    def role(user: str) -> str:
+        if user not in role_cache:
+            try:
+                info = api(f"/repos/{repo_slug}/collaborators/{user}/permission")
+                role_cache[user] = (info or {}).get("role_name", "") if isinstance(info, dict) else ""
+            except urllib.error.HTTPError:
+                role_cache[user] = ""  # not a collaborator, or not visible: not a maintainer
+        return role_cache[user]
+
     if pr.association in TRUSTED_ASSOCIATIONS:
         lines.append(f"The author, @{pr.author}, is an organization {pr.association.lower()}. No extra review is needed.")
+        return True, lines
+    # Private organization membership appears as CONTRIBUTOR in workflow
+    # events, so also trust an author who could approve the change themselves.
+    if role(pr.author) in MAINTAINER_ROLES:
+        lines.append(f"The author, @{pr.author}, has the {role(pr.author)} role on this repository. No extra review is needed.")
         return True, lines
     if pr.author == DEPENDABOT and pr.author_type == "Bot" and all(PurePosixPath(p).name in DEPENDENCY_FILES for p in hits):
         lines.append("Dependabot changed only manifests and lockfiles. The dependency checks cover them.")
@@ -116,17 +133,6 @@ def decide(pr: PullRequest, touched: list[str], globs: list[str], api: Api, repo
         user = (review.get("user") or {}).get("login")
         if user and review.get("state") in ("APPROVED", "CHANGES_REQUESTED", "DISMISSED"):
             latest[user] = review
-
-    role_cache: dict[str, str] = {}
-
-    def role(user: str) -> str:
-        if user not in role_cache:
-            try:
-                info = api(f"/repos/{repo_slug}/collaborators/{user}/permission")
-                role_cache[user] = (info or {}).get("role_name", "") if isinstance(info, dict) else ""
-            except urllib.error.HTTPError:
-                role_cache[user] = ""  # not a collaborator, or not visible: not a maintainer
-        return role_cache[user]
 
     maintainers = {u: r for u, r in latest.items() if u != pr.author and role(u) in MAINTAINER_ROLES}
     blocking = [u for u, r in maintainers.items() if r["state"] == "CHANGES_REQUESTED"]

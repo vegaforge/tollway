@@ -83,10 +83,22 @@ class DecideTest(unittest.TestCase):
         self.assertTrue(self.run_decide(["scripts/x.sh"], reviews))
 
     def test_author_cannot_approve_their_own_change(self) -> None:
-        self.assertFalse(self.run_decide(["scripts/x.sh"], [review("maint", "APPROVED")], pr(author="maint", association="COLLABORATOR")))
+        # A maintainer author is trusted outright (see the role tests), so the
+        # case that matters is a write collaborator approving their own work.
+        self.assertFalse(self.run_decide(["scripts/x.sh"], [review("helper", "APPROVED")], pr(author="helper", association="COLLABORATOR")))
 
     def test_org_member_is_exempt(self) -> None:
         self.assertTrue(self.run_decide([".github/workflows/ci.yml"], [], pr(author="Signor1", association="MEMBER")))
+
+    def test_private_org_member_with_admin_role_is_exempt(self) -> None:
+        # Private org membership shows up as CONTRIBUTOR in workflow events.
+        self.assertTrue(self.run_decide([".github/workflows/ci.yml"], [], pr(author="Signor1", association="CONTRIBUTOR")))
+
+    def test_author_with_maintain_role_is_exempt(self) -> None:
+        self.assertTrue(self.run_decide(["scripts/x.sh"], [], pr(author="maint", association="COLLABORATOR")))
+
+    def test_author_with_write_role_is_not_exempt(self) -> None:
+        self.assertFalse(self.run_decide(["scripts/x.sh"], [], pr(author="helper", association="COLLABORATOR")))
 
     def test_outside_collaborator_is_not_exempt(self) -> None:
         self.assertFalse(self.run_decide([".github/workflows/ci.yml"], [], pr(author="AbelOsaretin", association="COLLABORATOR")))

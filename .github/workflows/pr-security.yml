@@ -70,6 +70,15 @@ jobs:
           fi
       - name: Test the checks
         run: python3 -m unittest discover -s "$CHECKS/scripts/security"
+      - name: Look up the author's role on this repository
+        # Private organization membership shows up as CONTRIBUTOR in the
+        # event, so the role decides whether the author is a maintainer.
+        env:
+          GH_TOKEN: ${{ github.token }}
+          AUTHOR: ${{ github.event.pull_request.user.login }}
+        run: |
+          role=$(gh api "repos/$GITHUB_REPOSITORY/collaborators/$AUTHOR/permission" --jq .role_name 2>/dev/null) || role=none
+          echo "AUTHOR_ROLE=$role" >> "$GITHUB_ENV"
       - name: Scan the changed files
         env:
           AUTHOR_ASSOCIATION: ${{ github.event.pull_request.author_association }}
@@ -77,6 +86,7 @@ jobs:
           python3 -I "$CHECKS/scripts/security/scan_diff.py" \
             --repo pr --base HEAD^1 --head HEAD \
             --author-association "$AUTHOR_ASSOCIATION" \
+            --author-role "$AUTHOR_ROLE" \
             --allowlist "$CHECKS/.github/security/allowed-binaries.txt"
 
   malicious-patterns:

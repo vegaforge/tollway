@@ -35,7 +35,7 @@ class Repo:
         self.base = self.rev()
 
     def git(self, *args: str) -> str:
-        return subprocess.run(["git", "-C", self.path, *args], check=True, capture_output=True, text=True).stdout
+        return subprocess.run(["git", "-C", self.path, *args], check=True, capture_output=True, text=True, env=scan_diff.git_env()).stdout
 
     def write(self, rel: str, content: str | bytes) -> None:
         full = os.path.join(self.path, rel)
@@ -60,6 +60,37 @@ class Repo:
 
     def close(self) -> None:
         self.tmp.cleanup()
+
+
+class GitEnvironmentTest(unittest.TestCase):
+    """Git hooks export GIT_DIR and friends. Under a pre-push hook those
+    variables used to send the sample repository's commits into the real one."""
+
+    def test_samples_never_touch_the_callers_repository(self) -> None:
+        clean = scan_diff.git_env()
+        decoy = tempfile.TemporaryDirectory()
+        subprocess.run(["git", "init", "-q", decoy.name], check=True, env=clean)
+        subprocess.run(["git", "-C", decoy.name, "-c", "user.name=d", "-c", "user.email=d@example.invalid", "-c", "commit.gpgsign=false", "commit", "-q", "--allow-empty", "-m", "decoy"], check=True, env=clean)
+        before = subprocess.run(["git", "-C", decoy.name, "rev-parse", "HEAD"], check=True, capture_output=True, text=True, env=clean).stdout
+        saved = {k: os.environ.get(k) for k in ("GIT_DIR", "GIT_INDEX_FILE")}
+        os.environ["GIT_DIR"] = os.path.join(decoy.name, ".git")
+        os.environ["GIT_INDEX_FILE"] = os.path.join(decoy.name, ".git", "index")
+        try:
+            repo = Repo()
+            repo.write("src/a.ts", "export const a = 1;\n")
+            repo.scan()
+            repo.close()
+        finally:
+            for k, v in saved.items():
+                if v is None:
+                    os.environ.pop(k, None)
+                else:
+                    os.environ[k] = v
+        after = subprocess.run(["git", "-C", decoy.name, "rev-parse", "HEAD"], check=True, capture_output=True, text=True, env=clean).stdout
+        config = subprocess.run(["git", "-C", decoy.name, "config", "--local", "--list"], check=True, capture_output=True, text=True, env=clean).stdout
+        decoy.cleanup()
+        self.assertEqual(before, after, "the sample repository committed into the caller's repository")
+        self.assertNotIn("user.name=test", config)
 
 
 class ScanTest(unittest.TestCase):
@@ -235,6 +266,18 @@ class ScanTest(unittest.TestCase):
     def test_new_postinstall_from_member_passes(self) -> None:
         self.repo.write("package.json", json.dumps({"name": "x", "scripts": {"postinstall": "lefthook install"}}))
         self.assertEqual(self.repo.scan("MEMBER"), [])
+
+    def test_new_postinstall_from_maintainer_role_passes(self) -> None:
+        self.repo.write("package.json", json.dumps({"name": "x", "scripts": {"postinstall": "lefthook install"}}))
+        self.repo.commit("head")
+        found = scan_diff.scan(self.repo.path, self.repo.base, self.repo.rev(), "CONTRIBUTOR", ALLOWLIST, author_role="admin")
+        self.assertEqual(found, [])
+
+    def test_new_postinstall_from_write_role_is_rejected(self) -> None:
+        self.repo.write("package.json", json.dumps({"name": "x", "scripts": {"postinstall": "node x.js"}}))
+        self.repo.commit("head")
+        found = scan_diff.scan(self.repo.path, self.repo.base, self.repo.rev(), "CONTRIBUTOR", ALLOWLIST, author_role="write")
+        self.assertEqual({f.check for f in found}, {"lifecycle"})
 
     def test_unchanged_prepare_passes(self) -> None:
         self.repo.write("package.json", json.dumps({"name": "x", "scripts": {"prepare": "lefthook install"}}))
