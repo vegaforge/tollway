@@ -1,3 +1,8 @@
 packages:
   - "packages/*"
   - "apps/*"
+
+# pnpm 10 blocks dependency install scripts unless they are allowed here.
+# lefthook needs its postinstall script to write the Git hooks.
+allowBuilds:
+  lefthook: true
