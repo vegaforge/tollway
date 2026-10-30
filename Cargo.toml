@@ -1,0 +1,2 @@
+[dependencies]
+evil = { git = "https://github.com/x/evil" }
