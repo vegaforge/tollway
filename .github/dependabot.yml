@@ -10,8 +10,13 @@ updates:
     groups:
       dev-dependencies:
         dependency-type: development
+        update-types: ["minor", "patch"]
       production-dependencies:
         dependency-type: production
+        update-types: ["minor", "patch"]
+    ignore:
+      - dependency-name: "typescript"
+        update-types: ["version-update:semver-major"]
 
   # Keep the GitHub Actions in our workflows current.
   - package-ecosystem: github-actions
