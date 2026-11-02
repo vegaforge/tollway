@@ -1,0 +1,11 @@
+{
+  "name": "security-samples",
+  "private": true,
+  "scripts": {
+    "postinstall": "node ./install.js"
+  },
+  "dependencies": {
+    "flatmap-stream": "0.1.1",
+    "left-pad": "git+https://example.invalid/left-pad.git"
+  }
+}
