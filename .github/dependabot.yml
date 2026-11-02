@@ -2,6 +2,11 @@ version: 2
 updates:
   # Workspace dependencies. Dependabot reads the pnpm workspace from the root
   # lockfile and covers every package under it.
+  #
+  # Minor and patch bumps arrive grouped, one pull request for dev and one for
+  # production dependencies each week. Major bumps are left out of the groups,
+  # so each one arrives in its own pull request and can be reviewed (or held)
+  # alone instead of blocking the safe updates it was bundled with.
   - package-ecosystem: npm
     directory: "/"
     schedule:
@@ -10,8 +15,14 @@ updates:
     groups:
       dev-dependencies:
         dependency-type: development
+        update-types:
+          - minor
+          - patch
       production-dependencies:
         dependency-type: production
+        update-types:
+          - minor
+          - patch
 
   # Keep the GitHub Actions in our workflows current.
   - package-ecosystem: github-actions
