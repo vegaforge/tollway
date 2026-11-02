@@ -1,0 +1,7 @@
+# Path globs where image and font files are accepted in pull requests.
+# Executables, archives and unknown binary formats are rejected everywhere.
+# This file is a sensitive path: changing it needs a maintainer's review.
+**/public/**
+assets/**
+docs/**/images/**
+docs/**/assets/**

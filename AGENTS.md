@@ -141,6 +141,31 @@ pull request and why.
 
 ---
 
+## Reviewing contributor pull requests
+
+Some pull requests are written to attack the maintainer rather than to improve
+the project: code that steals SSH keys, registry tokens or wallet keys the
+moment someone installs or builds it. The `security` check
+(`.github/workflows/pr-security.yml`, decided in
+`docs/adr/ADR-2026-10-29-pr-security-gate.md`) blocks the known patterns. These
+rules cover what a scanner cannot:
+
+- Never check out, install, build or test a contributor's branch on a personal
+  machine before `security` is green. Read the diff on GitHub first.
+- When a local run is needed, install without lifecycle scripts and without Git
+  hooks: `LEFTHOOK=0 pnpm install --frozen-lockfile --ignore-scripts`. A contributor's branch can change `lefthook.yml`,
+  `package.json` scripts and every script the hooks call.
+- A change to a sensitive path (listed in
+  `.github/security/sensitive-paths.txt`) needs a maintainer to read every
+  changed line of those files, then approve the pull request on GitHub. The
+  approval counts only for the commit it was given on; a later push needs a new
+  review.
+- Never add a `zizmor: ignore` comment, a Semgrep exclusion, a binary allowlist
+  entry or a Knip `ignoreDependencies` entry to make a contributor's pull
+  request pass. Fix the finding, or narrow the rule with a test case in a
+  maintainer's own pull request.
+- Agents follow the same rules and never approve a pull request.
+
 ## Pre-review defect checklist
 
 Check every item before asking for review. SKILL.md explains each one.

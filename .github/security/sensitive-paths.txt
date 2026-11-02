@@ -1,0 +1,68 @@
+# Files that can run code on a maintainer's machine or in CI, or that change
+# what the security checks see. A pull request that adds, changes or deletes
+# any of them needs an APPROVED review from a maintainer on its latest commit
+# before the `security` check passes. Globs follow .gitignore rules: `**`
+# spans directories, and a pattern without a slash matches at any depth.
+# Keep .github/CODEOWNERS in step with this list.
+
+# CI, repository settings, and the security checks themselves
+.github/**
+scripts/**
+
+# Git hooks and editor or container tooling that runs on checkout or open
+lefthook.yml
+lefthook-local.yml
+.lefthook/**
+.husky/**
+.vscode/**
+.devcontainer/**
+.idea/**
+.envrc
+.gitattributes
+.gitmodules
+.semgrepignore
+
+# JavaScript and TypeScript: install scripts, dependency resolution, and
+# config files that build tools import and execute
+package.json
+pnpm-lock.yaml
+pnpm-workspace.yaml
+package-lock.json
+npm-shrinkwrap.json
+.npmrc
+.pnpmfile.cjs
+.yarnrc.yml
+*.config.js
+*.config.cjs
+*.config.mjs
+*.config.ts
+*.config.mts
+*.config.cts
+turbo.json
+knip.json
+knip.jsonc
+knip.ts
+biome.json
+biome.jsonc
+
+# Rust: build scripts, proc macros and toolchain settings
+Cargo.toml
+Cargo.lock
+build.rs
+.cargo/**
+rust-toolchain
+rust-toolchain.toml
+deny.toml
+
+# Go modules
+go.mod
+go.sum
+go.work
+
+# Containers and task runners
+Dockerfile*
+docker-compose*
+compose.yaml
+compose.yml
+Makefile
+justfile

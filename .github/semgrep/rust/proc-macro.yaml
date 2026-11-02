@@ -1,0 +1,49 @@
+# Procedural macros run inside the compiler and rust-analyzer, on every build
+# and in every editor that opens the crate. Tests: proc-macro.rs.
+
+rules:
+  - id: rust-proc-macro-side-effects
+    languages: [rust]
+    severity: ERROR
+    message: >-
+      A procedural macro that starts programs, opens network connections,
+      reads environment variables or touches the file system. Macros only
+      transform tokens.
+    patterns:
+      - pattern-either:
+          - pattern-inside: |
+              #[proc_macro]
+              fn $F(...) -> $R { ... }
+          - pattern-inside: |
+              #[proc_macro_derive(...)]
+              fn $F(...) -> $R { ... }
+          - pattern-inside: |
+              #[proc_macro_attribute]
+              fn $F(...) -> $R { ... }
+      - pattern-either:
+          - pattern: std::process::Command::new(...)
+          - pattern: Command::new(...)
+          - pattern: std::net::TcpStream::connect(...)
+          - pattern: std::net::UdpSocket::bind(...)
+          - pattern: TcpStream::connect(...)
+          - pattern: UdpSocket::bind(...)
+          - pattern: reqwest::get(...)
+          - pattern: reqwest::blocking::get(...)
+          - pattern: ureq::get(...)
+          - pattern: ureq::post(...)
+          - pattern: std::env::var(...)
+          - pattern: env::var(...)
+          - pattern: std::env::vars()
+          - pattern: std::fs::read_to_string(...)
+          - pattern: std::fs::read(...)
+          - pattern: std::fs::read_dir(...)
+          - pattern: std::fs::write(...)
+          - pattern: std::fs::copy(...)
+          - pattern: std::fs::File::open(...)
+          - pattern: std::fs::File::create(...)
+          - pattern: fs::read_to_string(...)
+          - pattern: fs::read(...)
+          - pattern: fs::read_dir(...)
+          - pattern: fs::write(...)
+          - pattern: File::open(...)
+          - pattern: File::create(...)

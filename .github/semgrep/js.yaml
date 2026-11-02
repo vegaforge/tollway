@@ -1,0 +1,160 @@
+# Malicious-behaviour rules for JavaScript and TypeScript.
+#
+# These target what an attacker's code does (run hidden code, steal secrets),
+# not ordinary bugs. Every rule is ERROR, so any match fails the
+# `malicious-patterns` job. Tests: js.ts in this folder, run with
+#   semgrep --test --metrics=off .github/semgrep
+# A false positive is fixed by narrowing the rule and adding an `ok:` case.
+
+rules:
+  - id: js-dynamic-code-execution
+    languages: [javascript, typescript]
+    severity: ERROR
+    message: >-
+      Builds and runs code at runtime ($EXPR). This is how hidden payloads
+      are executed. Nothing in this repository needs eval, new Function or the
+      vm module.
+    patterns:
+      - pattern-either:
+          - pattern: eval($X)
+          - pattern: new Function(...)
+          - pattern: Function(...)
+          - pattern: $VM.runInNewContext(...)
+          - pattern: $VM.runInThisContext(...)
+          - pattern: $VM.runInContext(...)
+          - pattern: $VM.compileFunction(...)
+          - pattern: new $VM.Script(...)
+          - pattern: setTimeout("...", ...)
+          - pattern: setInterval("...", ...)
+      - pattern: $EXPR
+
+  - id: js-decoded-or-remote-code-execution
+    languages: [javascript, typescript]
+    severity: ERROR
+    mode: taint
+    message: >-
+      Data that was decoded (base64, hex, char codes) or downloaded flows into
+      code execution, a shell command or a dynamic import. This is the
+      signature of a dropper.
+    pattern-sources:
+      - pattern: Buffer.from($X, "base64")
+      - pattern: Buffer.from($X, "hex")
+      - pattern: Buffer.from($X, "base64url")
+      - pattern: atob(...)
+      - pattern: String.fromCharCode(...)
+      - pattern: decodeURIComponent(...)
+      - pattern: unescape(...)
+      - pattern: fetch(...)
+      - pattern: $AXIOS.get(...)
+      - pattern: $AXIOS.post(...)
+      - pattern: $HTTP.get(...)
+      - pattern: $HTTP.request(...)
+    pattern-sinks:
+      - pattern: eval(...)
+      - pattern: new Function(...)
+      - pattern: Function(...)
+      - pattern: require(...)
+      - pattern: import(...)
+      - pattern: $CP.exec(...)
+      - pattern: $CP.execSync(...)
+      - pattern: $CP.spawn(...)
+      - pattern: $CP.spawnSync(...)
+      - pattern: $CP.execFile(...)
+      - pattern: $CP.execFileSync(...)
+      - pattern: $CP.fork(...)
+      - pattern: exec(...)
+      - pattern: execSync(...)
+      - pattern: spawn(...)
+      - pattern: spawnSync(...)
+      - pattern: execFile(...)
+      - pattern: $VM.runInNewContext(...)
+      - pattern: $VM.runInThisContext(...)
+      - pattern: new $VM.Script(...)
+      - pattern: $FS.writeFileSync(...)
+      - pattern: $FS.writeFile(...)
+
+  - id: js-child-process
+    languages: [javascript, typescript]
+    severity: ERROR
+    message: >-
+      Imports child_process. No package or app in this repository starts
+      other programs. If a maintainer adds a script that genuinely needs it,
+      narrow this rule in the same pull request.
+    pattern-either:
+      - pattern: require("child_process")
+      - pattern: require("node:child_process")
+      - pattern: import "child_process"
+      - pattern: import "node:child_process"
+      - pattern: import $X from "child_process"
+      - pattern: import $X from "node:child_process"
+      - pattern: import { $...X } from "child_process"
+      - pattern: import { $...X } from "node:child_process"
+      - pattern: import * as $X from "child_process"
+      - pattern: import * as $X from "node:child_process"
+      - pattern: import("child_process")
+      - pattern: import("node:child_process")
+
+  - id: js-string-built-require
+    languages: [javascript, typescript]
+    severity: ERROR
+    message: >-
+      require() or import() of a module name assembled at runtime. This hides
+      which module is loaded from reviewers and scanners.
+    pattern-either:
+      - pattern: require($A + $B)
+      - pattern: require(`...${$X}...`)
+      - pattern: require($A.join(...))
+      - pattern: require($A.reverse().join(...))
+      - pattern: import($A + $B)
+      - pattern: import(`...${$X}...`)
+
+  - id: js-environment-exfiltration
+    languages: [javascript, typescript]
+    severity: ERROR
+    mode: taint
+    message: >-
+      The whole environment, or a secret-named environment variable, flows
+      into a network request URL or body. That is how CI tokens and keys are
+      stolen. Secrets may go into request headers for the service they belong
+      to, never into a URL or a body.
+    options:
+      taint_assume_safe_functions: false
+    pattern-sources:
+      - pattern: JSON.stringify(process.env, ...)
+      - pattern: Object.entries(process.env)
+      - pattern: Object.keys(process.env)
+      - pattern: Object.values(process.env)
+      - pattern: "{..., ...process.env, ...}"
+      - pattern: Object.assign($T, process.env)
+      - patterns:
+          - pattern-either:
+              - pattern: process.env.$K
+              - pattern: process.env[$K]
+          - metavariable-regex:
+              metavariable: $K
+              regex: (?i).*(TOKEN|SECRET|PASSW|SEED|MNEMONIC|PRIVATE|CREDENTIAL|NPM_|GH_|GITHUB_|SSH|SESSION|COOKIE).*
+    pattern-sinks:
+      - patterns:
+          - pattern-inside: fetch($URL, ...)
+          - pattern: $URL
+      - patterns:
+          - pattern-inside: "fetch($U, {..., body: $B, ...})"
+          - pattern: $B
+      - patterns:
+          - pattern-either:
+              - pattern-inside: $AX.post($U, $D, ...)
+              - pattern-inside: $AX.put($U, $D, ...)
+              - pattern-inside: $AX.patch($U, $D, ...)
+          - pattern-either:
+              - pattern: $U
+              - pattern: $D
+      - pattern: $AX.get(...)
+      - pattern: $HTTP.request(...)
+      - pattern: navigator.sendBeacon(...)
+      - pattern: new WebSocket(...)
+      - pattern: $SOCKET.send(...)
+      - pattern: $REQ.write(...)
+      - pattern: $NET.connect(...)
+      - pattern: $NET.createConnection(...)
+      - pattern: $DNS.resolve(...)
+      - pattern: $DNS.lookup(...)

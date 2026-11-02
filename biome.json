@@ -7,7 +7,7 @@
   },
   "files": {
     "ignoreUnknown": true,
-    "includes": ["**", "!**/globals.css", "!**/global.css"]
+    "includes": ["**", "!**/globals.css", "!**/global.css", "!.github/semgrep"]
   },
   "formatter": {
     "enabled": true,

@@ -1,0 +1,38 @@
+# Rules for Cargo build scripts. build.rs runs on the machine of anyone who
+# builds the crate, including `cargo check` in an editor, so it is a favourite
+# place to hide malware. Tests: build.rs in this folder.
+
+rules:
+  - id: rust-build-script-side-effects
+    languages: [rust]
+    severity: ERROR
+    message: >-
+      A build script that starts programs, opens network connections or reads
+      the home directory. Build scripts in this repository only generate code
+      and set cargo directives.
+    paths:
+      include:
+        - "build.rs"
+        - "**/build.rs"
+    pattern-either:
+      - pattern: std::process::Command::new(...)
+      - pattern: Command::new(...)
+      - pattern: std::net::TcpStream::connect(...)
+      - pattern: TcpStream::connect(...)
+      - pattern: std::net::UdpSocket::bind(...)
+      - pattern: UdpSocket::bind(...)
+      - pattern: reqwest::get(...)
+      - pattern: reqwest::blocking::get(...)
+      - pattern: reqwest::Client::new(...)
+      - pattern: reqwest::blocking::Client::new(...)
+      - pattern: ureq::get(...)
+      - pattern: ureq::post(...)
+      - pattern: std::env::var("HOME")
+      - pattern: env::var("HOME")
+      - pattern: std::env::var("USERPROFILE")
+      - pattern: env::var("USERPROFILE")
+      - pattern: std::env::home_dir()
+      - pattern: home::home_dir()
+      - pattern: dirs::home_dir()
+      - pattern: std::env::vars()
+      - pattern: env::vars()
