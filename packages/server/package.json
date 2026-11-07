@@ -35,7 +35,7 @@
     "@x402/stellar": "^2.16.0"
   },
   "devDependencies": {
-    "@types/ioredis-mock": "^8.2.5",
+    "@types/ioredis-mock": "^8.2.8",
     "@types/node": "^22.19.20",
     "ioredis-mock": "^8.9.0",
     "tsup": "^8.5.0",
