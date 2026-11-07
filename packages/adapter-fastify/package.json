@@ -1,6 +1,6 @@
 {
   "name": "@tollway/adapter-fastify",
-  "version": "0.0.1",
+  "version": "0.0.2",
   "description": "Fastify preHandler adapter for the Tollway payment gate",
   "license": "Apache-2.0",
   "repository": {
