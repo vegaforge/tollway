@@ -33,7 +33,7 @@
     "@tollway/core": "workspace:*"
   },
   "devDependencies": {
-    "fast-check": "^3.23.0",
+    "fast-check": "^4.10.2",
     "tsup": "^8.5.0",
     "typescript": "^5.8.0",
     "vitest": "^4.1.8"
