@@ -9,8 +9,8 @@
 </p>
 
 <p align="center">
-  <a href="https://usetollway.vercel.app"><strong>Website</strong></a> ·
-  <a href="https://usetollway.vercel.app/docs"><strong>Docs</strong></a>
+  <a href="https://usetollway.netlify.app"><strong>Website</strong></a> ·
+  <a href="https://usetollway.netlify.app/docs"><strong>Docs</strong></a>
 </p>
 
 <p align="center">
