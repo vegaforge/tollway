@@ -21,7 +21,7 @@ const mono = IBM_Plex_Mono({
 const description = "Orchestration, policy, and observability for agent payments on Stellar";
 
 export const metadata: Metadata = {
-  metadataBase: new URL("https://usetollway.vercel.app"),
+  metadataBase: new URL("https://usetollway.netlify.app"),
   title: {
     default: "Tollway",
     template: "%s · Tollway",
@@ -30,7 +30,7 @@ export const metadata: Metadata = {
   openGraph: {
     type: "website",
     siteName: "Tollway",
-    url: "https://usetollway.vercel.app",
+    url: "https://usetollway.netlify.app",
     title: "Tollway",
     description,
   },

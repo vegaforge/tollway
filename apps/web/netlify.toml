@@ -1,0 +1,17 @@
+# Netlify build for the Tollway website and docs (apps/web).
+#
+# In the Netlify UI, set the package directory to apps/web and leave the base
+# directory empty. Netlify then installs from the repository root, where
+# pnpm-lock.yaml, .nvmrc and the packageManager field live, and reads this file.
+# Paths below are relative to the repository root.
+#
+# Netlify adds its Next.js runtime on its own; nothing else needs installing.
+
+[build]
+  command = "pnpm turbo build --filter=@tollway/web"
+  publish = "apps/web/.next"
+
+  # Skip the build when nothing the site uses has changed. Exit code 0 means
+  # skip. The site depends on its own folder, the shared theme package and the
+  # lockfile.
+  ignore = "git diff --quiet $CACHED_COMMIT_REF $COMMIT_REF -- apps/web packages/theme pnpm-lock.yaml package.json"
