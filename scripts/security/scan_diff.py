@@ -571,6 +571,158 @@ def check_obfuscation(change: Change, text: str, lines: list[tuple[int, str]]) -
 
 
 # ---------------------------------------------------------------------------
+# Indicators Drips reported after Wave 10 (ADR-2026-11-18-wave-malware-indicators)
+#
+# Each of these fails the check whatever the author's role and whatever the
+# reviews say. They are known patterns from real malicious pull requests, so a
+# single rushed approval must not be able to let one through.
+# ---------------------------------------------------------------------------
+
+# 1. Editor tasks that run as soon as someone opens the folder.
+FOLDER_OPEN = re.compile(r"""["']runOn["']\s*:\s*["']folderOpen["']""")
+AUTOMATIC_TASKS = re.compile(r"""["']task\.allowAutomaticTasks["']\s*:\s*(?=\S)(?!["']off["'])""")
+
+
+def is_editor_tasks(path: str) -> bool:
+    p = PurePosixPath(path)
+    return (p.parent.name == ".vscode" and p.name == "tasks.json") or p.suffix == ".code-workspace"
+
+
+def is_editor_settings(path: str) -> bool:
+    p = PurePosixPath(path)
+    return (p.parent.name == ".vscode" and p.name == "settings.json") or p.suffix == ".code-workspace"
+
+
+JSON_UNICODE_ESCAPE = re.compile(r"\\u([0-9a-fA-F]{4})")
+
+
+def check_autorun(change: Change, text: str) -> list[Finding]:
+    findings = []
+    # Plain-text matching on purpose: tasks.json allows comments and trailing
+    # commas, so a JSON parser would fail on exactly the files that hide this.
+    # JSON \uXXXX escapes are decoded first, because the editor decodes them
+    # too ("folder\u004fpen" is "folderOpen"). Line numbers stay valid since
+    # an escape never contains a newline.
+    text = JSON_UNICODE_ESCAPE.sub(lambda m: chr(int(m.group(1), 16)), text)
+    if is_editor_tasks(change.path):
+        for m in FOLDER_OPEN.finditer(text):
+            findings.append(Finding(change.path, text.count("\n", 0, m.start()) + 1, "autorun", 'An editor task with "runOn": "folderOpen" runs a command as soon as someone opens the folder. This is a known malware delivery trick and is not accepted.'))
+    if is_editor_settings(change.path):
+        for m in AUTOMATIC_TASKS.finditer(text):
+            findings.append(Finding(change.path, text.count("\n", 0, m.start()) + 1, "autorun", "task.allowAutomaticTasks lets editor tasks run without asking. Only \"off\" is accepted."))
+    return findings
+
+
+# 2. Files that claim to be fonts or images but are not. Real assets start with
+#    their format's magic bytes; a text file named *.woff2 is how a payload
+#    hides from the binary checks and from every code check.
+ASSET_EXTENSIONS: dict[str, tuple[bytes, ...]] = {
+    ".woff": (b"wOFF",),
+    ".woff2": (b"wOF2",),
+    ".ttf": (b"\x00\x01\x00\x00", b"true"),
+    ".otf": (b"OTTO",),
+    ".png": (b"\x89PNG\r\n\x1a\n",),
+    ".jpg": (b"\xff\xd8\xff",),
+    ".jpeg": (b"\xff\xd8\xff",),
+    ".gif": (b"GIF87a", b"GIF89a"),
+    ".ico": (b"\x00\x00\x01\x00",),
+}
+MALICIOUS_ASSET_NAMES = re.compile(r"^fa-(?:solid|regular)\b", re.I)
+
+
+def asset_matches(suffix: str, data: bytes) -> bool:
+    if suffix == ".eot":
+        # Embedded OpenType keeps its "LP" magic at offset 34.
+        return len(data) >= 36 and data[34:36] == b"LP"
+    if suffix == ".webp":
+        return data[:4] == b"RIFF" and data[8:12] == b"WEBP"
+    return any(data.startswith(magic) for magic in ASSET_EXTENSIONS[suffix])
+
+
+def check_fake_asset(change: Change, data: bytes) -> list[Finding]:
+    p = PurePosixPath(change.path)
+    suffix = p.suffix.lower()
+    if suffix == ".lik":
+        return [Finding(change.path, 0, "fake-asset", ".lik files are a known malware container disguised as a font. They are not accepted.")]
+    if MALICIOUS_ASSET_NAMES.match(p.name):
+        return [Finding(change.path, 0, "fake-asset", f"{p.name} matches the font names used to hide malware in Wave pull requests. Vendored icon fonts are not accepted; use the package from npm instead.")]
+    if suffix in ASSET_EXTENSIONS or suffix in (".eot", ".webp"):
+        if not asset_matches(suffix, data):
+            return [Finding(change.path, 0, "fake-asset", f"This file is named {suffix} but its content is not a {suffix} file. Disguised files are not accepted.")]
+    return []
+
+
+# 3. Build output. No repository here commits dist/ or build/, so a pull request
+#    that adds one is shipping a file nobody can review against its source.
+BUILD_DIRS = {"dist", "build"}
+
+
+def check_build_output(change: Change) -> list[Finding]:
+    if any(part in BUILD_DIRS for part in PurePosixPath(change.path).parts[:-1]):
+        return [Finding(change.path, 0, "build-output", "Files under dist/ or build/ are generated and are not committed. A committed build file cannot be reviewed against its source.")]
+    return []
+
+
+# 4. Everyday scripts that run a loose JavaScript file. "node api.js" in dev or
+#    start runs whatever that file is the moment someone tries the project.
+EVERYDAY_SCRIPTS = ("start", "dev", "build", "test", "serve", "preview")
+NODE_RUN = re.compile(r"(?:^|[\s;&|(])node((?:\s+-{1,2}[\w-]+(?:=\S+)?)*)\s+(\S+)")
+
+
+def loose_files(command: str) -> list[str]:
+    hits = []
+    for m in NODE_RUN.finditer(command):
+        target = m.group(2).strip("'\"")
+        if not re.search(r"\.c?js$", target):
+            continue
+        if target.lstrip("./").startswith("scripts/"):
+            continue
+        hits.append(target)
+    return hits
+
+
+def check_loose_scripts(change: Change, text: str) -> list[Finding]:
+    if PurePosixPath(change.path).name != "package.json":
+        return []
+    scripts = scripts_of(text.encode("utf-8"))
+    findings = []
+    for name in EVERYDAY_SCRIPTS:
+        for target in loose_files(scripts.get(name, "")):
+            findings.append(Finding(change.path, line_of(text, f'"{name}"'), "loose-script", f'scripts.{name} runs "node {target}". Everyday scripts may only run tools or files under scripts/, so that nothing runs just by trying the project.'))
+    return findings
+
+
+# 5. Code pushed far to the right, out of view in a diff, often after a
+#    legitimate line of a config file.
+HIDDEN_CODE_EXTENSIONS = {".json", ".jsonc", ".json5", ".yaml", ".yml", ".toml"}
+TRAILING_PAYLOAD = re.compile(r"\S[ \t]{60,}\S")
+INDENTED_PAYLOAD = re.compile(r"^[ \t]{120,}\S")
+
+
+def check_hidden_code(change: Change, lines: list[tuple[int, str]]) -> list[Finding]:
+    if not (is_code(change.path) or PurePosixPath(change.path).suffix.lower() in HIDDEN_CODE_EXTENSIONS):
+        return []
+    findings = []
+    for lineno, line in lines:
+        if TRAILING_PAYLOAD.search(line) or INDENTED_PAYLOAD.search(line):
+            findings.append(Finding(change.path, lineno, "hidden-code", "Code after a long run of spaces or tabs is pushed out of view in a diff. This is how malware is appended to config files, and it is not accepted."))
+    return findings
+
+
+# 6. Strings seen inside the malware itself.
+KNOWN_MARKERS = ("rmcej%otb%", "Cot%3T=sthP", "_$__1e42")
+
+
+def check_markers(change: Change, lines: list[tuple[int, str]]) -> list[Finding]:
+    findings = []
+    for lineno, line in lines:
+        for marker in KNOWN_MARKERS:
+            if marker in line:
+                findings.append(Finding(change.path, lineno, "marker", f"Contains {marker}, a marker of known malware. Do not run this code."))
+    return findings
+
+
+# ---------------------------------------------------------------------------
 # Driver
 # ---------------------------------------------------------------------------
 
@@ -585,9 +737,14 @@ def scan(repo: str, base: str | None, head: str, association: str, allowlist: li
         if change.mode in ("120000", "160000"):
             findings += check_link(change, data)
             continue
+        findings += check_build_output(change)
+        fake = check_fake_asset(change, data)
+        findings += fake
         binary = check_binary(change, data, allowlist)
         if binary or looks_binary(data):
-            findings += binary
+            # A disguised file already explains itself; do not also report it
+            # as an unknown binary.
+            findings += [] if fake else binary
             continue
 
         text = data.decode("utf-8")
@@ -597,6 +754,10 @@ def scan(repo: str, base: str | None, head: str, association: str, allowlist: li
         findings += check_hidden_unicode(change, lines)
         findings += check_svg(change, text)
         findings += check_obfuscation(change, text, lines)
+        findings += check_autorun(change, text)
+        findings += check_hidden_code(change, lines)
+        findings += check_markers(change, lines)
+        findings += check_loose_scripts(change, text)
 
         if name == "pnpm-lock.yaml":
             findings += check_pnpm_lock(change, text)
