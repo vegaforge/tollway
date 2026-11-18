@@ -1,8 +1,6 @@
-<!-- EMBARGOED SECURITY RECORD. Keep local; see the technical ADR. -->
-
 # ADR for Dummies: Only the process holding the lock can let go of it
 
-- **Status:** Accepted 2026-11-18. **Embargoed: keep local.**
+- **Status:** Accepted 2026-11-18.
 - **Date:** 2026-11-18
 - **Technical ADR:** [ADR-2026-11-18-redis-lock-ownership](ADR-2026-11-18-redis-lock-ownership.md)
 

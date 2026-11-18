@@ -1,14 +1,8 @@
-<!--
-  EMBARGOED SECURITY RECORD. DO NOT PUSH THIS BRANCH OR OPEN A PUBLIC PULL REQUEST
-  until the maintainer decides the disclosure step. Lives only in
-  .worktrees/security-fixes (branch fix/security-embargo).
--->
-
 # ADR: A verified receipt is exactly the signed receipt
 
-- **Status:** Accepted 2026-11-18. **Embargoed: keep local.**
+- **Status:** Accepted 2026-11-18.
 - **Date:** 2026-11-18
-- **Issue:** none filed on purpose (SECURITY.md).
+- **Issue:** none; handled privately under SECURITY.md until this fix was ready.
 - **Scope:** `packages/core/src/receipt/schema.ts`, `packages/core/src/receipt/receipt.ts`, `packages/client/src/index.ts`, their tests, `docs/receipt-format.md`. The signed bytes and the receipt format do not change.
 
 ## Context

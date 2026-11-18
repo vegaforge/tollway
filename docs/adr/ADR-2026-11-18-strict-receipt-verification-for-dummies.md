@@ -1,8 +1,6 @@
-<!-- EMBARGOED SECURITY RECORD. Keep local; see the technical ADR. -->
-
 # ADR for Dummies: A checked receipt has nothing added to it
 
-- **Status:** Accepted 2026-11-18. **Embargoed: keep local.**
+- **Status:** Accepted 2026-11-18.
 - **Date:** 2026-11-18
 - **Technical ADR:** [ADR-2026-11-18-strict-receipt-verification](ADR-2026-11-18-strict-receipt-verification.md)
 

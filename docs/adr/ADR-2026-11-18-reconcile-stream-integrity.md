@@ -1,14 +1,8 @@
-<!--
-  EMBARGOED SECURITY RECORD. DO NOT PUSH THIS BRANCH OR OPEN A PUBLIC PULL REQUEST
-  until the maintainer decides the disclosure step. Lives only in
-  .worktrees/security-fixes (branch fix/security-embargo).
--->
-
 # ADR: Channel reconciliation checks the whole commitment stream, not just its last entry
 
-- **Status:** Accepted 2026-11-18. **Embargoed: keep local.**
+- **Status:** Accepted 2026-11-18.
 - **Date:** 2026-11-18
-- **Issue:** none filed on purpose (SECURITY.md).
+- **Issue:** none; handled privately under SECURITY.md until this fix was ready.
 - **Scope:** `packages/reconcile/src/index.ts`, its unit and property tests, `apps/web/src/content/docs/reconciliation.mdx`. No change to other packages.
 
 ## Context

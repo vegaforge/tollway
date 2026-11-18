@@ -1,8 +1,6 @@
-<!-- EMBARGOED SECURITY RECORD. Keep local; see the technical ADR. -->
-
 # ADR for Dummies: The safety net looks at every payment, not just the last one
 
-- **Status:** Accepted 2026-11-18. **Embargoed: keep local.**
+- **Status:** Accepted 2026-11-18.
 - **Date:** 2026-11-18
 - **Technical ADR:** [ADR-2026-11-18-reconcile-stream-integrity](ADR-2026-11-18-reconcile-stream-integrity.md)
 

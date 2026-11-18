@@ -1,14 +1,8 @@
-<!--
-  EMBARGOED SECURITY RECORD. DO NOT PUSH THIS BRANCH OR OPEN A PUBLIC PULL REQUEST
-  until the maintainer decides the disclosure step. Lives only in
-  .worktrees/security-fixes (branch fix/security-embargo).
--->
-
 # ADR: Bind a settled payment to the HTTP method it paid for
 
-- **Status:** Accepted 2026-11-18. **Embargoed: keep local.**
+- **Status:** Accepted 2026-11-18.
 - **Date:** 2026-11-18
-- **Issue:** none filed on purpose (SECURITY.md).
+- **Issue:** none; handled privately under SECURITY.md until this fix was ready.
 - **Scope:** `packages/server/src/gate.ts`, `packages/server/src/cache.ts`, their tests, the four adapter test files. The receipt format (v1) does not change.
 
 ## Context

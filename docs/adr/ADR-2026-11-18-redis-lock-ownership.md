@@ -1,14 +1,8 @@
-<!--
-  EMBARGOED SECURITY RECORD. DO NOT PUSH THIS BRANCH OR OPEN A PUBLIC PULL REQUEST
-  until the maintainer decides the disclosure step. Lives only in
-  .worktrees/security-fixes (branch fix/security-embargo).
--->
-
 # ADR: Redis settlement locks are owned, renewed, and released only by their holder
 
-- **Status:** Accepted 2026-11-18. **Embargoed: keep local.**
+- **Status:** Accepted 2026-11-18.
 - **Date:** 2026-11-18
-- **Issue:** none filed on purpose (SECURITY.md).
+- **Issue:** none; handled privately under SECURITY.md until this fix was ready.
 - **Scope:** `packages/server/src/cache.ts`, `packages/server/src/gate.ts`, their tests. No change to `@vegaforge/tollway-core` or the adapters.
 
 ## Context

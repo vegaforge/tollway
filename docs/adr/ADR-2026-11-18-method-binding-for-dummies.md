@@ -1,8 +1,6 @@
-<!-- EMBARGOED SECURITY RECORD. Keep local; see the technical ADR. -->
-
 # ADR for Dummies: Paying to read does not let you write
 
-- **Status:** Accepted 2026-11-18. **Embargoed: keep local.**
+- **Status:** Accepted 2026-11-18.
 - **Date:** 2026-11-18
 - **Technical ADR:** [ADR-2026-11-18-method-binding](ADR-2026-11-18-method-binding.md)
 
