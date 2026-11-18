@@ -68,18 +68,7 @@ body:
       value: |
         - `./scripts/preflight.sh` must pass.
         - Add a release note in `docs/release-notes/` if package or app source changes, and a changeset if a publishable package changes.
-        - The PR body includes `Closes #<this issue>`.
+        - Open the pull request against the `dev` branch. The PR body includes `Closes #<this issue>`.
         - Follow AGENTS.md and CONTRIBUTING.md.
-    validations:
-      required: true
-  - type: dropdown
-    id: complexity
-    attributes:
-      label: Complexity
-      description: Sets the Wave points. Apply the matching complexity label as well.
-      options:
-        - Trivial (100 points)
-        - Medium (150 points)
-        - High (200 points)
     validations:
       required: true
