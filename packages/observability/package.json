@@ -1,6 +1,6 @@
 {
   "name": "@vegaforge/tollway-observability",
-  "version": "0.0.1",
+  "version": "0.0.2",
   "description": "Spend, latency, and failure metrics with machine-readable exports and webhooks",
   "license": "Apache-2.0",
   "repository": {
