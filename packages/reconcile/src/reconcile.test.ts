@@ -332,3 +332,64 @@ describe("reconcileCharge", () => {
     expect(result.channelId).toBe("ch-target");
   });
 });
+
+// Regression lock for ADR-2026-11-18-reconcile-stream-integrity: the whole
+// stream is checked, not only its last entry.
+describe("reconcileChannel stream integrity", () => {
+  const reconciler = createReconciler();
+
+  it("flags a stream whose cumulative amount goes down", async () => {
+    const result = await reconciler.reconcileChannel(
+      [mkCommitment(0, "100"), mkCommitment(1, "40")],
+      mkSettlement("40", "60"),
+    );
+    expect(result.ok).toBe(false);
+    if (result.ok) return;
+    expect(result.drift.map((d) => d.kind)).toContain("non-monotonic-cumulative");
+    // The highest promised amount is what should have settled.
+    expect(result.drift.map((d) => d.kind)).toContain("under-settled");
+  });
+
+  it("flags and ignores a commitment from another channel", async () => {
+    const foreign: CommitmentRecord = { channelId: "ch-2", sequence: 1, cumulativeAmount: "40" };
+    const result = await reconciler.reconcileChannel(
+      [mkCommitment(0, "100"), foreign],
+      mkSettlement("40", "60"),
+    );
+    expect(result.ok).toBe(false);
+    if (result.ok) return;
+    const kinds = result.drift.map((d) => d.kind);
+    expect(kinds).toContain("foreign-commitment");
+    expect(kinds).toContain("under-settled");
+  });
+
+  it("names a duplicate sequence as such, not as a gap", async () => {
+    const result = await reconciler.reconcileChannel(
+      [mkCommitment(0, "100"), mkCommitment(1, "200"), mkCommitment(1, "150")],
+      mkSettlement("200"),
+    );
+    expect(result.ok).toBe(false);
+    if (result.ok) return;
+    const kinds = result.drift.map((d) => d.kind);
+    expect(kinds).toContain("duplicate-sequence");
+    expect(kinds).not.toContain("sequence-gap");
+  });
+
+  it("uses the highest of disagreeing duplicates for the settlement check", async () => {
+    const result = await reconciler.reconcileChannel(
+      [mkCommitment(0, "100"), mkCommitment(1, "150"), mkCommitment(1, "200")],
+      mkSettlement("150"),
+    );
+    expect(result.ok).toBe(false);
+    if (result.ok) return;
+    expect(result.drift.map((d) => d.kind)).toContain("under-settled");
+  });
+
+  it("still reconciles a healthy stream cleanly", async () => {
+    const result = await reconciler.reconcileChannel(
+      [mkCommitment(0, "100"), mkCommitment(1, "100"), mkCommitment(2, "250")],
+      mkSettlement("250", "750"),
+    );
+    expect(result).toEqual({ ok: true, channelId: "ch-1" });
+  });
+});
