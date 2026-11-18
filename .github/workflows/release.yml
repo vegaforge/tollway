@@ -1,12 +1,14 @@
 name: Release
 
-# Pushes to main keep a "Version Packages" pull request up to date via Changesets.
-# Publishing to npm never happens automatically: it runs only when a maintainer
-# triggers this workflow by hand with publish set to true.
+# Pushes to dev keep a "Version Packages" pull request into dev up to date via
+# Changesets, so version bumps travel dev to staging to main like every other
+# change (docs/adr/ADR-2026-11-18-branch-flow.md). Publishing to npm never
+# happens automatically: it runs only when a maintainer triggers this workflow
+# by hand on main with publish set to true.
 
 on:
   push:
-    branches: [main]
+    branches: [dev]
   workflow_dispatch:
     inputs:
       publish:
@@ -57,7 +59,7 @@ jobs:
 
   publish:
     name: Publish to npm
-    if: github.event_name == 'workflow_dispatch' && inputs.publish
+    if: github.event_name == 'workflow_dispatch' && inputs.publish && github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
     timeout-minutes: 15
     permissions:
@@ -75,6 +77,19 @@ jobs:
           node-version: 22
           cache: pnpm
           registry-url: https://registry.npmjs.org
+
+      # Versions are bumped on dev. If changesets are still pending here, the
+      # version pull request was not merged before promotion, and publishing
+      # would ship packages whose version and changelog do not match.
+      - name: No pending changesets
+        run: |
+          pending=$(find .changeset -name '*.md' ! -name 'README.md' | sort)
+          if [ -n "$pending" ]; then
+            echo "Unreleased changesets are still on main:"
+            echo "$pending"
+            echo "Merge the Version Packages pull request into dev and promote it first."
+            exit 1
+          fi
 
       - name: Install
         run: pnpm install --frozen-lockfile

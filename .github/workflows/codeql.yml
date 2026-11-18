@@ -2,9 +2,9 @@ name: CodeQL
 
 on:
   push:
-    branches: [main]
+    branches: [dev, staging, main]
   pull_request:
-    branches: [main]
+    branches: [dev, staging, main]
   schedule:
     # Weekly scan so newly disclosed patterns are caught on dormant code.
     - cron: "0 6 * * 1"

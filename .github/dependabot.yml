@@ -7,8 +7,11 @@ updates:
   # production dependencies each week. Major bumps are left out of the groups,
   # so each one arrives in its own pull request and can be reviewed (or held)
   # alone instead of blocking the safe updates it was bundled with.
+  # Both ecosystems open their pull requests against dev, like every other
+  # change (docs/adr/ADR-2026-11-18-branch-flow.md).
   - package-ecosystem: npm
     directory: "/"
+    target-branch: dev
     schedule:
       interval: weekly
     open-pull-requests-limit: 10
@@ -27,6 +30,7 @@ updates:
   # Keep the GitHub Actions in our workflows current.
   - package-ecosystem: github-actions
     directory: "/"
+    target-branch: dev
     schedule:
       interval: weekly
     open-pull-requests-limit: 5
