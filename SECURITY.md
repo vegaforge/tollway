@@ -21,4 +21,4 @@ You should receive an acknowledgement within 72 hours. We will keep you informed
 
 ## Scope notes
 
-Tollway is non-custodial by design: x402 settles directly to the `PAY_TO` address, MPP channel funds live in the channel contract, and Tollway never holds funds. Reports that demonstrate a path by which Tollway could cause double charges, receipt forgery, policy bypass, or silent reconciliation drift are in scope and treated as high severity. See the [security model in the design document](docs/design.md#security-model).
+Tollway is non-custodial by design: x402 settles directly to the `PAY_TO` address, MPP channel funds live in the channel contract, and Tollway never holds funds. Reports that demonstrate a path by which Tollway could cause double charges, receipt forgery, policy bypass, or silent reconciliation drift are in scope and treated as high severity. See the [threat model](docs/threat-model.md) and the [security model in the design document](docs/design.md#security-model).

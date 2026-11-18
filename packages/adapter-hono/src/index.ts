@@ -7,7 +7,7 @@
  * "Repository layout".
  */
 
-import type { Gate, GateOutcome } from "@vegaforge/tollway-server";
+import type { Gate, GateOutcome, RouteTable } from "@vegaforge/tollway-server";
 import type { Context, MiddlewareHandler } from "hono";
 
 /** Where the verified receipt is stashed on the Hono context for downstream handlers. */
@@ -51,6 +51,18 @@ export function honoPaywall(gate: Gate): MiddlewareHandler {
     }
 
     return c.json({ error: outcome.reason }, outcome.status as JsonStatus);
+  };
+}
+
+/** Routes paid requests through a compiled table; unmatched requests continue unchanged. */
+export function honoRouteTable(table: RouteTable): MiddlewareHandler {
+  return async (c, next) => {
+    const match = table.match(c.req.method, requestUrl(c));
+    if (!match) {
+      await next();
+      return;
+    }
+    await honoPaywall(match.gate)(c, next);
   };
 }
 

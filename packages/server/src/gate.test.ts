@@ -156,7 +156,7 @@ describe("createPaywall", () => {
   });
 });
 
-describe("settlement cache binding", () => {
+describe("TM-02 cross-offer replay", () => {
   const headers = { [PAYMENT_SIGNATURE_HEADER]: "mock-signed-auth-entry" };
 
   function gateFor(overrides: Partial<PaywallConfig>, cache: SettlementCache) {
@@ -217,6 +217,7 @@ describe("settlement cache binding", () => {
     expect(mpp.receipt.receipt.model).toBe("mpp-charge");
   });
 
+  describe("TM-03 same-process concurrent duplicate", () => {
   it("settles concurrent identical payments once", async () => {
     const inner = createMockFacilitator();
     let settleCalls = 0;
@@ -244,6 +245,7 @@ describe("settlement cache binding", () => {
     expect(second.kind).toBe("settled");
     if (first.kind !== "settled" || second.kind !== "settled") return;
     expect(second.receipt).toEqual(first.receipt);
+  });
   });
 
   it("does not leave a cache write rejection unhandled", async () => {
@@ -280,7 +282,7 @@ describe("settlement cache binding", () => {
   });
 });
 
-describe("settlement lock across processes", () => {
+describe("TM-04 shared-lock duplicate settlement", () => {
   const headers = { [PAYMENT_SIGNATURE_HEADER]: "mock-signed-auth-entry" };
 
   function countingFacilitator() {

@@ -1,0 +1,22 @@
+{
+  "name": "my-tollway-hono-api",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "node --env-file-if-exists=.env --import tsx src/index.ts",
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run"
+  },
+  "dependencies": {
+    "@vegaforge/tollway-adapter-hono": "workspace:*",
+    "@vegaforge/tollway-core": "workspace:*",
+    "@vegaforge/tollway-server": "workspace:*",
+    "hono": "^4.6.0"
+  },
+  "devDependencies": {
+    "@types/node": "^22.19.20",
+    "tsx": "^4.20.0",
+    "typescript": "^5.8.0",
+    "vitest": "^4.1.8"
+  }
+}

@@ -8,7 +8,7 @@
  * @vegaforge/tollway-adapter-next. See docs/design.md, "Repository layout".
  */
 
-import type { Gate, GateOutcome } from "@vegaforge/tollway-server";
+import type { Gate, GateOutcome, RouteTable } from "@vegaforge/tollway-server";
 import type { FastifyReply, FastifyRequest, preHandlerHookHandler } from "fastify";
 
 type SettledReceipt = Extract<GateOutcome, { kind: "settled" }>["receipt"];
@@ -50,6 +50,15 @@ export function fastifyPaywall(gate: Gate): preHandlerHookHandler {
     }
 
     await reply.status(outcome.status).send({ error: outcome.reason });
+  };
+}
+
+/** Routes paid requests through a compiled table; unmatched requests continue unchanged. */
+export function fastifyRouteTable(table: RouteTable): preHandlerHookHandler {
+  return async (request, reply) => {
+    const match = table.match(request.method, request.url);
+    if (!match) return;
+    await fastifyPaywall(match.gate)(request, reply);
   };
 }
 
