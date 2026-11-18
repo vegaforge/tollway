@@ -41,8 +41,9 @@
     }
   },
   "devDependencies": {
-    "@vegaforge/tollway-core": "workspace:*",
     "@types/node": "^22.19.20",
+    "@vegaforge/tollway-core": "workspace:*",
+    "next": "^15.5.29",
     "tsup": "^8.5.0",
     "typescript": "^5.8.0",
     "vitest": "^4.1.8"
