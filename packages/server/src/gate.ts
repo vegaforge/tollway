@@ -123,6 +123,8 @@ type SettlementResult =
       ok: true;
       receipt: SignedReceipt;
       replayed: boolean;
+      /** Method of the request this receipt was settled for; null if unknown. */
+      method: string | null;
       cacheError?: Error;
       lockLost?: true;
     }
@@ -187,6 +189,7 @@ async function settleWithHandler<TPayment>(
   payment: TPayment,
   offer: PaymentOffer,
   model: SettlementModel,
+  method: string,
   handler: Handler<TPayment>,
   context: SettlementContext,
 ): Promise<GateOutcome> {
@@ -204,13 +207,13 @@ async function settleWithHandler<TPayment>(
   // written with no await in between, so two requests cannot both miss it.
   const pending = context.inFlight.get(key);
   if (pending) {
-    return toOutcome(await pending, offer, model, true);
+    return toOutcome(await pending, offer, model, method, true);
   }
 
-  const attempt = settleOnce(payment, offer, model, handler, verification, key, context);
+  const attempt = settleOnce(payment, offer, model, method, handler, verification, key, context);
   context.inFlight.set(key, attempt);
   try {
-    return toOutcome(await attempt, offer, model, false);
+    return toOutcome(await attempt, offer, model, method, false);
   } finally {
     context.inFlight.delete(key);
   }
@@ -218,18 +221,24 @@ async function settleWithHandler<TPayment>(
 
 /**
  * Turns a settlement result into the outcome for one request. A receipt is
- * only returned for the offer it was issued against; anything else is a
- * rejection, never a replay. See docs/design.md, "Design notes" (duplicate
- * protection).
+ * only returned for the offer it was issued against, and for the HTTP method
+ * it was paid with; anything else is a rejection, never a replay. See
+ * docs/design.md, "Design notes" (duplicate protection).
  */
 function toOutcome(
   result: SettlementResult,
   offer: PaymentOffer,
   model: SettlementModel,
+  method: string,
   waited: boolean,
 ): GateOutcome {
   if (!result.ok) {
     return result.outcome;
+  }
+  // A null method comes from an entry an older version wrote. Refusing it
+  // is safe; treating it as a miss would settle the payment a second time.
+  if (result.method !== method) {
+    return OFFER_MISMATCH;
   }
   if (receiptBinding(result.receipt) !== offerBinding(offer, model)) {
     return OFFER_MISMATCH;
@@ -256,6 +265,7 @@ async function settleOnce<TPayment>(
   payment: TPayment,
   offer: PaymentOffer,
   model: SettlementModel,
+  method: string,
   handler: Handler<TPayment>,
   verification: { payer: string; nonce: string },
   key: string,
@@ -265,11 +275,11 @@ async function settleOnce<TPayment>(
 
   const cached = await cache?.get(key);
   if (cached) {
-    return { ok: true, receipt: cached, replayed: true };
+    return { ok: true, receipt: cached.receipt, method: cached.method, replayed: true };
   }
 
   if (!cache?.acquire || !cache.release || !cache.renew) {
-    return settleAndRecord(payment, offer, model, handler, verification, key, context);
+    return settleAndRecord(payment, offer, model, method, handler, verification, key, context);
   }
 
   const lock = await cache.acquire(key, context.lockTtlMs);
@@ -288,8 +298,13 @@ async function settleOnce<TPayment>(
     // our lock, so look again now that we hold it.
     const settledElsewhere = await cache.get(key);
     result = settledElsewhere
-      ? { ok: true, receipt: settledElsewhere, replayed: true }
-      : await settleAndRecord(payment, offer, model, handler, verification, key, context);
+      ? {
+          ok: true,
+          receipt: settledElsewhere.receipt,
+          method: settledElsewhere.method,
+          replayed: true,
+        }
+      : await settleAndRecord(payment, offer, model, method, handler, verification, key, context);
   } catch (error) {
     keeper.stop();
     await releaseOrThrow(release, key, error);
@@ -405,6 +420,7 @@ async function settleAndRecord<TPayment>(
   payment: TPayment,
   offer: PaymentOffer,
   model: SettlementModel,
+  method: string,
   handler: Handler<TPayment>,
   verification: { payer: string; nonce: string },
   key: string,
@@ -435,19 +451,19 @@ async function settleAndRecord<TPayment>(
   );
 
   if (!context.cache) {
-    return { ok: true, receipt, replayed: false };
+    return { ok: true, receipt, method, replayed: false };
   }
 
   // The payment has settled, so a failed write must not cost the payer the
   // receipt. The error goes on the outcome and to onCacheError instead.
   try {
-    await context.cache.set(key, receipt);
+    await context.cache.set(key, { receipt, method });
   } catch (writeFailure) {
     const cacheError = asError(writeFailure, "settlement cache write failed");
     context.onCacheError?.(cacheError, key);
-    return { ok: true, receipt, replayed: false, cacheError };
+    return { ok: true, receipt, method, replayed: false, cacheError };
   }
-  return { ok: true, receipt, replayed: false };
+  return { ok: true, receipt, method, replayed: false };
 }
 
 /**
@@ -477,6 +493,7 @@ export function createPaywall(config: PaywallConfig, deps: PaywallDeps): Gate {
       facilitatorUrl: config.facilitatorUrl,
     };
 
+    const method = request.method.toUpperCase();
     const signatureHeader = readHeader(request.headers, PAYMENT_SIGNATURE_HEADER);
     if (!signatureHeader) {
       return {
@@ -493,7 +510,7 @@ export function createPaywall(config: PaywallConfig, deps: PaywallDeps): Gate {
 
     if (decision.model === "x402") {
       const payment: X402Payment = { model: "x402", paymentSignature: signatureHeader };
-      return settleWithHandler(payment, offer, "x402", deps.facilitator, context);
+      return settleWithHandler(payment, offer, "x402", method, deps.facilitator, context);
     }
 
     if (decision.model === "mpp-charge") {
@@ -506,7 +523,14 @@ export function createPaywall(config: PaywallConfig, deps: PaywallDeps): Gate {
       }
 
       const payment: MppChargePayment = { model: "mpp-charge", payload: signatureHeader };
-      return settleWithHandler(payment, offer, "mpp-charge", deps.mppChargeHandler, context);
+      return settleWithHandler(
+        payment,
+        offer,
+        "mpp-charge",
+        method,
+        deps.mppChargeHandler,
+        context,
+      );
     }
 
     return {

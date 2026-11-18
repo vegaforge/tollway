@@ -5,9 +5,11 @@ import {
   createInMemorySettlementCache,
   createRedisSettlementCache,
   type RedisLikeClient,
+  type SettlementEntry,
 } from "./cache.js";
 
 let receipt: SignedReceipt;
+let entry: SettlementEntry;
 
 beforeAll(async () => {
   const signer = await Ed25519Signer.generate("cache-test-key");
@@ -24,6 +26,7 @@ beforeAll(async () => {
     }),
     signer,
   );
+  entry = { receipt, method: "GET" };
 });
 
 describe("createInMemorySettlementCache", () => {
@@ -31,16 +34,16 @@ describe("createInMemorySettlementCache", () => {
     const cache = createInMemorySettlementCache();
     await expect(cache.get("nonce-1")).resolves.toBeUndefined();
 
-    await cache.set("nonce-1", receipt);
-    await expect(cache.get("nonce-1")).resolves.toBe(receipt);
+    await cache.set("nonce-1", entry);
+    await expect(cache.get("nonce-1")).resolves.toBe(entry);
   });
 
   it("evicts an entry once the TTL has elapsed", async () => {
     vi.useFakeTimers();
     try {
       const cache = createInMemorySettlementCache(50);
-      await cache.set("nonce-evict", receipt);
-      await expect(cache.get("nonce-evict")).resolves.toBe(receipt);
+      await cache.set("nonce-evict", entry);
+      await expect(cache.get("nonce-evict")).resolves.toBe(entry);
 
       vi.advanceTimersByTime(60);
       await expect(cache.get("nonce-evict")).resolves.toBeUndefined();
@@ -56,10 +59,10 @@ describe("createRedisSettlementCache", () => {
     const cache = createRedisSettlementCache({ client });
 
     await expect(cache.get("nonce-1")).resolves.toBeUndefined();
-    await cache.set("nonce-1", receipt);
+    await cache.set("nonce-1", entry);
 
     const hit = await cache.get("nonce-1");
-    expect(hit).toEqual(receipt);
+    expect(hit).toEqual(entry);
   });
 
   it("shares cached receipts across two cache instances pointing at the same Redis", async () => {
@@ -70,18 +73,18 @@ describe("createRedisSettlementCache", () => {
     const writer = createRedisSettlementCache({ client });
     const reader = createRedisSettlementCache({ client });
 
-    await writer.set("nonce-cross", receipt);
+    await writer.set("nonce-cross", entry);
 
     const hit = await reader.get("nonce-cross");
-    expect(hit).toEqual(receipt);
+    expect(hit).toEqual(entry);
   });
 
   it("honors Redis TTL eviction semantics", async () => {
     const client = new RedisMock() as unknown as RedisLikeClient;
     const cache = createRedisSettlementCache({ client, ttlMs: 1_000 });
 
-    await cache.set("nonce-ttl", receipt);
-    await expect(cache.get("nonce-ttl")).resolves.toEqual(receipt);
+    await cache.set("nonce-ttl", entry);
+    await expect(cache.get("nonce-ttl")).resolves.toEqual(entry);
 
     // Advance Redis's internal clock past the TTL via the mock's own time helper
     // when available; otherwise fall back to deleting and asserting the miss.
@@ -115,18 +118,38 @@ describe("createRedisSettlementCache", () => {
     await expect(cache.get("nonce-foreign")).resolves.toBeUndefined();
 
     // The cache still returns its own entries.
-    await cache.set("nonce-good", receipt);
-    await expect(cache.get("nonce-good")).resolves.toEqual(receipt);
+    await cache.set("nonce-good", entry);
+    await expect(cache.get("nonce-good")).resolves.toEqual(entry);
+  });
+
+  it("reads a bare receipt from an older version as an entry with no method", async () => {
+    const client = new RedisMock() as unknown as RedisLikeClient;
+    const cache = createRedisSettlementCache({ client });
+    await client.set("tollway:settlement:nonce-legacy", JSON.stringify(receipt), "EX", 30);
+    await expect(cache.get("nonce-legacy")).resolves.toEqual({ receipt, method: null });
+  });
+
+  it("treats an entry with extra or malformed fields as a miss", async () => {
+    const client = new RedisMock() as unknown as RedisLikeClient;
+    const cache = createRedisSettlementCache({ client });
+    for (const [key, value] of [
+      ["nonce-extra", { receipt, method: "GET", note: "x" }],
+      ["nonce-empty-method", { receipt, method: "" }],
+      ["nonce-bad-receipt", { receipt: { hello: "world" }, method: "GET" }],
+    ] as const) {
+      await client.set(`tollway:settlement:${key}`, JSON.stringify(value), "EX", 30);
+      await expect(cache.get(key)).resolves.toBeUndefined();
+    }
   });
 
   it("applies a custom key prefix", async () => {
     const client = new RedisMock() as unknown as RedisLikeClient;
     const cache = createRedisSettlementCache({ client, keyPrefix: "custom:" });
-    await cache.set("nonce-prefix", receipt);
+    await cache.set("nonce-prefix", entry);
 
     const direct = await client.get("custom:nonce-prefix");
     expect(direct).not.toBeNull();
-    expect(JSON.parse(direct ?? "null")).toEqual(receipt);
+    expect(JSON.parse(direct ?? "null")).toEqual(entry);
   });
 });
 

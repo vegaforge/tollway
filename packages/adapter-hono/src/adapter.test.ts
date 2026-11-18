@@ -1,5 +1,6 @@
 import { Ed25519Signer } from "@tollway/core";
 import {
+  createInMemorySettlementCache,
   createMockFacilitator,
   createPaywall,
   PAYMENT_SIGNATURE_HEADER,
@@ -49,5 +50,25 @@ describe("honoPaywall", () => {
     const body = (await response.json()) as { quote: number; receiptId: string };
     expect(body.quote).toBe(42);
     expect(body.receiptId).toBeTruthy();
+  });
+});
+
+// Regression lock for ADR-2026-11-18-method-binding.
+describe("honoPaywall method binding", () => {
+  it("does not let a payment made for GET unlock POST on the same path", async () => {
+    const signer = await Ed25519Signer.generate("test-key");
+    const gate = createPaywall(config, {
+      signer,
+      facilitator: createMockFacilitator(),
+      cache: createInMemorySettlementCache(),
+    });
+    const app = new Hono();
+    app.on(["GET", "POST"], "/report", honoPaywall(gate), (c) => c.json({ ok: true }));
+    const headers = { [PAYMENT_SIGNATURE_HEADER]: "mock-signed-auth-entry-method" };
+
+    const read = await app.request("/report", { headers });
+    expect(read.status).toBe(200);
+    const write = await app.request("/report", { method: "POST", headers });
+    expect(write.status).toBe(409);
   });
 });

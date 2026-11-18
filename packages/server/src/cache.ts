@@ -18,8 +18,8 @@ import { type SignedReceipt, signedReceiptSchema } from "@tollway/core";
  * both settle the same payment if it reaches them at the same moment.
  */
 export interface SettlementCache {
-  get(key: string): Promise<SignedReceipt | undefined>;
-  set(key: string, receipt: SignedReceipt): Promise<void>;
+  get(key: string): Promise<SettlementEntry | undefined>;
+  set(key: string, entry: SettlementEntry): Promise<void>;
   /**
    * Takes an exclusive settlement lock on `key` for `ttlMs`. Resolves the
    * lock on success, or false if another holder has it.
@@ -39,6 +39,20 @@ export interface SettlementCache {
 }
 
 /**
+ * What the cache remembers about a settled payment: the receipt, and the
+ * HTTP method of the request it paid for. A receipt is only replayed for the
+ * same method, so one payment cannot unlock every method on a URL.
+ */
+export type SettlementEntry = {
+  receipt: SignedReceipt;
+  /**
+   * Uppercase HTTP method, or null for an entry written by a version that
+   * did not record it. The gate never replays a null-method entry.
+   */
+  method: string | null;
+};
+
+/**
  * Proof of holding a settlement lock. The token is unique per acquisition,
  * so a holder whose lock expired cannot renew or release the next holder's.
  */
@@ -48,7 +62,7 @@ export type SettlementLock = { readonly token: string };
 export type LockingSettlementCache = SettlementCache &
   Required<Pick<SettlementCache, "acquire" | "renew" | "release">>;
 
-type Entry = { receipt: SignedReceipt; expiresAt: number };
+type Entry = { entry: SettlementEntry; expiresAt: number };
 
 /**
  * In-memory cache with TTL eviction. The default window covers a few ledger
@@ -69,10 +83,10 @@ export function createInMemorySettlementCache(ttlMs = 30_000): SettlementCache {
         entries.delete(key);
         return undefined;
       }
-      return entry.receipt;
+      return entry.entry;
     },
-    async set(key, receipt) {
-      entries.set(key, { receipt, expiresAt: Date.now() + ttlMs });
+    async set(key, entry) {
+      entries.set(key, { entry, expiresAt: Date.now() + ttlMs });
     },
   };
 }
@@ -120,6 +134,30 @@ const RENEW_IF_HELD = `if redis.call("GET", KEYS[1]) == ARGV[1] then
   return redis.call("PEXPIRE", KEYS[1], ARGV[2])
 end
 return 0`;
+
+/**
+ * Reads a stored settlement. The current shape is exactly
+ * `{ receipt, method }`. A bare receipt is what an older version stored; it
+ * is returned with `method: null` so the gate refuses it rather than
+ * treating it as a miss and settling the payment again. Anything else is a
+ * miss.
+ */
+function parseStoredEntry(candidate: unknown): SettlementEntry | undefined {
+  if (isRecord(candidate) && Object.keys(candidate).sort().join(",") === "method,receipt") {
+    const receipt = signedReceiptSchema.safeParse(candidate.receipt);
+    const { method } = candidate;
+    if (receipt.success && typeof method === "string" && method.length > 0) {
+      return { receipt: receipt.data, method };
+    }
+    return undefined;
+  }
+  const legacy = signedReceiptSchema.safeParse(candidate);
+  return legacy.success ? { receipt: legacy.data, method: null } : undefined;
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
 
 function lockMs(ttlMs: number): number {
   return Math.max(1, Math.ceil(ttlMs));
@@ -171,11 +209,10 @@ export function createRedisSettlementCache(
       } catch {
         return undefined;
       }
-      const parsed = signedReceiptSchema.safeParse(candidate);
-      return parsed.success ? (parsed.data as SignedReceipt) : undefined;
+      return parseStoredEntry(candidate);
     },
-    async set(key, receipt) {
-      await client.set(`${keyPrefix}${key}`, JSON.stringify(receipt), "EX", ttlSeconds);
+    async set(key, entry) {
+      await client.set(`${keyPrefix}${key}`, JSON.stringify(entry), "EX", ttlSeconds);
     },
     async acquire(key, lockTtlMs) {
       const token = crypto.randomUUID();

@@ -112,3 +112,33 @@ describe("expressPaywall with a shared settlement cache", () => {
     }
   });
 });
+
+// Regression lock for ADR-2026-11-18-method-binding.
+describe("expressPaywall method binding", () => {
+  it("does not let a payment made for GET unlock POST on the same path", async () => {
+    const signer = await Ed25519Signer.generate("test-key");
+    const gate = createPaywall(config, {
+      signer,
+      facilitator: createMockFacilitator(),
+      cache: createInMemorySettlementCache(),
+    });
+    const app = express();
+    app.all("/report", expressPaywall(gate), (_req, res) => {
+      res.json({ ok: true });
+    });
+    const server = app.listen(0);
+    await new Promise((resolve) => server.once("listening", resolve));
+    const address = server.address();
+    if (!address || typeof address === "string") throw new Error("expected a TCP address");
+    const url = `http://127.0.0.1:${address.port}/report`;
+    const headers = { [PAYMENT_SIGNATURE_HEADER]: "mock-signed-auth-entry-method" };
+    try {
+      const read = await fetch(url, { headers });
+      expect(read.status).toBe(200);
+      const write = await fetch(url, { method: "POST", headers });
+      expect(write.status).toBe(409);
+    } finally {
+      await new Promise((resolve) => server.close(resolve));
+    }
+  });
+});

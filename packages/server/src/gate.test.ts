@@ -440,3 +440,80 @@ describe("settlement lock across processes", () => {
     expect(reported[0]?.key).toMatch(/^x402:/);
   });
 });
+
+// Regression lock for ADR-2026-11-18-method-binding: one payment pays for one
+// HTTP method, even when a single gate is mounted on several methods.
+describe("method binding", () => {
+  const headers = { [PAYMENT_SIGNATURE_HEADER]: "mock-signed-auth-entry-method" };
+
+  function countingGate(cache = createInMemorySettlementCache()) {
+    const inner = createMockFacilitator();
+    const calls = { settle: 0 };
+    const gate = createPaywall(config, {
+      signer,
+      facilitator: {
+        ...inner,
+        async settle(input) {
+          calls.settle++;
+          await new Promise((resolve) => setTimeout(resolve, 20));
+          return inner.settle(input);
+        },
+      },
+      cache,
+    });
+    return { gate, calls };
+  }
+
+  it("does not serve a payment made for GET to a POST on the same URL", async () => {
+    const { gate, calls } = countingGate();
+    const read = await gate({ ...baseRequest, method: "GET", headers });
+    expect(read.kind).toBe("settled");
+
+    const write = await gate({ ...baseRequest, method: "POST", headers });
+    expect(write).toEqual({
+      kind: "rejected",
+      status: 409,
+      reason: "payment already settled for a different offer",
+    });
+    expect(calls.settle).toBe(1);
+  });
+
+  it("still replays a retry of the same method", async () => {
+    const { gate, calls } = countingGate();
+    await gate({ ...baseRequest, method: "GET", headers });
+    const retry = await gate({ ...baseRequest, method: "get", headers });
+    expect(retry.kind).toBe("settled");
+    if (retry.kind === "settled") expect(retry.replayed).toBe(true);
+    expect(calls.settle).toBe(1);
+  });
+
+  it("settles once and rejects the other method when both arrive together", async () => {
+    const { gate, calls } = countingGate();
+    const [read, write] = await Promise.all([
+      gate({ ...baseRequest, method: "GET", headers }),
+      gate({ ...baseRequest, method: "POST", headers }),
+    ]);
+    expect(read.kind).toBe("settled");
+    expect(write).toMatchObject({ kind: "rejected", status: 409 });
+    expect(calls.settle).toBe(1);
+  });
+
+  it("refuses a Redis entry written without a method, without settling again", async () => {
+    const redis = new RedisMock();
+    const client = redis as unknown as RedisLikeClient;
+    const keyPrefix = "gate-test:legacy-entry:";
+    const { gate: writer } = countingGate(createRedisSettlementCache({ client, keyPrefix }));
+    const settled = await writer({ ...baseRequest, method: "GET", headers });
+    if (settled.kind !== "settled") throw new Error("expected the first request to settle");
+
+    // An older process stored the bare receipt, with no method.
+    const keys = await redis.keys(`${keyPrefix}x402:*`);
+    expect(keys).toHaveLength(1);
+    await redis.set(keys[0] as string, JSON.stringify(settled.receipt), "EX", 30);
+
+    const { gate, calls } = countingGate(createRedisSettlementCache({ client, keyPrefix }));
+    const outcome = await gate({ ...baseRequest, method: "GET", headers });
+    expect(outcome).toMatchObject({ kind: "rejected", status: 409 });
+    expect(calls.settle).toBe(0);
+  });
+});
