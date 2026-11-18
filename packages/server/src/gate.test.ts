@@ -1,6 +1,6 @@
 import { Ed25519Signer, Ed25519Verifier, verifyReceipt } from "@vegaforge/tollway-core";
 import RedisMock from "ioredis-mock";
-import { beforeAll, describe, expect, it } from "vitest";
+import { beforeAll, describe, expect, it, vi } from "vitest";
 import {
   createInMemorySettlementCache,
   createRedisSettlementCache,
@@ -325,41 +325,50 @@ describe("settlement lock across processes", () => {
 
   // Regression lock for ADR-2026-11-18-redis-lock-ownership: a /settle that
   // outlives the lock TTL must not let a second process settle the same payment.
+  // Fake timers drive both the renewal interval and Redis expiry (ioredis-mock
+  // reads Date.now), so the outcome does not depend on how busy the machine is.
   it("keeps the lock alive while a slow settlement runs", async () => {
-    const client = new RedisMock() as unknown as RedisLikeClient;
-    const keyPrefix = "gate-test:slow-settle:";
-    const inner = createMockFacilitator();
-    const calls = { settle: 0 };
-    const slowFacilitator: FacilitatorClient = {
-      ...inner,
-      async settle(input) {
-        calls.settle++;
-        await new Promise((resolve) => setTimeout(resolve, 300));
-        return inner.settle(input);
-      },
-    };
-    const lockTtl = { settlementLockTtlMs: 90 };
-    const processA = createPaywall(config, {
-      signer,
-      facilitator: slowFacilitator,
-      cache: createRedisSettlementCache({ client, keyPrefix }),
-      ...lockTtl,
-    });
-    const processB = createPaywall(config, {
-      signer,
-      facilitator: slowFacilitator,
-      cache: createRedisSettlementCache({ client, keyPrefix }),
-      ...lockTtl,
-    });
+    vi.useFakeTimers();
+    try {
+      const client = new RedisMock() as unknown as RedisLikeClient;
+      const keyPrefix = "gate-test:slow-settle:";
+      const inner = createMockFacilitator();
+      const calls = { settle: 0 };
+      const slowFacilitator: FacilitatorClient = {
+        ...inner,
+        async settle(input) {
+          calls.settle++;
+          await new Promise((resolve) => setTimeout(resolve, 3_000));
+          return inner.settle(input);
+        },
+      };
+      const lockTtl = { settlementLockTtlMs: 900 };
+      const processA = createPaywall(config, {
+        signer,
+        facilitator: slowFacilitator,
+        cache: createRedisSettlementCache({ client, keyPrefix }),
+        ...lockTtl,
+      });
+      const processB = createPaywall(config, {
+        signer,
+        facilitator: slowFacilitator,
+        cache: createRedisSettlementCache({ client, keyPrefix }),
+        ...lockTtl,
+      });
 
-    const first = processA({ ...baseRequest, headers });
-    // Retry of the same payment reaches another process after the TTL.
-    await new Promise((resolve) => setTimeout(resolve, 180));
-    const second = await processB({ ...baseRequest, headers });
+      const first = processA({ ...baseRequest, headers });
+      // A retry of the same payment reaches another process long after the
+      // original TTL would have expired without renewal.
+      await vi.advanceTimersByTimeAsync(1_800);
+      const second = await processB({ ...baseRequest, headers });
+      expect(second).toEqual({ kind: "rejected", status: 409, reason: "settlement in progress" });
 
-    expect(second).toEqual({ kind: "rejected", status: 409, reason: "settlement in progress" });
-    expect((await first).kind).toBe("settled");
-    expect(calls.settle).toBe(1);
+      await vi.advanceTimersByTimeAsync(1_500);
+      expect((await first).kind).toBe("settled");
+      expect(calls.settle).toBe(1);
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it("reports a lock lost during settlement instead of hiding it", async () => {
