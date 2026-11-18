@@ -113,6 +113,18 @@ changes without installing or running them, and it fails when it finds:
   or downloads and runs code
 - workflow changes with unsafe triggers or permissions, and known malware
   signatures
+- editor tasks that run on folder open (`"runOn": "folderOpen"`) or settings
+  that allow automatic tasks
+- files named as fonts or images whose content is something else, `.lik`
+  files, and vendored `fa-solid*` or `fa-regular*` font files
+- anything committed under a `dist/` or `build/` directory
+- `start`, `dev`, `build`, `test`, `serve` or `preview` scripts that run a
+  loose `.js` file with `node` (files under `scripts/` are fine)
+- code pushed out of view after a long run of spaces or tabs
+- strings known to appear in Wave malware
+
+These last checks were added after Drips warned Wave maintainers about
+malicious pull requests. No approval overrides them.
 
 Changes to build scripts, Git hooks, workflows, dependency manifests and other
 files that run code (the list is in `.github/security/sensitive-paths.txt`) also
