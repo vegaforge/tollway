@@ -70,7 +70,10 @@ describe("createPaywall", () => {
     expect(outcome.receipt.receipt.settlement.kind).toBe("transaction");
 
     const verifier = Ed25519Verifier.forSigner(signer);
-    expect(await verifyReceipt(outcome.receipt, verifier)).toEqual({ valid: true });
+    expect(await verifyReceipt(outcome.receipt, verifier)).toEqual({
+      valid: true,
+      receipt: outcome.receipt,
+    });
   });
 
   it("treats a repeated payment as idempotent rather than a second charge", async () => {
@@ -111,7 +114,10 @@ describe("createPaywall", () => {
       expect(outcome.receipt.receipt.settlement.kind).toBe("transaction");
 
       const verifier = Ed25519Verifier.forSigner(signer);
-      expect(await verifyReceipt(outcome.receipt, verifier)).toEqual({ valid: true });
+      expect(await verifyReceipt(outcome.receipt, verifier)).toEqual({
+        valid: true,
+        receipt: outcome.receipt,
+      });
     });
 
     it("treats a repeated mpp-charge payment as idempotent rather than a second charge", async () => {
