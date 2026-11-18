@@ -7,17 +7,22 @@ import { settlementModels, stellarNetworks } from "../types.js";
  * See docs/design.md, "One receipt format".
  */
 
+// Every schema here is strict: an unknown key fails parsing. A receipt is
+// only as trustworthy as its signature, and zod's default would silently drop
+// fields the signature never covered while the caller kept them
+// (ADR-2026-11-18-strict-receipt-verification).
+
 /**
  * How the payment is anchored on chain. x402 and MPP charge point at a
  * Stellar transaction; channel payments point at a channel id plus their
  * position in the cumulative commitment stream.
  */
 export const settlementRefSchema = z.discriminatedUnion("kind", [
-  z.object({
+  z.strictObject({
     kind: z.literal("transaction"),
     txHash: z.string().min(1),
   }),
-  z.object({
+  z.strictObject({
     kind: z.literal("channel-commitment"),
     channelId: z.string().min(1),
     sequence: z.number().int().nonnegative(),
@@ -33,7 +38,7 @@ const refKindForModel = {
 } as const;
 
 export const receiptBodySchema = z
-  .object({
+  .strictObject({
     version: z.literal(1),
     /** Unique per receipt. The signature covers it, so replays are detectable. */
     id: z.string().min(1),
@@ -63,7 +68,7 @@ export const receiptBodySchema = z
 
 export type ReceiptBody = z.infer<typeof receiptBodySchema>;
 
-export const receiptSignatureSchema = z.object({
+export const receiptSignatureSchema = z.strictObject({
   /** Identifies the signing key, so keys can rotate without orphaning receipts. */
   keyId: z.string().min(1),
   algorithm: z.string().min(1),
@@ -73,7 +78,7 @@ export const receiptSignatureSchema = z.object({
 
 export type ReceiptSignature = z.infer<typeof receiptSignatureSchema>;
 
-export const signedReceiptSchema = z.object({
+export const signedReceiptSchema = z.strictObject({
   receipt: receiptBodySchema,
   signature: receiptSignatureSchema,
 });

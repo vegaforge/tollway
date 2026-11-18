@@ -48,6 +48,11 @@ const receipt = await signReceipt(
 
 const verifier = Ed25519Verifier.forSigner(signer);
 const result = await verifyReceipt(receipt, verifier);
+if (result.valid) {
+  // Use result.receipt from here on: it is exactly what the signature covers.
+  // A receipt with any unsigned field fails verification.
+  console.log(result.receipt.receipt.amount);
+}
 ```
 
 ## Reference

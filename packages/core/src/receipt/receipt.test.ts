@@ -54,7 +54,7 @@ describe("sign and verify", () => {
 
     expect(signed.signature.keyId).toBe("test-key");
     expect(signed.signature.algorithm).toBe("Ed25519");
-    expect(await verifyReceipt(signed, verifier)).toEqual({ valid: true });
+    expect(await verifyReceipt(signed, verifier)).toEqual({ valid: true, receipt: signed });
   });
 
   it("flags a tampered amount", async () => {
@@ -94,5 +94,38 @@ describe("sign and verify", () => {
     const a = await signReceipt(body, signer);
     const b = await signReceipt(reordered, signer);
     expect(a.signature.value).toBe(b.signature.value);
+  });
+});
+
+// Regression lock for ADR-2026-11-18-strict-receipt-verification: every field
+// of a verified receipt was covered by the signature.
+describe("strict verification", () => {
+  async function signedPair() {
+    const signer = await Ed25519Signer.generate("strict-key");
+    const signed = await signReceipt(buildReceipt(x402Input), signer);
+    return { signed, verifier: Ed25519Verifier.forSigner(signer) };
+  }
+
+  it("rejects an unsigned field added to the receipt body", async () => {
+    const { signed, verifier } = await signedPair();
+    const tampered = { ...signed, receipt: { ...signed.receipt, refunded: "true" } };
+    const result = await verifyReceipt(tampered, verifier);
+    expect(result.valid).toBe(false);
+  });
+
+  it("rejects an unsigned field added to the envelope or the signature", async () => {
+    const { signed, verifier } = await signedPair();
+    await expect(verifyReceipt({ ...signed, note: "paid" }, verifier)).resolves.toMatchObject({
+      valid: false,
+    });
+    await expect(
+      verifyReceipt({ ...signed, signature: { ...signed.signature, trusted: true } }, verifier),
+    ).resolves.toMatchObject({ valid: false });
+  });
+
+  it("returns the parsed receipt so callers never keep their unchecked input", async () => {
+    const { signed, verifier } = await signedPair();
+    const result = await verifyReceipt(structuredClone(signed), verifier);
+    expect(result).toEqual({ valid: true, receipt: signed });
   });
 });

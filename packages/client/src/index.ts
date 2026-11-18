@@ -25,6 +25,7 @@ import {
   type SettlementModel,
   type SignedReceipt,
   type StellarNetwork,
+  signedReceiptSchema,
   TollwayError,
   verifyReceipt,
 } from "@tollway/core";
@@ -144,18 +145,15 @@ export function createClient(options: TollwayClientOptions): TollwayClient {
           }
         }
 
-        const receipt = await options.settler.settle({
+        const settled = await options.settler.settle({
           resource: request.resource,
           offer: request.offer,
           model,
         });
 
-        if (options.verifier) {
-          const verification = await verifyReceipt(receipt, options.verifier);
-          if (!verification.valid) {
-            throw new ReceiptVerificationError(verification.reason);
-          }
-        }
+        // Only the parsed receipt leaves pay(), never the settler's object,
+        // so a field the signature does not cover cannot reach the caller.
+        const receipt = await checkedReceipt(settled, options.verifier);
 
         if (options.policy) {
           await options.policy.record(intent);
@@ -205,6 +203,31 @@ export class ReceiptVerificationError extends TollwayError {
     this.name = "ReceiptVerificationError";
     this.reason = reason;
   }
+}
+
+/**
+ * Returns the receipt as parsed and, when a verifier is set, as verified.
+ * Without a verifier the signature is not checked, but the shape still is.
+ */
+async function checkedReceipt(
+  candidate: unknown,
+  verifier: ReceiptVerifier | undefined,
+): Promise<SignedReceipt> {
+  if (verifier) {
+    const verification = await verifyReceipt(candidate, verifier);
+    if (!verification.valid) {
+      throw new ReceiptVerificationError(verification.reason);
+    }
+    return verification.receipt;
+  }
+  const parsed = signedReceiptSchema.safeParse(candidate);
+  if (!parsed.success) {
+    throw new TollwayError(
+      "invalid-receipt",
+      `settler returned a malformed receipt: ${parsed.error.issues.map((i) => i.message).join("; ")}`,
+    );
+  }
+  return parsed.data;
 }
 
 async function decideModel(
