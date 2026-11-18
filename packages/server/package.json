@@ -1,6 +1,6 @@
 {
   "name": "@tollway/server",
-  "version": "0.0.1",
+  "version": "0.0.2",
   "description": "Service-side payment gate, the framework-agnostic core that charges agents",
   "license": "Apache-2.0",
   "repository": {
