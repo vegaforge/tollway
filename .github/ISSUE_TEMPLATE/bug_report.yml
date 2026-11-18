@@ -15,17 +15,17 @@ body:
       label: Package
       description: Which package is affected?
       options:
-        - "@tollway/core"
-        - "@tollway/client"
-        - "@tollway/server"
-        - "@tollway/adapter-express"
-        - "@tollway/adapter-fastify"
-        - "@tollway/adapter-next"
-        - "@tollway/adapter-hono"
-        - "@tollway/channels"
-        - "@tollway/reconcile"
-        - "@tollway/observability"
-        - "@tollway/theme"
+        - "@vegaforge/tollway-core"
+        - "@vegaforge/tollway-client"
+        - "@vegaforge/tollway-server"
+        - "@vegaforge/tollway-adapter-express"
+        - "@vegaforge/tollway-adapter-fastify"
+        - "@vegaforge/tollway-adapter-next"
+        - "@vegaforge/tollway-adapter-hono"
+        - "@vegaforge/tollway-channels"
+        - "@vegaforge/tollway-reconcile"
+        - "@vegaforge/tollway-observability"
+        - "@vegaforge/tollway-theme"
         - apps/dashboard
         - apps/web
         - apps/demo
@@ -47,7 +47,7 @@ body:
       description: Minimal steps or a repo link. Mention whether MOCK_MODE was on.
       placeholder: |
         1. pnpm install
-        2. MOCK_MODE=true pnpm --filter @tollway/demo start
+        2. MOCK_MODE=true pnpm --filter @vegaforge/tollway-demo start
         3. ...
     validations:
       required: true

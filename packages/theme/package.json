@@ -1,5 +1,5 @@
 {
-  "name": "@tollway/theme",
+  "name": "@vegaforge/tollway-theme",
   "version": "0.0.1",
   "description": "Tollway design tokens: brand palette, semantic roles, CSS variables, and a Tailwind preset",
   "license": "Apache-2.0",

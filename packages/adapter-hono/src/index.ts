@@ -1,13 +1,13 @@
 /**
- * @tollway/adapter-hono
+ * @vegaforge/tollway-adapter-hono
  *
  * A thin translation between Hono and the framework-agnostic gate in
- * @tollway/server. All the payment logic lives in the gate; this adapter
+ * @vegaforge/tollway-server. All the payment logic lives in the gate; this adapter
  * only maps Hono requests in and gate outcomes out. See docs/design.md,
  * "Repository layout".
  */
 
-import type { Gate, GateOutcome } from "@tollway/server";
+import type { Gate, GateOutcome } from "@vegaforge/tollway-server";
 import type { Context, MiddlewareHandler } from "hono";
 
 /** Where the verified receipt is stashed on the Hono context for downstream handlers. */

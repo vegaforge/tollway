@@ -1,5 +1,5 @@
 /**
- * @tollway/client
+ * @vegaforge/tollway-client
  *
  * The agent-side wrapper. One call to pay for a resource: the client runs
  * the policy check, asks the router which model to use, delegates the
@@ -28,7 +28,7 @@ import {
   signedReceiptSchema,
   TollwayError,
   verifyReceipt,
-} from "@tollway/core";
+} from "@vegaforge/tollway-core";
 
 /** Events the client emits so callers and observability can follow along. */
 export type ClientEvent =

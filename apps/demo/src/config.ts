@@ -1,5 +1,5 @@
 import { StrKey } from "@stellar/stellar-sdk";
-import type { StellarNetwork } from "@tollway/core";
+import type { StellarNetwork } from "@vegaforge/tollway-core";
 import { USDC_PUBNET_ADDRESS, USDC_TESTNET_ADDRESS } from "@x402/stellar";
 
 /**

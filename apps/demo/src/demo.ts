@@ -1,5 +1,5 @@
 import type { AddressInfo } from "node:net";
-import { expressPaywall } from "@tollway/adapter-express";
+import { expressPaywall } from "@vegaforge/tollway-adapter-express";
 import {
   Ed25519Signer,
   Ed25519Verifier,
@@ -7,7 +7,7 @@ import {
   type SignedReceipt,
   type StellarNetwork,
   verifyReceipt,
-} from "@tollway/core";
+} from "@vegaforge/tollway-core";
 import {
   createHttpFacilitator,
   createInMemorySettlementCache,
@@ -19,7 +19,7 @@ import {
   PAYMENT_RESPONSE_HEADER,
   PAYMENT_SIGNATURE_HEADER,
   type PaywallConfig,
-} from "@tollway/server";
+} from "@vegaforge/tollway-server";
 import {
   createEd25519Signer,
   ExactStellarScheme,

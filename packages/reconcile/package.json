@@ -1,5 +1,5 @@
 {
-  "name": "@tollway/reconcile",
+  "name": "@vegaforge/tollway-reconcile",
   "version": "0.0.1",
   "description": "Reconciles off-chain channel commitments against on-chain settlement and flags drift",
   "license": "Apache-2.0",
@@ -30,7 +30,7 @@
     "typecheck": "tsc --noEmit"
   },
   "dependencies": {
-    "@tollway/core": "workspace:*"
+    "@vegaforge/tollway-core": "workspace:*"
   },
   "devDependencies": {
     "fast-check": "^3.23.0",

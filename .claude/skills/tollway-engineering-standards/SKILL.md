@@ -29,11 +29,11 @@ What each layer may import:
 
 | Package | May depend on | Must not depend on |
 | ------- | ------------- | ------------------ |
-| `@tollway/core` | `zod` only | any other `@tollway/*` package |
-| `@tollway/theme` | nothing | any other `@tollway/*` package |
-| `@tollway/server` | `core`, `@x402/core`, `@x402/stellar` | adapters, `client`, apps |
-| `@tollway/client`, `channels`, `reconcile`, `observability` | `core` | each other, `server`, adapters, apps |
-| `@tollway/adapter-*` | `server` (runtime), `core` (types), its own framework as a peer | another adapter, apps |
+| `@vegaforge/tollway-core` | `zod` only | any other `@vegaforge/tollway-*` package |
+| `@vegaforge/tollway-theme` | nothing | any other `@vegaforge/tollway-*` package |
+| `@vegaforge/tollway-server` | `core`, `@x402/core`, `@x402/stellar` | adapters, `client`, apps |
+| `@vegaforge/tollway-client`, `channels`, `reconcile`, `observability` | `core` | each other, `server`, adapters, apps |
+| `@vegaforge/tollway-adapter-*` | `server` (runtime), `core` (types), its own framework as a peer | another adapter, apps |
 | `apps/*` | any package | another app |
 
 Rules that follow from the table:
@@ -53,7 +53,7 @@ What enforces it today:
 
 - **Declared dependencies.** pnpm links a workspace package into another
   package's `node_modules` only if that package lists it in `package.json`.
-  An import of an undeclared `@tollway/*` package fails to resolve in
+  An import of an undeclared `@vegaforge/tollway-*` package fails to resolve in
   `pnpm typecheck` and `pnpm build`. Adding a dependency edge is therefore a
   visible `package.json` change that review must check against the table.
 - **Turbo task graph.** `turbo.json` runs `build`, `typecheck`, and `test`
@@ -62,8 +62,8 @@ What enforces it today:
 
 Gap to close: nothing stops a package from adding a forbidden edge to its
 `package.json`. A Biome `noRestrictedImports` rule in per-package `overrides`
-(for example, forbid `@tollway/*` under `packages/core/**`, forbid
-`@tollway/adapter-*` under `packages/adapter-*/**`) would turn the table into
+(for example, forbid `@vegaforge/tollway-*` under `packages/core/**`, forbid
+`@vegaforge/tollway-adapter-*` under `packages/adapter-*/**`) would turn the table into
 a lint error. Propose it through an ADR before adding it.
 
 A type-only import still counts as a dependency once it appears in a

@@ -45,7 +45,7 @@ const preferenceOrder: readonly SettlementModel[] = ["x402", "mpp-charge", "mpp-
  * offer and policy accept, otherwise x402 for an unknown counterparty.
  *
  * TODO: promote a counterparty to channel mode once traffic crosses the
- * threshold and @tollway/channels can run the lifecycle. The threshold is an
+ * threshold and @vegaforge/tollway-channels can run the lifecycle. The threshold is an
  * open question; see docs/design.md, "Open questions", item 5.
  */
 export function createDefaultRouter(): ModelRouter {

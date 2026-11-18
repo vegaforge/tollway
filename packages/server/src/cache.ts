@@ -1,4 +1,4 @@
-import { type SignedReceipt, signedReceiptSchema } from "@tollway/core";
+import { type SignedReceipt, signedReceiptSchema } from "@vegaforge/tollway-core";
 
 /**
  * Short-lived idempotency cache keyed by settlement model and nonce
@@ -94,7 +94,7 @@ export function createInMemorySettlementCache(ttlMs = 30_000): SettlementCache {
 /**
  * The minimal Redis surface this cache uses, kept duck-typed so consumers
  * can plug in `ioredis`, `ioredis-mock`, or any compatible client without
- * @tollway/server taking on a runtime dependency. The methods match the
+ * @vegaforge/tollway-server taking on a runtime dependency. The methods match the
  * ioredis signatures used here: `set(key, value, "EX", ttlSeconds)` stores
  * with a TTL, `set(key, value, "PX", ttlMs, "NX")` stores only if the key is
  * absent and resolves "OK" when it did, `get(key)` returns the stored value
@@ -173,10 +173,10 @@ const DEFAULT_REDIS_KEY_PREFIX = "tollway:settlement:";
  * TTL is expressed in seconds via Redis's `EX` option so the store evicts
  * stale entries itself, matching the in-memory cache's eviction window.
  * Receipts round-trip as JSON; the structure is the canonical SignedReceipt
- * from @tollway/core, so deserialization is a plain `JSON.parse`.
+ * from @vegaforge/tollway-core, so deserialization is a plain `JSON.parse`.
  *
  * The client is injected so the consumer owns the connection lifecycle, and
- * @tollway/server stays free of a hard dependency on `ioredis`. Tests use
+ * @vegaforge/tollway-server stays free of a hard dependency on `ioredis`. Tests use
  * `ioredis-mock` against the same interface.
  *
  * `acquire` is `SET NX PX` with a random token as the value, so only one

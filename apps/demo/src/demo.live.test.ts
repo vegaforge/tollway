@@ -6,7 +6,7 @@ import { runDemo } from "./demo.js";
  * unless enabled, because it needs funded accounts and an API key. Run with:
  *
  *   TOLLWAY_DEMO_LIVE=true OZ_API_KEY=... STELLAR_RECIPIENT=G... \
- *     STELLAR_SECRET_KEY=S... pnpm --filter @tollway/demo test
+ *     STELLAR_SECRET_KEY=S... pnpm --filter @vegaforge/tollway-demo test
  *
  * Both accounts need a USDC trustline and the payer needs testnet USDC.
  */

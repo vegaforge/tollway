@@ -1,5 +1,5 @@
 /**
- * @tollway/server
+ * @vegaforge/tollway-server
  *
  * The service-side gate that charges agents, framework agnostic. Framework
  * adapters (Express, Fastify, Next, Hono) wrap the gate; this package owns

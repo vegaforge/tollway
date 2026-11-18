@@ -17,14 +17,14 @@ export default function ExportsPage() {
           <EmptyState
             title="No exports configured"
             body="Build the export controls here: pick a range and format, then stream the receipts out."
-            source="@tollway/observability · export()"
+            source="@vegaforge/tollway-observability · export()"
           />
         </Panel>
         <Panel title="Webhooks" description="Push events to your own endpoints">
           <EmptyState
             title="No webhooks configured"
             body="Build webhook management here for receipt.created, channel.opened and closed, budget.warning, and anomaly.detected."
-            source="@tollway/observability · WebhookEvent"
+            source="@vegaforge/tollway-observability · WebhookEvent"
           />
         </Panel>
       </div>

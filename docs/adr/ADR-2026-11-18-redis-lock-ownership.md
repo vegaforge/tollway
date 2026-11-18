@@ -9,7 +9,7 @@
 - **Status:** Accepted 2026-11-18. **Embargoed: keep local.**
 - **Date:** 2026-11-18
 - **Issue:** none filed on purpose (SECURITY.md).
-- **Scope:** `packages/server/src/cache.ts`, `packages/server/src/gate.ts`, their tests. No change to `@tollway/core` or the adapters.
+- **Scope:** `packages/server/src/cache.ts`, `packages/server/src/gate.ts`, their tests. No change to `@vegaforge/tollway-core` or the adapters.
 
 ## Context
 

@@ -1,5 +1,5 @@
 /**
- * @tollway/reconcile
+ * @vegaforge/tollway-reconcile
  *
  * The safety net. For channel mode it compares the stored commitment stream
  * against the channel contract state and the on-chain settlement at close,
@@ -7,7 +7,7 @@
  * and matches its receipt. See docs/design.md, "Reconciliation".
  */
 
-import { type SignedReceipt, signedReceiptSchema } from "@tollway/core";
+import { type SignedReceipt, signedReceiptSchema } from "@vegaforge/tollway-core";
 
 /** One stored cumulative commitment, as the channel manager recorded it. */
 export type CommitmentRecord = {

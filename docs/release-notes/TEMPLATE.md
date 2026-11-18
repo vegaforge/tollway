@@ -2,7 +2,7 @@
 date: <YYYY-MM-DD>
 feature: <one line>
 scope: feat | fix | chore | docs
-packages: [<@tollway/package>, ...]
+packages: [<@vegaforge/tollway-package>, ...]
 scenario-impact: updated | needs_automation | none
 ---
 

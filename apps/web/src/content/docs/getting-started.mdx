@@ -22,7 +22,7 @@ pnpm test
 The demo drives one paid x402 request from challenge to signed receipt, with no network needed:
 
 ```bash
-MOCK_MODE=true pnpm --filter @tollway/demo start
+MOCK_MODE=true pnpm --filter @vegaforge/tollway-demo start
 ```
 
 Mock mode is the only demo path that works today. Without `MOCK_MODE`, the demo calls the mainnet OpenZeppelin facilitator URL, sends no API key, and uses placeholder addresses, so a real testnet run fails. Fixing those defaults is tracked in [#113](https://github.com/vegaforge/tollway/issues/113).
@@ -33,12 +33,12 @@ Tollway is pre-release and no package is published to npm yet.
 
 Implemented and tested:
 
-- `@tollway/core`: the canonical receipt with an Ed25519 signer, the policy and budget engine, and the default model router.
-- `@tollway/server`: the payment gate for x402 and MPP charge, an HTTP facilitator client, a mock facilitator and MPP charge handler, and in-memory and Redis settlement caches.
+- `@vegaforge/tollway-core`: the canonical receipt with an Ed25519 signer, the policy and budget engine, and the default model router.
+- `@vegaforge/tollway-server`: the payment gate for x402 and MPP charge, an HTTP facilitator client, a mock facilitator and MPP charge handler, and in-memory and Redis settlement caches.
 - The Express, Fastify, Next.js, and Hono adapters.
-- `@tollway/client` orchestration (policy, routing, receipt verification). You supply the payment signer.
-- `@tollway/channels` open, commit, and close against an injected channel adapter.
-- `@tollway/reconcile` drift detection and `@tollway/observability` metrics, exports, and webhooks.
+- `@vegaforge/tollway-client` orchestration (policy, routing, receipt verification). You supply the payment signer.
+- `@vegaforge/tollway-channels` open, commit, and close against an injected channel adapter.
+- `@vegaforge/tollway-reconcile` drift detection and `@vegaforge/tollway-observability` metrics, exports, and webhooks.
 
 Still open, each with a tracking issue:
 

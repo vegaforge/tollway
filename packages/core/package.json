@@ -1,5 +1,5 @@
 {
-  "name": "@tollway/core",
+  "name": "@vegaforge/tollway-core",
   "version": "0.0.1",
   "description": "Shared types, the canonical signed receipt, and the model router interface for Tollway",
   "license": "Apache-2.0",

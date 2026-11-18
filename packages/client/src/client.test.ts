@@ -7,7 +7,7 @@ import {
   type SignedReceipt,
   signReceipt,
   TollwayError,
-} from "@tollway/core";
+} from "@vegaforge/tollway-core";
 import { beforeAll, describe, expect, it, vi } from "vitest";
 import {
   type ClientEvent,

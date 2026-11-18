@@ -2,7 +2,7 @@
 date: 2026-11-18
 feature: a settled payment pays for one HTTP method
 scope: fix
-packages: ["@tollway/server"]
+packages: ["@vegaforge/tollway-server"]
 scenario-impact: none
 ---
 

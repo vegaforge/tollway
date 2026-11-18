@@ -1,4 +1,4 @@
-import { base64UrlToBytes, bytesToBase64Url, utf8Bytes } from "@tollway/core";
+import { base64UrlToBytes, bytesToBase64Url, utf8Bytes } from "@vegaforge/tollway-core";
 
 /** The x402 header names, per docs/design.md, "The problem". */
 export const PAYMENT_REQUIRED_HEADER = "PAYMENT-REQUIRED";

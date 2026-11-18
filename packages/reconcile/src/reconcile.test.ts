@@ -1,4 +1,4 @@
-import type { SignedReceipt } from "@tollway/core";
+import type { SignedReceipt } from "@vegaforge/tollway-core";
 import { describe, expect, it } from "vitest";
 import { type CommitmentRecord, createReconciler, type SettlementRecord } from "./index.js";
 

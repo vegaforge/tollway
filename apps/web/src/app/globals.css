@@ -1,7 +1,7 @@
 @import "tailwindcss";
 @import "fumadocs-ui/css/neutral.css";
 @import "fumadocs-ui/css/preset.css";
-@import "@tollway/theme/tokens.css";
+@import "@vegaforge/tollway-theme/tokens.css";
 
 /* Let Tailwind scan the Fumadocs UI components for the classes they use. */
 @source "../../node_modules/fumadocs-ui/dist/**/*.js";
@@ -10,7 +10,7 @@
    next-themes (via Fumadocs RootProvider) sets on <html>. */
 @custom-variant dark (&:where(.dark, .dark *, [data-theme="dark"], [data-theme="dark"] *));
 
-/* Bridge the @tollway/theme tokens into the names the components use, then into
+/* Bridge the @vegaforge/tollway-theme tokens into the names the components use, then into
    Tailwind's color space. Everything resolves to --tollway-*, which flips under
    .dark via tokens.css. Fumadocs keeps its own --color-fd-* tokens. */
 :root {

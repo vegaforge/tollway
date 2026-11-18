@@ -7,5 +7,5 @@
   "access": "public",
   "baseBranch": "dev",
   "updateInternalDependencies": "patch",
-  "ignore": ["@tollway/dashboard", "@tollway/demo", "@tollway/web"]
+  "ignore": ["@vegaforge/tollway-dashboard", "@vegaforge/tollway-demo", "@vegaforge/tollway-web"]
 }

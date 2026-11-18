@@ -1,17 +1,17 @@
 /**
- * @tollway/adapter-next
+ * @vegaforge/tollway-adapter-next
  *
  * Next.js App Router adapter for the Tollway payment gate. App Router route
  * handlers are plain Web fetch handlers, so this adapter speaks the standard
  * Request and Response and works with any Next.js version that exposes them
  * (which is every App Router release). The shape mirrors
- * @tollway/adapter-express and @tollway/adapter-hono, the worked references:
+ * @vegaforge/tollway-adapter-express and @vegaforge/tollway-adapter-hono, the worked references:
  * a thin map from a Web request into the framework-agnostic gate and gate
  * outcomes back out. See docs/design.md, "Repository layout".
  */
 
-import type { SignedReceipt } from "@tollway/core";
-import type { Gate } from "@tollway/server";
+import type { SignedReceipt } from "@vegaforge/tollway-core";
+import type { Gate } from "@vegaforge/tollway-server";
 
 /** Extra argument a paid handler receives: the verified receipt. */
 export type PaidContext = { receipt: SignedReceipt };
@@ -30,7 +30,7 @@ export type PaidHandler = (request: Request, context: PaidContext) => Response |
  *
  * ```ts
  * // app/quotes/latest/route.ts
- * import { withPaywall } from "@tollway/adapter-next";
+ * import { withPaywall } from "@vegaforge/tollway-adapter-next";
  *
  * export const GET = withPaywall(gate, async (_request, { receipt }) => {
  *   return Response.json({ quote: 42, receiptId: receipt.receipt.id });

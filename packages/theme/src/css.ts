@@ -24,7 +24,7 @@ function brandDeclarations(indent: string): string {
  * the consuming app prefers to toggle.
  */
 export function renderTokensCss(): string {
-  return `/* Generated from @tollway/theme. Edit src/tokens.ts, not this file. */
+  return `/* Generated from @vegaforge/tollway-theme. Edit src/tokens.ts, not this file. */
 
 :root {
 ${brandDeclarations("  ")}

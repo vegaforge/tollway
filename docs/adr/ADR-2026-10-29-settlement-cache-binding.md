@@ -1,6 +1,6 @@
 <!--
   EMBARGOED SECURITY RECORD. DO NOT PUSH THIS BRANCH OR OPEN A PUBLIC PULL REQUEST.
-  This file describes an unfixed vulnerability in @tollway/server. It lives only
+  This file describes an unfixed vulnerability in @vegaforge/tollway-server. It lives only
   in the maintainer's local worktree (.worktrees/fix-settlement-cache-binding)
   until the fix is developed in a GitHub security advisory private fork and the
   advisory is published. See "Disclosure plan" below.
@@ -11,7 +11,7 @@
 - **Status:** Accepted 2026-10-29. **Embargoed: keep local.**
 - **Date:** 2026-10-29
 - **Issue:** none filed on purpose. Tracked as a private GitHub security advisory (to be drafted).
-- **Scope:** `packages/server/src/gate.ts`, `packages/server/src/cache.ts`, their tests, and one adapter-level test. No change to `@tollway/core`, the receipt format, or the adapters' source.
+- **Scope:** `packages/server/src/gate.ts`, `packages/server/src/cache.ts`, their tests, and one adapter-level test. No change to `@vegaforge/tollway-core`, the receipt format, or the adapters' source.
 
 ## Context
 
@@ -74,10 +74,10 @@ limited to same-price routes: any route behind the same cache is open.
   price and payee is not caught by `/verify` in principle, because x402
   `PaymentRequirements` as built in `toRequirements` carries no resource.
 - **Who runs this code.** Every workspace package is at version `0.0.1` and
-  none has been published from this repository. The `@tollway/server` and
-  `@tollway/client` packages on npm (versions 0.1.0 to 0.2.0, March 2026) are
+  none has been published from this repository. The `@vegaforge/tollway-server` and
+  `@vegaforge/tollway-client` packages on npm (versions 0.1.0 to 0.2.0, March 2026) are
   published by a different maintainer from `TollwayProtocol/Tollway` and
-  contain unrelated code (`npm view @tollway/server repository maintainers`).
+  contain unrelated code (`npm view @vegaforge/tollway-server repository maintainers`).
   Exposure is limited to people running this repository from source or
   copying the gate.
 
@@ -94,7 +94,7 @@ open question below rather than decided here.
 
 1. **Bind every cache entry to its offer.** The gate derives an offer key
    from `model`, `network`, `resource`, `amount`, `asset`, and `payTo`, using
-   `canonicalJson` from `@tollway/core` so it is stable. The cache key becomes
+   `canonicalJson` from `@vegaforge/tollway-core` so it is stable. The cache key becomes
    `<model>:<nonce>`. On a hit, the gate compares the cached receipt's
    `resource`, `amount`, `asset`, `payee`, `network`, and `model` with the
    current offer. Equal: return it as today (`replayed: true`). Not equal:
@@ -116,7 +116,7 @@ open question below rather than decided here.
    `onCacheError(error, key)` in `PaywallDeps` is called as well. Nothing is
    swallowed: the caller sees the error on the outcome, and an unhandled
    rejection can no longer occur.
-4. **Ship as one patch.** One changeset for `@tollway/server` (patch), one
+4. **Ship as one patch.** One changeset for `@vegaforge/tollway-server` (patch), one
    release note, and these ADRs flipped to Accepted in the same change.
 
 Decided at approval (2026-10-29), taking the conservative option for both
@@ -236,22 +236,22 @@ In `packages/adapter-express/src/adapter.test.ts`:
    gets 409 and the handler does not run.
 
 Then: `./scripts/preflight.sh` (or the four commands until governance lands),
-`MOCK_MODE=true pnpm --filter @tollway/demo start`, and, if a key is
+`MOCK_MODE=true pnpm --filter @vegaforge/tollway-demo start`, and, if a key is
 available, one live testnet run to answer the open question.
 
 ## Disclosure plan
 
 1. **Draft a private advisory now.** On GitHub: Security, Advisories, "New
    draft security advisory" for `vegaforge/tollway`. Affected package
-   `@tollway/server`, ecosystem npm, affected versions `<= 0.0.1` (source on
+   `@vegaforge/tollway-server`, ecosystem npm, affected versions `<= 0.0.1` (source on
    `main` through `a095452`; never published from this repository). Severity
    to be set by the maintainer; suggested Medium, because exploitation needs
    a handler that accepts a reused payment, which the shipped mocks do.
 2. **Develop the fix in the advisory's temporary private fork**, not by
    pushing this branch. Move these ADRs and the red tests there.
-3. **Version.** Add a `@tollway/server` patch changeset. That bumps this
+3. **Version.** Add a `@vegaforge/tollway-server` patch changeset. That bumps this
    repository's `0.0.1` to `0.0.2`. A `0.2.1` release is not possible from
-   here: npm versions 0.1.0 to 0.2.0 of `@tollway/server` belong to another
+   here: npm versions 0.1.0 to 0.2.0 of `@vegaforge/tollway-server` belong to another
    publisher, and this repository cannot publish under the `@tollway` scope
    until the maintainer secures the scope or renames the packages. That is a
    separate decision, and it blocks every release, not only this fix.

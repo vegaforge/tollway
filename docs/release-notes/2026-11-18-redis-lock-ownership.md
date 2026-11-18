@@ -2,7 +2,7 @@
 date: 2026-11-18
 feature: Redis settlement locks are owned, renewed and released only by their holder
 scope: fix
-packages: ["@tollway/server"]
+packages: ["@vegaforge/tollway-server"]
 scenario-impact: none
 ---
 

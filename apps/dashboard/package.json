@@ -1,5 +1,5 @@
 {
-  "name": "@tollway/dashboard",
+  "name": "@vegaforge/tollway-dashboard",
   "version": "0.0.0",
   "private": true,
   "description": "Tollway observability dashboard",
@@ -13,9 +13,9 @@
     "typecheck": "tsc --noEmit"
   },
   "dependencies": {
-    "@tollway/channels": "workspace:*",
-    "@tollway/core": "workspace:*",
-    "@tollway/theme": "workspace:*",
+    "@vegaforge/tollway-channels": "workspace:*",
+    "@vegaforge/tollway-core": "workspace:*",
+    "@vegaforge/tollway-theme": "workspace:*",
     "next": "^16.4.3",
     "next-themes": "^0.4.6",
     "react": "^19.3.1",

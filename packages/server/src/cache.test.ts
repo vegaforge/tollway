@@ -1,4 +1,9 @@
-import { buildReceipt, Ed25519Signer, type SignedReceipt, signReceipt } from "@tollway/core";
+import {
+  buildReceipt,
+  Ed25519Signer,
+  type SignedReceipt,
+  signReceipt,
+} from "@vegaforge/tollway-core";
 import RedisMock from "ioredis-mock";
 import { beforeAll, describe, expect, it, vi } from "vitest";
 import {

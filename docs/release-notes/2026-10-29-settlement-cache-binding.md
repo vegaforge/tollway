@@ -2,7 +2,7 @@
 date: 2026-10-29
 feature: Bind cached receipts to their offer, settle concurrent duplicates once, await cache writes
 scope: fix
-packages: [@tollway/server]
+packages: [@vegaforge/tollway-server]
 scenario-impact: none
 ---
 

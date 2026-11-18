@@ -1,4 +1,4 @@
-import { Ed25519Signer, Ed25519Verifier, verifyReceipt } from "@tollway/core";
+import { Ed25519Signer, Ed25519Verifier, verifyReceipt } from "@vegaforge/tollway-core";
 import RedisMock from "ioredis-mock";
 import { beforeAll, describe, expect, it } from "vitest";
 import {

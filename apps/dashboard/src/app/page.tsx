@@ -1,4 +1,4 @@
-import { settlementModels } from "@tollway/core";
+import { settlementModels } from "@vegaforge/tollway-core";
 import { EmptyState } from "@/components/ui/empty-state";
 import { PageHeader } from "@/components/ui/page-header";
 import { Panel } from "@/components/ui/panel";
@@ -26,7 +26,7 @@ export default function OverviewPage() {
     <>
       <PageHeader
         title="Overview"
-        lead="Spend, model mix, failures, and open channels at a glance. Wire the widgets to @tollway/observability to replace the placeholders."
+        lead="Spend, model mix, failures, and open channels at a glance. Wire the widgets to @vegaforge/tollway-observability to replace the placeholders."
       />
 
       <section className="mb-6 grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-4">
@@ -51,7 +51,7 @@ export default function OverviewPage() {
           <EmptyState
             title="No spend data yet"
             body="A time series of spend by agent and service will render here."
-            source="@tollway/observability · summarize()"
+            source="@vegaforge/tollway-observability · summarize()"
           />
         </Panel>
 
@@ -59,7 +59,7 @@ export default function OverviewPage() {
           <EmptyState
             title="No receipts yet"
             body="Settled payments appear here as canonical receipts, newest first."
-            source="@tollway/core · SignedReceipt"
+            source="@vegaforge/tollway-core · SignedReceipt"
           />
         </Panel>
 
@@ -67,7 +67,7 @@ export default function OverviewPage() {
           <EmptyState
             title="Nothing flagged"
             body="Anomaly events and budget stops surface here as they fire."
-            source="@tollway/observability · anomaly.detected"
+            source="@vegaforge/tollway-observability · anomaly.detected"
           />
         </Panel>
       </div>

@@ -10,7 +10,7 @@ import {
   type StellarNetwork,
   signReceipt,
   type X402Payment,
-} from "@tollway/core";
+} from "@vegaforge/tollway-core";
 import type { SettlementCache, SettlementLock } from "./cache.js";
 import type { FacilitatorClient } from "./facilitator.js";
 import {

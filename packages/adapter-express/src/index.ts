@@ -1,13 +1,13 @@
 /**
- * @tollway/adapter-express
+ * @vegaforge/tollway-adapter-express
  *
  * A thin translation between Express and the framework-agnostic gate in
- * @tollway/server. All the payment logic lives in the gate; this adapter
+ * @vegaforge/tollway-server. All the payment logic lives in the gate; this adapter
  * only maps Express requests in and gate outcomes out. See docs/design.md,
  * "Repository layout".
  */
 
-import type { Gate } from "@tollway/server";
+import type { Gate } from "@vegaforge/tollway-server";
 import type { NextFunction, Request, RequestHandler, Response } from "express";
 
 /** Where the verified receipt is stashed on res.locals for downstream handlers. */

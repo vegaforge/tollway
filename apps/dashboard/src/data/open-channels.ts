@@ -2,7 +2,7 @@
  * Typed data layer for the channels view.
  *
  * The channels view (src/app/channels/page.tsx) depends on
- * @tollway/observability, which is tracked in issue #31. Until #31 lands,
+ * @vegaforge/tollway-observability, which is tracked in issue #31. Until #31 lands,
  * this module is the single seam where the UI talks to the data. Replacing
  * `fetchOpenChannels` with a real rollup against the observability hub (or
  * a direct ChannelManager.list iteration) is a one-import change; everything
@@ -11,12 +11,12 @@
  * See docs/design.md, "The channel lifecycle manager".
  */
 
-import type { ChannelStatus } from "@tollway/channels";
+import type { ChannelStatus } from "@vegaforge/tollway-channels";
 
 /**
  * One row in the open-channels table. Amounts are integer strings in the
  * asset's smallest unit, matching the canonical Channel shape in
- * @tollway/channels. The table formats them for display; the data layer
+ * @vegaforge/tollway-channels. The table formats them for display; the data layer
  * does not.
  */
 export type OpenChannelRow = {

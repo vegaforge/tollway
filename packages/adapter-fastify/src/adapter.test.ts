@@ -1,11 +1,11 @@
-import { Ed25519Signer } from "@tollway/core";
+import { Ed25519Signer } from "@vegaforge/tollway-core";
 import {
   createInMemorySettlementCache,
   createMockFacilitator,
   createPaywall,
   PAYMENT_SIGNATURE_HEADER,
   type PaywallConfig,
-} from "@tollway/server";
+} from "@vegaforge/tollway-server";
 import Fastify from "fastify";
 import { describe, expect, it } from "vitest";
 import { fastifyPaywall, RECEIPT_REQUEST_KEY } from "./index.js";

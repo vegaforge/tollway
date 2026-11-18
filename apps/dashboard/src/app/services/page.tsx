@@ -16,7 +16,7 @@ export default function ServicesPage() {
         <EmptyState
           title="No service data yet"
           body="Build the per-service table and latency breakdown here, grouped by settlement model."
-          source="@tollway/observability · summarize({ payee })"
+          source="@vegaforge/tollway-observability · summarize({ payee })"
         />
       </Panel>
     </>

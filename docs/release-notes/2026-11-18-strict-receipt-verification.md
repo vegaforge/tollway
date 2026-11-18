@@ -2,7 +2,7 @@
 date: 2026-11-18
 feature: a verified receipt is exactly the signed receipt
 scope: fix
-packages: ["@tollway/core", "@tollway/client"]
+packages: ["@vegaforge/tollway-core", "@vegaforge/tollway-client"]
 scenario-impact: none
 ---
 
@@ -14,7 +14,7 @@ signed receipt with an extra, unsigned field (for example
 receipt schemas are now strict, so any unsigned field makes the receipt
 invalid, and a valid result returns the parsed receipt as `result.receipt`.
 
-`@tollway/client` returns that parsed receipt from `pay()`, never the object
+`@vegaforge/tollway-client` returns that parsed receipt from `pay()`, never the object
 its settler produced. Without a verifier the signature is still not checked,
 but a receipt that does not match the schema is rejected with
 `TollwayError` code `invalid-receipt`.

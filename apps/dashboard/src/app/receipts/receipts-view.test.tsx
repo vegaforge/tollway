@@ -5,7 +5,7 @@ import {
   type ReceiptBody,
   type SignedReceipt,
   signReceipt,
-} from "@tollway/core";
+} from "@vegaforge/tollway-core";
 import { afterEach, beforeAll, describe, expect, it, vi } from "vitest";
 
 const useReceiptsMock = vi.hoisted(() => vi.fn());

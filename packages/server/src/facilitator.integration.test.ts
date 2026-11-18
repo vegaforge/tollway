@@ -1,4 +1,4 @@
-import type { PaymentOffer, X402Payment } from "@tollway/core";
+import type { PaymentOffer, X402Payment } from "@vegaforge/tollway-core";
 import { describe, expect, it } from "vitest";
 import { createHttpFacilitator } from "./facilitator.js";
 
@@ -6,7 +6,7 @@ import { createHttpFacilitator } from "./facilitator.js";
  * Opt-in integration tests: these reach a live testnet facilitator over the
  * network, so they are skipped unless explicitly enabled. Run with:
  *
- *   TOLLWAY_FACILITATOR_INTEGRATION=true pnpm --filter @tollway/server test
+ *   TOLLWAY_FACILITATOR_INTEGRATION=true pnpm --filter @vegaforge/tollway-server test
  *
  * OpenZeppelin Channels requires an API key on testnet and mainnet. Set
  * OZ_API_KEY (generate one at https://channels.openzeppelin.com/testnet/gen);

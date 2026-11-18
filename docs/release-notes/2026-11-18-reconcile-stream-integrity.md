@@ -2,7 +2,7 @@
 date: 2026-11-18
 feature: channel reconciliation checks every commitment, not just the last
 scope: fix
-packages: ["@tollway/reconcile"]
+packages: ["@vegaforge/tollway-reconcile"]
 scenario-impact: none
 ---
 

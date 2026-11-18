@@ -22,7 +22,7 @@ only `{ valid: true }`.
 So a receipt with extra fields that the signature never covered, for example
 `receipt.refunded: "true"` or `receipt.note: "paid in full"`, verifies as valid.
 The caller still holds its own input object, extra fields included.
-`@tollway/client` does exactly that: `pay()` verifies `receipt` and then
+`@vegaforge/tollway-client` does exactly that: `pay()` verifies `receipt` and then
 returns and emits that same unverified object to the agent
 (`packages/client/src/index.ts`).
 
@@ -40,7 +40,7 @@ that reads a field the signature does not cover and trusts it because
    parsed value, and its TSDoc says callers must use that value, not their
    input. `ReceiptVerification` is widened accordingly (additive for callers
    that only read `valid`).
-3. `@tollway/client` returns and emits the verified receipt when a verifier is
+3. `@vegaforge/tollway-client` returns and emits the verified receipt when a verifier is
    configured, and the parsed receipt (schema-checked, signature not checked)
    when it is not, so `pay()` never hands back raw settler output.
 4. Everything that parses receipts from outside (the Redis settlement cache,

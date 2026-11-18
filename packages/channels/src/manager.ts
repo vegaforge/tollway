@@ -6,7 +6,7 @@
  * `recover` is tracked under #38 and remains a typed stub.
  */
 
-import { NotImplementedError } from "@tollway/core";
+import { NotImplementedError } from "@vegaforge/tollway-core";
 import type {
   CloseAdapterResult,
   MppChannelAdapter,

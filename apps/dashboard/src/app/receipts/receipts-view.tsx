@@ -7,7 +7,7 @@ import {
   type SettlementRef,
   type SignedReceipt,
   verifyReceipt,
-} from "@tollway/core";
+} from "@vegaforge/tollway-core";
 import { useEffect, useMemo, useState } from "react";
 
 import { Panel } from "@/components/ui/panel";

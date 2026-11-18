@@ -1,6 +1,6 @@
 # Dashboard data contracts
 
-A contributor guide for the Tollway observability dashboard (`apps/dashboard`). Every view here is meant to render against `@tollway/observability`. The hub itself shipped in #31, but nothing feeds it gate outcomes yet (tracked in #106), so for now each view either reads from a typed local seam under `apps/dashboard/src/data/` or shows a placeholder naming the source it will eventually consume. This document records both the primitives every view composes from and the contracts each view holds with its data source so new views stay consistent.
+A contributor guide for the Tollway observability dashboard (`apps/dashboard`). Every view here is meant to render against `@vegaforge/tollway-observability`. The hub itself shipped in #31, but nothing feeds it gate outcomes yet (tracked in #106), so for now each view either reads from a typed local seam under `apps/dashboard/src/data/` or shows a placeholder naming the source it will eventually consume. This document records both the primitives every view composes from and the contracts each view holds with its data source so new views stay consistent.
 
 See also `docs/design.md`, "Observability", which lists what the dashboard is supposed to show and the webhook event set it consumes.
 
@@ -38,7 +38,7 @@ The placeholder a widget shows when its data is unavailable. Every unwired widge
 <EmptyState
   title="No receipts yet"
   body="Settled payments will appear here as canonical receipts, newest first."
-  source="@tollway/core · SignedReceipt"
+  source="@vegaforge/tollway-core · SignedReceipt"
 />
 ```
 
@@ -63,7 +63,7 @@ The discriminated union is load-bearing: the view branches on `status` once and 
 
 The row shape is owned by the data module, not the view. Two conventions hold across every row type:
 
-1. Amounts are integer strings in the asset's smallest unit (Stellar SACs use 7 decimals), matching the canonical receipt and channel shapes in `@tollway/core` and `@tollway/channels`. The data layer never formats; the view does.
+1. Amounts are integer strings in the asset's smallest unit (Stellar SACs use 7 decimals), matching the canonical receipt and channel shapes in `@vegaforge/tollway-core` and `@vegaforge/tollway-channels`. The data layer never formats; the view does.
 2. The asset code (`"USDC"`, etc.) travels alongside the amount on the row. Per-asset metadata, decimals included, will eventually attach here once the observability hub returns it.
 
 The snapshot return type wraps the rows in an object (`OpenChannelsSnapshot`, `AgentSpendSnapshot`) so the seam stays stable when the hub starts attaching cursors, generated-at timestamps, or paging metadata.
@@ -72,19 +72,19 @@ When #31 lands, swapping the body of `fetchOpenChannels` or `fetchAgentSpend` fo
 
 ### Unwired views: an `EmptyState` with a `source`
 
-A view that does not yet have a data hook renders an `EmptyState` directly inside its `Panel`. The `source` prop carries the contract: it names the `@tollway/observability` (or `@tollway/core`) symbol the view will eventually call. When you wire the view, that `source` is the import you reach for.
+A view that does not yet have a data hook renders an `EmptyState` directly inside its `Panel`. The `source` prop carries the contract: it names the `@vegaforge/tollway-observability` (or `@vegaforge/tollway-core`) symbol the view will eventually call. When you wire the view, that `source` is the import you reach for.
 
 ## View-to-source map
 
 | Route | View | Current source | Future source |
 | ----- | ---- | -------------- | ------------- |
-| `/` | Overview | `StatCard` placeholders plus `EmptyState`s for model mix, spend over time, recent receipts, anomalies | `@tollway/observability` (`summarize`), `@tollway/core` (`SignedReceipt`), `anomaly.detected` events |
+| `/` | Overview | `StatCard` placeholders plus `EmptyState`s for model mix, spend over time, recent receipts, anomalies | `@vegaforge/tollway-observability` (`summarize`), `@vegaforge/tollway-core` (`SignedReceipt`), `anomaly.detected` events |
 | `/agents` | Per-agent spend | `useAgentSpend` -> `fetchAgentSpend` stub in `src/data/agent-spend.ts` | `summarize({ payer })` per agent, or a future `byPayer` rollup on the hub |
 | `/services` | Per-service revenue | `EmptyState` with `summarize({ payee })` as the named source | `summarize({ payee })`, plus latency-per-model breakdown |
 | `/channels` | Open MPP channels | `useOpenChannels` -> `fetchOpenChannels` stub in `src/data/open-channels.ts` | Observability hub rollup over `channel.opened` / `channel.closed`, or a direct `ChannelManager.list` iteration |
-| `/receipts` | Signed receipt archive | `EmptyState` with `@tollway/core · SignedReceipt` as the named source | Receipt archive backed by the observability hub's receipt stream |
+| `/receipts` | Signed receipt archive | `EmptyState` with `@vegaforge/tollway-core · SignedReceipt` as the named source | Receipt archive backed by the observability hub's receipt stream |
 | `/anomalies` | Anomaly feed | `EmptyState` with `anomaly.detected` as the named source | `anomaly.detected` event stream, with the rule that fired |
-| `/exports` | Exports and webhooks | Two `EmptyState`s, one per panel | `@tollway/observability` `export()` for JSON and CSV, and the `WebhookEvent` set for outgoing webhooks |
+| `/exports` | Exports and webhooks | Two `EmptyState`s, one per panel | `@vegaforge/tollway-observability` `export()` for JSON and CSV, and the `WebhookEvent` set for outgoing webhooks |
 
 The nav order in `apps/dashboard/src/components/shell/nav.ts` matches this table. Add new entries there when you add a route.
 

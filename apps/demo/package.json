@@ -1,5 +1,5 @@
 {
-  "name": "@tollway/demo",
+  "name": "@vegaforge/tollway-demo",
   "version": "0.0.0",
   "private": true,
   "description": "End-to-end Tollway demo: one paid x402 request producing a canonical receipt",
@@ -12,9 +12,9 @@
   },
   "dependencies": {
     "@stellar/stellar-sdk": "^14.6.1",
-    "@tollway/adapter-express": "workspace:*",
-    "@tollway/core": "workspace:*",
-    "@tollway/server": "workspace:*",
+    "@vegaforge/tollway-adapter-express": "workspace:*",
+    "@vegaforge/tollway-core": "workspace:*",
+    "@vegaforge/tollway-server": "workspace:*",
     "@x402/stellar": "^2.16.0",
     "express": "^5.1.0"
   },

@@ -1,7 +1,7 @@
 /**
  * Typed data layer for the agents view.
  *
- * The agents view (src/app/agents/page.tsx) depends on @tollway/observability,
+ * The agents view (src/app/agents/page.tsx) depends on @vegaforge/tollway-observability,
  * which is tracked in issue #31. Until #31 lands, this module is the single
  * seam where the UI talks to the data. Replacing `fetchAgentSpend` with a real
  * call to the observability hub is a one-import change; everything downstream
@@ -13,7 +13,7 @@
 /**
  * One row in the per-agent spend table. Amounts are integer strings in the
  * asset's smallest unit, matching the canonical receipt and policy shapes in
- * @tollway/core. The table formats them for display; the data layer does not.
+ * @vegaforge/tollway-core. The table formats them for display; the data layer does not.
  */
 export type AgentSpendRow = {
   /** Stable id for the agent, used as the React key. */
