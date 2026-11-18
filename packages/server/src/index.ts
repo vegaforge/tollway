@@ -13,6 +13,7 @@ export {
   type RedisLikeClient,
   type RedisSettlementCacheOptions,
   type SettlementCache,
+  type SettlementLock,
 } from "./cache.js";
 export {
   createHttpFacilitator,

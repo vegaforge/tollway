@@ -308,11 +308,94 @@ describe("settlement lock across processes", () => {
     });
     if (!verification.valid) throw new Error("expected the mock to accept the payment");
     const otherProcess = createRedisSettlementCache({ client, keyPrefix });
-    await expect(otherProcess.acquire(`x402:${verification.nonce}`, 30_000)).resolves.toBe(true);
+    await expect(otherProcess.acquire(`x402:${verification.nonce}`, 30_000)).resolves.toEqual({
+      token: expect.any(String),
+    });
 
     const outcome = await gate({ ...baseRequest, headers });
     expect(outcome).toEqual({ kind: "rejected", status: 409, reason: "settlement in progress" });
     expect(calls.settle).toBe(0);
+  });
+
+  // Regression lock for ADR-2026-11-18-redis-lock-ownership: a /settle that
+  // outlives the lock TTL must not let a second process settle the same payment.
+  it("keeps the lock alive while a slow settlement runs", async () => {
+    const client = new RedisMock() as unknown as RedisLikeClient;
+    const keyPrefix = "gate-test:slow-settle:";
+    const inner = createMockFacilitator();
+    const calls = { settle: 0 };
+    const slowFacilitator: FacilitatorClient = {
+      ...inner,
+      async settle(input) {
+        calls.settle++;
+        await new Promise((resolve) => setTimeout(resolve, 300));
+        return inner.settle(input);
+      },
+    };
+    const lockTtl = { settlementLockTtlMs: 90 };
+    const processA = createPaywall(config, {
+      signer,
+      facilitator: slowFacilitator,
+      cache: createRedisSettlementCache({ client, keyPrefix }),
+      ...lockTtl,
+    });
+    const processB = createPaywall(config, {
+      signer,
+      facilitator: slowFacilitator,
+      cache: createRedisSettlementCache({ client, keyPrefix }),
+      ...lockTtl,
+    });
+
+    const first = processA({ ...baseRequest, headers });
+    // Retry of the same payment reaches another process after the TTL.
+    await new Promise((resolve) => setTimeout(resolve, 180));
+    const second = await processB({ ...baseRequest, headers });
+
+    expect(second).toEqual({ kind: "rejected", status: 409, reason: "settlement in progress" });
+    expect((await first).kind).toBe("settled");
+    expect(calls.settle).toBe(1);
+  });
+
+  it("reports a lock lost during settlement instead of hiding it", async () => {
+    const redis = new RedisMock();
+    const client = redis as unknown as RedisLikeClient;
+    const keyPrefix = "gate-test:lost-lock:";
+    const inner = createMockFacilitator();
+    const reported: string[] = [];
+    const gate = createPaywall(config, {
+      signer,
+      facilitator: {
+        ...inner,
+        async settle(input) {
+          // The lock disappears mid-settlement (Redis failover, eviction).
+          await redis.del(`${keyPrefix}lock:x402:${input.nonce}`);
+          await new Promise((resolve) => setTimeout(resolve, 120));
+          return inner.settle(input);
+        },
+      },
+      cache: createRedisSettlementCache({ client, keyPrefix }),
+      settlementLockTtlMs: 90,
+      onCacheError: (error) => reported.push(error.message),
+    });
+
+    const outcome = await gate({ ...baseRequest, headers });
+    expect(outcome.kind).toBe("settled");
+    if (outcome.kind !== "settled") return;
+    expect(outcome.lockLost).toBe(true);
+    expect(outcome.cacheError).toBeInstanceOf(Error);
+    expect(reported).toHaveLength(1);
+  });
+
+  it("refuses a cache that implements only part of the lock interface", () => {
+    const partial = {
+      ...createInMemorySettlementCache(),
+      async acquire() {
+        return { token: "t" };
+      },
+    };
+    expect(() =>
+      createPaywall(config, { signer, facilitator: createMockFacilitator(), cache: partial }),
+    ).toThrow(/acquire, renew and release/);
   });
 
   it("releases the lock after settling so a retry replays the receipt", async () => {

@@ -136,11 +136,55 @@ describe("createRedisSettlementCache settlement lock", () => {
     const first = createRedisSettlementCache({ client });
     const second = createRedisSettlementCache({ client });
 
-    await expect(first.acquire("x402:nonce-lock", 30_000)).resolves.toBe(true);
+    const firstLock = await first.acquire("x402:nonce-lock", 30_000);
+    if (!firstLock) throw new Error("expected the first cache to take the lock");
     await expect(second.acquire("x402:nonce-lock", 30_000)).resolves.toBe(false);
 
-    await first.release("x402:nonce-lock");
-    await expect(second.acquire("x402:nonce-lock", 30_000)).resolves.toBe(true);
-    await second.release("x402:nonce-lock");
+    await expect(first.release("x402:nonce-lock", firstLock)).resolves.toBe(true);
+    const secondLock = await second.acquire("x402:nonce-lock", 30_000);
+    if (!secondLock) throw new Error("expected the second cache to take the lock");
+    await expect(second.release("x402:nonce-lock", secondLock)).resolves.toBe(true);
+  });
+});
+
+// Regression lock for ADR-2026-11-18-redis-lock-ownership.
+describe("createRedisSettlementCache lock ownership", () => {
+  const prefix = "tollway:settlement:";
+
+  it("does not let a holder whose lock expired release the new holder's lock", async () => {
+    const redis = new RedisMock();
+    const client = redis as unknown as RedisLikeClient;
+    const processA = createRedisSettlementCache({ client, keyPrefix: "own:a:" });
+    const processB = createRedisSettlementCache({ client, keyPrefix: "own:a:" });
+    const processC = createRedisSettlementCache({ client, keyPrefix: "own:a:" });
+
+    const lockA = await processA.acquire("x402:nonce", 30_000);
+    expect(lockA).toBeTruthy();
+    // A's lock expires while A is still working (a slow /settle).
+    await redis.del("own:a:lock:x402:nonce");
+    const lockB = await processB.acquire("x402:nonce", 30_000);
+    expect(lockB).toBeTruthy();
+
+    // A finishes late and releases with its own, stale lock.
+    if (!lockA) throw new Error("expected A to hold the lock");
+    await processA.release("x402:nonce", lockA);
+
+    // B still holds the lock, so a third process must not get it.
+    await expect(processC.acquire("x402:nonce", 30_000)).resolves.toBe(false);
+  });
+
+  it("renews only a lock the caller still holds", async () => {
+    const redis = new RedisMock();
+    const client = redis as unknown as RedisLikeClient;
+    const cache = createRedisSettlementCache({ client });
+    const lock = await cache.acquire("x402:renew", 30_000);
+    if (!lock) throw new Error("expected to acquire");
+
+    await expect(cache.renew("x402:renew", lock, 30_000)).resolves.toBe(true);
+    await redis.del(`${prefix}lock:x402:renew`);
+    const other = await createRedisSettlementCache({ client }).acquire("x402:renew", 30_000);
+    expect(other).toBeTruthy();
+    await expect(cache.renew("x402:renew", lock, 30_000)).resolves.toBe(false);
+    await expect(cache.release("x402:renew", lock)).resolves.toBe(false);
   });
 });
