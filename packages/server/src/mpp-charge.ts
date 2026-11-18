@@ -1,5 +1,5 @@
-import type { MppChargePayment, PaymentOffer } from "@tollway/core";
-import { NotImplementedError, utf8Bytes } from "@tollway/core";
+import type { MppChargePayment, PaymentOffer } from "@vegaforge/tollway-core";
+import { NotImplementedError, utf8Bytes } from "@vegaforge/tollway-core";
 import { mockAccount, mockHex } from "./hash.js";
 
 /**
@@ -91,7 +91,7 @@ export function createMppChargeHandler(_options: MppChargeOptions = {}): MppChar
 export async function deriveMppChargeNonce(payload: string): Promise<string> {
   const data = new Uint8Array(utf8Bytes(payload));
   const digest = await crypto.subtle.digest("SHA-256", data);
-  // Reuse bytesToBase64Url from @tollway/core
-  const { bytesToBase64Url } = await import("@tollway/core");
+  // Reuse bytesToBase64Url from @vegaforge/tollway-core
+  const { bytesToBase64Url } = await import("@vegaforge/tollway-core");
   return bytesToBase64Url(new Uint8Array(digest));
 }

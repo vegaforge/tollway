@@ -1,5 +1,5 @@
 /**
- * @tollway/reconcile
+ * @vegaforge/tollway-reconcile
  *
  * The safety net. For channel mode it compares the stored commitment stream
  * against the channel contract state and the on-chain settlement at close,
@@ -7,7 +7,7 @@
  * and matches its receipt. See docs/design.md, "Reconciliation".
  */
 
-import { type SignedReceipt, signedReceiptSchema } from "@tollway/core";
+import { type SignedReceipt, signedReceiptSchema } from "@vegaforge/tollway-core";
 
 /** One stored cumulative commitment, as the channel manager recorded it. */
 export type CommitmentRecord = {
@@ -30,7 +30,13 @@ export type DriftKind =
   | "missing-commitment"
   | "unexpected-remainder"
   | "sequence-gap"
-  | "malformed-record";
+  | "malformed-record"
+  /** A cumulative amount is lower than one at an earlier sequence. */
+  | "non-monotonic-cumulative"
+  /** A commitment names a different channel than the settlement. */
+  | "foreign-commitment"
+  /** Two or more commitments share one sequence. */
+  | "duplicate-sequence";
 
 export type Drift = {
   kind: DriftKind;
@@ -119,8 +125,22 @@ export function createReconciler(options: ReconcilerOptions = {}): Reconciler {
       }
       const remainder = remainderResult.amount;
 
+      // A commitment for another channel can neither cause nor hide drift
+      // here, so it is reported and left out of every amount check.
+      const own: CommitmentRecord[] = [];
+      for (const commitment of commitments) {
+        if (commitment.channelId === channelId) {
+          own.push(commitment);
+        } else {
+          drifts.push({
+            kind: "foreign-commitment",
+            detail: `commitment at sequence ${commitment.sequence} belongs to channel ${commitment.channelId}, not ${channelId}; excluded from the amount checks`,
+          });
+        }
+      }
+
       // No commitments recorded, but funds moved on-chain.
-      if (commitments.length === 0) {
+      if (own.length === 0) {
         if (settled > 0n) {
           drifts.push({
             kind: "missing-commitment",
@@ -130,53 +150,88 @@ export function createReconciler(options: ReconcilerOptions = {}): Reconciler {
         return buildResult(channelId, drifts, suppress);
       }
 
-      // Sort by sequence for deterministic processing regardless of input order.
-      const sorted = [...commitments].sort((a, b) => a.sequence - b.sequence);
+      // The highest amount committed at each sequence. Where duplicates
+      // disagree, the higher one counts, so ambiguity can only add drift.
+      const bySequence = new Map<number, { amount: bigint; count: number }>();
+      for (const entry of own) {
+        const parsedAmount = parseAmount(
+          entry.cumulativeAmount,
+          `commitments[${entry.sequence}].cumulativeAmount`,
+        );
+        if (!parsedAmount.ok) {
+          drifts.push(parsedAmount.drift);
+          return buildResult(channelId, drifts, suppress);
+        }
+        const seen = bySequence.get(entry.sequence);
+        bySequence.set(entry.sequence, {
+          amount: seen && seen.amount > parsedAmount.amount ? seen.amount : parsedAmount.amount,
+          count: (seen?.count ?? 0) + 1,
+        });
+      }
+      const sequences = [...bySequence.keys()].sort((a, b) => a - b);
+
+      for (const sequence of sequences) {
+        const seen = bySequence.get(sequence);
+        if (seen && seen.count > 1) {
+          drifts.push({
+            kind: "duplicate-sequence",
+            detail: `sequence ${sequence} appears ${seen.count} times; the highest amount, ${seen.amount}, is used for the settlement check`,
+          });
+        }
+      }
 
       // Sequences must start at 0 and be contiguous. Report only the first gap
       // so the detail stays actionable.
-      for (const [i, entry] of sorted.entries()) {
-        if (entry.sequence !== i) {
+      for (const [i, sequence] of sequences.entries()) {
+        if (sequence !== i) {
           drifts.push({
             kind: "sequence-gap",
-            detail: `sequence gap at position ${i}: expected sequence ${i}, got ${entry.sequence}`,
+            detail: `sequence gap at position ${i}: expected sequence ${i}, got ${sequence}`,
           });
           break;
         }
       }
 
-      // sorted is guaranteed non-empty: the commitments.length === 0 guard above returned early.
-      const last = sorted.at(-1);
-      if (last === undefined) return buildResult(channelId, drifts, suppress);
-
-      const lastCumulativeResult = parseAmount(
-        last.cumulativeAmount,
-        `commitments[${last.sequence}].cumulativeAmount`,
-      );
-      if (!lastCumulativeResult.ok) {
-        drifts.push(lastCumulativeResult.drift);
-        return buildResult(channelId, drifts, suppress);
+      // Cumulative amounts never go down. A decrease is what a rolled back or
+      // tampered store looks like. Report the first one. The expected
+      // settlement is the most that was ever committed, at whichever sequence.
+      let previous: { sequence: number; amount: bigint } | undefined;
+      let highest = { sequence: sequences[0] ?? 0, amount: 0n };
+      let reportedDecrease = false;
+      for (const sequence of sequences) {
+        const amount = bySequence.get(sequence)?.amount ?? 0n;
+        if (previous && amount < previous.amount && !reportedDecrease) {
+          drifts.push({
+            kind: "non-monotonic-cumulative",
+            detail: `cumulative amount fell from ${previous.amount} at sequence ${previous.sequence} to ${amount} at sequence ${sequence}`,
+          });
+          reportedDecrease = true;
+        }
+        if (amount > highest.amount) highest = { sequence, amount };
+        previous = { sequence, amount };
       }
-      const lastCumulative = lastCumulativeResult.amount;
 
-      if (settled < lastCumulative) {
+      const expected = highest.amount;
+      const expectedText = expected.toString();
+
+      if (settled < expected) {
         drifts.push({
           kind: "under-settled",
-          detail: `channel settled ${settledAmount} but last commitment was ${last.cumulativeAmount} (sequence ${last.sequence}); shortfall: ${String(lastCumulative - settled)}`,
+          detail: `channel settled ${settledAmount} but last commitment was ${expectedText} (sequence ${highest.sequence}); shortfall: ${String(expected - settled)}`,
         });
-      } else if (settled > lastCumulative) {
+      } else if (settled > expected) {
         drifts.push({
           kind: "over-settled",
-          detail: `channel settled ${settledAmount} but last commitment was only ${last.cumulativeAmount} (sequence ${last.sequence}); excess: ${String(settled - lastCumulative)}`,
+          detail: `channel settled ${settledAmount} but last commitment was only ${expectedText} (sequence ${highest.sequence}); excess: ${String(settled - expected)}`,
         });
       }
 
       // settled + remainder = 0 with positive commitments means all channel
       // funds are unaccounted for.
-      if (settled + remainder === 0n && lastCumulative > 0n) {
+      if (settled + remainder === 0n && expected > 0n) {
         drifts.push({
           kind: "unexpected-remainder",
-          detail: `settled (${settledAmount}) + returnedRemainder (${returnedRemainder}) is zero but commitments totalled ${last.cumulativeAmount}; channel funds appear lost`,
+          detail: `settled (${settledAmount}) + returnedRemainder (${returnedRemainder}) is zero but commitments totalled ${expectedText}; channel funds appear lost`,
         });
       }
 

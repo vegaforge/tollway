@@ -7,7 +7,7 @@ import {
   type SignedReceipt,
   signReceipt,
   TollwayError,
-} from "@tollway/core";
+} from "@vegaforge/tollway-core";
 import { beforeAll, describe, expect, it, vi } from "vitest";
 import {
   type ClientEvent,
@@ -66,7 +66,7 @@ describe("createClient happy path", () => {
     const result = await client.pay({ resource: OFFER.resource, offer: OFFER });
 
     expect(result.model).toBe("x402");
-    expect(result.receipt).toBe(baselineReceipt);
+    expect(result.receipt).toEqual(baselineReceipt);
     expect(settler.settle).toHaveBeenCalledWith({
       resource: OFFER.resource,
       offer: OFFER,
@@ -228,7 +228,7 @@ describe("createClient receipt verification", () => {
     const client = createClient({ network: "testnet", settler: mockSettler(tampered) });
 
     const result = await client.pay({ resource: OFFER.resource, offer: OFFER });
-    expect(result.receipt).toBe(tampered);
+    expect(result.receipt).toEqual(tampered);
   });
 });
 
@@ -282,5 +282,27 @@ describe("createClient error events", () => {
     await expect(client.pay({ resource: OFFER.resource, offer: OFFER })).resolves.toMatchObject({
       model: "x402",
     });
+  });
+});
+
+// Regression lock for ADR-2026-11-18-strict-receipt-verification.
+describe("createClient returns only signed receipt fields", () => {
+  it("rejects a receipt carrying a field the signature does not cover", async () => {
+    const padded = {
+      ...baselineReceipt,
+      receipt: { ...baselineReceipt.receipt, refunded: "true" },
+    } as SignedReceipt;
+    const client = createClient({ network: "testnet", settler: mockSettler(padded), verifier });
+    await expect(client.pay({ resource: OFFER.resource, offer: OFFER })).rejects.toBeInstanceOf(
+      ReceiptVerificationError,
+    );
+  });
+
+  it("does not hand back settler output as is when no verifier is set", async () => {
+    const padded = { ...baselineReceipt, extra: 1 } as SignedReceipt;
+    const client = createClient({ network: "testnet", settler: mockSettler(padded) });
+    await expect(client.pay({ resource: OFFER.resource, offer: OFFER })).rejects.toBeInstanceOf(
+      TollwayError,
+    );
   });
 });

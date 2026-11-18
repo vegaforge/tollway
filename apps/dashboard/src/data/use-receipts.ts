@@ -19,7 +19,7 @@ export type UseReceiptsState =
 
 /**
  * Subscribes the receipts view to the data source. Today the source is a
- * local stub; tomorrow it is @tollway/observability or the receipt
+ * local stub; tomorrow it is @vegaforge/tollway-observability or the receipt
  * archive. The hook's contract does not change either way.
  */
 export function useReceipts(): UseReceiptsState {

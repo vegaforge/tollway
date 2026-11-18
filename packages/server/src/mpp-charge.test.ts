@@ -1,4 +1,4 @@
-import type { MppChargePayment, PaymentOffer } from "@tollway/core";
+import type { MppChargePayment, PaymentOffer } from "@vegaforge/tollway-core";
 import { describe, expect, it } from "vitest";
 import { createMockMppChargeHandler } from "./mpp-charge.js";
 

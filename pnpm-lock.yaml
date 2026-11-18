@@ -32,13 +32,13 @@ importers:
 
   apps/dashboard:
     dependencies:
-      '@tollway/channels':
+      '@vegaforge/tollway-channels':
         specifier: workspace:*
         version: link:../../packages/channels
-      '@tollway/core':
+      '@vegaforge/tollway-core':
         specifier: workspace:*
         version: link:../../packages/core
-      '@tollway/theme':
+      '@vegaforge/tollway-theme':
         specifier: workspace:*
         version: link:../../packages/theme
       next:
@@ -93,13 +93,13 @@ importers:
       '@stellar/stellar-sdk':
         specifier: ^14.6.1
         version: 14.6.1
-      '@tollway/adapter-express':
+      '@vegaforge/tollway-adapter-express':
         specifier: workspace:*
         version: link:../../packages/adapter-express
-      '@tollway/core':
+      '@vegaforge/tollway-core':
         specifier: workspace:*
         version: link:../../packages/core
-      '@tollway/server':
+      '@vegaforge/tollway-server':
         specifier: workspace:*
         version: link:../../packages/server
       '@x402/stellar':
@@ -127,7 +127,7 @@ importers:
 
   apps/web:
     dependencies:
-      '@tollway/theme':
+      '@vegaforge/tollway-theme':
         specifier: workspace:*
         version: link:../../packages/theme
       fumadocs-core:
@@ -176,19 +176,19 @@ importers:
 
   packages/adapter-express:
     dependencies:
-      '@tollway/server':
+      '@vegaforge/tollway-server':
         specifier: workspace:*
         version: link:../server
     devDependencies:
-      '@tollway/core':
-        specifier: workspace:*
-        version: link:../core
       '@types/express':
         specifier: ^5.0.0
         version: 5.0.6
       '@types/node':
         specifier: ^22.19.20
         version: 22.19.20
+      '@vegaforge/tollway-core':
+        specifier: workspace:*
+        version: link:../core
       express:
         specifier: ^5.1.0
         version: 5.2.1
@@ -204,16 +204,16 @@ importers:
 
   packages/adapter-fastify:
     dependencies:
-      '@tollway/server':
+      '@vegaforge/tollway-server':
         specifier: workspace:*
         version: link:../server
     devDependencies:
-      '@tollway/core':
-        specifier: workspace:*
-        version: link:../core
       '@types/node':
         specifier: ^22.19.20
         version: 22.19.20
+      '@vegaforge/tollway-core':
+        specifier: workspace:*
+        version: link:../core
       fastify:
         specifier: ^5.2.0
         version: 5.8.5
@@ -229,16 +229,16 @@ importers:
 
   packages/adapter-hono:
     dependencies:
-      '@tollway/server':
+      '@vegaforge/tollway-server':
         specifier: workspace:*
         version: link:../server
     devDependencies:
-      '@tollway/core':
-        specifier: workspace:*
-        version: link:../core
       '@types/node':
         specifier: ^22.19.20
         version: 22.19.20
+      '@vegaforge/tollway-core':
+        specifier: workspace:*
+        version: link:../core
       hono:
         specifier: ^4.6.0
         version: 4.12.23
@@ -254,19 +254,19 @@ importers:
 
   packages/adapter-next:
     dependencies:
-      '@tollway/server':
+      '@vegaforge/tollway-server':
         specifier: workspace:*
         version: link:../server
       next:
         specifier: ^14.0.0 || ^15.0.0
         version: 15.5.19(react-dom@19.3.1(react@19.3.1))(react@19.3.1)
     devDependencies:
-      '@tollway/core':
-        specifier: workspace:*
-        version: link:../core
       '@types/node':
         specifier: ^22.19.20
         version: 22.19.20
+      '@vegaforge/tollway-core':
+        specifier: workspace:*
+        version: link:../core
       tsup:
         specifier: ^8.5.0
         version: 8.5.1(jiti@2.7.0)(postcss@8.5.32)(tsx@4.22.4)(typescript@5.9.3)(yaml@2.9.1)
@@ -279,7 +279,7 @@ importers:
 
   packages/channels:
     dependencies:
-      '@tollway/core':
+      '@vegaforge/tollway-core':
         specifier: workspace:*
         version: link:../core
     devDependencies:
@@ -295,7 +295,7 @@ importers:
 
   packages/client:
     dependencies:
-      '@tollway/core':
+      '@vegaforge/tollway-core':
         specifier: workspace:*
         version: link:../core
     devDependencies:
@@ -330,7 +330,7 @@ importers:
 
   packages/observability:
     dependencies:
-      '@tollway/core':
+      '@vegaforge/tollway-core':
         specifier: workspace:*
         version: link:../core
     devDependencies:
@@ -349,7 +349,7 @@ importers:
 
   packages/reconcile:
     dependencies:
-      '@tollway/core':
+      '@vegaforge/tollway-core':
         specifier: workspace:*
         version: link:../core
     devDependencies:
@@ -368,7 +368,7 @@ importers:
 
   packages/server:
     dependencies:
-      '@tollway/core':
+      '@vegaforge/tollway-core':
         specifier: workspace:*
         version: link:../core
       '@x402/core':

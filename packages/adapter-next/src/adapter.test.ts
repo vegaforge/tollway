@@ -1,10 +1,11 @@
-import { Ed25519Signer } from "@tollway/core";
+import { Ed25519Signer } from "@vegaforge/tollway-core";
 import {
+  createInMemorySettlementCache,
   createMockFacilitator,
   createPaywall,
   PAYMENT_SIGNATURE_HEADER,
   type PaywallConfig,
-} from "@tollway/server";
+} from "@vegaforge/tollway-server";
 import { describe, expect, it } from "vitest";
 import { withPaywall } from "./index.js";
 
@@ -75,5 +76,29 @@ describe("withPaywall", () => {
     const body = (await response.json()) as { error?: string; quote?: number };
     expect(body.quote).toBeUndefined();
     expect(body.error).toMatch(/mpp-channel/);
+  });
+});
+
+// Regression lock for ADR-2026-11-18-method-binding.
+describe("withPaywall method binding", () => {
+  it("does not let a payment made for GET unlock POST on the same path", async () => {
+    const signer = await Ed25519Signer.generate("test-key");
+    const gate = createPaywall(config, {
+      signer,
+      facilitator: createMockFacilitator(),
+      cache: createInMemorySettlementCache(),
+    });
+    // One route file exporting GET and POST with the same gate.
+    const handler = withPaywall(gate, async () => Response.json({ ok: true }));
+    const GET = handler;
+    const POST = handler;
+    const headers = { [PAYMENT_SIGNATURE_HEADER]: "mock-signed-auth-entry-method" };
+
+    const read = await GET(new Request("http://example.test/report", { headers }));
+    expect(read.status).toBe(200);
+    const write = await POST(
+      new Request("http://example.test/report", { method: "POST", headers }),
+    );
+    expect(write.status).toBe(409);
   });
 });

@@ -12,17 +12,17 @@ body:
     attributes:
       label: Package
       options:
-        - "@tollway/core"
-        - "@tollway/client"
-        - "@tollway/server"
-        - "@tollway/adapter-express"
-        - "@tollway/adapter-fastify"
-        - "@tollway/adapter-next"
-        - "@tollway/adapter-hono"
-        - "@tollway/channels"
-        - "@tollway/reconcile"
-        - "@tollway/observability"
-        - "@tollway/theme"
+        - "@vegaforge/tollway-core"
+        - "@vegaforge/tollway-client"
+        - "@vegaforge/tollway-server"
+        - "@vegaforge/tollway-adapter-express"
+        - "@vegaforge/tollway-adapter-fastify"
+        - "@vegaforge/tollway-adapter-next"
+        - "@vegaforge/tollway-adapter-hono"
+        - "@vegaforge/tollway-channels"
+        - "@vegaforge/tollway-reconcile"
+        - "@vegaforge/tollway-observability"
+        - "@vegaforge/tollway-theme"
         - apps/dashboard
         - apps/web
         - apps/demo

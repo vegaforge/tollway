@@ -1,5 +1,5 @@
 {
-  "name": "@tollway/web",
+  "name": "@vegaforge/tollway-web",
   "version": "0.0.0",
   "private": true,
   "description": "Tollway landing page and documentation",
@@ -13,7 +13,7 @@
     "prebuild": "fumadocs-mdx"
   },
   "dependencies": {
-    "@tollway/theme": "workspace:*",
+    "@vegaforge/tollway-theme": "workspace:*",
     "fumadocs-core": "^16.17.9",
     "fumadocs-mdx": "^13.0.2",
     "fumadocs-ui": "^16.17.9",

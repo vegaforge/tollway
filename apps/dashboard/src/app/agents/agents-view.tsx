@@ -9,7 +9,7 @@ import { useAgentSpend } from "@/data/use-agent-spend";
 
 /**
  * Default precision used to render integer-string amounts. Stellar SACs (the
- * settlement target of @tollway/core) use 7 decimal places. When the
+ * settlement target of @vegaforge/tollway-core) use 7 decimal places. When the
  * observability hub starts attaching per-asset metadata to rows, the data
  * layer can override this.
  */
@@ -91,7 +91,7 @@ export function AgentsView() {
 
       <Panel
         title="Per-agent spend"
-        description="Sorted by spend. Reads from @tollway/observability once the hub lands."
+        description="Sorted by spend. Reads from @vegaforge/tollway-observability once the hub lands."
         className="mt-6"
       >
         {state.status === "loading" ? <AgentsTableSkeleton /> : null}

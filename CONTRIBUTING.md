@@ -37,7 +37,7 @@ Useful commands:
 | `pnpm lint` | Biome lint and format check; warnings fail |
 | `pnpm format:check` | Biome format check only |
 | `pnpm lint:fix` | Apply Biome fixes |
-| `pnpm --filter @tollway/core test` | Run one package's tests |
+| `pnpm --filter @vegaforge/tollway-core test` | Run one package's tests |
 
 ## Where to start
 
@@ -47,7 +47,7 @@ Useful commands:
 
 ## Project conventions
 
-- TypeScript strict mode everywhere. No `any` in `@tollway/core`.
+- TypeScript strict mode everywhere. No `any` in `@vegaforge/tollway-core`.
 - Lint and format with Biome. Run `pnpm lint:fix` before pushing.
 - Tests with Vitest. New behavior needs a test.
 - Library packages build with tsup (ESM, CJS, and type declarations).

@@ -16,7 +16,7 @@ export type UseAgentSpendState =
 
 /**
  * Subscribes the agents view to the data source. Today the source is a local
- * stub; tomorrow it is @tollway/observability. The hook's contract does not
+ * stub; tomorrow it is @vegaforge/tollway-observability. The hook's contract does not
  * change either way.
  */
 export function useAgentSpend(): UseAgentSpendState {

@@ -1,14 +1,14 @@
 /**
- * @tollway/adapter-fastify
+ * @vegaforge/tollway-adapter-fastify
  *
  * A thin translation between Fastify and the framework-agnostic gate in
- * @tollway/server. All the payment logic lives in the gate; this adapter
+ * @vegaforge/tollway-server. All the payment logic lives in the gate; this adapter
  * only maps Fastify requests in and gate outcomes out, exactly the same
- * shape as @tollway/adapter-express, @tollway/adapter-hono, and
- * @tollway/adapter-next. See docs/design.md, "Repository layout".
+ * shape as @vegaforge/tollway-adapter-express, @vegaforge/tollway-adapter-hono, and
+ * @vegaforge/tollway-adapter-next. See docs/design.md, "Repository layout".
  */
 
-import type { Gate, GateOutcome } from "@tollway/server";
+import type { Gate, GateOutcome } from "@vegaforge/tollway-server";
 import type { FastifyReply, FastifyRequest, preHandlerHookHandler } from "fastify";
 
 type SettledReceipt = Extract<GateOutcome, { kind: "settled" }>["receipt"];

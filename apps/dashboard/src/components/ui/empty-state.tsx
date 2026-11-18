@@ -12,7 +12,7 @@ export function EmptyState({
 }: {
   title: string;
   body: string;
-  /** Where the data will come from, e.g. "@tollway/observability · summarize()". */
+  /** Where the data will come from, e.g. "@vegaforge/tollway-observability · summarize()". */
   source?: string;
   icon?: ReactNode;
 }) {

@@ -13,6 +13,8 @@ The first is a commitment that does not show up at close. The agent has a signed
 
 The second is an unexpected remainder. The contract returns the difference between the deposit and the committed amount; if that arithmetic does not match what the agent has on record, something is off (a missing commitment in the stream, a contract that paid out somewhere unexpected, a mismatched asset).
 
+The engine also checks the stream itself before it trusts it. Cumulative amounts never go down from one sequence to the next, every commitment belongs to the channel being reconciled, and each sequence appears once. A decrease, a commitment from another channel, or a duplicated sequence is flagged by name. The expected settlement is the highest amount ever committed, not whichever entry happens to be listed last.
+
 For x402 and MPP charge, reconciliation is simpler. Each settlement is its own transaction, so the check is "did the transaction land on chain and does it match the receipt." No commitment stream to walk, no drift to detect.
 
 ## Why it gets property tests

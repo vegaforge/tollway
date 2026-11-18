@@ -55,12 +55,22 @@ export async function signReceipt(
   };
 }
 
-export type ReceiptVerification = { valid: true } | { valid: false; reason: string };
+export type ReceiptVerification =
+  | {
+      valid: true;
+      /**
+       * The receipt as parsed and verified. Use this value, not the input:
+       * it is exactly what the signature covers.
+       */
+      receipt: SignedReceipt;
+    }
+  | { valid: false; reason: string };
 
 /**
  * Checks a signed receipt against the schema and the verifier's trusted
  * keys. Accepts unknown as input on purpose: receipts arrive over the wire,
- * and the schema is the gate.
+ * and the schema is the gate. Any field the signature does not cover makes
+ * the receipt invalid, and a valid result carries the parsed receipt.
  */
 export async function verifyReceipt(
   candidate: unknown,
@@ -80,7 +90,7 @@ export async function verifyReceipt(
   if (!matches) {
     return { valid: false, reason: "signature does not verify against any trusted key" };
   }
-  return { valid: true };
+  return { valid: true, receipt: parsed.data };
 }
 
 function formatIssue(issue: { path: PropertyKey[]; message: string }): string {

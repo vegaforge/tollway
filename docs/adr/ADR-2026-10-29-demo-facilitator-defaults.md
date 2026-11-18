@@ -5,7 +5,7 @@
 - **Issue:** #113 (code part; the docs part is on `docs/readme-accuracy`)
 - **Scope:** `apps/demo/src/demo.ts`, `apps/demo/src/main.ts`,
   `apps/demo/src/demo.test.ts`, `packages/server/src/facilitator.integration.test.ts`,
-  and the README quickstart snippet. No change to `@tollway/server` source.
+  and the README quickstart snippet. No change to `@vegaforge/tollway-server` source.
 
 ## Context
 
@@ -51,7 +51,7 @@ Verified on `main` at `db70fae`:
    `https://channels.openzeppelin.com/x402` for mainnet. `FACILITATOR_URL`
    overrides it. The asset is `USDC_TESTNET_ADDRESS` or `USDC_PUBNET_ADDRESS`
    imported from `@x402/stellar` (added as a demo dependency at the version
-   `@tollway/server` uses), not a hardcoded string.
+   `@vegaforge/tollway-server` uses), not a hardcoded string.
 3. **Auth.** Live mode requires `OZ_API_KEY` and passes
    `createAuthHeaders: async () => ({ verify: h, settle: h, supported: h })`
    with `h = { Authorization: "Bearer " + key }`.
@@ -144,7 +144,7 @@ Red tests first, in `apps/demo/src/config.test.ts` (new) and
 5. `rejects an invalid STELLAR_RECIPIENT`: `GSERVICEXXXX...` is rejected.
 6. The existing mock-mode test stays unchanged and green.
 
-Then: `./scripts/preflight.sh`, `MOCK_MODE=true pnpm --filter @tollway/demo start`,
-`pnpm --filter @tollway/demo start` with no env (expect the clear message and
+Then: `./scripts/preflight.sh`, `MOCK_MODE=true pnpm --filter @vegaforge/tollway-demo start`,
+`pnpm --filter @vegaforge/tollway-demo start` with no env (expect the clear message and
 exit 1), and, under 5a with real testnet keys, one live run whose transaction
 hash is checked on a testnet explorer and pasted in the pull request.

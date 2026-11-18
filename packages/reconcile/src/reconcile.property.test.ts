@@ -300,13 +300,100 @@ describe("reconcileChannel property: composition", () => {
   });
 });
 
+// Regression lock for ADR-2026-11-18-reconcile-stream-integrity.
+describe("reconcileChannel property: stream integrity", () => {
+  /** A non-decreasing stream of at least two cumulative amounts. */
+  const rising = fc
+    .array(fc.bigInt({ min: 0n, max: 1_000_000n }), { minLength: 2, maxLength: 20 })
+    .map((deltas) => {
+      let total = 0n;
+      return deltas.map((d) => {
+        total += d;
+        return total;
+      });
+    });
+
+  it("never reports ok when some step decreases", async () => {
+    await fc.assert(
+      fc.asyncProperty(
+        rising,
+        fc.nat(),
+        fc.bigInt({ min: 1n, max: 1_000_000n }),
+        async (amounts, at, drop) => {
+          const i = 1 + (at % (amounts.length - 1));
+          const previous = amounts[i - 1] ?? 0n;
+          if (previous < drop) return true;
+          const stream = [...amounts];
+          stream[i] = previous - drop;
+          const commitments = stream.map((amount, sequence) => ({
+            channelId: "ch-p",
+            sequence,
+            cumulativeAmount: amount.toString(),
+          }));
+          const last = stream.at(-1) ?? 0n;
+          const result = await reconciler.reconcileChannel(commitments, {
+            channelId: "ch-p",
+            settledAmount: last.toString(),
+            returnedRemainder: "0",
+            txHash: "tx",
+          });
+          return hasDrift(result, "non-monotonic-cumulative");
+        },
+      ),
+      ASSERT_OPTS,
+    );
+  });
+
+  it("foreign-commitment fires for any commitment from another channel", async () => {
+    await fc.assert(
+      fc.asyncProperty(rising, fc.nat(), async (amounts, at) => {
+        const commitments = amounts.map((amount, sequence) => ({
+          channelId: sequence === at % amounts.length ? "ch-other" : "ch-p",
+          sequence,
+          cumulativeAmount: amount.toString(),
+        }));
+        const result = await reconciler.reconcileChannel(commitments, {
+          channelId: "ch-p",
+          settledAmount: (amounts.at(-1) ?? 0n).toString(),
+          returnedRemainder: "0",
+          txHash: "tx",
+        });
+        return hasDrift(result, "foreign-commitment");
+      }),
+      ASSERT_OPTS,
+    );
+  });
+
+  it("duplicate-sequence fires whenever a sequence repeats", async () => {
+    await fc.assert(
+      fc.asyncProperty(rising, fc.nat(), async (amounts, at) => {
+        const commitments = amounts.map((amount, sequence) => ({
+          channelId: "ch-p",
+          sequence,
+          cumulativeAmount: amount.toString(),
+        }));
+        const copy = commitments[at % commitments.length];
+        if (!copy) return true;
+        const result = await reconciler.reconcileChannel([...commitments, { ...copy }], {
+          channelId: "ch-p",
+          settledAmount: (amounts.at(-1) ?? 0n).toString(),
+          returnedRemainder: "0",
+          txHash: "tx",
+        });
+        return hasDrift(result, "duplicate-sequence");
+      }),
+      ASSERT_OPTS,
+    );
+  });
+});
+
 // Exhaustiveness: if a new variant is added to the DriftKind union without an
 // accompanying property below, this list will fall out of sync with the type
 // and TypeScript will fail to compile the assertion. The static check is the
 // point.
 
 describe("reconcileChannel property: taxonomy", () => {
-  it("the DriftKind union has the six members the property suite covers", () => {
+  it("the DriftKind union has the nine members the property suite covers", () => {
     const covered: Record<DriftKind, true> = {
       "under-settled": true,
       "over-settled": true,
@@ -314,7 +401,10 @@ describe("reconcileChannel property: taxonomy", () => {
       "unexpected-remainder": true,
       "sequence-gap": true,
       "malformed-record": true,
+      "non-monotonic-cumulative": true,
+      "foreign-commitment": true,
+      "duplicate-sequence": true,
     };
-    expect(Object.keys(covered)).toHaveLength(6);
+    expect(Object.keys(covered)).toHaveLength(9);
   });
 });

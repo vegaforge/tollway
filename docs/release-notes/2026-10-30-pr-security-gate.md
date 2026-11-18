@@ -24,6 +24,6 @@ in `.github/semgrep/`), `sensitive-paths` (`scripts/security/check_review.py`),
 job installs or runs the pull request's code. Knip now runs in `quality` and in
 preflight, and fails on unused or undeclared dependencies.
 
-Also in this change: every action in `codeql.yml` and `release.yml` is pinned to a commit, `release.yml` grants write access only to the Changesets job, and the unused `@tollway/observability` dependency is gone from the dashboard.
+Also in this change: every action in `codeql.yml` and `release.yml` is pinned to a commit, `release.yml` grants write access only to the Changesets job, and the unused `@vegaforge/tollway-observability` dependency is gone from the dashboard.
 
 Decision record: `docs/adr/ADR-2026-10-29-pr-security-gate.md`.

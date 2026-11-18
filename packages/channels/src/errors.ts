@@ -1,4 +1,4 @@
-import { TollwayError } from "@tollway/core";
+import { TollwayError } from "@vegaforge/tollway-core";
 
 /** Thrown when a channel id is not tracked by the manager. */
 export class ChannelNotFoundError extends TollwayError {

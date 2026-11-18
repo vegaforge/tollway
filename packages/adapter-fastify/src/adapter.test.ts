@@ -1,10 +1,11 @@
-import { Ed25519Signer } from "@tollway/core";
+import { Ed25519Signer } from "@vegaforge/tollway-core";
 import {
+  createInMemorySettlementCache,
   createMockFacilitator,
   createPaywall,
   PAYMENT_SIGNATURE_HEADER,
   type PaywallConfig,
-} from "@tollway/server";
+} from "@vegaforge/tollway-server";
 import Fastify from "fastify";
 import { describe, expect, it } from "vitest";
 import { fastifyPaywall, RECEIPT_REQUEST_KEY } from "./index.js";
@@ -94,6 +95,35 @@ describe("fastifyPaywall", () => {
       const body = response.json<{ error?: string; quote?: number }>();
       expect(body.quote).toBeUndefined();
       expect(body.error).toMatch(/mpp-channel/);
+    } finally {
+      await app.close();
+    }
+  });
+});
+
+// Regression lock for ADR-2026-11-18-method-binding.
+describe("fastifyPaywall method binding", () => {
+  it("does not let a payment made for GET unlock POST on the same path", async () => {
+    const signer = await Ed25519Signer.generate("test-key");
+    const gate = createPaywall(config, {
+      signer,
+      facilitator: createMockFacilitator(),
+      cache: createInMemorySettlementCache(),
+    });
+    const app = Fastify();
+    app.route({
+      method: ["GET", "POST"],
+      url: "/report",
+      preHandler: fastifyPaywall(gate),
+      handler: async () => ({ ok: true }),
+    });
+    await app.ready();
+    const headers = { [PAYMENT_SIGNATURE_HEADER]: "mock-signed-auth-entry-method" };
+    try {
+      const read = await app.inject({ method: "GET", url: "/report", headers });
+      expect(read.statusCode).toBe(200);
+      const write = await app.inject({ method: "POST", url: "/report", headers });
+      expect(write.statusCode).toBe(409);
     } finally {
       await app.close();
     }

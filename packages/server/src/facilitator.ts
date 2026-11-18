@@ -1,5 +1,10 @@
-import type { PaymentOffer, SettlementModel, StellarNetwork, X402Payment } from "@tollway/core";
-import { bytesToBase64Url, TollwayError, utf8Bytes } from "@tollway/core";
+import type {
+  PaymentOffer,
+  SettlementModel,
+  StellarNetwork,
+  X402Payment,
+} from "@vegaforge/tollway-core";
+import { bytesToBase64Url, TollwayError, utf8Bytes } from "@vegaforge/tollway-core";
 import { x402Version } from "@x402/core";
 import { type FacilitatorConfig, HTTPFacilitatorClient } from "@x402/core/http";
 import {

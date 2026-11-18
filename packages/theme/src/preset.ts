@@ -6,10 +6,10 @@ import { cssVar } from "./tokens.js";
  * package stays dependency free and works with both v3 and v4 configs.
  *
  * Usage:
- *   import { tollwayPreset } from "@tollway/theme/preset";
+ *   import { tollwayPreset } from "@vegaforge/tollway-theme/preset";
  *   export default { presets: [tollwayPreset], ... };
  *
- * and import "@tollway/theme/tokens.css" once in the app's root stylesheet.
+ * and import "@vegaforge/tollway-theme/tokens.css" once in the app's root stylesheet.
  */
 export interface TollwayTailwindPreset {
   darkMode: [string, string];

@@ -6,7 +6,7 @@
  * `recover` is tracked under #38 and remains a typed stub.
  */
 
-import { NotImplementedError } from "@tollway/core";
+import { NotImplementedError } from "@vegaforge/tollway-core";
 import type {
   CloseAdapterResult,
   MppChannelAdapter,
@@ -220,7 +220,7 @@ export function createChannelManager(options: CreateChannelManagerOptions): Chan
       } catch (error) {
         // Roll the channel back to open so the caller can retry. The
         // adapter is responsible for not leaving a half-submitted tx on
-        // chain; the manager just hands back a consistent local state.
+        // chain; the manager just hands back a consistent channel record.
         await store.updateChannel(channelId, { status: "open" });
         throw error;
       }

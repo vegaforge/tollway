@@ -1,4 +1,4 @@
-import { type SignedReceipt, signedReceiptSchema } from "@tollway/core";
+import { type SignedReceipt, signedReceiptSchema } from "@vegaforge/tollway-core";
 
 /**
  * Short-lived idempotency cache keyed by settlement model and nonce
@@ -13,24 +13,56 @@ import { type SignedReceipt, signedReceiptSchema } from "@tollway/core";
  * etc.) used when the gate runs in multiple processes.
  *
  * The gate always deduplicates concurrent settlements of one payment inside
- * a process. `acquire` and `release` extend that across processes. A cache
- * that does not implement them still works, but two processes can then both
- * settle the same payment if it reaches them at the same moment.
+ * a process. `acquire`, `renew` and `release` extend that across processes. A
+ * cache that does not implement them still works, but two processes can then
+ * both settle the same payment if it reaches them at the same moment.
  */
 export interface SettlementCache {
-  get(key: string): Promise<SignedReceipt | undefined>;
-  set(key: string, receipt: SignedReceipt): Promise<void>;
-  /** Takes an exclusive settlement lock on `key`. Resolves false if another holder has it. */
-  acquire?(key: string, ttlMs: number): Promise<boolean>;
-  /** Releases a lock taken with `acquire`. */
-  release?(key: string): Promise<void>;
+  get(key: string): Promise<SettlementEntry | undefined>;
+  set(key: string, entry: SettlementEntry): Promise<void>;
+  /**
+   * Takes an exclusive settlement lock on `key` for `ttlMs`. Resolves the
+   * lock on success, or false if another holder has it.
+   */
+  acquire?(key: string, ttlMs: number): Promise<SettlementLock | false>;
+  /**
+   * Extends a lock taken with `acquire` by `ttlMs`. Resolves false, and
+   * changes nothing, if the caller no longer holds it.
+   */
+  renew?(key: string, lock: SettlementLock, ttlMs: number): Promise<boolean>;
+  /**
+   * Releases a lock taken with `acquire`. Resolves false, and changes
+   * nothing, if the caller no longer holds it: a lock that expired may
+   * already belong to another process.
+   */
+  release?(key: string, lock: SettlementLock): Promise<boolean>;
 }
+
+/**
+ * What the cache remembers about a settled payment: the receipt, and the
+ * HTTP method of the request it paid for. A receipt is only replayed for the
+ * same method, so one payment cannot unlock every method on a URL.
+ */
+export type SettlementEntry = {
+  receipt: SignedReceipt;
+  /**
+   * Uppercase HTTP method, or null for an entry written by a version that
+   * did not record it. The gate never replays a null-method entry.
+   */
+  method: string | null;
+};
+
+/**
+ * Proof of holding a settlement lock. The token is unique per acquisition,
+ * so a holder whose lock expired cannot renew or release the next holder's.
+ */
+export type SettlementLock = { readonly token: string };
 
 /** A settlement cache that also provides the cross-process lock. */
 export type LockingSettlementCache = SettlementCache &
-  Required<Pick<SettlementCache, "acquire" | "release">>;
+  Required<Pick<SettlementCache, "acquire" | "renew" | "release">>;
 
-type Entry = { receipt: SignedReceipt; expiresAt: number };
+type Entry = { entry: SettlementEntry; expiresAt: number };
 
 /**
  * In-memory cache with TTL eviction. The default window covers a few ledger
@@ -51,10 +83,10 @@ export function createInMemorySettlementCache(ttlMs = 30_000): SettlementCache {
         entries.delete(key);
         return undefined;
       }
-      return entry.receipt;
+      return entry.entry;
     },
-    async set(key, receipt) {
-      entries.set(key, { receipt, expiresAt: Date.now() + ttlMs });
+    async set(key, entry) {
+      entries.set(key, { entry, expiresAt: Date.now() + ttlMs });
     },
   };
 }
@@ -62,17 +94,18 @@ export function createInMemorySettlementCache(ttlMs = 30_000): SettlementCache {
 /**
  * The minimal Redis surface this cache uses, kept duck-typed so consumers
  * can plug in `ioredis`, `ioredis-mock`, or any compatible client without
- * @tollway/server taking on a runtime dependency. The methods match the
+ * @vegaforge/tollway-server taking on a runtime dependency. The methods match the
  * ioredis signatures used here: `set(key, value, "EX", ttlSeconds)` stores
  * with a TTL, `set(key, value, "PX", ttlMs, "NX")` stores only if the key is
  * absent and resolves "OK" when it did, `get(key)` returns the stored value
- * or null, and `del(key)` removes a key.
+ * or null, and `eval(script, numKeys, ...keysAndArgs)` runs a Lua script
+ * atomically, which is how a lock is renewed or released only by its holder.
  */
 export interface RedisLikeClient {
   get(key: string): Promise<string | null>;
   set(key: string, value: string, mode: "EX", ttlSeconds: number): Promise<unknown>;
   set(key: string, value: string, mode: "PX", ttlMs: number, condition: "NX"): Promise<unknown>;
-  del(key: string): Promise<unknown>;
+  eval(script: string, numKeys: number, ...keysAndArgs: Array<string | number>): Promise<unknown>;
 }
 
 export type RedisSettlementCacheOptions = {
@@ -88,6 +121,47 @@ export type RedisSettlementCacheOptions = {
 };
 
 const DEFAULT_REDIS_TTL_MS = 30_000;
+
+// Both scripts compare the stored token with the caller's before acting, in
+// one atomic step. A GET followed by a separate DEL or PEXPIRE could act on a
+// lock that changed hands between the two calls.
+const RELEASE_IF_HELD = `if redis.call("GET", KEYS[1]) == ARGV[1] then
+  return redis.call("DEL", KEYS[1])
+end
+return 0`;
+
+const RENEW_IF_HELD = `if redis.call("GET", KEYS[1]) == ARGV[1] then
+  return redis.call("PEXPIRE", KEYS[1], ARGV[2])
+end
+return 0`;
+
+/**
+ * Reads a stored settlement. The current shape is exactly
+ * `{ receipt, method }`. A bare receipt is what an older version stored; it
+ * is returned with `method: null` so the gate refuses it rather than
+ * treating it as a miss and settling the payment again. Anything else is a
+ * miss.
+ */
+function parseStoredEntry(candidate: unknown): SettlementEntry | undefined {
+  if (isRecord(candidate) && Object.keys(candidate).sort().join(",") === "method,receipt") {
+    const receipt = signedReceiptSchema.safeParse(candidate.receipt);
+    const { method } = candidate;
+    if (receipt.success && typeof method === "string" && method.length > 0) {
+      return { receipt: receipt.data, method };
+    }
+    return undefined;
+  }
+  const legacy = signedReceiptSchema.safeParse(candidate);
+  return legacy.success ? { receipt: legacy.data, method: null } : undefined;
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+function lockMs(ttlMs: number): number {
+  return Math.max(1, Math.ceil(ttlMs));
+}
 const DEFAULT_REDIS_KEY_PREFIX = "tollway:settlement:";
 
 /**
@@ -99,15 +173,17 @@ const DEFAULT_REDIS_KEY_PREFIX = "tollway:settlement:";
  * TTL is expressed in seconds via Redis's `EX` option so the store evicts
  * stale entries itself, matching the in-memory cache's eviction window.
  * Receipts round-trip as JSON; the structure is the canonical SignedReceipt
- * from @tollway/core, so deserialization is a plain `JSON.parse`.
+ * from @vegaforge/tollway-core, so deserialization is a plain `JSON.parse`.
  *
  * The client is injected so the consumer owns the connection lifecycle, and
- * @tollway/server stays free of a hard dependency on `ioredis`. Tests use
+ * @vegaforge/tollway-server stays free of a hard dependency on `ioredis`. Tests use
  * `ioredis-mock` against the same interface.
  *
- * `acquire` is `SET NX PX`, so only one process at a time settles a given
- * payment. `release` deletes the lock without checking who holds it; the
- * lock TTL is the bound if a holder dies before releasing.
+ * `acquire` is `SET NX PX` with a random token as the value, so only one
+ * process at a time settles a given payment. `renew` and `release` compare
+ * that token and act in one Lua script, so a process whose lock expired can
+ * never extend or delete the lock another process now holds. The lock TTL is
+ * the bound if a holder dies without releasing.
  */
 export function createRedisSettlementCache(
   options: RedisSettlementCacheOptions,
@@ -133,24 +209,35 @@ export function createRedisSettlementCache(
       } catch {
         return undefined;
       }
-      const parsed = signedReceiptSchema.safeParse(candidate);
-      return parsed.success ? (parsed.data as SignedReceipt) : undefined;
+      return parseStoredEntry(candidate);
     },
-    async set(key, receipt) {
-      await client.set(`${keyPrefix}${key}`, JSON.stringify(receipt), "EX", ttlSeconds);
+    async set(key, entry) {
+      await client.set(`${keyPrefix}${key}`, JSON.stringify(entry), "EX", ttlSeconds);
     },
     async acquire(key, lockTtlMs) {
+      const token = crypto.randomUUID();
       const result = await client.set(
         `${keyPrefix}lock:${key}`,
-        "1",
+        token,
         "PX",
-        Math.max(1, Math.ceil(lockTtlMs)),
+        lockMs(lockTtlMs),
         "NX",
       );
-      return result === "OK";
+      return result === "OK" ? { token } : false;
     },
-    async release(key) {
-      await client.del(`${keyPrefix}lock:${key}`);
+    async renew(key, lock, lockTtlMs) {
+      const result = await client.eval(
+        RENEW_IF_HELD,
+        1,
+        `${keyPrefix}lock:${key}`,
+        lock.token,
+        lockMs(lockTtlMs),
+      );
+      return result === 1;
+    },
+    async release(key, lock) {
+      const result = await client.eval(RELEASE_IF_HELD, 1, `${keyPrefix}lock:${key}`, lock.token);
+      return result === 1;
     },
   };
 }

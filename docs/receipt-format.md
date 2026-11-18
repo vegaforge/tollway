@@ -140,7 +140,7 @@ interface ReceiptSigner {
 The default implementation is `Ed25519Signer`, which uses WebCrypto and therefore runs in both Node and edge runtimes:
 
 ```ts
-import { Ed25519Signer, buildReceipt, signReceipt } from "@tollway/core";
+import { Ed25519Signer, buildReceipt, signReceipt } from "@vegaforge/tollway-core";
 
 const signer = await Ed25519Signer.generate("tollway-2026-q2");
 
@@ -178,10 +178,10 @@ interface ReceiptVerifier {
 }
 ```
 
-`verifyReceipt(candidate, verifier)` accepts `unknown` on purpose: receipts arrive over the wire and the schema is the gate. It runs `signedReceiptSchema.safeParse(candidate)` first, then asks the verifier to check the signature.
+`verifyReceipt(candidate, verifier)` accepts `unknown` on purpose: receipts arrive over the wire and the schema is the gate. It runs `signedReceiptSchema.safeParse(candidate)` first, then asks the verifier to check the signature. The schemas are strict: a field anywhere in the receipt that the signature does not cover makes the receipt invalid. A valid result carries the parsed receipt as `result.receipt`; use that value from then on, not the object you passed in.
 
 ```ts
-import { Ed25519Verifier, verifyReceipt } from "@tollway/core";
+import { Ed25519Verifier, verifyReceipt } from "@vegaforge/tollway-core";
 
 const verifier = new Ed25519Verifier({
   "tollway-2026-q2": signerPublicKeyBytes,
@@ -191,6 +191,7 @@ const result = await verifyReceipt(incomingReceipt, verifier);
 if (!result.valid) {
   throw new Error(`receipt rejected: ${result.reason}`);
 }
+const trusted = result.receipt; // exactly what the signature covers
 ```
 
 `Ed25519Verifier.forSigner(signer)` is a convenience constructor for the single-key case: it builds a verifier that trusts the signer's own public key.

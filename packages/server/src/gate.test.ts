@@ -1,6 +1,6 @@
-import { Ed25519Signer, Ed25519Verifier, verifyReceipt } from "@tollway/core";
+import { Ed25519Signer, Ed25519Verifier, verifyReceipt } from "@vegaforge/tollway-core";
 import RedisMock from "ioredis-mock";
-import { beforeAll, describe, expect, it } from "vitest";
+import { beforeAll, describe, expect, it, vi } from "vitest";
 import {
   createInMemorySettlementCache,
   createRedisSettlementCache,
@@ -70,7 +70,10 @@ describe("createPaywall", () => {
     expect(outcome.receipt.receipt.settlement.kind).toBe("transaction");
 
     const verifier = Ed25519Verifier.forSigner(signer);
-    expect(await verifyReceipt(outcome.receipt, verifier)).toEqual({ valid: true });
+    expect(await verifyReceipt(outcome.receipt, verifier)).toEqual({
+      valid: true,
+      receipt: outcome.receipt,
+    });
   });
 
   it("treats a repeated payment as idempotent rather than a second charge", async () => {
@@ -111,7 +114,10 @@ describe("createPaywall", () => {
       expect(outcome.receipt.receipt.settlement.kind).toBe("transaction");
 
       const verifier = Ed25519Verifier.forSigner(signer);
-      expect(await verifyReceipt(outcome.receipt, verifier)).toEqual({ valid: true });
+      expect(await verifyReceipt(outcome.receipt, verifier)).toEqual({
+        valid: true,
+        receipt: outcome.receipt,
+      });
     });
 
     it("treats a repeated mpp-charge payment as idempotent rather than a second charge", async () => {
@@ -308,11 +314,103 @@ describe("settlement lock across processes", () => {
     });
     if (!verification.valid) throw new Error("expected the mock to accept the payment");
     const otherProcess = createRedisSettlementCache({ client, keyPrefix });
-    await expect(otherProcess.acquire(`x402:${verification.nonce}`, 30_000)).resolves.toBe(true);
+    await expect(otherProcess.acquire(`x402:${verification.nonce}`, 30_000)).resolves.toEqual({
+      token: expect.any(String),
+    });
 
     const outcome = await gate({ ...baseRequest, headers });
     expect(outcome).toEqual({ kind: "rejected", status: 409, reason: "settlement in progress" });
     expect(calls.settle).toBe(0);
+  });
+
+  // Regression lock for ADR-2026-11-18-redis-lock-ownership: a /settle that
+  // outlives the lock TTL must not let a second process settle the same payment.
+  // Fake timers drive both the renewal interval and Redis expiry (ioredis-mock
+  // reads Date.now), so the outcome does not depend on how busy the machine is.
+  it("keeps the lock alive while a slow settlement runs", async () => {
+    vi.useFakeTimers();
+    try {
+      const client = new RedisMock() as unknown as RedisLikeClient;
+      const keyPrefix = "gate-test:slow-settle:";
+      const inner = createMockFacilitator();
+      const calls = { settle: 0 };
+      const slowFacilitator: FacilitatorClient = {
+        ...inner,
+        async settle(input) {
+          calls.settle++;
+          await new Promise((resolve) => setTimeout(resolve, 3_000));
+          return inner.settle(input);
+        },
+      };
+      const lockTtl = { settlementLockTtlMs: 900 };
+      const processA = createPaywall(config, {
+        signer,
+        facilitator: slowFacilitator,
+        cache: createRedisSettlementCache({ client, keyPrefix }),
+        ...lockTtl,
+      });
+      const processB = createPaywall(config, {
+        signer,
+        facilitator: slowFacilitator,
+        cache: createRedisSettlementCache({ client, keyPrefix }),
+        ...lockTtl,
+      });
+
+      const first = processA({ ...baseRequest, headers });
+      // A retry of the same payment reaches another process long after the
+      // original TTL would have expired without renewal.
+      await vi.advanceTimersByTimeAsync(1_800);
+      const second = await processB({ ...baseRequest, headers });
+      expect(second).toEqual({ kind: "rejected", status: 409, reason: "settlement in progress" });
+
+      await vi.advanceTimersByTimeAsync(1_500);
+      expect((await first).kind).toBe("settled");
+      expect(calls.settle).toBe(1);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("reports a lock lost during settlement instead of hiding it", async () => {
+    const redis = new RedisMock();
+    const client = redis as unknown as RedisLikeClient;
+    const keyPrefix = "gate-test:lost-lock:";
+    const inner = createMockFacilitator();
+    const reported: string[] = [];
+    const gate = createPaywall(config, {
+      signer,
+      facilitator: {
+        ...inner,
+        async settle(input) {
+          // The lock disappears mid-settlement (Redis failover, eviction).
+          await redis.del(`${keyPrefix}lock:x402:${input.nonce}`);
+          await new Promise((resolve) => setTimeout(resolve, 120));
+          return inner.settle(input);
+        },
+      },
+      cache: createRedisSettlementCache({ client, keyPrefix }),
+      settlementLockTtlMs: 90,
+      onCacheError: (error) => reported.push(error.message),
+    });
+
+    const outcome = await gate({ ...baseRequest, headers });
+    expect(outcome.kind).toBe("settled");
+    if (outcome.kind !== "settled") return;
+    expect(outcome.lockLost).toBe(true);
+    expect(outcome.cacheError).toBeInstanceOf(Error);
+    expect(reported).toHaveLength(1);
+  });
+
+  it("refuses a cache that implements only part of the lock interface", () => {
+    const partial = {
+      ...createInMemorySettlementCache(),
+      async acquire() {
+        return { token: "t" };
+      },
+    };
+    expect(() =>
+      createPaywall(config, { signer, facilitator: createMockFacilitator(), cache: partial }),
+    ).toThrow(/acquire, renew and release/);
   });
 
   it("releases the lock after settling so a retry replays the receipt", async () => {
@@ -355,5 +453,82 @@ describe("settlement lock across processes", () => {
     expect(reported).toHaveLength(1);
     expect(reported[0]?.error).toBe(writeError);
     expect(reported[0]?.key).toMatch(/^x402:/);
+  });
+});
+
+// Regression lock for ADR-2026-11-18-method-binding: one payment pays for one
+// HTTP method, even when a single gate is mounted on several methods.
+describe("method binding", () => {
+  const headers = { [PAYMENT_SIGNATURE_HEADER]: "mock-signed-auth-entry-method" };
+
+  function countingGate(cache = createInMemorySettlementCache()) {
+    const inner = createMockFacilitator();
+    const calls = { settle: 0 };
+    const gate = createPaywall(config, {
+      signer,
+      facilitator: {
+        ...inner,
+        async settle(input) {
+          calls.settle++;
+          await new Promise((resolve) => setTimeout(resolve, 20));
+          return inner.settle(input);
+        },
+      },
+      cache,
+    });
+    return { gate, calls };
+  }
+
+  it("does not serve a payment made for GET to a POST on the same URL", async () => {
+    const { gate, calls } = countingGate();
+    const read = await gate({ ...baseRequest, method: "GET", headers });
+    expect(read.kind).toBe("settled");
+
+    const write = await gate({ ...baseRequest, method: "POST", headers });
+    expect(write).toEqual({
+      kind: "rejected",
+      status: 409,
+      reason: "payment already settled for a different offer",
+    });
+    expect(calls.settle).toBe(1);
+  });
+
+  it("still replays a retry of the same method", async () => {
+    const { gate, calls } = countingGate();
+    await gate({ ...baseRequest, method: "GET", headers });
+    const retry = await gate({ ...baseRequest, method: "get", headers });
+    expect(retry.kind).toBe("settled");
+    if (retry.kind === "settled") expect(retry.replayed).toBe(true);
+    expect(calls.settle).toBe(1);
+  });
+
+  it("settles once and rejects the other method when both arrive together", async () => {
+    const { gate, calls } = countingGate();
+    const [read, write] = await Promise.all([
+      gate({ ...baseRequest, method: "GET", headers }),
+      gate({ ...baseRequest, method: "POST", headers }),
+    ]);
+    expect(read.kind).toBe("settled");
+    expect(write).toMatchObject({ kind: "rejected", status: 409 });
+    expect(calls.settle).toBe(1);
+  });
+
+  it("refuses a Redis entry written without a method, without settling again", async () => {
+    const redis = new RedisMock();
+    const client = redis as unknown as RedisLikeClient;
+    const keyPrefix = "gate-test:legacy-entry:";
+    const { gate: writer } = countingGate(createRedisSettlementCache({ client, keyPrefix }));
+    const settled = await writer({ ...baseRequest, method: "GET", headers });
+    if (settled.kind !== "settled") throw new Error("expected the first request to settle");
+
+    // An older process stored the bare receipt, with no method.
+    const keys = await redis.keys(`${keyPrefix}x402:*`);
+    expect(keys).toHaveLength(1);
+    await redis.set(keys[0] as string, JSON.stringify(settled.receipt), "EX", 30);
+
+    const { gate, calls } = countingGate(createRedisSettlementCache({ client, keyPrefix }));
+    const outcome = await gate({ ...baseRequest, method: "GET", headers });
+    expect(outcome).toMatchObject({ kind: "rejected", status: 409 });
+    expect(calls.settle).toBe(0);
   });
 });

@@ -1,5 +1,5 @@
 {
-  "name": "@tollway/observability",
+  "name": "@vegaforge/tollway-observability",
   "version": "0.0.1",
   "description": "Spend, latency, and failure metrics with machine-readable exports and webhooks",
   "license": "Apache-2.0",
@@ -30,7 +30,7 @@
     "typecheck": "tsc --noEmit"
   },
   "dependencies": {
-    "@tollway/core": "workspace:*"
+    "@vegaforge/tollway-core": "workspace:*"
   },
   "devDependencies": {
     "@types/node": "^22.19.20",

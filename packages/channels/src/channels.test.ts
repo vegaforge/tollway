@@ -1,4 +1,4 @@
-import { NotImplementedError } from "@tollway/core";
+import { NotImplementedError } from "@vegaforge/tollway-core";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type {
   CloseAdapterInput,

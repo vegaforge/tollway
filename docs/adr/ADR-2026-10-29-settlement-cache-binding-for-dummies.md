@@ -47,7 +47,7 @@ the technical record.
   and network it paid for.
 - Duplicate payments that arrive together are settled once.
 - A failure to save a receipt is reported, not crashed on and not hidden.
-- One small version bump of `@tollway/server`.
+- One small version bump of `@vegaforge/tollway-server`.
 
 ## What does not change
 

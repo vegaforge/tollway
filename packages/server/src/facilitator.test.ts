@@ -1,4 +1,4 @@
-import type { PaymentOffer, X402Payment } from "@tollway/core";
+import type { PaymentOffer, X402Payment } from "@vegaforge/tollway-core";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { createHttpFacilitator } from "./facilitator.js";
 

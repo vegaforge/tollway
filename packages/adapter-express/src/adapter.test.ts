@@ -1,11 +1,11 @@
-import { Ed25519Signer } from "@tollway/core";
+import { Ed25519Signer } from "@vegaforge/tollway-core";
 import {
   createInMemorySettlementCache,
   createMockFacilitator,
   createPaywall,
   PAYMENT_SIGNATURE_HEADER,
   type PaywallConfig,
-} from "@tollway/server";
+} from "@vegaforge/tollway-server";
 import express from "express";
 import { describe, expect, it } from "vitest";
 import { expressPaywall, RECEIPT_LOCALS_KEY } from "./index.js";
@@ -107,6 +107,36 @@ describe("expressPaywall with a shared settlement cache", () => {
         error: "payment already settled for a different offer",
       });
       expect(served).toEqual(["latest"]);
+    } finally {
+      await new Promise((resolve) => server.close(resolve));
+    }
+  });
+});
+
+// Regression lock for ADR-2026-11-18-method-binding.
+describe("expressPaywall method binding", () => {
+  it("does not let a payment made for GET unlock POST on the same path", async () => {
+    const signer = await Ed25519Signer.generate("test-key");
+    const gate = createPaywall(config, {
+      signer,
+      facilitator: createMockFacilitator(),
+      cache: createInMemorySettlementCache(),
+    });
+    const app = express();
+    app.all("/report", expressPaywall(gate), (_req, res) => {
+      res.json({ ok: true });
+    });
+    const server = app.listen(0);
+    await new Promise((resolve) => server.once("listening", resolve));
+    const address = server.address();
+    if (!address || typeof address === "string") throw new Error("expected a TCP address");
+    const url = `http://127.0.0.1:${address.port}/report`;
+    const headers = { [PAYMENT_SIGNATURE_HEADER]: "mock-signed-auth-entry-method" };
+    try {
+      const read = await fetch(url, { headers });
+      expect(read.status).toBe(200);
+      const write = await fetch(url, { method: "POST", headers });
+      expect(write.status).toBe(409);
     } finally {
       await new Promise((resolve) => server.close(resolve));
     }

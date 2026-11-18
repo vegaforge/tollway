@@ -2,7 +2,7 @@
  * Typed data layer for the receipts view.
  *
  * The receipts view (src/app/receipts/page.tsx) depends on
- * @tollway/observability, which is tracked in issue #31. Until #31 lands,
+ * @vegaforge/tollway-observability, which is tracked in issue #31. Until #31 lands,
  * this module is the single seam where the UI talks to the data. Replacing
  * the body of `fetchReceipts` with a real call to the observability hub
  * (or the receipt archive surfaced by the optional shared service) is a
@@ -17,7 +17,12 @@
  * See docs/design.md, "One receipt format" and "Observability".
  */
 
-import { buildReceipt, Ed25519Signer, type SignedReceipt, signReceipt } from "@tollway/core";
+import {
+  buildReceipt,
+  Ed25519Signer,
+  type SignedReceipt,
+  signReceipt,
+} from "@vegaforge/tollway-core";
 
 /**
  * One row in the receipts archive. The row is the canonical SignedReceipt

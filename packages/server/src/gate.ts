@@ -10,8 +10,8 @@ import {
   type StellarNetwork,
   signReceipt,
   type X402Payment,
-} from "@tollway/core";
-import type { SettlementCache } from "./cache.js";
+} from "@vegaforge/tollway-core";
+import type { SettlementCache, SettlementLock } from "./cache.js";
 import type { FacilitatorClient } from "./facilitator.js";
 import {
   encodeHeader,
@@ -71,6 +71,13 @@ export type GateOutcome =
        * recognised as a replay until the cache recovers.
        */
       cacheError?: Error;
+      /**
+       * Set when this request settled but did not hold the cross-process
+       * settlement lock for the whole settlement (it expired or could not
+       * be renewed). Another process may have settled the same payment, so
+       * treat it as an operational alert. `cacheError` explains why.
+       */
+      lockLost?: true;
     }
   | { kind: "rejected"; status: number; reason: string };
 
@@ -87,6 +94,12 @@ export type PaywallDeps = {
    * same error is also set as `cacheError` on the outcome.
    */
   onCacheError?: (error: Error, key: string) => void;
+  /**
+   * How long a cross-process settlement lock lives if its holder stops
+   * renewing it, in milliseconds. Defaults to 30 000. Only used with a cache
+   * that implements locks.
+   */
+  settlementLockTtlMs?: number;
 };
 
 type Handler<TPayment> = {
@@ -106,7 +119,15 @@ type RejectedOutcome = Extract<GateOutcome, { kind: "rejected" }>;
 
 /** The shared result of one settlement attempt, before it is checked against an offer. */
 type SettlementResult =
-  | { ok: true; receipt: SignedReceipt; replayed: boolean; cacheError?: Error }
+  | {
+      ok: true;
+      receipt: SignedReceipt;
+      replayed: boolean;
+      /** Method of the request this receipt was settled for; null if unknown. */
+      method: string | null;
+      cacheError?: Error;
+      lockLost?: true;
+    }
   | { ok: false; outcome: RejectedOutcome };
 
 type SettlementContext = {
@@ -115,13 +136,14 @@ type SettlementContext = {
   onCacheError?: (error: Error, key: string) => void;
   /** Settlements in progress in this process, by cache key. */
   inFlight: Map<string, Promise<SettlementResult>>;
+  lockTtlMs: number;
 };
 
 /**
  * How long a cross-process settlement lock lives if its holder never
  * releases it. Matches the default cache TTL.
  */
-const SETTLEMENT_LOCK_TTL_MS = 30_000;
+const DEFAULT_SETTLEMENT_LOCK_TTL_MS = 30_000;
 
 const OFFER_MISMATCH: RejectedOutcome = {
   kind: "rejected",
@@ -167,6 +189,7 @@ async function settleWithHandler<TPayment>(
   payment: TPayment,
   offer: PaymentOffer,
   model: SettlementModel,
+  method: string,
   handler: Handler<TPayment>,
   context: SettlementContext,
 ): Promise<GateOutcome> {
@@ -184,13 +207,13 @@ async function settleWithHandler<TPayment>(
   // written with no await in between, so two requests cannot both miss it.
   const pending = context.inFlight.get(key);
   if (pending) {
-    return toOutcome(await pending, offer, model, true);
+    return toOutcome(await pending, offer, model, method, true);
   }
 
-  const attempt = settleOnce(payment, offer, model, handler, verification, key, context);
+  const attempt = settleOnce(payment, offer, model, method, handler, verification, key, context);
   context.inFlight.set(key, attempt);
   try {
-    return toOutcome(await attempt, offer, model, false);
+    return toOutcome(await attempt, offer, model, method, false);
   } finally {
     context.inFlight.delete(key);
   }
@@ -198,18 +221,24 @@ async function settleWithHandler<TPayment>(
 
 /**
  * Turns a settlement result into the outcome for one request. A receipt is
- * only returned for the offer it was issued against; anything else is a
- * rejection, never a replay. See docs/design.md, "Design notes" (duplicate
- * protection).
+ * only returned for the offer it was issued against, and for the HTTP method
+ * it was paid with; anything else is a rejection, never a replay. See
+ * docs/design.md, "Design notes" (duplicate protection).
  */
 function toOutcome(
   result: SettlementResult,
   offer: PaymentOffer,
   model: SettlementModel,
+  method: string,
   waited: boolean,
 ): GateOutcome {
   if (!result.ok) {
     return result.outcome;
+  }
+  // A null method comes from an entry an older version wrote. Refusing it
+  // is safe; treating it as a miss would settle the payment a second time.
+  if (result.method !== method) {
+    return OFFER_MISMATCH;
   }
   if (receiptBinding(result.receipt) !== offerBinding(offer, model)) {
     return OFFER_MISMATCH;
@@ -226,6 +255,9 @@ function toOutcome(
   if (!waited && result.cacheError) {
     outcome.cacheError = result.cacheError;
   }
+  if (!waited && result.lockLost) {
+    outcome.lockLost = true;
+  }
   return outcome;
 }
 
@@ -233,6 +265,7 @@ async function settleOnce<TPayment>(
   payment: TPayment,
   offer: PaymentOffer,
   model: SettlementModel,
+  method: string,
   handler: Handler<TPayment>,
   verification: { payer: string; nonce: string },
   key: string,
@@ -242,17 +275,22 @@ async function settleOnce<TPayment>(
 
   const cached = await cache?.get(key);
   if (cached) {
-    return { ok: true, receipt: cached, replayed: true };
+    return { ok: true, receipt: cached.receipt, method: cached.method, replayed: true };
   }
 
-  if (!cache?.acquire || !cache.release) {
-    return settleAndRecord(payment, offer, model, handler, verification, key, context);
+  if (!cache?.acquire || !cache.release || !cache.renew) {
+    return settleAndRecord(payment, offer, model, method, handler, verification, key, context);
   }
 
-  const locked = await cache.acquire(key, SETTLEMENT_LOCK_TTL_MS);
-  if (!locked) {
+  const lock = await cache.acquire(key, context.lockTtlMs);
+  if (!lock) {
     return { ok: false, outcome: SETTLEMENT_IN_PROGRESS };
   }
+  const release = (): Promise<boolean> => cache.release?.(key, lock) ?? Promise.resolve(false);
+
+  // A slow facilitator can outlive the lock TTL, and an expired lock lets a
+  // second process settle the same payment. Renew it while we work.
+  const keeper = keepLockAlive(cache.renew.bind(cache), key, lock, context.lockTtlMs);
 
   let result: SettlementResult;
   try {
@@ -260,15 +298,23 @@ async function settleOnce<TPayment>(
     // our lock, so look again now that we hold it.
     const settledElsewhere = await cache.get(key);
     result = settledElsewhere
-      ? { ok: true, receipt: settledElsewhere, replayed: true }
-      : await settleAndRecord(payment, offer, model, handler, verification, key, context);
+      ? {
+          ok: true,
+          receipt: settledElsewhere.receipt,
+          method: settledElsewhere.method,
+          replayed: true,
+        }
+      : await settleAndRecord(payment, offer, model, method, handler, verification, key, context);
   } catch (error) {
-    await releaseOrThrow(cache.release.bind(cache), key, error);
+    keeper.stop();
+    await releaseOrThrow(release, key, error);
     throw error;
   }
+  keeper.stop();
 
+  let released: boolean;
   try {
-    await cache.release(key);
+    released = await release();
   } catch (releaseFailure) {
     const releaseError = asError(releaseFailure, "settlement lock release failed");
     if (!result.ok || result.replayed) {
@@ -279,7 +325,76 @@ async function settleOnce<TPayment>(
     context.onCacheError?.(releaseError, key);
     return { ...result, cacheError: result.cacheError ?? releaseError };
   }
+
+  // The lock was not ours for the whole settlement, so another process may
+  // have settled this payment too. The receipt is still valid; say so loudly.
+  if (result.ok && !result.replayed && (keeper.lost() || !released)) {
+    const lostError = keeper.error() ?? new Error(LOCK_LOST_MESSAGE);
+    context.onCacheError?.(lostError, key);
+    return { ...result, lockLost: true, cacheError: result.cacheError ?? lostError };
+  }
   return result;
+}
+
+/**
+ * A cache with only some of the lock methods would silently settle without a
+ * lock (or with one nobody renews), so refuse it at construction.
+ */
+function assertCompleteLocking(cache: SettlementCache | undefined): void {
+  if (!cache) return;
+  const present = [cache.acquire, cache.renew, cache.release].filter(Boolean).length;
+  if (present !== 0 && present !== 3) {
+    throw new TypeError(
+      "the settlement cache must implement all of acquire, renew and release, or none of them",
+    );
+  }
+}
+
+const LOCK_LOST_MESSAGE =
+  "the settlement lock was lost before the settlement finished, so duplicate protection across processes was not held throughout";
+
+type LockKeeper = { stop(): void; lost(): boolean; error(): Error | undefined };
+
+/**
+ * Renews a held lock every third of its TTL until stopped. A renewal that
+ * reports the lock is gone, or that fails, marks the lock as lost; it never
+ * throws into the request. The timer does not keep the process alive.
+ */
+function keepLockAlive(
+  renew: (key: string, lock: SettlementLock, ttlMs: number) => Promise<boolean>,
+  key: string,
+  lock: SettlementLock,
+  ttlMs: number,
+): LockKeeper {
+  let stopped = false;
+  let lost = false;
+  let failure: Error | undefined;
+  const timer = setInterval(
+    () => {
+      renew(key, lock, ttlMs).then(
+        (held) => {
+          if (!stopped && !held) lost = true;
+        },
+        (renewFailure: unknown) => {
+          if (stopped) return;
+          lost = true;
+          failure = asError(renewFailure, "settlement lock renewal failed");
+        },
+      );
+    },
+    Math.max(1, Math.floor(ttlMs / 3)),
+  );
+  if (typeof timer === "object" && timer !== null && "unref" in timer) {
+    timer.unref();
+  }
+  return {
+    stop() {
+      stopped = true;
+      clearInterval(timer);
+    },
+    lost: () => lost,
+    error: () => failure,
+  };
 }
 
 /**
@@ -287,16 +402,16 @@ async function settleOnce<TPayment>(
  * both errors are thrown together so neither is lost.
  */
 async function releaseOrThrow(
-  release: (key: string) => Promise<void>,
+  release: () => Promise<boolean>,
   key: string,
   original: unknown,
 ): Promise<void> {
   try {
-    await release(key);
+    await release();
   } catch (releaseFailure) {
     throw new AggregateError(
       [original, releaseFailure],
-      "settlement failed and the settlement lock could not be released",
+      `settlement failed and the settlement lock for ${key} could not be released`,
     );
   }
 }
@@ -305,6 +420,7 @@ async function settleAndRecord<TPayment>(
   payment: TPayment,
   offer: PaymentOffer,
   model: SettlementModel,
+  method: string,
   handler: Handler<TPayment>,
   verification: { payer: string; nonce: string },
   key: string,
@@ -335,19 +451,19 @@ async function settleAndRecord<TPayment>(
   );
 
   if (!context.cache) {
-    return { ok: true, receipt, replayed: false };
+    return { ok: true, receipt, method, replayed: false };
   }
 
   // The payment has settled, so a failed write must not cost the payer the
   // receipt. The error goes on the outcome and to onCacheError instead.
   try {
-    await context.cache.set(key, receipt);
+    await context.cache.set(key, { receipt, method });
   } catch (writeFailure) {
     const cacheError = asError(writeFailure, "settlement cache write failed");
     context.onCacheError?.(cacheError, key);
-    return { ok: true, receipt, replayed: false, cacheError };
+    return { ok: true, receipt, method, replayed: false, cacheError };
   }
-  return { ok: true, receipt, replayed: false };
+  return { ok: true, receipt, method, replayed: false };
 }
 
 /**
@@ -356,12 +472,14 @@ async function settleAndRecord<TPayment>(
  * mishandled. See docs/design.md, "Build plan", Phase 1.
  */
 export function createPaywall(config: PaywallConfig, deps: PaywallDeps): Gate {
+  assertCompleteLocking(deps.cache);
   const acceptedModels = config.models ?? ["x402"];
   const context: SettlementContext = {
     signer: deps.signer,
     cache: deps.cache,
     onCacheError: deps.onCacheError,
     inFlight: new Map(),
+    lockTtlMs: deps.settlementLockTtlMs ?? DEFAULT_SETTLEMENT_LOCK_TTL_MS,
   };
 
   return async function gate(request): Promise<GateOutcome> {
@@ -375,6 +493,7 @@ export function createPaywall(config: PaywallConfig, deps: PaywallDeps): Gate {
       facilitatorUrl: config.facilitatorUrl,
     };
 
+    const method = request.method.toUpperCase();
     const signatureHeader = readHeader(request.headers, PAYMENT_SIGNATURE_HEADER);
     if (!signatureHeader) {
       return {
@@ -391,7 +510,7 @@ export function createPaywall(config: PaywallConfig, deps: PaywallDeps): Gate {
 
     if (decision.model === "x402") {
       const payment: X402Payment = { model: "x402", paymentSignature: signatureHeader };
-      return settleWithHandler(payment, offer, "x402", deps.facilitator, context);
+      return settleWithHandler(payment, offer, "x402", method, deps.facilitator, context);
     }
 
     if (decision.model === "mpp-charge") {
@@ -404,7 +523,14 @@ export function createPaywall(config: PaywallConfig, deps: PaywallDeps): Gate {
       }
 
       const payment: MppChargePayment = { model: "mpp-charge", payload: signatureHeader };
-      return settleWithHandler(payment, offer, "mpp-charge", deps.mppChargeHandler, context);
+      return settleWithHandler(
+        payment,
+        offer,
+        "mpp-charge",
+        method,
+        deps.mppChargeHandler,
+        context,
+      );
     }
 
     return {

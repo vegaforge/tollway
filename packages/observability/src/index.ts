@@ -1,12 +1,12 @@
 /**
- * @tollway/observability
+ * @vegaforge/tollway-observability
  *
  * Spend, latency, and failure metrics per agent, per service, and per model,
  * with machine-readable exports and webhooks for whatever you want to wire
  * up. See docs/design.md, "Observability".
  */
 
-import type { SettlementModel } from "@tollway/core";
+import type { SettlementModel } from "@vegaforge/tollway-core";
 
 /** Webhook event names, matching docs/design.md, "Observability". */
 export const webhookEvents = [

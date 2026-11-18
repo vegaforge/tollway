@@ -2,13 +2,13 @@
 date: 2026-10-29
 feature: The demo's live mode pays real testnet USDC, or lists what is missing and exits
 scope: fix
-packages: [@tollway/demo]
+packages: [@vegaforge/tollway-demo]
 scenario-impact: none
 ---
 
 # Demo live mode works on testnet
 
-`MOCK_MODE=true pnpm --filter @tollway/demo start` is unchanged.
+`MOCK_MODE=true pnpm --filter @vegaforge/tollway-demo start` is unchanged.
 
 Without `MOCK_MODE`, the demo now makes a real x402 payment on Stellar
 testnet:
@@ -33,7 +33,7 @@ setting and exits with code 1, without a stack trace and before any network
 call. Mainnet also needs `STELLAR_RPC_URL`, because `@x402/stellar` has no
 default mainnet RPC.
 
-The opt-in facilitator integration test in `@tollway/server` now defaults to
+The opt-in facilitator integration test in `@vegaforge/tollway-server` now defaults to
 the testnet URL and sends `OZ_API_KEY`. A new opt-in test,
 `apps/demo/src/demo.live.test.ts` (`TOLLWAY_DEMO_LIVE=true`), runs the demo
 against the live facilitator.

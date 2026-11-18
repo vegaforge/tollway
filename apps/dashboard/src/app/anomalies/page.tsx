@@ -16,7 +16,7 @@ export default function AnomaliesPage() {
         <EmptyState
           title="Nothing flagged"
           body="Build the anomaly feed here: budget stops, sudden spend spikes, and reconciliation drift, newest first."
-          source="@tollway/observability · anomaly.detected"
+          source="@vegaforge/tollway-observability · anomaly.detected"
         />
       </Panel>
     </>

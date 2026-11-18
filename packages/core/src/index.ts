@@ -1,5 +1,5 @@
 /**
- * @tollway/core
+ * @vegaforge/tollway-core
  *
  * The shared foundation everything else composes: domain types, the
  * canonical signed receipt, the model router interface, and the policy

@@ -1,6 +1,6 @@
 "use client";
 
-import type { ChannelStatus } from "@tollway/channels";
+import type { ChannelStatus } from "@vegaforge/tollway-channels";
 import { useMemo } from "react";
 
 import { Panel } from "@/components/ui/panel";
@@ -10,7 +10,7 @@ import { useOpenChannels } from "@/data/use-open-channels";
 
 /**
  * Default precision used to render integer-string amounts. Stellar SACs (the
- * settlement target of @tollway/core) use 7 decimal places. When the
+ * settlement target of @vegaforge/tollway-core) use 7 decimal places. When the
  * observability hub starts attaching per-asset metadata to rows, the data
  * layer can override this.
  */
@@ -19,7 +19,7 @@ const DEFAULT_ASSET_DECIMALS = 7;
 /**
  * Default drawdown fraction at which an open channel is flagged as nearing
  * close. Mirrors the ClosePolicy.drawdownThreshold heuristic in
- * @tollway/channels: when committed / deposit reaches this fraction the
+ * @vegaforge/tollway-channels: when committed / deposit reaches this fraction the
  * channel manager's shouldClose returns true. Overridable via prop so the
  * view stays decoupled from the policy engine.
  */

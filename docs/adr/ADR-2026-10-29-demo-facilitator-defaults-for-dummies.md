@@ -14,7 +14,7 @@ either work for real or stop at once with a clear list of what to set.
 
 ## What people see
 
-1. `MOCK_MODE=true pnpm --filter @tollway/demo start` works exactly as now.
+1. `MOCK_MODE=true pnpm --filter @vegaforge/tollway-demo start` works exactly as now.
 2. Running the demo without mock mode and without setup prints, in plain
    words, which settings are missing (the facilitator API key, the account
    that receives the payment, the account that pays) and stops.

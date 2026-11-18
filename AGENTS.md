@@ -125,7 +125,7 @@ only when run alone does not count.
 4. **Build.** Test first, inside the layering rules in SKILL.md.
 5. **Verify.** `./scripts/preflight.sh`, then run the affected flow by hand.
    For the payment path that means at least `MOCK_MODE=true pnpm --filter
-   @tollway/demo start`.
+   @vegaforge/tollway-demo start`.
 6. **Document.** A release note in `docs/release-notes/<YYYY-MM-DD>-<topic>.md`
    from `docs/release-notes/TEMPLATE.md`. If a publishable package changed, a
    changeset too (`pnpm changeset`). The release note is the human summary;

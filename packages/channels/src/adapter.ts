@@ -11,7 +11,7 @@
  * channel implementation could slot in later.
  */
 
-import type { StellarNetwork } from "@tollway/core";
+import type { StellarNetwork } from "@vegaforge/tollway-core";
 
 export type OpenAdapterInput = {
   counterparty: string;

@@ -44,6 +44,6 @@ See AGENTS.md and `.claude/skills/tollway-engineering-standards/SKILL.md` for wh
 
 ## How this was verified
 
-<!-- The exact commands you ran and what they printed. For the payment path, include the demo run, for example MOCK_MODE=true pnpm --filter @tollway/demo start. -->
+<!-- The exact commands you ran and what they printed. For the payment path, include the demo run, for example MOCK_MODE=true pnpm --filter @vegaforge/tollway-demo start. -->
 
 ## Notes for the reviewer

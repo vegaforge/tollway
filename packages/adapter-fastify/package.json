@@ -1,5 +1,5 @@
 {
-  "name": "@tollway/adapter-fastify",
+  "name": "@vegaforge/tollway-adapter-fastify",
   "version": "0.0.1",
   "description": "Fastify preHandler adapter for the Tollway payment gate",
   "license": "Apache-2.0",
@@ -30,13 +30,13 @@
     "typecheck": "tsc --noEmit"
   },
   "dependencies": {
-    "@tollway/server": "workspace:*"
+    "@vegaforge/tollway-server": "workspace:*"
   },
   "peerDependencies": {
     "fastify": "^5.0.0"
   },
   "devDependencies": {
-    "@tollway/core": "workspace:*",
+    "@vegaforge/tollway-core": "workspace:*",
     "@types/node": "^22.19.20",
     "fastify": "^5.2.0",
     "tsup": "^8.5.0",

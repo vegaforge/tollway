@@ -6,7 +6,7 @@
  * is responsible for orchestration, not for the SDK's wire format.
  */
 
-import type { StellarNetwork } from "@tollway/core";
+import type { StellarNetwork } from "@vegaforge/tollway-core";
 
 export type ChannelStatus = "open" | "closing" | "closed" | "recovering" | "recovered";
 

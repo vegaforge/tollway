@@ -1,5 +1,5 @@
 {
-  "name": "@tollway/server",
+  "name": "@vegaforge/tollway-server",
   "version": "0.0.1",
   "description": "Service-side payment gate, the framework-agnostic core that charges agents",
   "license": "Apache-2.0",
@@ -30,7 +30,7 @@
     "typecheck": "tsc --noEmit"
   },
   "dependencies": {
-    "@tollway/core": "workspace:*",
+    "@vegaforge/tollway-core": "workspace:*",
     "@x402/core": "^2.16.0",
     "@x402/stellar": "^2.16.0"
   },

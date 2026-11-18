@@ -1,5 +1,5 @@
 /**
- * @tollway/channels
+ * @vegaforge/tollway-channels
  *
  * The MPP payment channel lifecycle the raw SDK leaves to the integrator:
  * open the channel, advance cumulative commitments off chain, close with a

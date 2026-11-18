@@ -40,27 +40,27 @@ Tollway is a library plus an optional shared service. Most users embed the libra
 flowchart TB
   subgraph agent["Agent side"]
     AC[Agent code]
-    CL["@tollway/client"]
+    CL["@vegaforge/tollway-client"]
     AC --> CL
   end
 
   subgraph svc["Service side"]
     RT[HTTP route]
-    MW["@tollway/server gate"]
+    MW["@vegaforge/tollway-server gate"]
     AD["framework adapter (express, fastify, next, hono)"]
     RT --> AD --> MW
   end
 
-  subgraph core["@tollway/core"]
+  subgraph core["@vegaforge/tollway-core"]
     POL[Policy and budget engine]
     ROUTER[Model router]
     RCPT[Canonical signed receipt]
   end
 
   subgraph shared["Shared services (optional)"]
-    CHAN["@tollway/channels lifecycle"]
-    RECON["@tollway/reconcile"]
-    OBS["@tollway/observability"]
+    CHAN["@vegaforge/tollway-channels lifecycle"]
+    RECON["@vegaforge/tollway-reconcile"]
+    OBS["@vegaforge/tollway-observability"]
   end
 
   subgraph base["Stellar base layer"]
@@ -93,7 +93,7 @@ Its inputs are declared offer hints, observed traffic shape, explicit configurat
 
 ### The x402 request path
 
-The x402 path runs end to end through `@tollway/core`, `@tollway/server`, an adapter, and a facilitator. The header encoding and payload shapes do not yet match the x402 V2 wire format that stock x402 clients send; that work is tracked in [#43](https://github.com/vegaforge/tollway/issues/43).
+The x402 path runs end to end through `@vegaforge/tollway-core`, `@vegaforge/tollway-server`, an adapter, and a facilitator. The header encoding and payload shapes do not yet match the x402 V2 wire format that stock x402 clients send; that work is tracked in [#43](https://github.com/vegaforge/tollway/issues/43).
 
 ```mermaid
 sequenceDiagram
@@ -138,17 +138,17 @@ Tollway is a pnpm and Turborepo monorepo. Each package is independently buildabl
 
 | Package | Responsibility |
 | ------- | -------------- |
-| `@tollway/core` | model router, policy schema, canonical receipt, shared types |
-| `@tollway/client` | agent-side client wrapper |
-| `@tollway/server` | service-side payment gate, framework agnostic |
-| `@tollway/adapter-express` | Express adapter (the reference adapter) |
-| `@tollway/adapter-fastify` | Fastify adapter |
-| `@tollway/adapter-next` | Next.js App Router adapter |
-| `@tollway/adapter-hono` | Hono adapter |
-| `@tollway/channels` | MPP channel lifecycle manager |
-| `@tollway/reconcile` | reconciliation engine |
-| `@tollway/observability` | metrics, exports, webhooks |
-| `@tollway/theme` | shared design tokens |
+| `@vegaforge/tollway-core` | model router, policy schema, canonical receipt, shared types |
+| `@vegaforge/tollway-client` | agent-side client wrapper |
+| `@vegaforge/tollway-server` | service-side payment gate, framework agnostic |
+| `@vegaforge/tollway-adapter-express` | Express adapter (the reference adapter) |
+| `@vegaforge/tollway-adapter-fastify` | Fastify adapter |
+| `@vegaforge/tollway-adapter-next` | Next.js App Router adapter |
+| `@vegaforge/tollway-adapter-hono` | Hono adapter |
+| `@vegaforge/tollway-channels` | MPP channel lifecycle manager |
+| `@vegaforge/tollway-reconcile` | reconciliation engine |
+| `@vegaforge/tollway-observability` | metrics, exports, webhooks |
+| `@vegaforge/tollway-theme` | shared design tokens |
 
 Apps: `apps/web` (landing page and docs), `apps/dashboard` (observability UI), `apps/demo` (end-to-end x402 demo).
 
@@ -167,7 +167,7 @@ pnpm test
 Run the x402 demo with no network, from challenge to a verified receipt:
 
 ```bash
-MOCK_MODE=true pnpm --filter @tollway/demo start
+MOCK_MODE=true pnpm --filter @vegaforge/tollway-demo start
 ```
 
 Without `MOCK_MODE`, the demo pays 0.001 testnet USDC through the OpenZeppelin Channels testnet facilitator and prints the settlement transaction hash. It needs two testnet accounts with a USDC trustline (the payer also needs testnet USDC from the [Circle faucet](https://faucet.circle.com/)) and an API key from [channels.openzeppelin.com/testnet/gen](https://channels.openzeppelin.com/testnet/gen). Use testnet keys only: the payer's secret key sits in an environment variable.
@@ -176,7 +176,7 @@ Without `MOCK_MODE`, the demo pays 0.001 testnet USDC through the OpenZeppelin C
 OZ_API_KEY=... \
 STELLAR_RECIPIENT=G... \
 STELLAR_SECRET_KEY=S... \
-pnpm --filter @tollway/demo start
+pnpm --filter @vegaforge/tollway-demo start
 ```
 
 If a setting is missing or invalid, the demo lists every problem and exits with code 1. `FACILITATOR_URL` overrides the facilitator. `STELLAR_NETWORK=mainnet` switches to mainnet and then also needs `STELLAR_RPC_URL`.
@@ -184,9 +184,9 @@ If a setting is missing or invalid, the demo lists every problem and exits with 
 Gate a route on the service side:
 
 ```ts
-import { Ed25519Signer } from "@tollway/core";
-import { createPaywall, createMockFacilitator } from "@tollway/server";
-import { expressPaywall } from "@tollway/adapter-express";
+import { Ed25519Signer } from "@vegaforge/tollway-core";
+import { createPaywall, createMockFacilitator } from "@vegaforge/tollway-server";
+import { expressPaywall } from "@vegaforge/tollway-adapter-express";
 
 const signer = await Ed25519Signer.generate("service-key");
 const gate = createPaywall(
@@ -207,14 +207,14 @@ Implemented and tested:
 
 | Package or app | What works |
 | -------------- | ---------- |
-| `@tollway/core` | Canonical receipt (build, sign, verify) with a swappable Ed25519 signer, zod schemas, the policy engine (`createPolicyEngine`: budgets, per-service caps, rate limits, and anomaly stops, held in memory), and the default model router. |
-| `@tollway/server` | The payment gate (`createPaywall`) for x402 and MPP charge, an HTTP facilitator client built on `@x402/core` and `@x402/stellar`, a mock facilitator, a mock MPP charge handler, and in-memory and Redis settlement caches. |
-| `@tollway/adapter-express`, `-fastify`, `-next`, `-hono` | All four adapters wrap the gate, each with its own tests. |
-| `@tollway/client` | Agent-side orchestration: policy check, routing, receipt verification, and events. You supply the `ClientSettler` that signs payments. |
-| `@tollway/channels` | Channel `open`, `commit`, `shouldClose`, and `close` against an injected `MppChannelAdapter`. |
-| `@tollway/reconcile` | The reconciler and drift detection, with unit and property tests. |
-| `@tollway/observability` | Metric recording, spend summaries, JSON and CSV export, and webhook delivery with retry and timeout. |
-| `@tollway/theme` | Shared design tokens. |
+| `@vegaforge/tollway-core` | Canonical receipt (build, sign, verify) with a swappable Ed25519 signer, zod schemas, the policy engine (`createPolicyEngine`: budgets, per-service caps, rate limits, and anomaly stops, held in memory), and the default model router. |
+| `@vegaforge/tollway-server` | The payment gate (`createPaywall`) for x402 and MPP charge, an HTTP facilitator client built on `@x402/core` and `@x402/stellar`, a mock facilitator, a mock MPP charge handler, and in-memory and Redis settlement caches. |
+| `@vegaforge/tollway-adapter-express`, `-fastify`, `-next`, `-hono` | All four adapters wrap the gate, each with its own tests. |
+| `@vegaforge/tollway-client` | Agent-side orchestration: policy check, routing, receipt verification, and events. You supply the `ClientSettler` that signs payments. |
+| `@vegaforge/tollway-channels` | Channel `open`, `commit`, `shouldClose`, and `close` against an injected `MppChannelAdapter`. |
+| `@vegaforge/tollway-reconcile` | The reconciler and drift detection, with unit and property tests. |
+| `@vegaforge/tollway-observability` | Metric recording, spend summaries, JSON and CSV export, and webhook delivery with retry and timeout. |
+| `@vegaforge/tollway-theme` | Shared design tokens. |
 | `apps/dashboard` | Agents, channels, and receipts views over typed hooks backed by stub data. |
 | `apps/demo` | The x402 round trip in mock mode. |
 
@@ -225,8 +225,8 @@ Open work:
 - `ChannelManager.recover`, which throws `NotImplementedError` today ([#38](https://github.com/vegaforge/tollway/issues/38)).
 - Router promotion to `mpp-channel` under sustained traffic ([#105](https://github.com/vegaforge/tollway/issues/105)). The gate answers `501` if a router selects `mpp-channel`.
 - x402 V2 wire compatibility for the gate's headers ([#43](https://github.com/vegaforge/tollway/issues/43)).
-- A production x402 `ClientSettler` for `@tollway/client` ([#102](https://github.com/vegaforge/tollway/issues/102)).
-- Feeding gate outcomes into `@tollway/observability` ([#106](https://github.com/vegaforge/tollway/issues/106)) and signing webhook deliveries ([#104](https://github.com/vegaforge/tollway/issues/104)).
+- A production x402 `ClientSettler` for `@vegaforge/tollway-client` ([#102](https://github.com/vegaforge/tollway/issues/102)).
+- Feeding gate outcomes into `@vegaforge/tollway-observability` ([#106](https://github.com/vegaforge/tollway/issues/106)) and signing webhook deliveries ([#104](https://github.com/vegaforge/tollway/issues/104)).
 - A shared conformance suite for the four adapters ([#107](https://github.com/vegaforge/tollway/issues/107)).
 - Dashboard services and exports views ([#108](https://github.com/vegaforge/tollway/issues/108), [#109](https://github.com/vegaforge/tollway/issues/109)). The overview and anomalies pages are placeholders.
 
