@@ -90,7 +90,8 @@ feature branch --squash--> dev --merge--> staging --merge--> main
 - Contributions are squash-merged into `dev`. Promotions use a merge commit so
   the three branches keep a shared history.
 - Package versions are bumped on `dev` through the Changesets "Version
-  Packages" pull request and published by hand from `main`.
+  Packages" pull request, which the maintainer starts by hand, and published
+  by hand from `main`. Neither happens automatically.
 
 The decision is recorded in
 [ADR-2026-11-18-branch-flow](docs/adr/ADR-2026-11-18-branch-flow.md).

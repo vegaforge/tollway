@@ -92,6 +92,14 @@ Two things in the current setup conflict with the new flow:
    flow: branch from `origin/dev`, open the pull request into `dev`, never
    aim a fix at `staging` or `main`.
 
+### Amendment, 2026-11-18
+
+At the maintainer's request, decision 7 runs by hand while nothing is being
+published. The Release workflow no longer runs on pushes to `dev`; the
+maintainer starts it on `dev` with "version" set when a release is being
+prepared, and on `main` with "publish" set to publish. Every other decision
+is unchanged.
+
 ## Diagram
 
 ```mermaid

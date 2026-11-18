@@ -1,16 +1,20 @@
 name: Release
 
-# Pushes to dev keep a "Version Packages" pull request into dev up to date via
-# Changesets, so version bumps travel dev to staging to main like every other
-# change (docs/adr/ADR-2026-11-18-branch-flow.md). Publishing to npm never
-# happens automatically: it runs only when a maintainer triggers this workflow
-# by hand on main with publish set to true.
+# Nothing here runs on its own. Until releases start after the Drips Wave, a
+# maintainer triggers this workflow by hand:
+#
+# - on dev with "version" set, to open the Changesets "Version Packages" pull
+#   request into dev, so version bumps travel dev to staging to main like
+#   every other change (docs/adr/ADR-2026-11-18-branch-flow.md);
+# - on main with "publish" set, to publish to npm.
 
 on:
-  push:
-    branches: [dev]
   workflow_dispatch:
     inputs:
+      version:
+        description: Open or update the Version Packages pull request (run on dev)
+        type: boolean
+        default: false
       publish:
         description: Publish pending releases to npm
         type: boolean
@@ -25,7 +29,7 @@ concurrency:
 jobs:
   version:
     name: Version packages
-    if: github.event_name == 'push'
+    if: inputs.version && github.ref == 'refs/heads/dev'
     runs-on: ubuntu-latest
     timeout-minutes: 15
     permissions:
@@ -59,7 +63,7 @@ jobs:
 
   publish:
     name: Publish to npm
-    if: github.event_name == 'workflow_dispatch' && inputs.publish && github.ref == 'refs/heads/main'
+    if: inputs.publish && github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
     timeout-minutes: 15
     permissions:
