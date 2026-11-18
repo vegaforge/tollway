@@ -29,7 +29,7 @@ Closes #
 See AGENTS.md and `.claude/skills/tollway-engineering-standards/SKILL.md` for what each item means.
 
 - [ ] **Assigned**: I was assigned the linked issue before opening this pull request.
-- [ ] **Branch**: the work was done on its own branch, cut from an up-to-date `main`.
+- [ ] **Branch**: the work was done on its own branch, cut from an up-to-date `dev`, and this pull request targets `dev`.
 - [ ] **Approval**: the ADR pair or plan was approved by the maintainer (non-trivial changes only).
 - [ ] **Test first**: a bug fix is locked by a test that failed before the fix.
 - [ ] **Boundary validation**: external payloads (x402 and MPP headers, facilitator responses, webhook bodies, shared-store reads) are parsed with a schema and mapped to Tollway types.

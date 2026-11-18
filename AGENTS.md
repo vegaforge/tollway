@@ -17,20 +17,32 @@ rules below exist so that nothing depends on an agent remembering to be careful.
 
 ## Directives
 
-### Directive 1: `main` is read-only, and every branch lives in a worktree
+### Directive 1: `dev`, `staging` and `main` are read-only, and every branch lives in a worktree
 
-`main` is the only long-lived branch. Agents never commit or push to it.
+There are three long-lived branches, one per environment
+([ADR-2026-11-18-branch-flow](docs/adr/ADR-2026-11-18-branch-flow.md)):
 
-All work happens in a Git worktree cut from a freshly fetched `origin/main`:
+- `dev` is development. Every change lands here first, and only here.
+- `staging` is testing. It accepts pull requests from `dev` only.
+- `main` is production. It accepts pull requests from `staging` only.
+
+Agents never commit or push to any of the three, and never open, approve or
+merge a promotion pull request (`dev` into `staging`, `staging` into `main`)
+unless the maintainer asks. The `branch flow` job in `quality` rejects any
+other route, and only the maintainer can merge. Fixes aimed at `staging` or
+`main` go through `dev` like everything else.
+
+All work happens in a Git worktree cut from a freshly fetched `origin/dev`:
 
 ```bash
-git fetch origin main
-git worktree add .worktrees/<branch-dashed> -b <branch> origin/main
+git fetch origin dev
+git worktree add .worktrees/<branch-dashed> -b <branch> origin/dev
 cd .worktrees/<branch-dashed>
 pnpm install --frozen-lockfile
 ```
 
-`.worktrees/` is ignored by Git. Never assume a local `main` is current.
+`.worktrees/` is ignored by Git. Never assume a local long-lived branch is
+current.
 
 ### Directive 2: Two ADRs and explicit human approval before non-trivial work
 
@@ -102,7 +114,7 @@ only when run alone does not count.
 0 SYNC -> 1 DECIDE -> 2 PLAN -> 3 ISOLATE -> 4 BUILD -> 5 VERIFY -> 6 DOCUMENT -> 7 DELIVER
 ```
 
-0. **Sync.** `git fetch origin main`. Read the issue, the code it touches, and
+0. **Sync.** `git fetch origin dev`. Read the issue, the code it touches, and
    `docs/design.md`.
 1. **Decide.** Non-trivial work gets the two ADRs (Directive 2). Stop and wait
    for approval.
@@ -118,7 +130,7 @@ only when run alone does not count.
    from `docs/release-notes/TEMPLATE.md`. If a publishable package changed, a
    changeset too (`pnpm changeset`). The release note is the human summary;
    the changeset is the version bump. A change to `packages/*/src` needs both.
-7. **Deliver.** Open the pull request against `main` with
+7. **Deliver.** Open the pull request against `dev` with
    `.github/pull_request_template.md`. Every CI job, and the aggregate
    `quality` check, must be green before review.
 
@@ -207,7 +219,8 @@ Check every item before asking for review. SKILL.md explains each one.
   `chore/`, `docs/`, `test/`.
 - Conventional Commits, for example
   `fix(server): bind cached receipts to the offer`.
-- Squash merges only. The branch is deleted on merge.
+- Pull requests into `dev` are squash-merged and the branch is deleted on
+  merge. Promotions into `staging` and `main` use a merge commit.
 - The pull request body includes `Closes #<issue>`.
 - Never add AI co-author trailers, "generated with" footers, or session links
   to commits, pull requests, or files.

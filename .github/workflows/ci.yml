@@ -9,7 +9,7 @@ name: CI
 
 on:
   push:
-    branches: [main]
+    branches: [dev, staging, main]
   pull_request:
 
 concurrency:
@@ -24,6 +24,48 @@ env:
   CI: true
 
 jobs:
+  # Code moves one way: feature branch into dev, dev into staging, staging
+  # into main. See docs/adr/ADR-2026-11-18-branch-flow.md. This job is part of
+  # quality, so the flow is enforced by the check that is already required.
+  branch-flow:
+    name: branch flow
+    runs-on: ubuntu-latest
+    timeout-minutes: 2
+    steps:
+      - name: dev to staging to main
+        env:
+          EVENT: ${{ github.event_name }}
+          BASE: ${{ github.base_ref }}
+          HEAD: ${{ github.head_ref }}
+          HEAD_REPO: ${{ github.event.pull_request.head.repo.full_name }}
+          REPO: ${{ github.repository }}
+        run: |
+          if [ "$EVENT" != "pull_request" ]; then
+            echo "Not a pull request, nothing to check."
+            exit 0
+          fi
+          if [ "$BASE" = "staging" ] || [ "$BASE" = "main" ]; then
+            if [ "$HEAD_REPO" != "$REPO" ]; then
+              echo "Pull requests into $BASE must come from this repository, not a fork. Open yours against dev."
+              exit 1
+            fi
+          fi
+          case "$BASE" in
+            main)
+              [ "$HEAD" = "staging" ] || { echo "main only accepts pull requests from staging, not $HEAD. Open yours against dev."; exit 1; } ;;
+            staging)
+              [ "$HEAD" = "dev" ] || { echo "staging only accepts pull requests from dev, not $HEAD. Open yours against dev."; exit 1; } ;;
+            dev)
+              if [ "$HEAD" = "staging" ] || [ "$HEAD" = "main" ]; then
+                echo "dev does not take pull requests from $HEAD. Changes flow dev to staging to main."
+                exit 1
+              fi ;;
+            *)
+              echo "Pull requests go into dev. $BASE is not one of dev, staging or main."
+              exit 1 ;;
+          esac
+          echo "$HEAD into $BASE follows the branch flow."
+
   checks:
     name: format, lint, typecheck
     runs-on: ubuntu-latest
@@ -86,7 +128,8 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
-          # The release-note gate diffs the branch against origin/main.
+          # The release-note gate diffs the branch against the pull request's
+          # base branch (origin/main on pushes).
           fetch-depth: 0
           persist-credentials: false
 
@@ -107,12 +150,13 @@ jobs:
         run: bash scripts/check_release_notes.sh
         env:
           STRICT_RELEASE_NOTES: "true"
+          RELEASE_NOTES_BASE: origin/${{ github.base_ref || 'main' }}
 
   quality:
     name: quality
     runs-on: ubuntu-latest
     timeout-minutes: 5
-    needs: [checks, tests, build]
+    needs: [branch-flow, checks, tests, build]
     if: always()
     steps:
       # Anything other than success fails this job, including a cancelled or
@@ -121,10 +165,11 @@ jobs:
         if: contains(needs.*.result, 'failure') || contains(needs.*.result, 'cancelled') || contains(needs.*.result, 'skipped')
         run: |
           echo "At least one gate did not succeed:"
+          echo "  branch flow: ${{ needs.branch-flow.result }}"
           echo "  checks: ${{ needs.checks.result }}"
           echo "  tests:  ${{ needs.tests.result }}"
           echo "  build:  ${{ needs.build.result }}"
           exit 1
 
       - name: Report
-        run: echo "checks, tests and build all succeeded."
+        run: echo "branch flow, checks, tests and build all succeeded."
