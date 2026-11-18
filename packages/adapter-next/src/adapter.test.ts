@@ -6,6 +6,7 @@ import {
   PAYMENT_SIGNATURE_HEADER,
   type PaywallConfig,
 } from "@vegaforge/tollway-server";
+import { NextRequest } from "next/server";
 import { describe, expect, it } from "vitest";
 import { withPaywall } from "./index.js";
 
@@ -100,5 +101,24 @@ describe("withPaywall method binding", () => {
       new Request("http://example.test/report", { method: "POST", headers }),
     );
     expect(write.status).toBe(409);
+  });
+});
+
+// App Router handlers receive a NextRequest, not a plain Request. Run the
+// wrapper against the real class from the Next version in the peer range.
+describe("withPaywall with a real NextRequest", () => {
+  it("challenges and then serves a NextRequest exactly like a Request", async () => {
+    const handler = await buildHandler();
+
+    const unpaid = await handler(new NextRequest("http://example.test/quotes/latest"));
+    expect(unpaid.status).toBe(402);
+
+    const paid = await handler(
+      new NextRequest("http://example.test/quotes/latest", {
+        headers: { [PAYMENT_SIGNATURE_HEADER]: "mock-signed-auth-entry" },
+      }),
+    );
+    expect(paid.status).toBe(200);
+    expect(paid.headers.get("payment-response")).toBeTruthy();
   });
 });
