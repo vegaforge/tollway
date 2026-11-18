@@ -1,6 +1,6 @@
 {
   "name": "@vegaforge/tollway-channels",
-  "version": "0.0.1",
+  "version": "0.0.2",
   "description": "MPP payment channel lifecycle manager: open, commit, close, recover",
   "license": "Apache-2.0",
   "repository": {
