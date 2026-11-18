@@ -1,6 +1,6 @@
 {
   "name": "@vegaforge/tollway-client",
-  "version": "0.0.1",
+  "version": "0.1.0",
   "description": "Agent-side client that routes, pays, and collects receipts across settlement models",
   "license": "Apache-2.0",
   "repository": {

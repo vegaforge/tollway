@@ -1,6 +1,6 @@
 {
   "name": "@vegaforge/tollway-reconcile",
-  "version": "0.0.1",
+  "version": "0.1.0",
   "description": "Reconciles off-chain channel commitments against on-chain settlement and flags drift",
   "license": "Apache-2.0",
   "repository": {
