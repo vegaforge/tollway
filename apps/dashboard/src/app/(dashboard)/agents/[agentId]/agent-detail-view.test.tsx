@@ -1,7 +1,7 @@
 import { fireEvent, render, screen, within } from "@testing-library/react";
-import { afterEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeAll, describe, expect, it, vi } from "vitest";
 
-import type { AgentDetail } from "@/data/agent-detail";
+import { type AgentDetail, type AgentPolicyUsage, fetchAgentDetail } from "@/data/agent-detail";
 
 const useAgentDetailMock = vi.hoisted(() => vi.fn());
 
@@ -11,214 +11,196 @@ vi.mock("@/data/use-agent-detail", () => ({
 
 import { AgentDetailView } from "./agent-detail-view";
 
-function detail(overrides: Partial<AgentDetail> = {}): AgentDetail {
-  return {
-    id: "agent-research-01",
-    label: "research-bot",
-    payerAddresses: ["GAGENT1", "GAGENT2"],
-    series: [
-      {
-        bucket: "day",
-        assets: [
-          { asset: "USDC", points: [{ bucket: "2026-11-19", amount: "5000000000" }] },
-          { asset: "XLM", points: [{ bucket: "2026-11-19", amount: "2000000000" }] },
-        ],
-      },
-      {
-        bucket: "hour",
-        assets: [
-          { asset: "USDC", points: [{ bucket: "2026-11-19T10", amount: "1000000" }] },
-          { asset: "XLM", points: [{ bucket: "2026-11-19T11", amount: "700000" }] },
-        ],
-      },
-    ],
-    byModel: [
-      { key: "x402", asset: "USDC", amount: "5000000000" },
-      { key: "mpp-channel", asset: "XLM", amount: "2000000000" },
-    ],
-    byPayee: [{ key: "GSERVICE1", asset: "USDC", amount: "3000000000" }],
-    policy: {
-      document: {
-        budgets: { daily: "5000000000", total: "10000000000" },
-        perService: { GSERVICE1: { cap: "8000000000" } },
-      },
-      daily: {
-        budget: "5000000000",
-        usedByAsset: [
-          { asset: "USDC", amount: "5000000000" },
-          { asset: "XLM", amount: "2000000000" },
-        ],
-      },
-      total: {
-        budget: "10000000000",
-        usedByAsset: [{ asset: "USDC", amount: "10000000000" }],
-      },
-      perService: [
-        {
-          payee: "GSERVICE1",
-          cap: "8000000000",
-          usedByAsset: [{ asset: "USDC", amount: "1000000000" }],
-        },
-      ],
-    },
-    recentStops: [
-      {
-        at: "2026-11-19T10:00:00.000Z",
-        rule: "budget",
-        detail: "daily budget exceeded for USDC",
-      },
-    ],
-    ...overrides,
-  };
-}
+// The fixture is the stub's own research-bot: two payer addresses, USDC and
+// XLM, a failed payment, a policy, and two engine-produced stops.
+let research: AgentDetail;
+
+beforeAll(async () => {
+  research = await fetchAgentDetail("agent-research-01", { bucket: "day", range: "7d" });
+});
 
 afterEach(() => {
   useAgentDetailMock.mockReset();
 });
 
+function ready(overrides: Partial<AgentDetail> = {}) {
+  useAgentDetailMock.mockReturnValue({ status: "ready", detail: { ...research, ...overrides } });
+  render(<AgentDetailView agentId="agent-research-01" />);
+}
+
+function policyWith(overrides: Partial<AgentPolicyUsage>): AgentPolicyUsage {
+  if (research.policy === null) throw new Error("research-bot fixture has a policy");
+  return { ...research.policy, ...overrides };
+}
+
 describe("AgentDetailView", () => {
   it("renders a skeleton while loading", () => {
     useAgentDetailMock.mockReturnValue({ status: "loading" });
-
     render(<AgentDetailView agentId="agent-research-01" />);
 
     expect(screen.getByTestId("agent-detail-skeleton")).toBeInTheDocument();
   });
 
-  it("renders an error surface without inventing data", () => {
-    useAgentDetailMock.mockReturnValue({
-      status: "error",
-      error: new Error("hub offline"),
-    });
-
+  it("renders an error surface with a way back, without inventing data", () => {
+    useAgentDetailMock.mockReturnValue({ status: "error", error: new Error("hub offline") });
     render(<AgentDetailView agentId="agent-research-01" />);
 
     const alert = screen.getByRole("alert");
     expect(alert).toHaveTextContent(/could not load agent detail/i);
     expect(alert).toHaveTextContent(/hub offline/i);
+    expect(within(alert).getByRole("link", { name: /back to agents/i })).toHaveAttribute(
+      "href",
+      "/agents",
+    );
   });
 
   it("shows the identity including every payer address", () => {
-    useAgentDetailMock.mockReturnValue({ status: "ready", detail: detail() });
-
-    render(<AgentDetailView agentId="agent-research-01" />);
+    ready();
 
     expect(screen.getByText("research-bot")).toBeInTheDocument();
     expect(screen.getByText("agent-research-01")).toBeInTheDocument();
-    expect(screen.getByText("GAGENT1")).toBeInTheDocument();
-    expect(screen.getByText("GAGENT2")).toBeInTheDocument();
+    expect(screen.getByText("GAGENTRESEARCH1")).toBeInTheDocument();
+    expect(screen.getByText("GAGENTRESEARCH2")).toBeInTheDocument();
   });
 
-  it("renders spend over time per asset without summing across assets", () => {
-    useAgentDetailMock.mockReturnValue({ status: "ready", detail: detail() });
-
-    render(<AgentDetailView agentId="agent-research-01" />);
+  it("renders one series per asset, settled only, never summed across assets", () => {
+    ready();
 
     const usdc = screen.getByTestId("agent-series-USDC");
     const xlm = screen.getByTestId("agent-series-XLM");
-    expect(usdc).toHaveTextContent("500.00 USDC");
-    expect(xlm).toHaveTextContent("200.00 XLM");
-    expect(screen.queryByText(/700\.00 USDC/)).not.toBeInTheDocument();
+    // 250 + 100 settled on the 19th; the failed 99.9999999 is not counted.
+    expect(usdc).toHaveTextContent("2026-11-19350 USDC");
+    expect(xlm).toHaveTextContent("2026-11-19200 XLM");
+    expect(screen.queryByText(/550 USDC/)).not.toBeInTheDocument();
   });
 
-  it("switches the series between hourly and daily buckets", () => {
-    useAgentDetailMock.mockReturnValue({ status: "ready", detail: detail() });
+  it("asks the data layer again when the bucket or range changes", () => {
+    ready();
 
-    render(<AgentDetailView agentId="agent-research-01" />);
-
-    expect(screen.getByTestId("agent-series-USDC")).toHaveTextContent("500.00 USDC");
-    fireEvent.change(screen.getByLabelText(/bucket/i), { target: { value: "hour" } });
-    expect(screen.getByTestId("agent-series-USDC")).toHaveTextContent("0.10 USDC");
-  });
-
-  it("shows model mix and services paid", () => {
-    useAgentDetailMock.mockReturnValue({ status: "ready", detail: detail() });
-
-    render(<AgentDetailView agentId="agent-research-01" />);
-
-    expect(screen.getByText("x402")).toBeInTheDocument();
-    expect(screen.getByText("mpp-channel")).toBeInTheDocument();
-    expect(screen.getAllByText("GSERVICE1").length).toBeGreaterThan(0);
-  });
-
-  it("says so explicitly when the agent has no policy", () => {
-    useAgentDetailMock.mockReturnValue({
-      status: "ready",
-      detail: detail({ policy: null }),
+    expect(useAgentDetailMock).toHaveBeenLastCalledWith("agent-research-01", {
+      bucket: "day",
+      range: "7d",
     });
+    fireEvent.change(screen.getByLabelText("Bucket"), { target: { value: "hour" } });
+    expect(useAgentDetailMock).toHaveBeenLastCalledWith("agent-research-01", {
+      bucket: "hour",
+      range: "7d",
+    });
+    fireEvent.change(screen.getByLabelText("Range"), { target: { value: "30d" } });
+    expect(useAgentDetailMock).toHaveBeenLastCalledWith("agent-research-01", {
+      bucket: "hour",
+      range: "30d",
+    });
+  });
 
-    render(<AgentDetailView agentId="agent-research-01" />);
+  it("shows model mix and services paid per asset", () => {
+    ready();
 
-    expect(screen.getByText(/no policy governs this agent/i)).toBeInTheDocument();
+    expect(screen.getByRole("cell", { name: "x402" })).toBeInTheDocument();
+    expect(screen.getByRole("cell", { name: "mpp-channel" })).toBeInTheDocument();
+    expect(screen.getByRole("cell", { name: "GSERVICEBETA" })).toBeInTheDocument();
+  });
+
+  it("says so explicitly when the agent has no policy, with no budget bar", () => {
+    ready({ policy: null });
+
+    expect(screen.getByTestId("no-policy")).toHaveTextContent(/no policy governs this agent/i);
     expect(screen.queryByTestId("budget-usage-daily")).not.toBeInTheDocument();
   });
 
-  it("renders 0%, 100% and over-100% budget usage from bigint math", () => {
-    const policy = detail().policy;
-    if (policy === null) throw new Error("expected a policy in the fixture");
+  it("renders 0%, 100% and over-100% usage from bigint math, with both units", () => {
+    ready({
+      policy: policyWith({
+        daily: { limit: "10000000000", usedByAsset: [], windowStart: "2026-11-19T00:00:00.000Z" },
+        total: {
+          limit: "10000000000",
+          usedByAsset: [{ asset: "USDC", amount: "10000000000" }],
+          windowStart: "2026-11-01T00:00:00.000Z",
+        },
+        perService: [
+          {
+            payee: "GSERVICEALPHA",
+            limit: "1000000000",
+            usedByAsset: [{ asset: "USDC", amount: "1200000000" }],
+            windowStart: "2026-11-01T00:00:00.000Z",
+          },
+        ],
+      }),
+    });
 
-    useAgentDetailMock.mockReturnValue({
-      status: "ready",
-      detail: detail({
-        policy: {
-          ...policy,
-          daily: {
-            budget: "10000000000",
-            usedByAsset: [{ asset: "USDC", amount: "0" }],
-          },
-          total: {
-            budget: "10000000000",
-            usedByAsset: [{ asset: "USDC", amount: "10000000000" }],
-          },
-          perService: [
-            {
-              payee: "GSERVICE1",
-              cap: "1000000000",
-              usedByAsset: [{ asset: "USDC", amount: "1200000000" }],
-            },
-          ],
+    expect(screen.getByTestId("budget-usage-daily")).toHaveTextContent("0.00%");
+    const total = screen.getByTestId("budget-usage-total");
+    expect(total).toHaveTextContent("100.00%");
+    expect(total).toHaveTextContent("1,000 USDC of 1,000 USDC");
+    expect(total).toHaveTextContent("10000000000 base units");
+    expect(total).not.toHaveTextContent(/over limit/i);
+    const cap = screen.getByTestId("service-cap-GSERVICEALPHA");
+    expect(cap).toHaveTextContent("120.00%");
+    expect(cap).toHaveTextContent(/over limit/i);
+  });
+
+  it("does not invent a percentage for a zero limit", () => {
+    ready({
+      policy: policyWith({
+        daily: {
+          limit: "0",
+          usedByAsset: [{ asset: "USDC", amount: "5" }],
+          windowStart: "2026-11-19T00:00:00.000Z",
         },
       }),
     });
 
-    render(<AgentDetailView agentId="agent-research-01" />);
-
-    expect(screen.getByTestId("budget-usage-daily")).toHaveTextContent("0.00%");
-    expect(screen.getByTestId("budget-usage-total")).toHaveTextContent("100.00%");
-    expect(screen.getByTestId("service-cap-GSERVICE1")).toHaveTextContent("120.00%");
+    const daily = screen.getByTestId("budget-usage-daily");
+    expect(daily).toHaveTextContent("limit is 0");
+    expect(daily).toHaveTextContent(/over limit/i);
   });
 
-  it("labels the daily window as a UTC day and notes the budget unit ambiguity", () => {
-    useAgentDetailMock.mockReturnValue({ status: "ready", detail: detail() });
+  it("shows each asset against the same limit and a limit the policy leaves unset", () => {
+    ready({
+      policy: policyWith({
+        total: { limit: null, usedByAsset: [], windowStart: "2026-11-01T00:00:00.000Z" },
+      }),
+    });
 
-    render(<AgentDetailView agentId="agent-research-01" />);
-
-    expect(screen.getAllByText(/UTC day/i).length).toBeGreaterThan(0);
-    expect(screen.getByText(/unit ambiguity/i)).toBeInTheDocument();
+    const daily = screen.getByTestId("budget-usage-daily");
+    expect(within(daily).getByTestId("usage-USDC")).toHaveTextContent("70.00%");
+    expect(within(daily).getByTestId("usage-XLM")).toHaveTextContent("40.00%");
+    expect(screen.getByTestId("budget-usage-total")).toHaveTextContent(/not set/i);
   });
 
-  it("lists recent policy stops and links to the filtered anomalies view", () => {
-    useAgentDetailMock.mockReturnValue({ status: "ready", detail: detail() });
+  it("labels the daily window as a UTC day and explains the budget unit", () => {
+    ready();
 
-    render(<AgentDetailView agentId="agent-research-01" />);
+    expect(screen.getByTestId("budget-usage-daily")).toHaveTextContent(
+      "UTC day 2026-11-19, 00:00 to 24:00 UTC",
+    );
+    expect(screen.getByText(/one number with no asset/i)).toBeInTheDocument();
+  });
 
-    const stop = screen.getByTestId("policy-stop-0");
-    expect(stop).toHaveTextContent("budget");
-    expect(stop).toHaveTextContent("daily budget exceeded for USDC");
-    expect(within(stop).getByRole("link")).toHaveAttribute(
+  it("lists policy stops with the rule and detail from the trace, and links to anomalies", () => {
+    ready();
+
+    const daily = screen.getByTestId("policy-stop-budget-daily");
+    expect(daily).toHaveTextContent("budget-daily");
+    expect(daily).toHaveTextContent("daily budget exceeded for USDC: 5500000000 > 5000000000");
+    expect(screen.getByTestId("policy-stop-per-service")).toHaveTextContent(
+      "per-service cap exceeded for GSERVICEBETA",
+    );
+    expect(screen.getByRole("link", { name: "View in anomalies" })).toHaveAttribute(
       "href",
       "/anomalies?agent=agent-research-01",
     );
   });
 
   it("renders an explicit empty state when there are no policy stops", () => {
-    useAgentDetailMock.mockReturnValue({
-      status: "ready",
-      detail: detail({ recentStops: [] }),
-    });
-
-    render(<AgentDetailView agentId="agent-research-01" />);
+    ready({ recentStops: [] });
 
     expect(screen.getByText(/no recent policy stops/i)).toBeInTheDocument();
+  });
+
+  it("renders an explicit empty state for a range with no settled spend", () => {
+    ready({ series: [], byModel: [], byPayee: [] });
+
+    expect(screen.getAllByText(/no settled spend in this range/i)).toHaveLength(3);
   });
 });

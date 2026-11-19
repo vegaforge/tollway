@@ -52,6 +52,9 @@ describe("AgentsView", () => {
     render(<AgentsView />);
 
     expect(screen.getByText(/no agents have spent yet/i)).toBeInTheDocument();
+    // With no rows there is no asset to total in, so none is named.
+    expect(screen.queryByText(/0 USDC/)).not.toBeInTheDocument();
+    expect(screen.getAllByText("None")).toHaveLength(2);
   });
 
   it("sorts rows by spend descending by default", () => {

@@ -52,7 +52,8 @@ function totalsByAsset(
 }
 
 function AssetTotals({ entries }: { entries: { asset: string; amount: string }[] }) {
-  if (entries.length === 0) return <>0 USDC</>;
+  // No rows means no asset to name; a made-up "0 USDC" would claim one.
+  if (entries.length === 0) return <>None</>;
   return (
     <>
       {entries.flatMap((entry, index) => [

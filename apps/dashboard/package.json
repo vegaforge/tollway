@@ -16,6 +16,7 @@
   "dependencies": {
     "@vegaforge/tollway-channels": "workspace:*",
     "@vegaforge/tollway-core": "workspace:*",
+    "@vegaforge/tollway-observability": "workspace:*",
     "@vegaforge/tollway-theme": "workspace:*",
     "bcryptjs": "3.0.3",
     "jose": "6.2.18",

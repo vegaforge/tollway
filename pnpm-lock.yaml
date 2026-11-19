@@ -45,6 +45,9 @@ importers:
       '@vegaforge/tollway-core':
         specifier: workspace:*
         version: link:../../packages/core
+      '@vegaforge/tollway-observability':
+        specifier: workspace:*
+        version: link:../../packages/observability
       '@vegaforge/tollway-theme':
         specifier: workspace:*
         version: link:../../packages/theme
