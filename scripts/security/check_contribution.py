@@ -3,9 +3,9 @@
 
 A pull request from someone who is not a maintainer passes only when:
 
-  * its description closes exactly one issue in this repository
+  * its description closes between one and four issues in this repository
     ("Closes #12", "Fixes #12", "Resolves owner/repo#12" or the issue URL);
-  * the author is assigned to that issue; and
+  * the author is assigned to every one of them; and
   * it does not mark any ADR in docs/adr/ as Accepted. Only the maintainer
     accepts a design (ADR-2026-11-19-open-source-governance).
 
@@ -38,6 +38,9 @@ from scan_diff import git_env  # noqa: E402
 CLOSING = r"(?:close[sd]?|fix(?:e[sd])?|resolve[sd]?)"
 ACCEPTED = re.compile(r"^\s*-\s*\*\*Status:\*\*\s*Accepted\b", re.I | re.M)
 HTML_COMMENT = re.compile(r"<!--.*?-->", re.S)
+# A contributor may work on up to four assigned issues at once and close them
+# in one pull request (maintainer decision, 2026-11-19).
+MAX_ISSUES = 4
 
 
 @dataclass(frozen=True)
@@ -83,21 +86,21 @@ def decide(pr: Contribution, adrs: list[AdrChange], api: Api, repo_slug: str) ->
         problems.append(
             "The description does not close an issue. Add `Closes #<number>` for the issue you were assigned."
         )
-    elif len(issues) > 1:
+    elif len(issues) > MAX_ISSUES:
         listed = ", ".join(f"#{n}" for n in sorted(issues))
         problems.append(
-            f"The description closes {listed}. Tollway takes one pull request per issue: "
-            "keep one `Closes #<number>` here and open a separate pull request for each other issue."
+            f"The description closes {listed}. A pull request may close at most four issues: "
+            "keep up to four `Closes #<number>` lines here and open another pull request for the rest."
         )
     else:
-        number = next(iter(issues))
-        try:
-            issue = api(f"/repos/{repo_slug}/issues/{number}")
-        except urllib.error.HTTPError:
-            issue = None
-        if not isinstance(issue, dict) or "pull_request" in issue:
-            problems.append(f"#{number} is not an open issue in this repository.")
-        else:
+        for number in sorted(issues):
+            try:
+                issue = api(f"/repos/{repo_slug}/issues/{number}")
+            except urllib.error.HTTPError:
+                issue = None
+            if not isinstance(issue, dict) or "pull_request" in issue:
+                problems.append(f"#{number} is not an open issue in this repository.")
+                continue
             assignees = {a.get("login") for a in issue.get("assignees") or []}
             if pr.author not in assignees:
                 problems.append(
@@ -117,7 +120,7 @@ def decide(pr: Contribution, adrs: list[AdrChange], api: Api, repo_slug: str) ->
 
     if problems:
         return False, problems
-    return True, ["One issue, assigned to the author, and no self-accepted ADRs."]
+    return True, [f"Closes {len(issues)} issue(s), all assigned to the author, and no self-accepted ADRs."]
 
 
 def adr_changes(repo: str, base: str, head: str) -> list[AdrChange]:
