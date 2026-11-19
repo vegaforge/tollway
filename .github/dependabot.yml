@@ -26,6 +26,14 @@ updates:
         update-types:
           - minor
           - patch
+    ignore:
+      # Biome 2.6 starts formatting Markdown, which would turn every open pull
+      # request's format check red at once. Move to it in a deliberate
+      # toolchain change that reformats the repository in one go.
+      - dependency-name: "@biomejs/biome"
+        update-types:
+          - version-update:semver-minor
+          - version-update:semver-major
 
   # Keep the GitHub Actions in our workflows current.
   - package-ecosystem: github-actions
