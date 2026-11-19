@@ -12,9 +12,30 @@ export {
   createPolicyEngine,
   type PaymentIntent,
   type Policy,
-  type PolicyDecision,
   type PolicyEngine,
 } from "./policy.js";
+export {
+  comparePolicyTraces,
+  decisionFromTrace,
+  POLICY_TRACE_VERSION,
+  type PolicyDecision,
+  type PolicyMode,
+  type PolicyOutcome,
+  type PolicyRuleId,
+  type PolicyRuleName,
+  type PolicyTrace,
+  type PolicyTraceComparison,
+  type PolicyTraceDifference,
+  type PolicyTraceEntry,
+  type PolicyWindow,
+  policyModes,
+  policyOutcomes,
+  policyRuleIds,
+  policyRuleNames,
+  policyTraceEntrySchema,
+  policyTraceSchema,
+  policyWindowSchema,
+} from "./policy-trace.js";
 export { canonicalBytes, canonicalJson, type JsonValue } from "./receipt/canonical.js";
 export {
   type BuildReceiptInput,

@@ -1,6 +1,9 @@
 packages:
   - "packages/*"
   - "apps/*"
+  # Private suites that need infrastructure a unit test cannot fake, such as
+  # a local Stellar network. Never published.
+  - "tests/*"
 
 # pnpm 10 blocks dependency install scripts unless they are allowed here.
 # lefthook needs its postinstall script to write the Git hooks.

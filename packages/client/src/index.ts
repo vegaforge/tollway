@@ -17,10 +17,15 @@
  */
 
 import {
+  comparePolicyTraces,
+  createPolicyEngine,
+  decisionFromTrace,
   type ModelRouter,
   type PaymentIntent,
   type PaymentOffer,
   type PolicyEngine,
+  type PolicyTrace,
+  type PolicyTraceComparison,
   type ReceiptVerifier,
   type SettlementModel,
   type SignedReceipt,
@@ -34,6 +39,26 @@ import {
 export type ClientEvent =
   | { type: "payment"; resource: string; model: SettlementModel; receipt: SignedReceipt }
   | { type: "skip"; resource: string; reason: string }
+  /**
+   * The active policy's full trace for this payment, emitted before the
+   * payment proceeds or is blocked. In dry-run, `trace.wouldBlock` marks a
+   * payment enforce mode would have stopped. The shape is documented in
+   * apps/web/src/content/docs/policy.mdx, "Decision traces".
+   */
+  | { type: "policy:decision"; resource: string; trace: PolicyTrace }
+  /**
+   * The candidate (shadow) policy's trace next to the active one, and how
+   * they differ. The candidate never affects the payment.
+   */
+  | {
+      type: "policy:shadow";
+      resource: string;
+      active: PolicyTrace;
+      candidate: PolicyTrace;
+      comparison: PolicyTraceComparison;
+    }
+  /** The shadow policy failed to evaluate or record. The payment is unaffected. */
+  | { type: "policy:shadow-error"; resource: string; error: Error }
   | { type: "error"; resource: string; error: Error }
   | { type: "budget:warning"; remaining: string }
   | { type: "channel:opened"; channelId: string }
@@ -64,6 +89,17 @@ export type TollwayClientOptions = {
   settler: ClientSettler;
   /** Optional policy engine. When omitted, every payment is allowed. */
   policy?: PolicyEngine;
+  /**
+   * Optional candidate policy to evaluate next to the active one, for
+   * rolling out a policy change. Its decision never blocks or allows a
+   * payment: the client emits a `policy:shadow` event with both traces and
+   * their differences. Settled payments are recorded on it too, so its
+   * budgets count the same real spend. Shadow evaluation runs only while
+   * at least one event handler is registered.
+   */
+  shadow?: PolicyEngine;
+  /** Where construction-time warnings go. Defaults to `console`. */
+  logger?: { warn(message: string): void };
   /** Optional router. When omitted, defaults to x402 unless `model` is on the request. */
   router?: ModelRouter;
   /**
@@ -106,6 +142,19 @@ export interface TollwayClient {
  */
 export function createClient(options: TollwayClientOptions): TollwayClient {
   const handlers: ClientEventHandler[] = [];
+  // With a shadow policy and no active one, the candidate is compared with
+  // "no policy", which an empty policy evaluates to exactly.
+  const shadowBaseline =
+    options.shadow && !options.policy ? createPolicyEngine({}) : options.policy;
+
+  if (options.policy?.mode === "dry-run") {
+    // Dry-run lets through payments the policy would block. Saying so once,
+    // loudly, at startup is what keeps it from being left on by accident.
+    (options.logger ?? console).warn(
+      "tollway-client: the policy is in dry-run mode. Payments it would block are allowed " +
+        "and only reported in policy:decision events. Switch to enforce before relying on it.",
+    );
+  }
 
   function emit(event: ClientEvent): void {
     for (const handler of handlers) {
@@ -115,6 +164,48 @@ export function createClient(options: TollwayClientOptions): TollwayClient {
         // A bad handler must not poison the pay() promise. Observability
         // pipelines wire their own retry/log strategy; this is best-effort.
       }
+    }
+  }
+
+  /**
+   * Evaluates the candidate next to the active policy and emits the
+   * comparison. A candidate that throws (a malformed limit in a policy
+   * still being drafted, say) is reported as `policy:shadow-error` rather
+   * than failing the payment, because the shadow is by definition not in
+   * charge of payments.
+   */
+  async function shadowCompare(
+    shadow: PolicyEngine,
+    baseline: PolicyEngine,
+    activeTrace: PolicyTrace | undefined,
+    intent: PaymentIntent,
+    resource: string,
+  ): Promise<void> {
+    try {
+      const active = activeTrace ?? (await baseline.evaluate(intent));
+      const candidate = await shadow.evaluate(intent);
+      emit({
+        type: "policy:shadow",
+        resource,
+        active,
+        candidate,
+        comparison: comparePolicyTraces(active, candidate),
+      });
+    } catch (rawError) {
+      emit({ type: "policy:shadow-error", resource, error: normalizeError(rawError) });
+    }
+  }
+
+  /** Records a settled payment on the shadow; a failure is reported, not thrown. */
+  async function shadowRecord(
+    shadow: PolicyEngine,
+    intent: PaymentIntent,
+    resource: string,
+  ): Promise<void> {
+    try {
+      await shadow.record(intent);
+    } catch (rawError) {
+      emit({ type: "policy:shadow-error", resource, error: normalizeError(rawError) });
     }
   }
 
@@ -133,8 +224,30 @@ export function createClient(options: TollwayClientOptions): TollwayClient {
           model,
         };
 
+        let activeTrace: PolicyTrace | undefined;
         if (options.policy) {
-          const decision = await options.policy.check(intent);
+          activeTrace = await options.policy.evaluate(intent);
+          // No handler, no event object: the quiet path stays as cheap as a
+          // plain check().
+          if (handlers.length > 0) {
+            emit({ type: "policy:decision", resource: request.resource, trace: activeTrace });
+          }
+        }
+
+        if (options.shadow && shadowBaseline && handlers.length > 0) {
+          await shadowCompare(
+            options.shadow,
+            shadowBaseline,
+            activeTrace,
+            intent,
+            request.resource,
+          );
+        }
+
+        if (activeTrace) {
+          // The same function check() uses, so the trace just emitted and the
+          // decision below cannot disagree.
+          const decision = decisionFromTrace(activeTrace);
           if (!decision.allowed) {
             emit({
               type: "skip",
@@ -157,6 +270,9 @@ export function createClient(options: TollwayClientOptions): TollwayClient {
 
         if (options.policy) {
           await options.policy.record(intent);
+        }
+        if (options.shadow) {
+          await shadowRecord(options.shadow, intent, request.resource);
         }
 
         emit({ type: "payment", resource: request.resource, model, receipt });

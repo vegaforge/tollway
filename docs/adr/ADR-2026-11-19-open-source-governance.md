@@ -90,6 +90,13 @@ issues, and the first contribution (#275) showed where they do not fit:
    that asks for something the `security` check forbids is rewritten so the
    two agree.
 
+### Amendment, 2026-11-19
+
+At the maintainer's request, a contributor may work on up to four assigned
+issues at once and close them in one pull request. Decision 2 now fails a pull
+request that closes no issue or more than four, or one the author is not
+assigned to; every closed issue is checked for assignment.
+
 ## Diagram
 
 ```mermaid

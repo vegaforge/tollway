@@ -9,6 +9,7 @@ Policy is data, not code: a small declarative schema the policy engine enforces 
 
 ```ts
 type Policy = {
+  mode?: "enforce" | "dry-run"; // default "enforce"
   budgets?: {
     daily?: string;   // spend ceiling per UTC day, integer string in smallest unit
     total?: string;   // lifetime ceiling for this policy
@@ -26,6 +27,8 @@ type Policy = {
 Every amount is an integer string in the asset's smallest unit, the same convention used on the canonical receipt. That is what lets the engine compose with bigint arithmetic and keep 64-bit amounts exact.
 
 ## What each field does
+
+**`mode`** is `enforce` unless you set it. In `enforce`, a failing rule blocks the payment. In `dry-run`, every rule is evaluated the same way, spend is recorded the same way, and the payment is allowed; the decision trace marks what enforce mode would have blocked. See "Dry-run and shadow policies" below. An unknown mode is refused with a `TollwayError` coded `invalid-policy`.
 
 **`budgets.daily`** is the per-UTC-day ceiling. The engine resets at the day boundary derived from the configured clock.
 
@@ -62,6 +65,180 @@ if (!decision.allowed) {
 ```
 
 After a settlement lands, the agent calls `engine.record(intent)` so daily and per-service totals advance.
+
+## Decision traces
+
+`engine.evaluate(intent)` returns a decision trace: one entry for every rule, whether it applied or not, with the numbers it compared. `engine.check(intent)` is built on it. It evaluates the trace and reports the first failing entry, so the decision and its explanation cannot disagree. The client uses the same derivation (`decisionFromTrace`, exported from `@vegaforge/tollway-core`).
+
+Rules are evaluated in this order. Static checks on the payment come first, then the stateful ceilings. Every rule runs even after one fails, so the trace is always complete; the decision names the first failure in this order.
+
+| Order | `id` | `rule` (what `check()` reports) | Window |
+| ----- | ---- | ------------------------------- | ------ |
+| 1 | `per-model-disabled` | `per-model-disabled` | none |
+| 2 | `min-channel-deposit` | `min-channel-deposit` | none |
+| 3 | `budget-daily` | `budget` | `utc-day` |
+| 4 | `budget-total` | `budget` | `lifetime` |
+| 5 | `per-service` | `per-service` | `lifetime` |
+| 6 | `rate-limit` | `rate-limit` | `sliding`, 60 seconds |
+| 7 | `anomaly` | `anomaly` | `sliding`, 60 seconds |
+
+Both budget rules report `budget` to `check()` and `PolicyBlockedError`, as they always have. The trace keeps them apart with `id`.
+
+This is a real trace, for a sixth payment of 1 USDC (`10000000` at 7 decimals) under a 5 USDC daily budget, with the policy in dry-run:
+
+```json
+{
+  "version": 1,
+  "mode": "dry-run",
+  "evaluatedAt": "2026-11-19T14:03:12.000Z",
+  "intent": {
+    "payee": "GBQUOTESSERVICE",
+    "resource": "https://api.example.com/quotes/latest",
+    "amount": "10000000",
+    "asset": "USDC:GA5ZSEJYB37JRC5AVCIA5MOP4RHTM335X2KGX3IHOJAPP5RE34K4KZVN",
+    "model": "x402"
+  },
+  "allowed": true,
+  "wouldBlock": true,
+  "blockedBy": "budget-daily",
+  "entries": [
+    {
+      "id": "per-model-disabled",
+      "rule": "per-model-disabled",
+      "configured": false,
+      "outcome": "not-applicable",
+      "limit": null,
+      "current": null,
+      "projected": null,
+      "window": null,
+      "detail": "policy does not enable or disable settlement model x402"
+    },
+    {
+      "id": "min-channel-deposit",
+      "rule": "min-channel-deposit",
+      "configured": false,
+      "outcome": "not-applicable",
+      "limit": null,
+      "current": null,
+      "projected": null,
+      "window": null,
+      "detail": "minimum channel deposit does not apply to x402"
+    },
+    {
+      "id": "budget-daily",
+      "rule": "budget",
+      "configured": true,
+      "outcome": "fail",
+      "limit": "50000000",
+      "current": "50000000",
+      "projected": "60000000",
+      "window": { "kind": "utc-day", "day": "2026-11-19" },
+      "detail": "daily budget exceeded for USDC:GA5ZSEJYB37JRC5AVCIA5MOP4RHTM335X2KGX3IHOJAPP5RE34K4KZVN: 60000000 > 50000000"
+    },
+    {
+      "id": "budget-total",
+      "rule": "budget",
+      "configured": false,
+      "outcome": "not-applicable",
+      "limit": null,
+      "current": null,
+      "projected": null,
+      "window": null,
+      "detail": "policy sets no total budget for USDC:GA5ZSEJYB37JRC5AVCIA5MOP4RHTM335X2KGX3IHOJAPP5RE34K4KZVN"
+    },
+    {
+      "id": "per-service",
+      "rule": "per-service",
+      "configured": true,
+      "outcome": "pass",
+      "limit": "200000000",
+      "current": "50000000",
+      "projected": "60000000",
+      "window": { "kind": "lifetime" },
+      "detail": "per-service cap for GBQUOTESSERVICE: 60000000 <= 200000000"
+    },
+    {
+      "id": "rate-limit",
+      "rule": "rate-limit",
+      "configured": true,
+      "outcome": "pass",
+      "limit": "30",
+      "current": "5",
+      "projected": "6",
+      "window": { "kind": "sliding", "seconds": 60 },
+      "detail": "rate limit: 6 of 30 requests in the last minute"
+    },
+    {
+      "id": "anomaly",
+      "rule": "anomaly",
+      "configured": false,
+      "outcome": "not-applicable",
+      "limit": null,
+      "current": null,
+      "projected": null,
+      "window": null,
+      "detail": "policy sets no anomaly stop"
+    }
+  ]
+}
+```
+
+What the fields mean:
+
+- **`version`** is the shape version, currently `1`. A consumer that stores traces should parse them with `policyTraceSchema` from `@vegaforge/tollway-core`, which rejects any other version and any trace whose summary contradicts its entries.
+- **`allowed`** is the decision after the mode is applied. It is always `true` in dry-run.
+- **`wouldBlock`** is `true` when any entry failed, whatever the mode. **`blockedBy`** is the `id` of the first failing entry, or `null`.
+- **`configured`** says whether the policy sets the rule at all. A rule can be configured and still `not-applicable` to this payment: a cap for another payee, or a channel minimum on an x402 payment.
+- **`outcome`** is `pass`, `fail`, or `not-applicable`.
+- **`limit`**, **`current`** and **`projected`** are integer strings. `current` is the counter before this payment and `projected` is what the limit is compared with if it goes through. For amounts these are in the asset's smallest unit; for `rate-limit` they are request counts. A rule that keeps no counter has `current: null`, and a rule with no numeric limit (a disabled model) has `limit: null`.
+- **`window`** is the period the counter covers: `{ "kind": "utc-day", "day": "YYYY-MM-DD" }`, `{ "kind": "lifetime" }`, or `{ "kind": "sliding", "seconds": 60 }`. Static rules have `null`.
+- **`intent`** holds the payee, resource, amount, asset, and model. A trace never carries request bodies or headers.
+
+`evaluate` does not record spend. Call `record` after the payment settles, as before.
+
+## Dry-run and shadow policies
+
+The client emits the active policy's trace as a `policy:decision` event before it pays or blocks:
+
+```ts
+import { createPolicyEngine } from "@vegaforge/tollway-core";
+import { createClient } from "@vegaforge/tollway-client";
+
+const client = createClient({
+  network: "testnet",
+  settler,
+  policy: createPolicyEngine(activePolicy),
+  // The candidate is evaluated next to the active policy and never blocks.
+  shadow: createPolicyEngine(candidatePolicy),
+});
+
+client.on((event) => {
+  if (event.type === "policy:decision" && event.trace.wouldBlock) {
+    log.info("policy decision", event.trace);
+  }
+  if (event.type === "policy:shadow" && !event.comparison.sameDecision) {
+    log.info("candidate policy disagrees", event.comparison.differences);
+  }
+  if (event.type === "policy:shadow-error") {
+    log.warn("candidate policy failed to evaluate", event.error);
+  }
+});
+```
+
+- **Shadow.** A `shadow` engine is evaluated on every payment next to the active policy. The client emits `policy:shadow` with both traces and a comparison: whether the two would decide alike, and each rule whose outcome differs. Modes are ignored in the comparison: it asks what each policy would do if enforced. The shadow never affects the payment, and if it throws (a malformed limit, say) the client emits `policy:shadow-error` and pays as usual. Settled payments are recorded on the shadow too, so its budgets count real spend from the moment the client is created. With no active `policy`, the candidate is compared with no policy at all.
+- **Dry-run.** With `mode: "dry-run"` the active policy evaluates and records exactly as in enforce mode, but allows every payment. The `policy:decision` trace marks the would-be block with `wouldBlock` and `blockedBy`. Dry-run is never the default, and the client logs a warning through `console.warn` (or the `logger` option) when it is created with a dry-run policy.
+
+The trace and the shadow comparison are only built into events while at least one handler is registered; with none, shadow evaluation is skipped and only its spend is recorded.
+
+### Rollout recipe
+
+To replace a policy without finding out from failed payments:
+
+1. **Shadow.** Keep the current policy as `policy` and pass the new one as `shadow`. Watch `policy:shadow` events where `sameDecision` is `false` until the differences are the ones you intended.
+2. **Dry-run.** Make the new policy the active one with `mode: "dry-run"`. Payments go through; `policy:decision` events with `wouldBlock: true` show exactly what it would stop, with the numbers. Spend is recorded, so the budgets it reports are real.
+3. **Enforce.** Remove `mode` (or set `"enforce"`). The warning at startup goes away and failing rules block payments with `PolicyBlockedError`.
+
+Creating a new engine starts its counters at zero. If an engine is replaced mid-day, its daily budget does not know about spend recorded by the old one.
 
 ## Reference
 

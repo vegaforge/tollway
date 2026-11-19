@@ -1,0 +1,99 @@
+---
+title: Observability
+description: Payment metrics, spend summaries, time-series rollups with latency percentiles, exports, and webhooks
+---
+
+The observability hub collects one `PaymentMetric` per measured payment and answers questions about them: how much was spent, on which model, in which asset, how often payments failed, and how long they took. It also delivers webhook events (`receipt.created`, `channel.opened`, `channel.closed`, `budget.warning`, `anomaly.detected`) to local handlers and HTTP subscribers.
+
+```ts
+import { createObservabilityHub } from "@vegaforge/tollway-observability";
+
+const hub = createObservabilityHub();
+
+hub.record({
+  payer: "GAGENT...",
+  payee: "GSERVICE...",
+  model: "x402",
+  amount: "10000", // 0.001 USDC: 7 decimals, integer string in the smallest unit
+  asset: "USDC:GA5Z...",
+  latencyMs: 182,
+  outcome: "settled", // or "failed" / "skipped"
+  at: "2026-11-19T10:04:31.000Z",
+});
+```
+
+Metrics are held in memory by the hub. Every amount, in and out, is an integer string in the asset's smallest unit, added with `bigint`.
+
+## Querying a time series
+
+`hub.timeseries` cuts a time range into buckets and returns, for each bucket, one row per model and asset:
+
+```ts
+const series = hub.timeseries({
+  from: "2026-11-19T00:00:00Z",
+  to: "2026-11-20T00:00:00Z",
+  bucket: "1h", // "1m" | "5m" | "1h" | "1d"
+  groupBy: "payee", // optional: "model" (default), "payee" or "payer"
+  model: "x402", // optional filters, as in summarize: payer, payee, model
+});
+
+for (const bucket of series.buckets) {
+  for (const row of bucket.rows) {
+    // row.model, row.asset, row.payee
+    // row.amount   settled amount, integer string
+    // row.settled, row.failed, row.skipped
+    // row.latencyMs  { p50, p95, p99 } or null when the row is empty
+  }
+}
+```
+
+How the range and the buckets behave:
+
+- **Both ends are required** and must be ISO 8601 timestamps with `Z` or an explicit offset such as `+02:00`. A timestamp without a zone is rejected, because it would be read in the server's local time.
+- **The range is half-open**, `[from, to)`: a metric exactly at `to` belongs to the next range. This differs from `summarize`, whose `to` is inclusive. A day of hourly buckets is `from: "...T00:00:00Z"` to the next midnight, which is exactly 24 buckets.
+- **Buckets are aligned to UTC.** Each bucket starts at a whole multiple of its width counted from the Unix epoch, so `1h` buckets start on the UTC hour and `1d` buckets at UTC midnight, wherever the server runs. The first bucket starts at `from` rounded down; metrics before `from` are still left out of it. `series.from` and `series.to` report the rounded range.
+- **Buckets are contiguous.** Every bucket in the range is returned, in time order, including empty ones. Every group (model and asset, plus payee or payer when asked) seen anywhere in the range has a row in every bucket, in the same order; in a bucket where it had no metrics, the row has zero counts, `amount: "0"` and `latencyMs: null`.
+- **Assets are never added together.** `asset` is part of every row's key.
+- **Only settled payments move money.** `amount` adds the row's `settled` metrics only. `settled`, `failed` and `skipped` count each outcome.
+- **Bad data is an error, not a gap.** A recorded metric in the range with an unparseable `at`, a settled `amount` that is not an integer string, or a negative or non-finite `latencyMs` makes the query throw a `TollwayError` with code `invalid-metric`. A malformed query throws `invalid-metrics-query`.
+
+### Size limits
+
+A query that would produce more buckets than `maxTimeseriesBuckets` (default 10 080, seven days of one-minute buckets), or more rows than `maxTimeseriesRows` (default 200 000, counted as buckets times groups), throws `MetricsQueryTooLargeError` (code `metrics-query-too-large`) before allocating the result. The error carries `limit` (`"buckets"` or `"rows"`), `requested` and `maximum`. Both limits are hub options:
+
+```ts
+const hub = createObservabilityHub({ maxTimeseriesBuckets: 1440, maxTimeseriesRows: 50_000 });
+```
+
+## How latency percentiles are computed
+
+`p50`, `p95` and `p99` use the **nearest-rank** method on the exact latency samples of the row: sort the `n` samples in ascending order, and the p-th percentile is the sample at 1-based rank `ceil(p / 100 * n)`.
+
+- Every reported value is a latency that was actually recorded. Nothing is interpolated or estimated.
+- With 4 samples `[1, 10, 20, 900]`, p50 is rank 2 (`10`), and p95 and p99 are both rank 4 (`900`). With few samples the high percentiles equal the maximum, which is the honest answer.
+- `p50 <= p95 <= p99` always holds.
+- Samples come from every metric in the row whatever its outcome, so a slow failure shows up in the latency of the model that produced it.
+
+The helper is exported as `nearestRankPercentile(sorted, p)` for callers that need the same method elsewhere.
+
+### Per store
+
+| Store | Bucketing and counts | Percentiles |
+| ----- | -------------------- | ----------- |
+| In-memory hub (the only store today) | Computed in process | Exact nearest rank over every sample in the row |
+
+There is no SQL store in `@vegaforge/tollway-observability` yet; it is tracked in [#217](https://github.com/vegaforge/tollway/issues/217). When it lands, the plan is to push bucketing (`floor(epoch_ms / width) * width`) and the per-outcome counts and settled sums into `GROUP BY` queries, keep the half-open range and UTC alignment above, and either compute percentiles exactly in SQL where the database has a nearest-rank aggregate (PostgreSQL's `percentile_disc` is one) or fetch the row's latency samples and apply the same nearest-rank method in process (SQLite has no percentile aggregate). This table will then list the method each store uses.
+
+## Spend summaries
+
+`hub.summarize(query?)` returns one flat summary over the whole window. Use `byAsset` for amounts: it holds the amount per asset and never adds different assets together.
+
+`totalAmount`, `byModel`, `byPayer` and `byPayee` are **deprecated**. They add amounts across assets, so they only make sense when the window holds a single asset, and like `byAsset` they include failed and skipped metrics. They keep their values for existing callers. For settled-only amounts, per-model or per-counterparty amounts in one asset, an outcome split, or latency, use `timeseries` and add up the rows you need.
+
+## Exports and webhooks
+
+`hub.export("json" | "csv", query?)` serializes the matching metrics. `hub.on(event, handler)` and `hub.addWebhook({ url, events? })` subscribe to webhook events, which `hub.emit(event)` delivers with retries and reports in a `DeliveryReport`.
+
+## Reference
+
+[`docs/design.md`, "Observability"](https://github.com/vegaforge/tollway/blob/main/docs/design.md#observability) is the architectural reference. The code lives in `packages/observability/src/`.
