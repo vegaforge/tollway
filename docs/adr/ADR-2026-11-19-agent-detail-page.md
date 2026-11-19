@@ -1,6 +1,6 @@
 # ADR: Agent detail page data seam and budget rendering
 
-- **Status:** Proposed, awaiting maintainer approval
+- **Status:** Accepted 2026-11-19
 - **Date:** 2026-11-19
 - **Issue:** #236
 - **Scope:** `apps/dashboard` only: new data module and hook, a `/agents/[agentId]` route and view, a link from the agents table, and `docs/dashboard-data-contracts.md`. No `packages/*` source changes, so no changeset. No new dependencies, config files, or workflow changes.
