@@ -19,6 +19,7 @@ import {
   PAYMENT_RESPONSE_HEADER,
   PAYMENT_SIGNATURE_HEADER,
   readHeader,
+  readMppCredential,
 } from "./headers.js";
 import type { MppChargeHandler } from "./mpp-charge.js";
 
@@ -469,6 +470,37 @@ async function settleAndRecord<TPayment>(
   return { ok: true, receipt, method, replayed: false };
 }
 
+const BODY_HEADERS = new Set(["content-type", "content-length", "content-encoding"]);
+
+/**
+ * The 402 for a request with no payment. It always carries the x402
+ * PAYMENT-REQUIRED header. When the route accepts mpp-charge, the MPP
+ * challenge `mppx` built (its `WWW-Authenticate: Payment ...` header) is
+ * added alongside, so an agent can answer with either protocol.
+ */
+async function paymentRequired(
+  offer: PaymentOffer,
+  request: TollwayRequest,
+  acceptedModels: SettlementModel[],
+  mppChargeHandler: MppChargeHandler | undefined,
+): Promise<GateOutcome> {
+  const headers: Record<string, string> = { [PAYMENT_REQUIRED_HEADER]: encodeHeader(offer) };
+  if (acceptedModels.includes("mpp-charge") && mppChargeHandler?.challenge) {
+    const mpp = await mppChargeHandler.challenge({
+      offer,
+      request: { method: request.method, url: request.url },
+    });
+    for (const [name, value] of Object.entries(mpp.headers)) {
+      // The adapters send the offer as the JSON body, so headers that
+      // describe mppx's own body would mislabel it.
+      if (!BODY_HEADERS.has(name.toLowerCase())) {
+        headers[name] = value;
+      }
+    }
+  }
+  return { kind: "payment-required", status: 402, headers, challenge: offer };
+}
+
 /**
  * Builds the gate from a paywall config. It settles x402 per-request and
  * mpp-charge; a routing decision for another model is rejected rather than
@@ -507,13 +539,33 @@ export function createPaywallWithInFlight(
 
     const method = request.method.toUpperCase();
     const signatureHeader = readHeader(request.headers, PAYMENT_SIGNATURE_HEADER);
+    const mppCredential = acceptedModels.includes("mpp-charge")
+      ? readMppCredential(request.headers)
+      : undefined;
+
+    // An MPP credential answers an MPP challenge, so the agent has already
+    // chosen the model; the router is not asked again.
+    if (mppCredential) {
+      if (!deps.mppChargeHandler) {
+        return {
+          kind: "rejected",
+          status: 500,
+          reason: "mpp-charge handler not configured",
+        };
+      }
+      const payment: MppChargePayment = { model: "mpp-charge", payload: mppCredential };
+      return settleWithHandler(
+        payment,
+        offer,
+        "mpp-charge",
+        method,
+        deps.mppChargeHandler,
+        context,
+      );
+    }
+
     if (!signatureHeader) {
-      return {
-        kind: "payment-required",
-        status: 402,
-        headers: { [PAYMENT_REQUIRED_HEADER]: encodeHeader(offer) },
-        challenge: offer,
-      };
+      return paymentRequired(offer, request, acceptedModels, deps.mppChargeHandler);
     }
 
     const decision = deps.router
@@ -526,23 +578,12 @@ export function createPaywallWithInFlight(
     }
 
     if (decision.model === "mpp-charge") {
-      if (!deps.mppChargeHandler) {
-        return {
-          kind: "rejected",
-          status: 500,
-          reason: "mpp-charge handler not configured",
-        };
-      }
-
-      const payment: MppChargePayment = { model: "mpp-charge", payload: signatureHeader };
-      return settleWithHandler(
-        payment,
-        offer,
-        "mpp-charge",
-        method,
-        deps.mppChargeHandler,
-        context,
-      );
+      return {
+        kind: "rejected",
+        status: 400,
+        reason:
+          "mpp-charge payments carry an Authorization: Payment credential, not PAYMENT-SIGNATURE",
+      };
     }
 
     return {

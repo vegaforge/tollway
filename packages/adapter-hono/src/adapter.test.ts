@@ -2,8 +2,10 @@ import { Ed25519Signer } from "@vegaforge/tollway-core";
 import {
   createInMemorySettlementCache,
   createMockFacilitator,
+  createMockMppChargeHandler,
   createPaywall,
   createRouteTable,
+  type MppChargeHandler,
   PAYMENT_SIGNATURE_HEADER,
   type PaywallConfig,
 } from "@vegaforge/tollway-server";
@@ -87,5 +89,67 @@ describe("honoPaywall method binding", () => {
     expect(read.status).toBe(200);
     const write = await app.request("/report", { method: "POST", headers });
     expect(write.status).toBe(409);
+  });
+});
+
+// MPP charge through the adapter: the challenge headers reach the client on
+// the 402, an Authorization: Payment credential settles, and a refused
+// credential comes back as the rejection status.
+async function mppGate() {
+  const signer = await Ed25519Signer.generate("test-key-mpp");
+  const base = createMockMppChargeHandler();
+  const handler: MppChargeHandler = {
+    ...base,
+    async challenge() {
+      return {
+        status: 402,
+        headers: { "www-authenticate": 'Payment id="test"', "cache-control": "no-store" },
+        body: null,
+      };
+    },
+    async verify(input) {
+      if (input.payment.payload === "Payment refused") {
+        return { valid: false, reason: "mpp challenge was not issued by this server" };
+      }
+      return base.verify(input);
+    },
+  };
+  return createPaywall(
+    { ...config, models: ["x402", "mpp-charge"] },
+    { signer, facilitator: createMockFacilitator(), mppChargeHandler: handler },
+  );
+}
+
+describe("honoPaywall with mpp-charge", () => {
+  async function build() {
+    const gate = await mppGate();
+    const app = new Hono();
+    app.get("/quotes/latest", honoPaywall(gate), (c) =>
+      c.json({ receiptModel: c.get(RECEIPT_CONTEXT_KEY).receipt.model }),
+    );
+    return app;
+  }
+
+  it("sends the MPP challenge headers with the 402", async () => {
+    const response = await (await build()).request("/quotes/latest");
+    expect(response.status).toBe(402);
+    expect(response.headers.get("www-authenticate")).toBe('Payment id="test"');
+    expect(response.headers.get("payment-required")).toBeTruthy();
+  });
+
+  it("settles an Authorization: Payment credential", async () => {
+    const response = await (await build()).request("/quotes/latest", {
+      headers: { authorization: "Payment ok" },
+    });
+    expect(response.status).toBe(200);
+    expect(((await response.json()) as { receiptModel: string }).receiptModel).toBe("mpp-charge");
+  });
+
+  it("answers a refused credential with the rejection status", async () => {
+    const response = await (await build()).request("/quotes/latest", {
+      headers: { authorization: "Payment refused" },
+    });
+    expect(response.status).toBe(402);
+    expect(await response.json()).toEqual({ error: "mpp challenge was not issued by this server" });
   });
 });
