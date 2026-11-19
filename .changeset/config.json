@@ -7,5 +7,10 @@
   "access": "public",
   "baseBranch": "dev",
   "updateInternalDependencies": "patch",
-  "ignore": ["@vegaforge/tollway-dashboard", "@vegaforge/tollway-demo", "@vegaforge/tollway-web"]
+  "ignore": [
+    "@vegaforge/tollway-dashboard",
+    "@vegaforge/tollway-demo",
+    "@vegaforge/tollway-web",
+    "@vegaforge/tollway-example-next-paid-api"
+  ]
 }

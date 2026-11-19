@@ -1,6 +1,8 @@
 packages:
   - "packages/*"
   - "apps/*"
+  # Runnable examples. Private, never published.
+  - "examples/*"
   # Private suites that need infrastructure a unit test cannot fake, such as
   # a local Stellar network. Never published.
   - "tests/*"

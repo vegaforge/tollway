@@ -1,0 +1,22 @@
+# Netlify build for the Next.js paid API example (examples/next-paid-api).
+#
+# In the Netlify UI, set the package directory to examples/next-paid-api and
+# leave the base directory empty. Netlify then installs from the repository
+# root, where pnpm-lock.yaml, .nvmrc and the packageManager field live, and
+# reads this file. Paths below are relative to the repository root.
+#
+# Netlify adds its Next.js runtime on its own; nothing else needs installing.
+#
+# No secrets here. TOLLWAY_DEPLOYED, TOLLWAY_RECEIPT_KEY, REDIS_URL and, for
+# testnet, TOLLWAY_MODE and OZ_API_KEY are set in the Netlify UI (Site
+# configuration, Environment variables), so the functions see them at runtime.
+# See the example's README, "Deploy on Netlify".
+
+[build]
+  command = "pnpm turbo build --filter=@vegaforge/tollway-example-next-paid-api"
+  publish = "examples/next-paid-api/.next"
+
+  # Skip the build when nothing the example uses has changed. Exit code 0
+  # means skip. The example depends on its own folder, the Next adapter, the
+  # server and core packages it pulls in, and the lockfile.
+  ignore = "git diff --quiet $CACHED_COMMIT_REF $COMMIT_REF -- examples/next-paid-api packages/adapter-next packages/server packages/core pnpm-lock.yaml pnpm-workspace.yaml package.json"
