@@ -9,6 +9,7 @@
     "channels",
     "policy",
     "receipts",
-    "reconciliation"
+    "reconciliation",
+    "playground"
   ]
 }

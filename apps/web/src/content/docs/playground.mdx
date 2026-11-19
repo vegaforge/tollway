@@ -1,0 +1,16 @@
+---
+title: 402 Playground
+description: Decode, validate and create x402 and Tollway payment headers locally in your browser
+---
+
+Use the playground to inspect a payment challenge, signed payment, settlement response or Tollway receipt. You can also construct a sample payment challenge in both x402 base64 and Tollway base64url formats.
+
+<PaymentPlayground />
+
+## Privacy and safety
+
+All decoding, validation and receipt verification happen locally in your browser. The playground does not send pasted header values or public keys to a server and does not load analytics. Do not paste secrets or signing keys. A PAYMENT-SIGNATURE contains a signed payment payload and should be treated as sensitive.
+
+The playground validates x402 PaymentRequired and PaymentPayload values with the schemas from @x402/core. Settlement responses are inspected structurally. Tollway receipts are checked with the canonical receipt schema and can be cryptographically verified against a public key or a JWKS-style JSON document.
+
+The encoder generates an example challenge only; it does not contact a facilitator or settle a payment.

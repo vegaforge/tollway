@@ -1,5 +1,6 @@
 import defaultMdxComponents from "fumadocs-ui/mdx";
 import type { MDXComponents } from "mdx/types";
+import { PaymentPlayground } from "@/components/payment-playground";
 
 /**
  * The MDX component map for the docs corpus. Every MDX file picks these up
@@ -9,6 +10,7 @@ import type { MDXComponents } from "mdx/types";
 export function getMDXComponents(components?: MDXComponents): MDXComponents {
   return {
     ...defaultMdxComponents,
+    PaymentPlayground,
     ...components,
   };
 }
