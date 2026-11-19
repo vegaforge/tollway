@@ -16,6 +16,23 @@ import os
 import sys
 
 
+# Semgrep's TypeScript parser lags the language, so valid code can fail to
+# parse. The fix is always on the contributor's side, so say what usually helps.
+REWRITE_HINT = (
+    "If the code is valid TypeScript, rewrite that line in a simpler form Semgrep can read: "
+    'for example, replace an inline `typeof import("pkg")` type with a top-level `import type * as Pkg from "pkg"` '
+    "and use `typeof Pkg`."
+)
+
+
+def rejected_code(message: str) -> str:
+    """The part of Semgrep's parse message that names what it rejected, if any."""
+    for line in message.splitlines():
+        if "was unexpected" in line:
+            return f": {line.strip()}"
+    return ""
+
+
 def main(argv: list[str]) -> int:
     if len(argv) != 2:
         print(__doc__, file=sys.stderr)
@@ -32,11 +49,18 @@ def main(argv: list[str]) -> int:
         print(f"::error file={r['path']},line={r['start']['line']},title=security/{rule}::{msg}")
         lines.append(f"- `{r['path']}:{r['start']['line']}` {rule}")
     for e in errors:
-        path = e.get("path") or ((e.get("spans") or [{}])[0].get("file")) or "?"
+        span = (e.get("spans") or [{}])[0]
+        path = e.get("path") or span.get("file") or "?"
+        line = (span.get("start") or {}).get("line")
         kind = e.get("type")
         kind = kind[0] if isinstance(kind, list) else kind
-        print(f"::error file={path},title=security/semgrep-error::Semgrep could not analyse this file ({kind}). Files the scanner cannot read are not accepted.")
-        lines.append(f"- `{path}` could not be analysed: {kind}")
+        detail = rejected_code(e.get("message") or "")
+        where = f"file={path}" + (f",line={line}" if line else "")
+        message = f"Semgrep could not analyse this file ({kind}){detail}. Files the scanner cannot read are not accepted."
+        if kind == "PartialParsing":
+            message += f" {REWRITE_HINT}"
+        print(f"::error {where},title=security/semgrep-error::{message}")
+        lines.append(f"- `{path}{':' + str(line) if line else ''}` could not be analysed: {kind}{detail}")
 
     scanned = len((report.get("paths") or {}).get("scanned") or [])
     if not results and not errors:

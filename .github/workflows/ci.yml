@@ -83,7 +83,16 @@ jobs:
           cache: pnpm
 
       - name: Install
+        id: install
         run: pnpm install --frozen-lockfile
+
+      # The usual cause is a branch cut from an old dev, or a package.json edit
+      # without a lockfile update. pnpm's own message does not say what to do.
+      - name: Explain an out-of-date lockfile
+        if: failure() && steps.install.outcome == 'failure'
+        run: |
+          echo "::error title=Lockfile out of date::pnpm-lock.yaml does not match the package.json files. Merge the latest dev into your branch, run pnpm install, and commit the updated pnpm-lock.yaml. Keep the dependency versions dev already has; do not roll them back."
+          exit 1
 
       - name: Format check
         run: pnpm format:check
