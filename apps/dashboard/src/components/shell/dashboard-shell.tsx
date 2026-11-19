@@ -1,4 +1,5 @@
 import type { ReactNode } from "react";
+import type { SessionSummary } from "@/components/auth/session-badge";
 import { Sidebar } from "./sidebar";
 import { Topbar } from "./topbar";
 
@@ -7,7 +8,13 @@ import { Topbar } from "./topbar";
  * scrolling content region. Every page renders inside it, so contributors add
  * views without touching the chrome.
  */
-export function DashboardShell({ children }: { children: ReactNode }) {
+export function DashboardShell({
+  children,
+  session,
+}: {
+  children: ReactNode;
+  session: SessionSummary;
+}) {
   return (
     <div className="flex min-h-screen bg-background text-foreground">
       <a
@@ -18,7 +25,7 @@ export function DashboardShell({ children }: { children: ReactNode }) {
       </a>
       <Sidebar />
       <div className="flex min-w-0 flex-1 flex-col">
-        <Topbar />
+        <Topbar session={session} />
         <main
           id="main-content"
           tabIndex={-1}

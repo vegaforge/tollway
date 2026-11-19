@@ -1,17 +1,15 @@
 import { NextResponse } from "next/server";
-import { csrfToken } from "../../../lib/csrf";
-import { readSession } from "../../../lib/session";
-import { isActiveSession } from "../../../lib/session-store";
+import { authorizeRequest } from "@/lib/authorize";
+import { csrfToken } from "@/lib/csrf";
 
 export async function GET(request: Request): Promise<NextResponse> {
-  const session = await readSession(request);
-  if (!session || !isActiveSession(session)) {
-    return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
-  }
+  const auth = await authorizeRequest(request, "viewer");
+  if (!auth.ok) return auth.response;
 
-  return NextResponse.json({
-    username: session.username,
-    role: session.role,
-    csrfToken: csrfToken(session.sid),
-  });
+  const { session } = auth;
+  return NextResponse.json(
+    { username: session.username, role: session.role, csrfToken: csrfToken(session.sid) },
+    // The body carries the CSRF token, so no shared cache may keep it.
+    { headers: { "cache-control": "no-store" } },
+  );
 }

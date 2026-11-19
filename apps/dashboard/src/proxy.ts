@@ -1,9 +1,15 @@
 import { type NextRequest, NextResponse } from "next/server";
-import { readSession } from "@/lib/session";
+import { activeSession } from "@/lib/authorize";
 
+/**
+ * First line of the dashboard's access control: no session, no page and no
+ * API. Every route handler and server component checks again for itself
+ * (src/lib/authorize.ts), so this is an early refusal, not the only one.
+ * Next.js 16 runs proxy.ts on the Node.js runtime, in the same process as
+ * the route handlers, which is why it can consult the revocation store.
+ */
 export async function proxy(request: NextRequest) {
-  const session = await readSession(request);
-  if (session) {
+  if (await activeSession(request)) {
     return NextResponse.next();
   }
 
@@ -17,5 +23,8 @@ export async function proxy(request: NextRequest) {
 }
 
 export const config = {
-  matcher: ["/((?!api/auth/login|login|_next/static|_next/image|favicon.ico).*)"],
+  // Everything except the sign-in page, the sign-in endpoint, and static
+  // assets. Each exclusion is anchored so `/login-anything` or
+  // `/api/auth/login/x` is still protected.
+  matcher: ["/((?!api/auth/login$|login$|_next/static/|_next/image|favicon\\.ico$).*)"],
 };

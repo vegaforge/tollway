@@ -22,7 +22,7 @@ export default defineConfig({
           environment: "jsdom",
           setupFiles: ["./vitest.setup.ts"],
           include: ["src/**/*.test.{ts,tsx}"],
-          exclude: ["src/lib/auth.test.ts", "src/app/api/**/*.test.ts"],
+          exclude: ["src/lib/auth*.test.ts", "src/app/api/**/*.test.ts"],
         },
       },
       {
@@ -32,7 +32,7 @@ export default defineConfig({
           globals: true,
           environment: "node",
           setupFiles: ["./vitest.setup.ts"],
-          include: ["src/lib/auth.test.ts", "src/app/api/**/*.test.ts"],
+          include: ["src/lib/auth*.test.ts", "src/app/api/**/*.test.ts"],
         },
       },
     ],

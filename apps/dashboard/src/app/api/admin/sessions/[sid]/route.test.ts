@@ -1,61 +1,60 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
-import { csrfToken } from "../../../../../lib/csrf";
-import { COOKIE_NAME, createSessionToken, type Session } from "../../../../../lib/session";
-import { rememberSession, resetSessionStore } from "../../../../../lib/session-store";
+import { csrfToken } from "@/lib/csrf";
+import { isActiveSession, resetSessionStore } from "@/lib/session-store";
+import { session, signedInCookie, TEST_SECRET } from "@/test/auth-fixtures";
 import { DELETE } from "./route";
 
-const admin: Session = {
-  sid: "admin-session",
-  username: "admin",
-  role: "admin",
-  exp: Math.floor(Date.now() / 1000) + 3600,
-};
+const admin = session({ sid: "admin-session", username: "admin", role: "admin" });
+const viewer = session({ sid: "viewer-session" });
+const target = session({ sid: "target-session", username: "someone" });
 
 beforeEach(() => {
-  vi.stubEnv("DASHBOARD_SESSION_SECRET", "test-secret");
+  vi.stubEnv("DASHBOARD_SESSION_SECRET", TEST_SECRET);
+  vi.stubEnv("DASHBOARD_ORIGIN", "");
   resetSessionStore();
 });
 
-async function request(session: Session | null) {
-  const token = session ? await createSessionToken(session) : "invalid";
-  return new Request("http://localhost/api/admin/sessions/target-session", {
-    method: "DELETE",
-    headers: {
-      cookie: `${COOKIE_NAME}=${token}`,
-      "x-csrf-token": session ? csrfToken(session.sid) : "invalid",
-      origin: "http://localhost",
-      host: "localhost",
-    },
-  });
+async function revoke(caller: typeof admin | null, sid: string, token?: string) {
+  const headers: Record<string, string> = { origin: "http://localhost", host: "localhost" };
+  if (caller) {
+    headers.cookie = await signedInCookie(caller);
+    headers["x-csrf-token"] = token ?? csrfToken(caller.sid);
+  }
+  return DELETE(
+    new Request(`http://localhost/api/admin/sessions/${sid}`, { method: "DELETE", headers }),
+    { params: Promise.resolve({ sid }) },
+  );
 }
 
 describe("/api/admin/sessions/[sid]", () => {
-  it("returns 401 without an authenticated session", async () => {
-    const response = await DELETE(await request(null), {
-      params: Promise.resolve({ sid: "target-session" }),
-    });
-
-    expect(response.status).toBe(401);
+  it("returns 401 when called directly without a session", async () => {
+    expect((await revoke(null, "target-session")).status).toBe(401);
   });
 
-  it("returns 403 for a viewer", async () => {
-    rememberSession(admin);
-    const viewer = { ...admin, sid: "viewer-session", role: "viewer" as const };
-    rememberSession(viewer);
-    const response = await DELETE(await request(viewer), {
-      params: Promise.resolve({ sid: "target-session" }),
-    });
+  it("returns 403 for a viewer and leaves the target alive", async () => {
+    await signedInCookie(target);
 
-    expect(response.status).toBe(403);
+    expect((await revoke(viewer, "target-session")).status).toBe(403);
+    expect(isActiveSession(target)).toBe(true);
+  });
+
+  it("returns 403 for an admin without the CSRF token", async () => {
+    await signedInCookie(target);
+
+    expect((await revoke(admin, "target-session", "forged")).status).toBe(403);
+    expect(isActiveSession(target)).toBe(true);
   });
 
   it("revokes a session for an admin", async () => {
-    rememberSession(admin);
-    const response = await DELETE(await request(admin), {
-      params: Promise.resolve({ sid: "target-session" }),
-    });
+    await signedInCookie(target);
+    const response = await revoke(admin, "target-session");
 
     expect(response.status).toBe(200);
     await expect(response.json()).resolves.toEqual({ revoked: true });
+    expect(isActiveSession(target)).toBe(false);
+  });
+
+  it("returns 404 for an unknown session id", async () => {
+    expect((await revoke(admin, "missing")).status).toBe(404);
   });
 });
