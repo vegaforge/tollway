@@ -16,6 +16,7 @@ import { settlementModels } from "./types.js";
  */
 export const POLICY_TRACE_VERSION = 1;
 
+/** The modes a policy engine runs in; see {@link PolicyMode}. */
 export const policyModes = ["enforce", "dry-run"] as const;
 /**
  * `enforce` blocks a payment when a rule fails. `dry-run` evaluates every
@@ -37,6 +38,7 @@ export const policyRuleIds = [
   "rate-limit",
   "anomaly",
 ] as const;
+/** The identifier of one policy rule, as it appears in a trace entry. */
 export type PolicyRuleId = (typeof policyRuleIds)[number];
 
 /**
@@ -52,9 +54,15 @@ export const policyRuleNames = [
   "rate-limit",
   "anomaly",
 ] as const;
+/** The coarser rule name a blocked decision reports; see {@link policyRuleNames}. */
 export type PolicyRuleName = (typeof policyRuleNames)[number];
 
+/**
+ * What a rule concluded for one intent. `not-applicable` means the rule is
+ * not configured or does not cover this intent, which is not a pass.
+ */
 export const policyOutcomes = ["pass", "fail", "not-applicable"] as const;
+/** What one rule concluded for one intent; see {@link policyOutcomes}. */
 export type PolicyOutcome = (typeof policyOutcomes)[number];
 
 const integerString = z.string().regex(/^[0-9]+$/, "must be an integer string");
@@ -69,8 +77,10 @@ export const policyWindowSchema = z.discriminatedUnion("kind", [
   z.strictObject({ kind: z.literal("lifetime") }),
   z.strictObject({ kind: z.literal("sliding"), seconds: z.number().int().positive() }),
 ]);
+/** The period a stateful rule counts over; see {@link policyWindowSchema}. */
 export type PolicyWindow = z.infer<typeof policyWindowSchema>;
 
+/** One rule's line in a policy trace, with the numbers it compared. */
 export const policyTraceEntrySchema = z.strictObject({
   id: z.enum(policyRuleIds),
   rule: z.enum(policyRuleNames),
@@ -87,8 +97,14 @@ export const policyTraceEntrySchema = z.strictObject({
   /** One sentence for a person reading the log. */
   detail: z.string().min(1),
 });
+/** One rule's line in a policy trace; see {@link policyTraceEntrySchema}. */
 export type PolicyTraceEntry = z.infer<typeof policyTraceEntrySchema>;
 
+/**
+ * A full policy trace. Parse stored traces with it: it rejects an unknown
+ * version and a summary (`allowed`, `wouldBlock`, `blockedBy`) that
+ * contradicts the entries.
+ */
 export const policyTraceSchema = z
   .strictObject({
     version: z.literal(POLICY_TRACE_VERSION),
@@ -125,8 +141,13 @@ export const policyTraceSchema = z
       ctx.addIssue({ code: "custom", message: "allowed does not match the mode and entries" });
     }
   });
+/** The decision log for one payment intent; see {@link policyTraceSchema}. */
 export type PolicyTrace = z.infer<typeof policyTraceSchema>;
 
+/**
+ * Whether a payment may go ahead and, when it may not, which rule blocked it
+ * and why. Derived from a trace by {@link decisionFromTrace}.
+ */
 export type PolicyDecision =
   | { allowed: true }
   | { allowed: false; rule: PolicyRuleName; detail: string };
@@ -153,6 +174,7 @@ export type PolicyTraceDifference = {
   candidate: PolicyOutcome;
 };
 
+/** The result of {@link comparePolicyTraces}: how two policies would decide the same intent. */
 export type PolicyTraceComparison = {
   /** True when the two policies would block or allow this intent alike. */
   sameDecision: boolean;

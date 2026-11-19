@@ -51,6 +51,11 @@ export type PaywallConfig = {
   facilitatorUrl?: string;
 };
 
+/**
+ * What the gate decided for one request: a 402 with the challenge, a settled
+ * payment with its receipt, or a rejection. Adapters turn it into their
+ * framework's response.
+ */
 export type GateOutcome =
   | {
       kind: "payment-required";
@@ -82,8 +87,13 @@ export type GateOutcome =
     }
   | { kind: "rejected"; status: number; reason: string };
 
+/** A payment gate for one paid resource, built by {@link createPaywall}. */
 export type Gate = (request: TollwayRequest) => Promise<GateOutcome>;
 
+/**
+ * The services a gate uses: the receipt signer, the facilitator, and the
+ * optional MPP charge handler, router and settlement cache.
+ */
 export type PaywallDeps = {
   signer: ReceiptSigner;
   facilitator: FacilitatorClient;

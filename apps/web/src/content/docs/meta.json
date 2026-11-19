@@ -10,6 +10,10 @@
     "policy",
     "receipts",
     "reconciliation",
-    "observability"
+    "observability",
+    "---Tools---",
+    "playground",
+    "---API reference---",
+    "api"
   ]
 }

@@ -29,6 +29,7 @@ export const settlementRefSchema = z.discriminatedUnion("kind", [
   }),
 ]);
 
+/** Where a payment is anchored on chain; see {@link settlementRefSchema}. */
 export type SettlementRef = z.infer<typeof settlementRefSchema>;
 
 const refKindForModel = {
@@ -37,6 +38,11 @@ const refKindForModel = {
   "mpp-channel": "channel-commitment",
 } as const;
 
+/**
+ * The receipt body every settlement path produces. It also checks that the
+ * settlement reference kind fits the model (a transaction for x402 and MPP
+ * charge, a channel commitment for MPP channels).
+ */
 export const receiptBodySchema = z
   .strictObject({
     version: z.literal(1),
@@ -66,8 +72,10 @@ export const receiptBodySchema = z
     }
   });
 
+/** The signed part of a receipt: who paid whom, how much, for what, and how it settled. */
 export type ReceiptBody = z.infer<typeof receiptBodySchema>;
 
+/** The signature block of a receipt: which key signed, with what algorithm, and the signature. */
 export const receiptSignatureSchema = z.strictObject({
   /** Identifies the signing key, so keys can rotate without orphaning receipts. */
   keyId: z.string().min(1),
@@ -76,11 +84,21 @@ export const receiptSignatureSchema = z.strictObject({
   value: z.string().min(1),
 });
 
+/** The signature block of a receipt; see {@link receiptSignatureSchema}. */
 export type ReceiptSignature = z.infer<typeof receiptSignatureSchema>;
 
+/**
+ * A receipt body with its signature. This is the schema to parse any receipt
+ * that arrives from outside; {@link verifyReceipt} applies it before checking
+ * the signature.
+ */
 export const signedReceiptSchema = z.strictObject({
   receipt: receiptBodySchema,
   signature: receiptSignatureSchema,
 });
 
+/**
+ * The canonical receipt Tollway returns for every settled payment, whatever
+ * the model. See docs/design.md, "One receipt format".
+ */
 export type SignedReceipt = z.infer<typeof signedReceiptSchema>;

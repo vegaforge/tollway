@@ -1,0 +1,40 @@
+{
+  "$schema": "https://typedoc-plugin-markdown.org/schema.json",
+  "tsconfig": "./typedoc/tsconfig.json",
+  "entryPointStrategy": "resolve",
+  "entryPoints": [
+    "../../packages/core/src/index.ts",
+    "../../packages/server/src/index.ts",
+    "../../packages/client/src/index.ts",
+    "../../packages/adapter-express/src/index.ts",
+    "../../packages/adapter-fastify/src/index.ts",
+    "../../packages/adapter-next/src/index.ts",
+    "../../packages/adapter-next/src/proxy.ts",
+    "../../packages/adapter-hono/src/index.ts",
+    "../../packages/channels/src/index.ts",
+    "../../packages/reconcile/src/index.ts",
+    "../../packages/observability/src/index.ts",
+    "../../packages/theme/src/index.ts",
+    "../../packages/theme/src/preset.ts"
+  ],
+  "out": "./src/content/docs/api",
+  "plugin": ["typedoc-plugin-markdown", "typedoc-plugin-frontmatter", "./typedoc/plugin.mjs"],
+  "fileExtension": ".mdx",
+  "outputFileStrategy": "modules",
+  "readme": "none",
+  "excludePrivate": true,
+  "excludeInternal": true,
+  "validation": {
+    "notExported": true,
+    "invalidLink": true,
+    "notDocumented": false
+  },
+  "entryFileName": "index",
+  "hidePageTitle": true,
+  "hideBreadcrumbs": true,
+  "hidePageHeader": true,
+  "disableSources": true,
+  "cleanOutputDir": true,
+  "treatWarningsAsErrors": true,
+  "sanitizeComments": true
+}

@@ -61,6 +61,10 @@ export type PaymentIntent = {
   model: SettlementModel;
 };
 
+/**
+ * Spending rules an agent applies before it pays. {@link createPolicyEngine}
+ * builds one from a policy.
+ */
 export interface PolicyEngine {
   /** The mode the engine was created with. The client warns when it is dry-run. */
   readonly mode: PolicyMode;

@@ -36,10 +36,16 @@ export type VerifyInput = {
   offer: PaymentOffer;
 };
 
+/**
+ * The outcome of checking a payment before settling it. A valid payment
+ * carries the payer and the nonce, the idempotency key derived from the
+ * signed payment.
+ */
 export type VerifyResult =
   | { valid: true; payer: string; nonce: string }
   | { valid: false; reason: string };
 
+/** A verified x402 payment to settle, with the payer and nonce verification returned. */
 export type SettleInput = {
   payment: X402Payment;
   offer: PaymentOffer;
@@ -47,13 +53,20 @@ export type SettleInput = {
   nonce: string;
 };
 
+/** The outcome of settling: the transaction hash, or why settlement failed. */
 export type SettleResult = { settled: true; txHash: string } | { settled: false; reason: string };
 
+/** The models and assets a facilitator says it can settle. */
 export type SupportedResult = {
   models: SettlementModel[];
   assets: string[];
 };
 
+/**
+ * The gate's view of an x402 facilitator: verify, then settle, plus a
+ * capability check. {@link createHttpFacilitator} talks to a real one and
+ * {@link createMockFacilitator} runs offline.
+ */
 export interface FacilitatorClient {
   verify(input: VerifyInput): Promise<VerifyResult>;
   settle(input: SettleInput): Promise<SettleResult>;
