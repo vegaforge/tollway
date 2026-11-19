@@ -35,3 +35,15 @@ reason = "mcp 1.29.0 (Semgrep tool dependency): server bearer-token authenticati
 id = "GHSA-xcq7-p3pf-p88h"
 ignoreUntil = 2027-01-31
 reason = "opentelemetry-api 1.37.0 (Semgrep tool dependency): tracestate parsing; the gate never ingests trace headers."
+
+# TypeDoc builds the docs site's API reference (#252). Every TypeDoc release up
+# to 0.28.20 depends on minimatch ^10, every 10.x is affected, and the patched
+# 11.0.1 removed `Minimatch.matchOne`, which TypeDoc calls, so it cannot be
+# overridden either. The advisory is a denial of service from a crafted glob
+# pattern. TypeDoc runs only while the docs site builds, never in a published
+# package, and the only patterns it matches come from apps/web/typedoc.json in
+# this repository. Remove this once a TypeDoc release accepts minimatch 11.
+[[IgnoredVulns]]
+id = "GHSA-g3hv-75wg-m249"
+ignoreUntil = 2027-02-28
+reason = "minimatch 10.2.6 (TypeDoc build-time dependency): globparts amplification needs an attacker-controlled pattern; TypeDoc only matches the patterns in apps/web/typedoc.json."
