@@ -11,6 +11,7 @@ import {
   verifyReceiptWithPublicKey,
   type DecodedHeader,
   type HeaderName,
+  type StellarPaymentDetails,
 } from "@/lib/playground";
 
 const HEADER_NAMES: HeaderName[] = [
@@ -27,7 +28,7 @@ export function PaymentPlayground() {
   const [publicKey, setPublicKey] = useState("");
   const [decoded, setDecoded] = useState<DecodedHeader | null>(null);
   const [verification, setVerification] = useState<string | null>(null);
-  const [xdrSummary, setXdrSummary] = useState<string | null>(null);
+  const [xdrSummary, setXdrSummary] = useState<StellarPaymentDetails | null>(null);
   const [xdrError, setXdrError] = useState<string | null>(null);
   const [encodeFields, setEncodeFields] = useState({
     resource: "https://api.example.com/quote",
@@ -54,7 +55,7 @@ export function PaymentPlayground() {
     if (!transactionXdr) return;
     try {
       const details = await decodeStellarTransactionXdr(transactionXdr.xdr, transactionXdr.network);
-      setXdrSummary(JSON.stringify(details, null, 2));
+      setXdrSummary(details);
       setXdrError(null);
     } catch (error) {
       setXdrSummary(null);
@@ -136,7 +137,18 @@ export function PaymentPlayground() {
                 <div className="space-y-2">
                   <button type="button" onClick={() => void decodeTransaction()} className="rounded-md border px-4 py-2">Decode Stellar transaction XDR</button>
                   {xdrError && <p role="alert" className="text-sm text-red-700">{xdrError}</p>}
-                  {xdrSummary && <pre className="overflow-auto rounded-md bg-muted p-3 text-xs">{xdrSummary}</pre>}
+                  {xdrSummary && (
+                    <div className="space-y-2 rounded-md border p-3">
+                      <dl className="grid gap-3 sm:grid-cols-3">
+                        <div><dt className="text-xs opacity-70">Transaction source</dt><dd className="break-all text-sm">{xdrSummary.source}</dd></div>
+                        {xdrSummary.payer && <div><dt className="text-xs opacity-70">Payer</dt><dd className="break-all text-sm">{xdrSummary.payer}</dd></div>}
+                        {xdrSummary.payee && <div><dt className="text-xs opacity-70">Payee</dt><dd className="break-all text-sm">{xdrSummary.payee}</dd></div>}
+                        {xdrSummary.amount && <div><dt className="text-xs opacity-70">Amount (base units)</dt><dd className="break-all text-sm">{xdrSummary.amount}</dd></div>}
+                        <div><dt className="text-xs opacity-70">Sequence</dt><dd className="text-sm">{xdrSummary.sequence}</dd></div>
+                        <div><dt className="text-xs opacity-70">Fee (stroops)</dt><dd className="text-sm">{xdrSummary.fee}</dd></div>
+                      </dl>
+                    </div>
+                  )}
                 </div>
               )}
               <pre className="max-h-80 overflow-auto rounded-md bg-muted p-3 text-xs">{JSON.stringify(decoded.value, null, 2)}</pre>

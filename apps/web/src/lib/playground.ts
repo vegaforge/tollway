@@ -286,20 +286,68 @@ export async function verifyReceiptWithPublicKey(
 }
 
 /** Decode transaction XDR only when the user explicitly expands the detail. */
+export type StellarPaymentDetails = {
+  source: string;
+  sequence: string;
+  fee: string;
+  payer?: string;
+  payee?: string;
+  amount?: string;
+};
+
+type DecodedContractCall = {
+  functionName(): { toString(): string };
+  args(): unknown[];
+};
+
+type DecodedHostFunction = {
+  switch(): { name: string };
+  invokeContract(): DecodedContractCall;
+};
+
+type DecodedStellarOperation = {
+  type: string;
+  func?: DecodedHostFunction;
+};
+
+/** Decodes the signed Soroban transaction and extracts a SEP-41 transfer when present. */
 export async function decodeStellarTransactionXdr(
   xdr: string,
   network: string,
-): Promise<{ source: string; sequence: string; fee: string }> {
+): Promise<StellarPaymentDetails> {
   const stellar = await import("@stellar/stellar-base");
   const passphrase = network === "stellar:testnet" || network === "testnet"
     ? stellar.Networks.TESTNET
     : stellar.Networks.PUBLIC;
   const transaction = stellar.TransactionBuilder.fromXDR(xdr, passphrase);
-  return {
+  const details: StellarPaymentDetails = {
     source: transaction.source,
     sequence: transaction.sequence,
     fee: transaction.fee,
   };
+
+  for (const operation of transaction.operations as DecodedStellarOperation[]) {
+    if (operation.type !== "invokeHostFunction" || !operation.func) continue;
+    if (operation.func.switch().name !== "hostFunctionTypeInvokeContract") continue;
+
+    const invocation = operation.func.invokeContract();
+    if (invocation.functionName().toString() !== "transfer") continue;
+    const args = invocation.args();
+    if (args.length < 3 || args[0] == null || args[1] == null || args[2] == null) continue;
+
+    details.payer = stellar.Address.fromScVal(
+      args[0] as Parameters<typeof stellar.Address.fromScVal>[0],
+    ).toString();
+    details.payee = stellar.Address.fromScVal(
+      args[1] as Parameters<typeof stellar.Address.fromScVal>[0],
+    ).toString();
+    details.amount = stellar.scValToBigInt(
+      args[2] as Parameters<typeof stellar.scValToBigInt>[0],
+    ).toString();
+    break;
+  }
+
+  return details;
 }
 
 /** Used to ensure receipt decoding does not accidentally trigger network access. */
