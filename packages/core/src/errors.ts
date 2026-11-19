@@ -7,6 +7,7 @@ export type TollwayErrorCode =
   | "not-implemented"
   | "no-viable-model"
   | "invalid-receipt"
+  | "invalid-signing-key"
   | "invalid-amount"
   | "invalid-policy"
   | "canonicalization-failed"
