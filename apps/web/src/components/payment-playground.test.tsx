@@ -3,9 +3,23 @@ import { describe, expect, it, vi } from "vitest";
 import { Ed25519Signer, buildReceipt, signReceipt, bytesToBase64Url } from "@vegaforge/tollway-core";
 import { encodePaymentRequiredHeader } from "@x402/core/http";
 import { PaymentPlayground } from "./payment-playground";
-import { decodeHeaderValue, MAX_HEADER_LENGTH } from "@/lib/playground";
+import { decodeHeaderValue, MAX_HEADER_LENGTH, bytesToBase64Url, utf8Bytes } from "@/lib/playground";
 
 describe("header decoder", () => {
+  it("decodes a valid Tollway base64url challenge", () => {
+    const challenge = {
+      x402Version: 2,
+      resource: { url: "https://api.example.test/quote", description: "quote", mimeType: "application/json" },
+      accepts: [{ scheme: "exact", network: "stellar:testnet", amount: "10000", asset: "USDC", payTo: "GABC", maxTimeoutSeconds: 300 }],
+    };
+    const encoded = bytesToBase64Url(utf8Bytes(JSON.stringify(challenge)));
+    expect(decodeHeaderValue("PAYMENT-REQUIRED", encoded)).toMatchObject({
+      encoding: "base64url",
+      shape: "x402 PaymentRequired v2",
+      valid: true,
+    });
+  });
+
   it("rejects malformed input, wrong header shapes and oversized values", () => {
     expect(decodeHeaderValue("PAYMENT-REQUIRED", "not-a-header").valid).toBe(false);
     expect(decodeHeaderValue("PAYMENT-REQUIRED", JSON.stringify({ wrong: true })).valid).toBe(false);
