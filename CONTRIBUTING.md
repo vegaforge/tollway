@@ -38,6 +38,7 @@ Useful commands:
 | `pnpm format:check` | Biome format check only |
 | `pnpm lint:fix` | Apply Biome fixes |
 | `pnpm --filter @vegaforge/tollway-core test` | Run one package's tests |
+| `pnpm --filter @vegaforge/tollway-integration-tests test` | Pay real transactions on a local Stellar network; needs Docker, see [docs/local-network-tests.md](docs/local-network-tests.md) |
 
 ## Where to start
 
