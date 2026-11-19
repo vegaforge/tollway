@@ -15,6 +15,7 @@
   "scripts": {
     "build": "turbo run build",
     "test": "turbo run test",
+    "bench": "turbo run build --filter=@vegaforge/tollway-bench^... && pnpm --filter @vegaforge/tollway-bench bench",
     "typecheck": "turbo run typecheck",
     "lint": "biome check --error-on-warnings .",
     "lint:fix": "biome check --write .",

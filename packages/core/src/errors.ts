@@ -8,6 +8,7 @@ export type TollwayErrorCode =
   | "no-viable-model"
   | "invalid-receipt"
   | "invalid-amount"
+  | "invalid-policy"
   | "canonicalization-failed"
   | "budget-exceeded"
   | "payment-failed"
@@ -17,7 +18,10 @@ export type TollwayErrorCode =
   | "channel-not-open"
   | "channel-already-closed"
   | "commitment-exceeds-deposit"
-  | "settlement-mismatch";
+  | "settlement-mismatch"
+  | "invalid-metrics-query"
+  | "invalid-metric"
+  | "metrics-query-too-large";
 
 export class TollwayError extends Error {
   readonly code: TollwayErrorCode;
