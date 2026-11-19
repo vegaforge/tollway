@@ -10,7 +10,9 @@ import {
 import { createMockFacilitator, type FacilitatorClient } from "./facilitator.js";
 import { createPaywall, type PaywallConfig, type TollwayRequest } from "./gate.js";
 import { decodeHeader, PAYMENT_REQUIRED_HEADER, PAYMENT_SIGNATURE_HEADER } from "./headers.js";
-import { createMockMppChargeHandler } from "./mpp-charge.js";
+import { createMockMppChargeHandler, type MppChargeHandler } from "./mpp-charge.js";
+
+const MPP_CREDENTIAL = "Payment mock-mpp-charge-payload";
 
 const config: PaywallConfig = {
   amount: "10000",
@@ -103,7 +105,7 @@ describe("createPaywall", () => {
     it("settles a signed request and produces a verifiable receipt", async () => {
       const outcome = await makeGate(true)({
         ...baseRequest,
-        headers: { [PAYMENT_SIGNATURE_HEADER]: "mock-mpp-charge-payload" },
+        headers: { authorization: MPP_CREDENTIAL },
       });
       expect(outcome.kind).toBe("settled");
       if (outcome.kind !== "settled") return;
@@ -122,7 +124,7 @@ describe("createPaywall", () => {
 
     it("treats a repeated mpp-charge payment as idempotent rather than a second charge", async () => {
       const gate = makeGate(true);
-      const headers = { [PAYMENT_SIGNATURE_HEADER]: "mock-mpp-charge-payload" };
+      const headers = { authorization: MPP_CREDENTIAL };
 
       const first = await gate({ ...baseRequest, headers });
       const second = await gate({ ...baseRequest, headers });
@@ -146,12 +148,82 @@ describe("createPaywall", () => {
       );
       const outcome = await gate({
         ...baseRequest,
-        headers: { [PAYMENT_SIGNATURE_HEADER]: "mock-mpp-charge-payload" },
+        headers: { authorization: MPP_CREDENTIAL },
       });
       expect(outcome.kind).toBe("rejected");
       if (outcome.kind !== "rejected") return;
       expect(outcome.status).toBe(500);
       expect(outcome.reason).toBe("mpp-charge handler not configured");
+    });
+
+    it("passes only the Payment scheme of the Authorization header to the handler", async () => {
+      const handler = createMockMppChargeHandler();
+      const verify = vi.spyOn(handler, "verify");
+      const gate = createPaywall(
+        { ...config, models: ["mpp-charge"] },
+        { signer, facilitator: createMockFacilitator(), mppChargeHandler: handler },
+      );
+      await gate({ ...baseRequest, headers: { Authorization: `Bearer abc, ${MPP_CREDENTIAL}` } });
+      expect(verify).toHaveBeenCalledWith(
+        expect.objectContaining({ payment: { model: "mpp-charge", payload: MPP_CREDENTIAL } }),
+      );
+    });
+
+    it("adds the handler's MPP challenge headers to the 402", async () => {
+      const handler: MppChargeHandler = {
+        ...createMockMppChargeHandler(),
+        challenge: vi.fn().mockResolvedValue({
+          status: 402,
+          headers: { "www-authenticate": 'Payment id="abc"', "cache-control": "no-store" },
+          body: null,
+        }),
+      };
+      const gate = createPaywall(
+        { ...config, models: ["x402", "mpp-charge"] },
+        { signer, facilitator: createMockFacilitator(), mppChargeHandler: handler },
+      );
+      const outcome = await gate(baseRequest);
+      expect(outcome.kind).toBe("payment-required");
+      if (outcome.kind !== "payment-required") return;
+      expect(outcome.headers["www-authenticate"]).toBe('Payment id="abc"');
+      expect(outcome.headers[PAYMENT_REQUIRED_HEADER]).toBeDefined();
+      expect(handler.challenge).toHaveBeenCalledWith({
+        offer: outcome.challenge,
+        request: { method: "GET", url: "/quotes/latest" },
+      });
+    });
+
+    it("does not ask for an MPP challenge on a route that does not accept mpp-charge", async () => {
+      const challenge = vi.fn();
+      const gate = createPaywall(config, {
+        signer,
+        facilitator: createMockFacilitator(),
+        mppChargeHandler: { ...createMockMppChargeHandler(), challenge },
+      });
+      const outcome = await gate(baseRequest);
+      expect(outcome.kind).toBe("payment-required");
+      expect(challenge).not.toHaveBeenCalled();
+    });
+
+    it("ignores an MPP credential on a route that only accepts x402", async () => {
+      const outcome = await makeGate(false)({
+        ...baseRequest,
+        headers: { authorization: MPP_CREDENTIAL },
+      });
+      expect(outcome.kind).toBe("payment-required");
+    });
+
+    it("rejects a PAYMENT-SIGNATURE that the router sends to mpp-charge", async () => {
+      const outcome = await makeGate(true)({
+        ...baseRequest,
+        headers: { [PAYMENT_SIGNATURE_HEADER]: "mock-signed-auth-entry" },
+      });
+      expect(outcome).toEqual({
+        kind: "rejected",
+        status: 400,
+        reason:
+          "mpp-charge payments carry an Authorization: Payment credential, not PAYMENT-SIGNATURE",
+      });
     });
   });
 });
@@ -204,13 +276,19 @@ describe("settlement cache binding", () => {
   });
 
   it("does not serve an x402 receipt to an mpp-charge offer that shares the cache", async () => {
-    // Both mock handlers derive the nonce from the raw header, so the same
-    // header value gives the same nonce under either model.
+    // Both mock handlers derive the nonce from the raw payment value, so the
+    // same value gives the same nonce under either model.
     const cache = createInMemorySettlementCache();
-    const x402 = await gateFor({ models: ["x402"] }, cache)({ ...baseRequest, headers });
+    const x402 = await gateFor(
+      { models: ["x402"] },
+      cache,
+    )({ ...baseRequest, headers: { [PAYMENT_SIGNATURE_HEADER]: MPP_CREDENTIAL } });
     expect(x402.kind).toBe("settled");
 
-    const mpp = await gateFor({ models: ["mpp-charge"] }, cache)({ ...baseRequest, headers });
+    const mpp = await gateFor(
+      { models: ["mpp-charge"] },
+      cache,
+    )({ ...baseRequest, headers: { authorization: MPP_CREDENTIAL } });
     expect(mpp.kind).toBe("settled");
     if (mpp.kind !== "settled") return;
     expect(mpp.replayed).toBe(false);

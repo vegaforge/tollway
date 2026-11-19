@@ -199,6 +199,25 @@ app.get("/quotes/latest", expressPaywall(gate), (_req, res) => {
 });
 ```
 
+Pay a route from the agent side with x402 on Stellar. The secret goes only to `createEd25519Signer`; the settler never holds it. The settler speaks x402 V2 (`PAYMENT-REQUIRED`, `PAYMENT-SIGNATURE`) and reads the Tollway receipt from `TOLLWAY-RECEIPT`, so it pays services that use that wire format ([#43](https://github.com/vegaforge/tollway/issues/43) brings the gate to it).
+
+```ts
+import { createClient, createX402Settler } from "@vegaforge/tollway-client";
+import { Ed25519Verifier } from "@vegaforge/tollway-core";
+import { createEd25519Signer } from "@x402/stellar";
+
+const client = createClient({
+  network: "testnet",
+  settler: createX402Settler({
+    signer: createEd25519Signer(process.env.STELLAR_SECRET_KEY ?? "", "stellar:testnet"),
+    network: "testnet",
+  }),
+  verifier: new Ed25519Verifier({ "service-key": servicePublicKey }),
+});
+
+const { receipt } = await client.pay({ resource: "https://api.example.com/quotes/latest", offer });
+```
+
 ## Status
 
 Tollway is pre-release. No package is published to npm yet; build from this repository.
@@ -208,10 +227,10 @@ Implemented and tested:
 | Package or app | What works |
 | -------------- | ---------- |
 | `@vegaforge/tollway-core` | Canonical receipt (build, sign, verify) with a swappable Ed25519 signer, zod schemas, the policy engine (`createPolicyEngine`: budgets, per-service caps, rate limits, and anomaly stops, held in memory), and the default model router. |
-| `@vegaforge/tollway-server` | The payment gate (`createPaywall`) for x402 and MPP charge, an HTTP facilitator client built on `@x402/core` and `@x402/stellar`, a mock facilitator, a mock MPP charge handler, and in-memory and Redis settlement caches. |
+| `@vegaforge/tollway-server` | The payment gate (`createPaywall`) for x402 and MPP charge, an HTTP facilitator client built on `@x402/core` and `@x402/stellar`, a mock facilitator, an MPP charge handler built on `mppx` and `@stellar/mpp` (plus a mock), and in-memory (bounded) and Redis settlement caches. |
 | `@vegaforge/tollway-adapter-express`, `-fastify`, `-next`, `-hono` | All four adapters wrap the gate, each with its own tests. |
-| `@vegaforge/tollway-client` | Agent-side orchestration: policy check, routing, receipt verification, and events. You supply the `ClientSettler` that signs payments. |
-| `@vegaforge/tollway-channels` | Channel `open`, `commit`, `shouldClose`, and `close` against an injected `MppChannelAdapter`. |
+| `@vegaforge/tollway-client` | Agent-side orchestration: policy check, routing, receipt verification, and events, plus `createX402Settler`, a `ClientSettler` that pays x402 V2 routes on Stellar with `@x402/stellar`. |
+| `@vegaforge/tollway-channels` | Channel `open`, `commit`, `shouldClose`, and `close` against an injected `MppChannelAdapter`, and `createStellarMppChannelAdapter`, the adapter backed by `@stellar/mpp/channel`. |
 | `@vegaforge/tollway-reconcile` | The reconciler and drift detection, with unit and property tests. |
 | `@vegaforge/tollway-observability` | Metric recording, spend summaries, JSON and CSV export, and webhook delivery with retry and timeout. |
 | `@vegaforge/tollway-theme` | Shared design tokens. |
@@ -220,12 +239,9 @@ Implemented and tested:
 
 Open work:
 
-- Real MPP charge settlement with `@stellar/mpp`: `createMppChargeHandler` throws `NotImplementedError` today ([#100](https://github.com/vegaforge/tollway/issues/100)).
-- A real `MppChannelAdapter` backed by `@stellar/mpp/channel` ([#101](https://github.com/vegaforge/tollway/issues/101)).
 - `ChannelManager.recover`, which throws `NotImplementedError` today ([#38](https://github.com/vegaforge/tollway/issues/38)).
 - Router promotion to `mpp-channel` under sustained traffic ([#105](https://github.com/vegaforge/tollway/issues/105)). The gate answers `501` if a router selects `mpp-channel`.
 - x402 V2 wire compatibility for the gate's headers ([#43](https://github.com/vegaforge/tollway/issues/43)).
-- A production x402 `ClientSettler` for `@vegaforge/tollway-client` ([#102](https://github.com/vegaforge/tollway/issues/102)).
 - Feeding gate outcomes into `@vegaforge/tollway-observability` ([#106](https://github.com/vegaforge/tollway/issues/106)) and signing webhook deliveries ([#104](https://github.com/vegaforge/tollway/issues/104)).
 - A shared conformance suite for the four adapters ([#107](https://github.com/vegaforge/tollway/issues/107)).
 - Dashboard services and exports views ([#108](https://github.com/vegaforge/tollway/issues/108), [#109](https://github.com/vegaforge/tollway/issues/109)). The overview and anomalies pages are placeholders.

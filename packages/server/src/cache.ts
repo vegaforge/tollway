@@ -64,14 +64,60 @@ export type LockingSettlementCache = SettlementCache &
 
 type Entry = { entry: SettlementEntry; expiresAt: number };
 
+export type InMemorySettlementCacheOptions = {
+  /**
+   * Most entries held at once. When the cache is full, inserting a new key
+   * evicts the oldest entry. Defaults to 10 000.
+   */
+  maxEntries?: number;
+  /** Clock in milliseconds since the epoch. Defaults to `Date.now`; tests inject their own. */
+  now?: () => number;
+};
+
+const DEFAULT_MAX_ENTRIES = 10_000;
+
 /**
- * In-memory cache with TTL eviction. The default window covers a few ledger
- * closes, enough to absorb a retry. Back it with a shared store
- * (createRedisSettlementCache) for multi-process deployments; the interface
- * is the seam.
+ * In-memory cache with TTL eviction and a size cap. The default window
+ * covers a few ledger closes, enough to absorb a retry. Back it with a
+ * shared store (createRedisSettlementCache) for multi-process deployments;
+ * the interface is the seam.
+ *
+ * Entries live in a `Map`, which keeps insertion order. Every entry gets the
+ * same TTL and an overwrite moves its key to the end, so the oldest entry is
+ * always first and expires first. Each `set` sweeps expired entries from that
+ * end, stopping at the first live one, and then evicts the oldest entries
+ * while the cache is still full. There is no background timer, so the cache
+ * never keeps a process alive.
  */
-export function createInMemorySettlementCache(ttlMs = 30_000): SettlementCache {
+export function createInMemorySettlementCache(
+  ttlMs = 30_000,
+  options: InMemorySettlementCacheOptions = {},
+): SettlementCache {
+  const maxEntries = options.maxEntries ?? DEFAULT_MAX_ENTRIES;
+  if (!Number.isInteger(maxEntries) || maxEntries < 1) {
+    throw new RangeError(`maxEntries must be a positive integer, got ${maxEntries}`);
+  }
+  const now = options.now ?? (() => Date.now());
   const entries = new Map<string, Entry>();
+
+  function sweepExpired(at: number): void {
+    for (const [key, entry] of entries) {
+      if (entry.expiresAt > at) {
+        return;
+      }
+      entries.delete(key);
+    }
+  }
+
+  function evictOldestWhileFull(): void {
+    while (entries.size >= maxEntries) {
+      const oldest = entries.keys().next();
+      if (oldest.done) {
+        return;
+      }
+      entries.delete(oldest.value);
+    }
+  }
 
   return {
     async get(key) {
@@ -79,14 +125,20 @@ export function createInMemorySettlementCache(ttlMs = 30_000): SettlementCache {
       if (!entry) {
         return undefined;
       }
-      if (entry.expiresAt <= Date.now()) {
+      if (entry.expiresAt <= now()) {
         entries.delete(key);
         return undefined;
       }
       return entry.entry;
     },
     async set(key, entry) {
-      entries.set(key, { entry, expiresAt: Date.now() + ttlMs });
+      const at = now();
+      // Deleting first moves an overwritten key to the newest end, and keeps
+      // an overwrite from evicting some other entry at the cap.
+      entries.delete(key);
+      sweepExpired(at);
+      evictOldestWhileFull();
+      entries.set(key, { entry, expiresAt: at + ttlMs });
     },
   };
 }

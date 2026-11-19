@@ -56,6 +56,87 @@ describe("createInMemorySettlementCache", () => {
       vi.useRealTimers();
     }
   });
+
+  it("still misses on get for an expired entry, using the injected clock", async () => {
+    let now = 1_000;
+    const cache = createInMemorySettlementCache(50, { now: () => now });
+    await cache.set("nonce-a", entry);
+    now += 49;
+    await expect(cache.get("nonce-a")).resolves.toBe(entry);
+    now += 1;
+    await expect(cache.get("nonce-a")).resolves.toBeUndefined();
+  });
+
+  it("evicts the oldest entry once maxEntries is reached", async () => {
+    const cache = createInMemorySettlementCache(60_000, { maxEntries: 2, now: () => 0 });
+    await cache.set("first", entry);
+    await cache.set("second", entry);
+    await cache.set("third", entry);
+
+    await expect(cache.get("first")).resolves.toBeUndefined();
+    await expect(cache.get("second")).resolves.toBe(entry);
+    await expect(cache.get("third")).resolves.toBe(entry);
+  });
+
+  it("does not evict another entry when an existing key is overwritten at the cap", async () => {
+    const cache = createInMemorySettlementCache(60_000, { maxEntries: 2, now: () => 0 });
+    await cache.set("first", entry);
+    await cache.set("second", entry);
+    await cache.set("second", entry);
+
+    await expect(cache.get("first")).resolves.toBe(entry);
+    await expect(cache.get("second")).resolves.toBe(entry);
+  });
+
+  it("treats an overwritten key as the newest entry", async () => {
+    let now = 0;
+    const cache = createInMemorySettlementCache(100, { maxEntries: 2, now: () => now });
+    await cache.set("first", entry);
+    await cache.set("second", entry);
+    now = 10;
+    await cache.set("first", entry);
+    await cache.set("third", entry);
+
+    await expect(cache.get("second")).resolves.toBeUndefined();
+    await expect(cache.get("first")).resolves.toBe(entry);
+    await expect(cache.get("third")).resolves.toBe(entry);
+  });
+
+  it("sweeps expired entries on set, from the oldest end", async () => {
+    let now = 0;
+    const cache = createInMemorySettlementCache(100, { maxEntries: 3, now: () => now });
+    await cache.set("old-1", entry);
+    await cache.set("old-2", entry);
+    now = 50;
+    await cache.set("young", entry);
+
+    // old-1 and old-2 expire at 100; young expires at 150. The next set
+    // sweeps both expired entries, so the cap of 3 is not reached and young
+    // survives.
+    now = 120;
+    await cache.set("new-1", entry);
+    await cache.set("new-2", entry);
+
+    await expect(cache.get("young")).resolves.toBe(entry);
+    await expect(cache.get("new-1")).resolves.toBe(entry);
+    await expect(cache.get("new-2")).resolves.toBe(entry);
+    await expect(cache.get("old-1")).resolves.toBeUndefined();
+  });
+
+  it("defaults maxEntries to 10000", async () => {
+    const cache = createInMemorySettlementCache(60_000, { now: () => 0 });
+    for (let index = 0; index <= 10_000; index += 1) {
+      await cache.set(`nonce-${index}`, entry);
+    }
+    await expect(cache.get("nonce-0")).resolves.toBeUndefined();
+    await expect(cache.get("nonce-1")).resolves.toBe(entry);
+    await expect(cache.get("nonce-10000")).resolves.toBe(entry);
+  });
+
+  it("rejects a maxEntries that is not a positive integer", () => {
+    expect(() => createInMemorySettlementCache(1_000, { maxEntries: 0 })).toThrow(RangeError);
+    expect(() => createInMemorySettlementCache(1_000, { maxEntries: 1.5 })).toThrow(RangeError);
+  });
 });
 
 describe("createRedisSettlementCache", () => {
