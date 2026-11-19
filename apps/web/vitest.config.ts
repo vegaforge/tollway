@@ -9,7 +9,7 @@ export default defineConfig({
   plugins: [react()],
   resolve: {
     alias: {
-      "@": \`\${here}src\`,
+      "@": `${here}src`,
     },
   },
   test: {
