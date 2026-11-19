@@ -2,8 +2,10 @@ import { Ed25519Signer } from "@vegaforge/tollway-core";
 import {
   createInMemorySettlementCache,
   createMockFacilitator,
+  createMockMppChargeHandler,
   createPaywall,
   createRouteTable,
+  type MppChargeHandler,
   PAYMENT_SIGNATURE_HEADER,
   type PaywallConfig,
 } from "@vegaforge/tollway-server";
@@ -146,6 +148,88 @@ describe("fastifyPaywall method binding", () => {
       expect(read.statusCode).toBe(200);
       const write = await app.inject({ method: "POST", url: "/report", headers });
       expect(write.statusCode).toBe(409);
+    } finally {
+      await app.close();
+    }
+  });
+});
+
+// MPP charge through the adapter: the challenge headers reach the client on
+// the 402, an Authorization: Payment credential settles, and a refused
+// credential comes back as the rejection status.
+async function mppGate() {
+  const signer = await Ed25519Signer.generate("test-key-mpp");
+  const base = createMockMppChargeHandler();
+  const handler: MppChargeHandler = {
+    ...base,
+    async challenge() {
+      return {
+        status: 402,
+        headers: { "www-authenticate": 'Payment id="test"', "cache-control": "no-store" },
+        body: null,
+      };
+    },
+    async verify(input) {
+      if (input.payment.payload === "Payment refused") {
+        return { valid: false, reason: "mpp challenge was not issued by this server" };
+      }
+      return base.verify(input);
+    },
+  };
+  return createPaywall(
+    { ...config, models: ["x402", "mpp-charge"] },
+    { signer, facilitator: createMockFacilitator(), mppChargeHandler: handler },
+  );
+}
+
+describe("fastifyPaywall with mpp-charge", () => {
+  async function build() {
+    const gate = await mppGate();
+    const app = Fastify();
+    app.get("/quotes/latest", { preHandler: fastifyPaywall(gate) }, async (request) => ({
+      receiptModel: request[RECEIPT_REQUEST_KEY]?.receipt.model,
+    }));
+    await app.ready();
+    return app;
+  }
+
+  it("sends the MPP challenge headers with the 402", async () => {
+    const app = await build();
+    try {
+      const response = await app.inject({ method: "GET", url: "/quotes/latest" });
+      expect(response.statusCode).toBe(402);
+      expect(response.headers["www-authenticate"]).toBe('Payment id="test"');
+      expect(response.headers["payment-required"]).toBeTruthy();
+    } finally {
+      await app.close();
+    }
+  });
+
+  it("settles an Authorization: Payment credential", async () => {
+    const app = await build();
+    try {
+      const response = await app.inject({
+        method: "GET",
+        url: "/quotes/latest",
+        headers: { authorization: "Payment ok" },
+      });
+      expect(response.statusCode).toBe(200);
+      expect(response.json<{ receiptModel: string }>().receiptModel).toBe("mpp-charge");
+    } finally {
+      await app.close();
+    }
+  });
+
+  it("answers a refused credential with the rejection status", async () => {
+    const app = await build();
+    try {
+      const response = await app.inject({
+        method: "GET",
+        url: "/quotes/latest",
+        headers: { authorization: "Payment refused" },
+      });
+      expect(response.statusCode).toBe(402);
+      expect(response.json()).toEqual({ error: "mpp challenge was not issued by this server" });
     } finally {
       await app.close();
     }

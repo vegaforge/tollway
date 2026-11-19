@@ -5,6 +5,9 @@ export const PAYMENT_REQUIRED_HEADER = "PAYMENT-REQUIRED";
 export const PAYMENT_SIGNATURE_HEADER = "PAYMENT-SIGNATURE";
 export const PAYMENT_RESPONSE_HEADER = "PAYMENT-RESPONSE";
 
+/** MPP sends its credential as `Authorization: Payment <credential>`. */
+export const MPP_AUTHORIZATION_HEADER = "Authorization";
+
 /** Encodes a value for an x402 header: JSON, then base64url. */
 export function encodeHeader(value: unknown): string {
   return bytesToBase64Url(utf8Bytes(JSON.stringify(value)));
@@ -27,4 +30,22 @@ export function readHeader(
     }
   }
   return undefined;
+}
+
+/**
+ * Returns the `Payment ...` credential from an Authorization header, or
+ * undefined when there is none. The header can list several schemes
+ * separated by commas; only the Payment one is MPP's.
+ */
+export function readMppCredential(
+  headers: Record<string, string | string[] | undefined>,
+): string | undefined {
+  const authorization = readHeader(headers, MPP_AUTHORIZATION_HEADER);
+  if (!authorization) {
+    return undefined;
+  }
+  return authorization
+    .split(",")
+    .map((scheme) => scheme.trim())
+    .find((scheme) => /^Payment\s+\S/i.test(scheme));
 }

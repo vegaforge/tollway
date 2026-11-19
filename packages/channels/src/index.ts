@@ -6,7 +6,8 @@
  * single settlement, and recover when a counterparty goes quiet. See
  * docs/design.md, "The channel lifecycle manager".
  *
- * This release ships `open`, `commit`, `shouldClose`, and `close`.
+ * This release ships `open`, `commit`, `shouldClose`, and `close`, and
+ * `createStellarMppChannelAdapter`, the adapter backed by @stellar/mpp.
  * `recover` is tracked under #38 and remains a typed stub.
  */
 
@@ -28,6 +29,10 @@ export {
   SettlementMismatchError,
 } from "./errors.js";
 export { type CreateChannelManagerOptions, createChannelManager } from "./manager.js";
+export {
+  createStellarMppChannelAdapter,
+  type StellarMppChannelAdapterOptions,
+} from "./stellar-adapter.js";
 export { type CommitmentStore, createMemoryCommitmentStore } from "./store.js";
 export type {
   Channel,

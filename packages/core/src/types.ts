@@ -50,7 +50,13 @@ export type X402Payment = {
 
 export type MppChargePayment = {
   model: "mpp-charge";
-  /** TODO: the real charge proof, once @stellar/mpp's charge shape is wired in. */
+  /**
+   * The agent's MPP credential from the `Authorization` header, exactly as
+   * sent: the `Payment <base64url JSON>` scheme `mppx` serializes. It holds
+   * the challenge being answered, the payer (`source`, a `did:pkh` id) and
+   * the signed transfer. Opaque to Tollway; `mppx` and @stellar/mpp own the
+   * format.
+   */
   payload: string;
 };
 

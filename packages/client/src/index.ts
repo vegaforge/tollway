@@ -248,3 +248,11 @@ function normalizeError(value: unknown): Error {
   if (value instanceof Error) return value;
   return new Error(typeof value === "string" ? value : JSON.stringify(value));
 }
+
+export {
+  createX402Settler,
+  PAYMENT_REQUIRED_HEADER,
+  PAYMENT_SIGNATURE_HEADER,
+  TOLLWAY_RECEIPT_HEADER,
+  type X402SettlerOptions,
+} from "./x402-settler.js";
