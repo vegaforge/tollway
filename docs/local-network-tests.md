@@ -65,6 +65,22 @@ passes `allowHttp: true`. The `@x402/stellar` client (through
 the harness runs an HTTPS proxy in front of the RPC with a throwaway
 certificate that Node trusts through `NODE_EXTRA_CA_CERTS`.
 
+## One Stellar SDK, and the one peer exception
+
+The whole workspace resolves a single `@stellar/stellar-sdk`, 16.4.1, so an
+`Address`, `Keypair` or XDR value built by one package can be handed to
+another. `@x402/stellar` 2.31.0 depends on `@stellar/stellar-sdk` `^16.4.1`
+(every release from 2.17.0 requires 16; 2.16.0 was the last on 14, and no
+release accepted 15).
+
+`@stellar/mpp` 0.7.1, its latest release, declares `@stellar/stellar-sdk`
+`^15.1.0` as a peer, and no release accepts 16 yet. The root `package.json`
+records that one exception under `pnpm.peerDependencyRules.allowedVersions`
+(`"@stellar/mpp>@stellar/stellar-sdk": "16"`), scoped to that peer only. This
+suite is what backs it: it runs a real MPP charge through `@stellar/mpp` on
+SDK 16 against the local network on every run of `integration.yml`. Remove
+the rule once an `@stellar/mpp` release accepts SDK 16.
+
 ## Running it locally
 
 You need Docker, OpenSSL and the repository installed (`pnpm install`).
