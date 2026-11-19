@@ -124,6 +124,8 @@ A dashboard and an exporter. Per-agent and per-service spend over time, model mi
 
 For how the dashboard views actually consume this data, including the three UI primitives every widget composes from and the data-layer seam each wired view holds with its source, see `docs/dashboard-data-contracts.md`.
 
+The dashboard is signed in separately from payment tenancy. `DASHBOARD_USERS` holds server-side username, bcrypt hash, and role records, and `DASHBOARD_SESSION_SECRET` signs an eight-hour HS256 session cookie. A `viewer` can read; an `admin` can revoke sessions. `proxy.ts` redirects unauthenticated pages to `/login?next=<path>` and answers 401 on `/api/**`, but every route handler checks the session again; the optimistic check never grants authority. State-changing handlers also check the request origin and a session-bound CSRF token. Login failures are uniform and rate-limited per username and client address. Revocation and rate-limit counters live in memory, so a restart clears them and a multi-instance deployment needs a shared store before production use. The service API key from #231 stays on the server; no dashboard client component may read it.
+
 ## Design notes
 
 A few decisions worth recording, since each one came up early and will come up again.

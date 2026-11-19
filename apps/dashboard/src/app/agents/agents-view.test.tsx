@@ -138,4 +138,36 @@ describe("AgentsView", () => {
 
     expect(screen.getAllByText("-").length).toBeGreaterThanOrEqual(3);
   });
+
+  it("links each agent row to its detail page", () => {
+    useAgentSpendMock.mockReturnValue({
+      status: "ready",
+      rows: [row("agent-research-01", "research-bot", "100000000")],
+    });
+
+    render(<AgentsView />);
+
+    expect(screen.getByRole("link", { name: /research-bot/i })).toHaveAttribute(
+      "href",
+      "/agents/agent-research-01",
+    );
+  });
+
+  it("shows headline totals per asset instead of summing across assets", () => {
+    useAgentSpendMock.mockReturnValue({
+      status: "ready",
+      rows: [
+        { id: "a", label: "a", spend: "10000000000", budget: "20000000000", asset: "USDC" },
+        { id: "b", label: "b", spend: "30000000000", budget: "40000000000", asset: "XLM" },
+      ],
+    });
+
+    render(<AgentsView />);
+
+    const spendCard = screen.getByText("Total spend").closest("div");
+    if (!spendCard) throw new Error("spend card not found");
+    expect(within(spendCard).getByText("1,000.00 USDC")).toBeInTheDocument();
+    expect(within(spendCard).getByText("3,000.00 XLM")).toBeInTheDocument();
+    expect(within(spendCard).queryByText(/4,000\.00 USDC/)).not.toBeInTheDocument();
+  });
 });

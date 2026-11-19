@@ -141,9 +141,14 @@ function ReceiptsTable({
                 }`}
               >
                 <td className="px-3 py-3">
-                  <span className="block font-mono text-xs text-muted">
+                  <button
+                    type="button"
+                    data-testid={`receipt-select-${receipt.id}`}
+                    aria-label={`Select receipt ${receipt.id}`}
+                    className="block rounded font-mono text-xs text-muted focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-primary"
+                  >
                     {truncate(receipt.payer, 8, 6)}
-                  </span>
+                  </button>
                 </td>
                 <td className="px-3 py-3">
                   <span className="block font-mono text-xs text-muted">
@@ -310,7 +315,7 @@ function VerificationPill({
     return (
       <span
         data-testid="receipt-verification-error"
-        className="inline-flex items-center gap-1.5 rounded-full bg-danger/15 px-2.5 py-1 text-[10px] font-medium uppercase tracking-wide text-danger"
+        className="inline-flex items-center gap-1.5 rounded-full bg-danger/15 px-2.5 py-1 text-[10px] font-medium uppercase tracking-wide text-foreground"
         title={verification.error.message}
       >
         Verification error
@@ -321,7 +326,7 @@ function VerificationPill({
     return (
       <span
         data-testid="receipt-verification-valid"
-        className="inline-flex items-center gap-1.5 rounded-full bg-success/15 px-2.5 py-1 text-[10px] font-medium uppercase tracking-wide text-success"
+        className="inline-flex items-center gap-1.5 rounded-full bg-success/15 px-2.5 py-1 text-[10px] font-medium uppercase tracking-wide text-foreground"
       >
         Signature valid
       </span>
@@ -330,7 +335,7 @@ function VerificationPill({
   return (
     <span
       data-testid="receipt-verification-invalid"
-      className="inline-flex items-center gap-1.5 rounded-full bg-danger/15 px-2.5 py-1 text-[10px] font-medium uppercase tracking-wide text-danger"
+      className="inline-flex items-center gap-1.5 rounded-full bg-danger/15 px-2.5 py-1 text-[10px] font-medium uppercase tracking-wide text-foreground"
       title={verification.result.reason}
     >
       Signature invalid

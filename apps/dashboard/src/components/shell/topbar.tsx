@@ -1,4 +1,5 @@
 import Link from "next/link";
+import { SessionBadge } from "@/components/auth/session-badge";
 import { LogoMark } from "@/components/logo";
 import { ThemeToggle } from "@/components/theme-toggle";
 import { Badge } from "@/components/ui/badge";
@@ -24,6 +25,7 @@ export function Topbar() {
           GitHub
         </a>
         <ThemeToggle />
+        <SessionBadge />
       </div>
     </header>
   );

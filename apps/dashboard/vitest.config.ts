@@ -13,9 +13,28 @@ export default defineConfig({
     },
   },
   test: {
-    globals: true,
-    environment: "jsdom",
-    setupFiles: ["./vitest.setup.ts"],
-    include: ["src/**/*.test.{ts,tsx}"],
+    projects: [
+      {
+        extends: true,
+        test: {
+          name: "dom",
+          globals: true,
+          environment: "jsdom",
+          setupFiles: ["./vitest.setup.ts"],
+          include: ["src/**/*.test.{ts,tsx}"],
+          exclude: ["src/lib/auth.test.ts", "src/app/api/**/*.test.ts"],
+        },
+      },
+      {
+        extends: true,
+        test: {
+          name: "server",
+          globals: true,
+          environment: "node",
+          setupFiles: ["./vitest.setup.ts"],
+          include: ["src/lib/auth.test.ts", "src/app/api/**/*.test.ts"],
+        },
+      },
+    ],
   },
 });

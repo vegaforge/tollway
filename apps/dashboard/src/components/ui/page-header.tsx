@@ -11,7 +11,10 @@ export function PageHeader({
   action?: ReactNode;
 }) {
   return (
-    <header className="mb-8 flex flex-wrap items-start justify-between gap-4">
+    <header
+      data-testid="page-header"
+      className="mb-8 flex flex-wrap items-start justify-between gap-4"
+    >
       <div>
         <h1 className="text-2xl font-semibold tracking-[-0.02em]">{title}</h1>
         {lead && <p className="mt-1 max-w-2xl text-sm text-muted">{lead}</p>}

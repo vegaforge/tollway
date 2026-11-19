@@ -1,5 +1,6 @@
 "use client";
 
+import Link from "next/link";
 import { useMemo, useState } from "react";
 
 import { Panel } from "@/components/ui/panel";
@@ -39,12 +40,27 @@ function formatAmount(amount: string, asset: string): string {
   return `${whole.toLocaleString("en-US")}.${fractionStr} ${asset}`;
 }
 
-function sumAmounts(rows: AgentSpendRow[], pick: (row: AgentSpendRow) => string): bigint {
-  return rows.reduce((acc, row) => acc + BigInt(pick(row)), 0n);
+function totalsByAsset(
+  rows: AgentSpendRow[],
+  pick: (row: AgentSpendRow) => string,
+): { asset: string; amount: string }[] {
+  const totals = new Map<string, bigint>();
+  for (const row of rows) {
+    totals.set(row.asset, (totals.get(row.asset) ?? 0n) + BigInt(pick(row)));
+  }
+  return [...totals.entries()].map(([asset, amount]) => ({ asset, amount: amount.toString() }));
 }
 
-function headlineAsset(rows: AgentSpendRow[]): string {
-  return rows[0]?.asset ?? "USDC";
+function AssetTotals({ entries }: { entries: { asset: string; amount: string }[] }) {
+  if (entries.length === 0) return <>0 USDC</>;
+  return (
+    <>
+      {entries.flatMap((entry, index) => [
+        ...(index > 0 ? [<span key={`separator-${entry.asset}`}> · </span>] : []),
+        <span key={entry.asset}>{formatAmount(entry.amount, entry.asset)}</span>,
+      ])}
+    </>
+  );
 }
 
 export function AgentsView() {
@@ -58,29 +74,26 @@ export function AgentsView() {
     [rows, sortDirection],
   );
 
-  const totals = useMemo(() => {
-    if (rows.length === 0) {
-      return { spend: "0", budget: "0", asset: "USDC" };
-    }
-    return {
-      spend: sumAmounts(rows, (r) => r.spend).toString(),
-      budget: sumAmounts(rows, (r) => r.budget).toString(),
-      asset: headlineAsset(rows),
-    };
-  }, [rows]);
+  const totals = useMemo(
+    () => ({
+      spend: totalsByAsset(rows, (row) => row.spend),
+      budget: totalsByAsset(rows, (row) => row.budget),
+    }),
+    [rows],
+  );
 
   return (
     <>
       <div className="grid gap-4 sm:grid-cols-3">
         <StatCard
           label="Total spend"
-          value={state.status === "ready" ? formatAmount(totals.spend, totals.asset) : "-"}
-          hint="Cumulative across all agents"
+          value={state.status === "ready" ? <AssetTotals entries={totals.spend} /> : "-"}
+          hint="Per asset, cumulative across agents"
         />
         <StatCard
           label="Total budget"
-          value={state.status === "ready" ? formatAmount(totals.budget, totals.asset) : "-"}
-          hint="Remaining across all agents"
+          value={state.status === "ready" ? <AssetTotals entries={totals.budget} /> : "-"}
+          hint="Per asset, remaining across agents"
         />
         <StatCard
           label="Agents"
@@ -152,7 +165,12 @@ function AgentsTable({
           {rows.map((row) => (
             <tr key={row.id} className="border-b border-border last:border-b-0">
               <td className="px-3 py-3">
-                <span className="font-medium">{row.label}</span>
+                <Link
+                  className="font-medium hover:underline"
+                  href={`/agents/${encodeURIComponent(row.id)}`}
+                >
+                  {row.label}
+                </Link>
                 <span className="ml-2 font-mono text-xs text-muted">{row.id}</span>
               </td>
               <td className="px-3 py-3 font-mono">{formatAmount(row.spend, row.asset)}</td>

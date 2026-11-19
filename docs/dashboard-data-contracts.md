@@ -80,6 +80,7 @@ A view that does not yet have a data hook renders an `EmptyState` directly insid
 | ----- | ---- | -------------- | ------------- |
 | `/` | Overview | `StatCard` placeholders plus `EmptyState`s for model mix, spend over time, recent receipts, anomalies | `@vegaforge/tollway-observability` (`summarize`), `@vegaforge/tollway-core` (`SignedReceipt`), `anomaly.detected` events |
 | `/agents` | Per-agent spend | `useAgentSpend` -> `fetchAgentSpend` stub in `src/data/agent-spend.ts` | `summarize({ payer })` per agent, or a future `byPayer` rollup on the hub |
+| `/agents/[agentId]` | One agent's spend, budget, and policy stops | `useAgentDetail` -> `fetchAgentDetail` stub in `src/data/agent-detail.ts` | #226 series filtered by payer, plus the #228 policy store per agent id |
 | `/services` | Per-service revenue | `EmptyState` with `summarize({ payee })` as the named source | `summarize({ payee })`, plus latency-per-model breakdown |
 | `/channels` | Open MPP channels | `useOpenChannels` -> `fetchOpenChannels` stub in `src/data/open-channels.ts` | Observability hub rollup over `channel.opened` / `channel.closed`, or a direct `ChannelManager.list` iteration |
 | `/receipts` | Signed receipt archive | `EmptyState` with `@vegaforge/tollway-core · SignedReceipt` as the named source | Receipt archive backed by the observability hub's receipt stream |
@@ -88,6 +89,22 @@ A view that does not yet have a data hook renders an `EmptyState` directly insid
 
 The nav order in `apps/dashboard/src/components/shell/nav.ts` matches this table. Add new entries there when you add a route.
 
+## Agent detail contract
+
+`/agents/[agentId]` consumes `AgentDetail` from `src/data/agent-detail.ts` through the `useAgentDetail(agentId)` hook. It carries identity (`id`, `label`, `payerAddresses`), settled spend as a time series per asset and bucket (`series`), spend by model and by payee (`byModel`, `byPayee`), the current policy with its usage (`policy`, or `null` when the agent has none), and `recentStops`.
+
+### Agent to payer mapping
+
+`Policy` in `packages/core/src/policy.ts` has no agent identity and `PaymentIntent` has no payer. `PaymentMetric.payer` in `@vegaforge/tollway-observability` is a payer address, not an agent id. The detail contract therefore carries an explicit `payerAddresses: string[]` per agent. The deterministic stub owns that map; the page never derives a payer from an agent id by string convention. A real implementation of `fetchAgentDetail` must keep the mapping explicit so spend cannot be attributed to the wrong agent.
+
+### Amounts, buckets, and budget usage
+
+Every amount is an integer base-unit string. `bucketSeries` and `seriesByAsset` count only metrics with `outcome === "settled"`, group by UTC hour or UTC day, and never sum across assets. `byModel` and `byPayee` are keyed by `(key, asset)` for the same reason.
+
+`percentageBasisPoints(used, budget)` multiplies by 10,000 before dividing, so a percentage is a `bigint` in basis points at every step and becomes a display string only in the view. The daily budget is labelled as a UTC day, matching `utcDate` in `packages/core/src/policy.ts`. Each asset's usage is compared against the policy's single-number budget separately; a zero budget with spend is shown as fully consumed. The view states the unit ambiguity until #191 keys budgets by asset. An agent without a policy renders an explicit message instead of an empty budget bar.
+
+Recent stops carry a rule name, a detail string, and a timestamp. Each links to `/anomalies?agent=<id>`.
+
 ## Adding a new view
 
 1. Add an entry to `navItems` in `src/components/shell/nav.ts`.
@@ -95,3 +112,19 @@ The nav order in `apps/dashboard/src/components/shell/nav.ts` matches this table
 3. If the view will be wired immediately, add a typed data module under `src/data/`. Export the row shape, a snapshot type, and a `fetchXxx` function; add a `useXxx` hook returning a `loading | error | ready` discriminated union over the snapshot. Mirror the conventions in `agent-spend.ts` and `open-channels.ts`.
 4. If the view is a placeholder for now, use a `Panel` containing an `EmptyState` and name the future source via the `source` prop. That keeps the contributor map intact.
 5. Cover the wired case with a Vitest component test that drives each state of the discriminated union (see `channels-view.test.tsx` and `agents-view.test.tsx`).
+
+## Authentication contract
+
+The dashboard session is independent of the service API key. `DASHBOARD_USERS` is a server-side JSON array of `{ username, passwordHash, role }`, where `role` is `viewer` or `admin`, and `DASHBOARD_SESSION_SECRET` signs the session token. `apps/dashboard/.env.example` shows the shape with a throwaway hash. Never commit real credentials.
+
+`src/lib/session.ts` signs and verifies the compact HS256 token; `src/lib/session-store.ts` tracks active and revoked session ids in memory; `src/lib/users.ts` verifies bcrypt password hashes; `src/lib/csrf.ts` checks request origin and a session-bound token; `src/lib/rate-limit.ts` counts failed logins per username and client address. All of these are server-only. `proxy.ts` redirects unauthenticated page requests to `/login?next=<path>` and returns JSON 401 for `/api/**`, while `POST /api/auth/login`, `POST /api/auth/logout`, `GET /api/session`, and `DELETE /api/admin/sessions/[sid]` re-check the session and role before doing work. Revocation and rate limits reset on restart, so a multi-instance deployment needs a shared store before production use.
+
+When #237 lands, the service API key stays server side. A browser component may use the session identity from `GET /api/session`, but it must never import or read the service key.
+
+## Browser tests
+
+Run `pnpm --filter @vegaforge/tollway-dashboard test:e2e`. The script builds the production dashboard, then Playwright starts `next start` on `127.0.0.1:3124` and runs the suites in light, dark, and mobile Chromium projects. A local Chromium override is available through `PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH`; CI installs the matching browser with `playwright install --with-deps chromium`.
+
+The route suite generates cases from `navItems`, so a new navigation entry must render a `PageHeader` with its `data-testid="page-header"` hook. Flow tests cover UI sign-in, protected navigation, sign-out, and keyboard theme toggling. The keyboard test uses the focusable receipt-select button, and the accessibility suite runs axe with serious and critical violations failing the build. The shell's skip link targets `<main id="main-content">`. Keep these hooks and controls when changing the shell.
+
+CI runs the browser suite in the `e2e` job of `.github/workflows/ci.yml`, adds it to `quality.needs`, and reports success without a browser run when the pull request touches none of `apps/dashboard/**`, `pnpm-lock.yaml`, or that workflow. Failures upload the Playwright report and test results.
