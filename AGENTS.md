@@ -207,6 +207,10 @@ rules cover what a scanner cannot:
   request pass. Fix the finding, or narrow the rule with a test case in a
   maintainer's own pull request.
 - Agents follow the same rules and never approve a pull request.
+- Once the diff is read, the maintainer approves and merges in one step with
+  `scripts/approve-and-merge.sh <pr-number>`. It approves the head commit,
+  re-runs the security run that failed only for want of that approval, and
+  turns on auto-merge, which still waits for `quality` and `security`.
 
 ## Pre-review defect checklist
 

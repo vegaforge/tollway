@@ -28,4 +28,9 @@ only the day's update instead of about 200 MB on every run. Runs for the same
 pull request no longer cancel each other across events, so approving a pull
 request does not leave a cancelled, failing `security` check behind.
 
+For the maintainer, `scripts/approve-and-merge.sh <pr-number>` approves a
+contributor's pull request, re-runs the security run whose only failure was
+the missing approval (that stale failure otherwise keeps the pull request
+blocked), and turns on auto-merge.
+
 Decision: ADR-2026-11-19-open-source-governance.

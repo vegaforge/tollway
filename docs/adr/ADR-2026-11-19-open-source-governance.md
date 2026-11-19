@@ -79,7 +79,13 @@ issues, and the first contribution (#275) showed where they do not fit:
    overwrite the base branch's cache. Runs for the same commit no longer
    cancel each other, so a review never leaves a cancelled, failing
    `security` behind.
-6. **The issues are swept.** The "write the ADR pair first" line is replaced
+6. **The maintainer approves and merges in one step.** Merging #276 showed
+   that approving starts a passing security run, but the failure the push run
+   recorded before the approval stays on the same commit and keeps the pull
+   request blocked until that run is re-run. `scripts/approve-and-merge.sh
+   <pr-number>` approves the head commit, re-runs that run's failed jobs, and
+   turns on auto-merge. It never bypasses a check.
+7. **The issues are swept.** The "write the ADR pair first" line is replaced
    with the rule in decision 1 in every open issue that has it, and any issue
    that asks for something the `security` check forbids is rewritten so the
    two agree.
