@@ -47,11 +47,11 @@
     }
   },
   "devDependencies": {
-    "@types/node": "^22.19.20",
-    "next": "^16.4.5",
-    "tsup": "^8.5.0",
-    "typescript": "^5.8.0",
-    "vitest": "^4.1.8"
+    "@types/node": "^22.20.5",
+    "next": "^16.4.6",
+    "tsup": "^8.5.1",
+    "typescript": "^5.9.3",
+    "vitest": "^4.1.12"
   },
   "publishConfig": {
     "access": "public"
