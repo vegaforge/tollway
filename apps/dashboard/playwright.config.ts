@@ -1,7 +1,14 @@
 import { defineConfig, devices } from "@playwright/test";
+import { baseURL, port } from "./e2e/server";
 
-const port = 3124;
-const baseURL = `http://127.0.0.1:${port}`;
+/**
+ * End-to-end and accessibility suite. It runs against the production build
+ * (`next build` happens in the `test:e2e` script, `next start` here) with
+ * the deterministic stub data, so every run sees the same pages. See
+ * docs/dashboard-data-contracts.md, "End-to-end tests".
+ */
+
+// Lets a machine with a system Chromium skip the Playwright download.
 const chromiumExecutable = process.env.PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH;
 
 export default defineConfig({
@@ -9,7 +16,8 @@ export default defineConfig({
   fullyParallel: true,
   workers: 2,
   forbidOnly: Boolean(process.env.CI),
-  retries: process.env.CI ? 2 : 0,
+  // No retries: a flaky test is a bug to fix, not a result to retry past.
+  retries: 0,
   reporter: process.env.CI ? [["github"], ["html", { open: "never" }]] : "list",
   use: {
     baseURL,
@@ -28,7 +36,7 @@ export default defineConfig({
     },
     {
       name: "mobile",
-      use: { ...devices["Pixel 7"] },
+      use: { ...devices["Pixel 7"], colorScheme: "light" },
     },
   ],
   webServer: {
@@ -37,12 +45,19 @@ export default defineConfig({
     reuseExistingServer: !process.env.CI,
     timeout: 120_000,
     env: {
-      DASHBOARD_SESSION_SECRET: "playwright-only-session-secret",
+      // Test-only values. The hashes are bcrypt cost 10 of the passwords in
+      // e2e/fixtures.ts; no real deployment uses either.
+      DASHBOARD_SESSION_SECRET: "playwright-only-session-secret-at-least-32-bytes",
       DASHBOARD_USERS: JSON.stringify([
         {
           username: "e2e",
-          passwordHash: "$2b$04$aEjJvAQZtjotlF2VrDuXeOA/arOJ.eLWaa4yPkWNJHnMVZsxGXkwm",
+          passwordHash: "$2b$10$XOB07DhxQPzPxVSlgvHJoOla6KoC5YMMUygiWnHRS0p8/O29kVrWq",
           role: "viewer",
+        },
+        {
+          username: "e2e-admin",
+          passwordHash: "$2b$10$gMMFSFGjdZiBguqZkPQubuG5wlNRfZHQNzT7u6WWj8IAoL5gQw/D.",
+          role: "admin",
         },
       ]),
     },

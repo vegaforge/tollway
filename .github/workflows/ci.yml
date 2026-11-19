@@ -214,7 +214,9 @@ jobs:
             echo "changed=true" >> "$GITHUB_OUTPUT"
             exit 0
           fi
-          if git diff --quiet "$BASE" HEAD -- apps/dashboard pnpm-lock.yaml .github/workflows/ci.yml; then
+          # The dashboard and the workspace packages it builds from.
+          if git diff --quiet "$BASE" HEAD -- apps/dashboard packages/core packages/channels \
+              packages/observability packages/theme pnpm-lock.yaml .github/workflows/ci.yml; then
             echo "changed=false" >> "$GITHUB_OUTPUT"
           else
             echo "changed=true" >> "$GITHUB_OUTPUT"
@@ -245,6 +247,11 @@ jobs:
         if: steps.paths.outputs.changed == 'true'
         run: pnpm --filter @vegaforge/tollway-dashboard exec playwright install --with-deps chromium
 
+      # The dashboard imports these packages from their built output.
+      - name: Build the dashboard's workspace dependencies
+        if: steps.paths.outputs.changed == 'true'
+        run: pnpm --filter "@vegaforge/tollway-dashboard^..." build
+
       - name: Test dashboard in the browser
         if: steps.paths.outputs.changed == 'true'
         run: pnpm --filter @vegaforge/tollway-dashboard test:e2e
@@ -260,7 +267,7 @@ jobs:
 
       - name: Report
         if: steps.paths.outputs.changed == 'false'
-        run: echo "No dashboard, lockfile, or workflow changes; browser suite not needed."
+        run: echo "No dashboard, dependency, lockfile, or workflow changes; browser suite not needed."
 
   quality:
     name: quality
@@ -284,4 +291,4 @@ jobs:
           exit 1
 
       - name: Report
-        run: echo "branch flow, checks, tests, build and dashboard e2e all succeeded."
+        run: echo "branch flow, checks, tests, Next adapter matrix, build and dashboard e2e all succeeded."

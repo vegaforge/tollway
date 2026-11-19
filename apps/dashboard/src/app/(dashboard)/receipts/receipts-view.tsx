@@ -144,9 +144,11 @@ function ReceiptsTable({
                   <button
                     type="button"
                     data-testid={`receipt-select-${receipt.id}`}
-                    aria-label={`Select receipt ${receipt.id}`}
+                    aria-pressed={isSelected}
                     className="block rounded font-mono text-xs text-muted focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-primary"
                   >
+                    {/* The accessible name contains the visible payer text (WCAG 2.5.3). */}
+                    <span className="sr-only">Select receipt {receipt.id}, payer </span>
                     {truncate(receipt.payer, 8, 6)}
                   </button>
                 </td>

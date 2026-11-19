@@ -151,7 +151,7 @@ function AgentsTable({
               <button
                 type="button"
                 onClick={onToggleSort}
-                className="inline-flex items-center gap-1 font-medium uppercase tracking-wide text-muted hover:text-foreground"
+                className="inline-flex items-center gap-1 rounded font-medium uppercase tracking-wide text-muted hover:text-foreground focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-primary"
               >
                 Spend
                 <span aria-hidden="true">{sortDirection === "asc" ? "▲" : "▼"}</span>

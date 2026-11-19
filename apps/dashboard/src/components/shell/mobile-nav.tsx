@@ -18,7 +18,18 @@ export function MobileNav() {
   const buttonRef = useRef<HTMLButtonElement>(null);
 
   return (
-    <div className="relative">
+    // Escape is handled on the wrapper so it works with focus on the button
+    // as well as inside the menu.
+    // biome-ignore lint/a11y/noStaticElementInteractions: the wrapper only listens for Escape bubbling from the button and links inside it; it is not itself interactive.
+    <div
+      className="relative"
+      onKeyDown={(event) => {
+        if (event.key === "Escape" && open) {
+          setOpen(false);
+          buttonRef.current?.focus();
+        }
+      }}
+    >
       <button
         ref={buttonRef}
         type="button"
@@ -44,12 +55,6 @@ export function MobileNav() {
         <nav
           id={menuId}
           aria-label="Dashboard sections"
-          onKeyDown={(event) => {
-            if (event.key === "Escape") {
-              setOpen(false);
-              buttonRef.current?.focus();
-            }
-          }}
           className="absolute left-0 top-11 z-40 flex w-56 flex-col gap-0.5 rounded-lg border border-border bg-surface p-2 shadow-lg"
         >
           {navItems.map((item) => {
