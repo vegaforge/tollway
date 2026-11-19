@@ -51,16 +51,38 @@ export type MetricsQuery = {
 /**
  * Aggregated spend over a query window. Amounts are integer strings in the
  * asset's smallest unit (same convention as `PaymentMetric.amount` and the
- * canonical receipt). Per-group buckets only carry the amount; per-group
- * counts and averages can be derived by combining with the `count` rollups
- * via a future query-side helper. Keys for `byPayer` / `byPayee` are the
- * payer / payee addresses exactly as they appear on the recorded metrics.
+ * canonical receipt). Every amount field counts metrics of every outcome
+ * (settled, failed and skipped); `count` is the number of matched metrics.
+ * Keys for `byPayer` / `byPayee` are the payer / payee addresses exactly as
+ * they appear on the recorded metrics. For settled-only amounts, an outcome
+ * split and latency, use `ObservabilityHub.timeseries`.
  */
 export type SpendSummary = {
+  /**
+   * @deprecated Adds amounts across assets, so it is only meaningful when the
+   * window holds a single asset. Use `byAsset`.
+   */
   totalAmount: string;
   count: number;
+  /**
+   * Amount per asset, keyed by `PaymentMetric.asset`. Amounts in different
+   * assets are never added together.
+   */
+  byAsset: Record<string, string>;
+  /**
+   * @deprecated Adds amounts across assets. Use `timeseries`, whose rows are
+   * keyed by model and asset.
+   */
   byModel: Partial<Record<SettlementModel, string>>;
+  /**
+   * @deprecated Adds amounts across assets. Use `timeseries` with
+   * `groupBy: "payer"`.
+   */
   byPayer: Record<string, string>;
+  /**
+   * @deprecated Adds amounts across assets. Use `timeseries` with
+   * `groupBy: "payee"`.
+   */
   byPayee: Record<string, string>;
 };
 
@@ -355,6 +377,7 @@ export function createObservabilityHub(options: ObservabilityHubOptions = {}): O
     summarize(query) {
       const matched = filterMetrics(metrics, query);
       let totalAmount = 0n;
+      const byAsset: Record<string, bigint> = {};
       const byModel: Partial<Record<SettlementModel, bigint>> = {};
       const byPayer: Record<string, bigint> = {};
       const byPayee: Record<string, bigint> = {};
@@ -370,6 +393,7 @@ export function createObservabilityHub(options: ObservabilityHubOptions = {}): O
           continue;
         }
         totalAmount += amount;
+        byAsset[m.asset] = (byAsset[m.asset] ?? 0n) + amount;
         byModel[m.model] = (byModel[m.model] ?? 0n) + amount;
         byPayer[m.payer] = (byPayer[m.payer] ?? 0n) + amount;
         byPayee[m.payee] = (byPayee[m.payee] ?? 0n) + amount;
@@ -378,6 +402,7 @@ export function createObservabilityHub(options: ObservabilityHubOptions = {}): O
       return {
         totalAmount: totalAmount.toString(),
         count: matched.length,
+        byAsset: stringifyBigintMap(byAsset),
         byModel: stringifyBigintMap(byModel) as Partial<Record<SettlementModel, string>>,
         byPayer: stringifyBigintMap(byPayer),
         byPayee: stringifyBigintMap(byPayee),

@@ -371,6 +371,7 @@ describe("observability hub: record + summarize", () => {
     expect(summary).toEqual({
       totalAmount: "0",
       count: 0,
+      byAsset: {},
       byModel: {},
       byPayer: {},
       byPayee: {},
