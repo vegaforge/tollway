@@ -78,9 +78,9 @@ A view that does not yet have a data hook renders an `EmptyState` directly insid
 
 | Route | View | Current source | Future source |
 | ----- | ---- | -------------- | ------------- |
-| `/` | Overview | `StatCard` placeholders plus `EmptyState`s for model mix, spend over time, recent receipts, anomalies | `@vegaforge/tollway-observability` (`summarize`), `@vegaforge/tollway-core` (`SignedReceipt`), `anomaly.detected` events |
+| `/` | Overview | `StatCard` placeholders plus `EmptyState`s for model mix, spend over time, recent receipts, anomalies | `@vegaforge/tollway-observability` (`summarize`, and `timeseries` for spend over time, wiring tracked in #232), `@vegaforge/tollway-core` (`SignedReceipt`), `anomaly.detected` events |
 | `/agents` | Per-agent spend | `useAgentSpend` -> `fetchAgentSpend` stub in `src/data/agent-spend.ts` | `summarize({ payer })` per agent, or a future `byPayer` rollup on the hub |
-| `/services` | Per-service revenue | `EmptyState` with `summarize({ payee })` as the named source | `summarize({ payee })`, plus latency-per-model breakdown |
+| `/services` | Per-service revenue | `EmptyState` with `summarize({ payee })` as the named source | `summarize({ payee })`, plus `timeseries({ payee, ... })` for the latency-per-model breakdown |
 | `/channels` | Open MPP channels | `useOpenChannels` -> `fetchOpenChannels` stub in `src/data/open-channels.ts` | Observability hub rollup over `channel.opened` / `channel.closed`, or a direct `ChannelManager.list` iteration |
 | `/receipts` | Signed receipt archive | `EmptyState` with `@vegaforge/tollway-core · SignedReceipt` as the named source | Receipt archive backed by the observability hub's receipt stream |
 | `/anomalies` | Anomaly feed | `EmptyState` with `anomaly.detected` as the named source | `anomaly.detected` event stream, with the rule that fired |
