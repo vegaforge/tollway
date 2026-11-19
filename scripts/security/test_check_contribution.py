@@ -18,6 +18,9 @@ ISSUES = {
     "21": {"number": 21, "assignees": [{"login": "alice"}]},
     "22": {"number": 22, "assignees": []},
     "23": {"number": 23, "assignees": [{"login": "bob"}, {"login": "alice"}]},
+    "24": {"number": 24, "assignees": [{"login": "alice"}]},
+    "25": {"number": 25, "assignees": [{"login": "alice"}]},
+    "26": {"number": 26, "assignees": [{"login": "alice"}]},
     "30": {"number": 30, "assignees": [{"login": "alice"}], "pull_request": {"url": "x"}},
 }
 
@@ -94,10 +97,20 @@ class DecideTest(unittest.TestCase):
         self.assertFalse(passed)
         self.assertIn("does not close an issue", lines[-1])
 
-    def test_several_issues_fail(self) -> None:
-        passed, lines = run("Closes #21\nCloses #23")
+    def test_up_to_four_assigned_issues_pass(self) -> None:
+        passed, lines = run("Closes #21\nCloses #23\nCloses #24\nCloses #25")
+        self.assertTrue(passed, lines)
+
+    def test_more_than_four_issues_fail(self) -> None:
+        passed, lines = run("Closes #21\nCloses #23\nCloses #24\nCloses #25\nCloses #26")
         self.assertFalse(passed)
-        self.assertIn("one pull request per issue", lines[-1])
+        self.assertIn("at most four issues", lines[-1])
+
+    def test_every_closed_issue_must_be_assigned_to_the_author(self) -> None:
+        passed, lines = run("Closes #21\nCloses #22")
+        self.assertFalse(passed)
+        self.assertEqual(len(lines), 1)
+        self.assertIn("not assigned to #22", lines[0])
 
     def test_unassigned_issue_fails(self) -> None:
         passed, lines = run("Closes #22")
@@ -129,7 +142,7 @@ class DecideTest(unittest.TestCase):
         passed, lines = run("Closes #21\nCloses #22", adrs)
         self.assertFalse(passed)
         text = "\n".join(lines)
-        self.assertIn("one pull request per issue", text)
+        self.assertIn("not assigned to #22", text)
         self.assertIn("Accepted", text)
 
 

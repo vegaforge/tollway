@@ -17,8 +17,9 @@ plain words, when something is wrong.
 1. A contributor takes an issue and starts coding straight away. The issue is
    the agreed design, so no paperwork first. If they want to do it
    differently, they ask in the issue.
-2. They open one pull request for that one issue. If they bundle several
-   issues, or were never assigned, a check tells them within minutes.
+2. They open one pull request closing up to four of their assigned issues.
+   If they claim more, or one they were never assigned, a check tells them
+   within minutes.
 3. The automatic tests start on their own; the maintainer no longer has to
    click to let them run (except for brand-new GitHub accounts).
 4. If they touched a file that can run code, a check says "waiting for the
@@ -32,7 +33,7 @@ strict as today. Only the paperwork and the confusing messages go.
 ## What changes
 
 - No design paperwork for contributors; only the maintainer approves designs.
-- One early check for "one issue, assigned to you, no self-approved designs".
+- One early check for "up to four issues, all assigned to you, no self-approved designs".
 - Clearer wording on the review-needed check.
 - Tests run without a click for established accounts.
 - The security check takes about a minute instead of five, and approving a
