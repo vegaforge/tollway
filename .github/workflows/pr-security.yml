@@ -106,10 +106,13 @@ jobs:
           path: trusted
           persist-credentials: false
           # Cone mode also brings the root files, which is where deny.toml lives.
+          # .github/workflows is here because test_advisory_exceptions.py
+          # compares this workflow's allow-ghsas with osv-scanner.toml.
           sparse-checkout: |
             scripts/security
             .github/semgrep
             .github/security
+            .github/workflows
       - name: Use the base branch copy of the checks
         run: |
           if [ -f trusted/scripts/security/scan_diff.py ]; then
