@@ -24,14 +24,49 @@ export type Policy = {
    * allows it and only marks the would-be block in the trace. Spend is
    * recorded the same way in both modes, so budgets stay real.
    */
+  /**
+   * Selects how failed rules affect the payment decision.
+   *
+   * Omit this field to use `enforce`.
+   * Use `dry-run` while observing a policy before making it authoritative.
+   * A dry-run decision remains allowed even when one or more rules fail.
+   * The trace still reports those failures so operators can measure impact.
+   * Recording is not disabled in dry-run mode.
+   */
   mode?: PolicyMode;
+  /**
+   * Spend limits grouped by their accounting period.
+   *
+   * Values are denominated in the smallest unit of the matching asset.
+   * The engine tracks each asset independently.
+   * A missing limit means that particular ceiling is not configured.
+   */
   budgets?: {
-    /** Spend ceiling per UTC day. */
+    /**
+     * Maximum cumulative spend for one asset during a UTC calendar day.
+     *
+     * The counter resets when the engine observes a new UTC date.
+     * It does not reset at the operator's local midnight.
+     * Supply a non-negative integer string in base units.
+     */
     daily?: string;
-    /** Lifetime ceiling for this policy. */
+    /**
+     * Maximum cumulative spend for one asset over this engine's lifetime.
+     *
+     * Unlike the daily counter, this value is not cleared at day boundaries.
+     * The in-memory implementation loses this history when the process ends.
+     * Supply a non-negative integer string in base units.
+     */
     total?: string;
   };
-  /** Caps per counterparty service, keyed by the payee address or service id. */
+  /**
+   * Lifetime spend ceilings for individual counterparties.
+   *
+   * Each record key is matched against `PaymentIntent.payee`.
+   * The same payee has a separate running total for each asset.
+   * Entries without a `cap` do not add a spend ceiling.
+   * Values use the smallest unit of the asset being evaluated.
+   */
   perService?: Record<string, { cap?: string }>;
   perModel?: Partial<
     Record<
@@ -43,35 +78,95 @@ export type Policy = {
       }
     >
   >;
+  /**
+   * Maximum number of recorded payment intents in a rolling minute.
+   *
+   * The count is shared across assets and settlement models for this engine.
+   * It is based on calls recorded through `record`, not calls to `check`.
+   * The value must be a non-negative safe integer.
+   */
   rateLimit?: {
     requestsPerMinute?: number;
   };
+  /**
+   * A short-window spend ceiling intended to stop sudden spending spikes.
+   *
+   * Samples are grouped by asset and considered over a rolling 60-second
+   * window. This rule is independent of the daily and lifetime budgets.
+   */
   anomaly?: {
-    /** Trips the anomaly stop when spend in any minute exceeds this. */
+    /**
+     * Maximum projected spend for an asset in the current rolling minute.
+     *
+     * The current window's recorded spend and the candidate intent are added
+     * before comparison. The value is a non-negative base-unit integer string.
+     */
     maxSpendPerMinute?: string;
   };
 };
 
-/** A payment the engine is asked to allow or block, before it happens. */
+/**
+ * Describes one proposed payment for policy evaluation.
+ *
+ * This is an intent, not proof that a payment has settled.
+ * Call `check` or `evaluate` before settlement, then call `record` only after
+ * the payment has actually settled. Recording a rejected payment would make
+ * spend and request counters inaccurate.
+ */
 export type PaymentIntent = {
+  /** Destination account or service identifier used for per-service limits. */
   payee: string;
+  /** Resource being purchased; retained in the trace for audit context. */
   resource: string;
+  /** Non-negative integer amount in the asset's smallest unit. */
   amount: string;
+  /** Asset identifier; budget counters are maintained independently per asset. */
   asset: string;
+  /** Settlement mechanism selected for this payment. */
   model: SettlementModel;
 };
 
+/**
+ * Stateful evaluator for one policy configuration.
+ *
+ * The default implementation keeps counters in process memory. Create one
+ * engine for the lifetime of the policy state you intend to enforce.
+ * Multiple engine instances do not share budgets or rate-limit history.
+ */
 export interface PolicyEngine {
-  /** The mode the engine was created with. The client warns when it is dry-run. */
+  /**
+   * Mode resolved when the engine was created.
+   *
+   * This value does not change if the original policy object is later edited.
+   * Clients should make dry-run mode visible because decisions are non-blocking.
+   */
   readonly mode: PolicyMode;
   /**
    * Evaluates every rule against the intent and returns the full trace,
    * including the decision. Does not record spend.
+   *
+   * The returned trace includes passing, failing, and not-applicable rules.
+   * Evaluation may prune expired rolling-window samples and reset a new UTC
+   * day's daily counter, but it never adds the candidate amount to spend.
+   * Invalid amount strings reject with `invalid-amount`.
    */
   evaluate(intent: PaymentIntent): Promise<PolicyTrace>;
-  /** The decision alone, derived from `evaluate` with `decisionFromTrace`. */
+  /**
+   * Returns only the allow/block decision for an intent.
+   *
+   * This is a convenience projection of `evaluate`; use `evaluate` when the
+   * caller needs rule-by-rule explanations or audit information.
+   * Like `evaluate`, this method does not reserve budget or record a request.
+   */
   check(intent: PaymentIntent): Promise<PolicyDecision>;
-  /** Records a settled payment so budgets and anomaly windows advance. */
+  /**
+   * Adds a successfully settled payment to the engine's accounting state.
+   *
+   * Call this once per settlement, after the settlement is confirmed.
+   * It advances daily, lifetime, per-service, rate-limit, and anomaly state.
+   * It does not re-evaluate the intent or verify that `check` was called first.
+   * Duplicate calls therefore count the same payment more than once.
+   */
   record(intent: PaymentIntent): Promise<void>;
 }
 
