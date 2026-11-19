@@ -119,6 +119,20 @@ feature branch --squash--> dev --merge--> staging --merge--> main
 The decision is recorded in
 [ADR-2026-11-18-branch-flow](docs/adr/ADR-2026-11-18-branch-flow.md).
 
+## When CI fails or does not run
+
+| What you see | Why | What to do |
+| --- | --- | --- |
+| No checks at all on your pull request | Your branch conflicts with `dev`, so GitHub cannot test it, or your GitHub account is brand new and the first run waits for the maintainer | Merge the latest `dev` into your branch and resolve the conflicts. If there are none, wait for the maintainer to approve the run |
+| `ERR_PNPM_OUTDATED_LOCKFILE`, or "Lockfile out of date" | A `package.json` changed without `pnpm-lock.yaml`, often because the branch was cut from an old `dev` | Merge the latest `dev`, run `pnpm install`, commit `pnpm-lock.yaml`. Keep the versions `dev` already has |
+| `contribution rules` | The pull request closes no issue or more than four, closes one you are not assigned to, or marks an ADR as Accepted | Follow the message: fix the `Closes #N` lines, get assigned on Drips, or set the ADR to `Proposed, awaiting maintainer approval` |
+| `maintainer review` | You changed a file that can run code (CI, scripts, `package.json`, lockfile, `*.config.*`) | Nothing. It turns green when the maintainer approves your latest commit |
+| `malicious patterns`: "could not be analysed" | Semgrep's parser could not read a line of valid code | Rewrite that line in a simpler form; the message names the line and gives an example |
+| `format, lint, typecheck` | Formatting, lint or type errors | Run `./scripts/preflight.sh` locally before pushing; `pnpm lint:fix` fixes most of them |
+| `tests` or `build, release notes` | A failing test, a build error, or a source change without a release note | Run `./scripts/preflight.sh`; add a release note under `docs/release-notes/` |
+
+`./scripts/preflight.sh` runs the same gates as CI. If it passes locally on a branch that is up to date with `dev`, CI passes too, apart from `maintainer review`.
+
 ## Security checks on pull requests
 
 Every pull request runs a `security` check next to `quality`. It reads your
