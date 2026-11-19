@@ -1,6 +1,6 @@
 # ADR for Dummies: Dashboard Playwright end-to-end and accessibility suite
 
-- **Status:** Accepted 2026-11-19
+- **Status:** Proposed, awaiting maintainer approval
 - **Date:** 2026-11-19
 - **Technical ADR:** [ADR-2026-11-19-dashboard-playwright-e2e](ADR-2026-11-19-dashboard-playwright-e2e.md)
 

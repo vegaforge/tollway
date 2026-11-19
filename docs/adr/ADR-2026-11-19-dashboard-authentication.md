@@ -1,6 +1,6 @@
 # ADR: Dashboard authentication with server-side sessions and roles
 
-- **Status:** Accepted 2026-11-19
+- **Status:** Proposed, awaiting maintainer approval
 - **Date:** 2026-11-19
 - **Issue:** #239
 - **Scope:** `apps/dashboard` only: a `proxy.ts`, login and session route handlers, a server-only session module, small shell changes for the signed-in user, docs, tests, and a release note. New dependencies touch `apps/dashboard/package.json` and `pnpm-lock.yaml`, which are sensitive paths. No `packages/*` source changes, so no changeset.

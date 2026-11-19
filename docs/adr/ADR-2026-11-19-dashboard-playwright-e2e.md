@@ -1,6 +1,6 @@
 # ADR: Dashboard Playwright end-to-end and accessibility suite
 
-- **Status:** Accepted 2026-11-19
+- **Status:** Proposed, awaiting maintainer approval
 - **Date:** 2026-11-19
 - **Issue:** #240
 - **Scope:** `apps/dashboard` test files, `apps/dashboard/package.json`, `pnpm-lock.yaml`, a new `apps/dashboard/playwright.config.ts`, small testability and keyboard fixes in `apps/dashboard/src`, `.github/workflows/ci.yml`, `docs/dashboard-data-contracts.md`, and a release note. No `packages/*` source changes, so no changeset. The dependency, config, and workflow paths are listed in `.github/security/sensitive-paths.txt` and need maintainer approval on the latest commit.

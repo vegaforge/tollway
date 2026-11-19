@@ -1,6 +1,6 @@
 # ADR for Dummies: Agent detail page data seam and budget rendering
 
-- **Status:** Accepted 2026-11-19
+- **Status:** Proposed, awaiting maintainer approval
 - **Date:** 2026-11-19
 - **Technical ADR:** [ADR-2026-11-19-agent-detail-page](ADR-2026-11-19-agent-detail-page.md)
 
