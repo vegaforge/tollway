@@ -12,6 +12,12 @@
  *
  * Header encoding goes through @x402/core/http, so it matches what the
  * x402 SDK itself sends and expects.
+ *
+ * Spend limits: from @x402/core 2.31 the x402Client applies its own spend
+ * controls by default (only assets the scheme recognises, capped at $1 per
+ * payment). Tollway's policy engine is the spend authority, so each
+ * settlement replaces those defaults with a cap of exactly the approved
+ * offer: the one asset the 402 names, at most the approved amount.
  */
 
 import {
@@ -23,7 +29,7 @@ import {
 } from "@vegaforge/tollway-core";
 import { x402Client } from "@x402/core/client";
 import { decodePaymentRequiredHeader, encodePaymentSignatureHeader } from "@x402/core/http";
-import type { PaymentRequired, PaymentRequirements } from "@x402/core/types";
+import type { PaymentPayload, PaymentRequired, PaymentRequirements } from "@x402/core/types";
 import type { ClientStellarSigner } from "@x402/stellar";
 import { ExactStellarScheme } from "@x402/stellar/exact/client";
 import type { ClientSettler, SettleRequest } from "./index.js";
@@ -67,9 +73,9 @@ export function createX402Settler(options: X402SettlerOptions): ClientSettler {
   const network = CAIP2[options.network];
   const doFetch = options.fetch ?? globalThis.fetch;
   const method = options.method ?? "GET";
-  const client = new x402Client().register(
-    network,
-    new ExactStellarScheme(options.signer, options.rpcUrl ? { url: options.rpcUrl } : undefined),
+  const scheme = new ExactStellarScheme(
+    options.signer,
+    options.rpcUrl ? { url: options.rpcUrl } : undefined,
   );
 
   return {
@@ -98,10 +104,28 @@ export function createX402Settler(options: X402SettlerOptions): ClientSettler {
       }
       assertMatchesOffer(requirements, offer, resource);
 
-      const payload = await client.createPaymentPayload({
-        ...paymentRequired,
-        accepts: [requirements],
+      // A client per settlement, so the spend cap belongs to this offer
+      // alone and two concurrent settlements cannot see each other's cap.
+      const client = x402Client.fromConfig({
+        schemes: [{ network, client: scheme }],
+        spendControls: {
+          allowedAssets: [
+            { network, asset: requirements.asset, maxAmountPerPayment: offer.amount },
+          ],
+        },
       });
+      let payload: PaymentPayload;
+      try {
+        payload = await client.createPaymentPayload({
+          ...paymentRequired,
+          accepts: [requirements],
+        });
+      } catch (error) {
+        throw new TollwayError(
+          "payment-failed",
+          `could not sign the x402 payment for ${resource}: ${messageOf(error)}`,
+        );
+      }
 
       const paid = await doFetch(resource, {
         method,

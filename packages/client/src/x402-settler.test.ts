@@ -29,24 +29,38 @@ const scheme = vi.hoisted(() => ({
   createPaymentPayload: vi.fn(),
 }));
 
-vi.mock("@x402/stellar/exact/client", () => ({
-  ExactStellarScheme: class {
-    readonly scheme = "exact";
-    constructor(
-      readonly signer: { signAuthEntry: (entry: string) => Promise<{ signedAuthEntry: string }> },
-      rpcConfig?: unknown,
-    ) {
-      scheme.constructed.push({ signer, rpcConfig });
-    }
-    async createPaymentPayload(x402Version: number, requirements: PaymentRequirements) {
-      scheme.createPaymentPayload(x402Version, requirements);
-      const { signedAuthEntry } = await this.signer.signAuthEntry(
-        Buffer.from(`auth-entry:${requirements.payTo}:${requirements.amount}`).toString("base64"),
-      );
-      return { x402Version, payload: { transaction: `signed-tx:${signedAuthEntry}` } };
-    }
-  },
-}));
+vi.mock("@x402/stellar/exact/client", async () => {
+  const { USDC_PUBNET_ADDRESS, USDC_TESTNET_ADDRESS } =
+    await vi.importActual<typeof import("@x402/stellar")>("@x402/stellar");
+  // The 2.31 scheme exposes findDefaultAsset, which x402Client's default
+  // spend controls use to recognise USDC and apply the $1 cap. The stub keeps
+  // the same lookup (dist/cjs/exact/client/index.js, DEFAULT_ASSETS) so those
+  // controls run here exactly as they would against the real scheme.
+  const defaults: Record<string, string> = {
+    "stellar:pubnet": USDC_PUBNET_ADDRESS,
+    "stellar:testnet": USDC_TESTNET_ADDRESS,
+  };
+  return {
+    ExactStellarScheme: class {
+      readonly scheme = "exact";
+      readonly findDefaultAsset = (asset: string, network: string) =>
+        defaults[network] === asset ? { asset, decimals: 7, symbol: "USDC" } : undefined;
+      constructor(
+        readonly signer: { signAuthEntry: (entry: string) => Promise<{ signedAuthEntry: string }> },
+        rpcConfig?: unknown,
+      ) {
+        scheme.constructed.push({ signer, rpcConfig });
+      }
+      async createPaymentPayload(x402Version: number, requirements: PaymentRequirements) {
+        scheme.createPaymentPayload(x402Version, requirements);
+        const { signedAuthEntry } = await this.signer.signAuthEntry(
+          Buffer.from(`auth-entry:${requirements.payTo}:${requirements.amount}`).toString("base64"),
+        );
+        return { x402Version, payload: { transaction: `signed-tx:${signedAuthEntry}` } };
+      }
+    },
+  };
+});
 
 const RESOURCE = "https://api.example.com/quotes/latest";
 const PAYEE = Keypair.random().publicKey();
@@ -175,6 +189,31 @@ describe("createX402Settler", () => {
     expect(scheme.createPaymentPayload).toHaveBeenCalledWith(2, stellarExact);
   });
 
+  // @x402/core 2.31 caps default assets at $1 and refuses other assets unless
+  // told otherwise. The offer the policy engine approved is the limit instead.
+  it("pays an approved offer above x402's default $1 cap", async () => {
+    const large: PaymentRequirements = { ...stellarExact, amount: "500000000" };
+    const { fetch } = scriptedFetch(challenge(paymentRequired([large])), paid());
+    await settler(fetch).settle({
+      resource: RESOURCE,
+      offer: { ...offer, amount: "500000000" },
+      model: "x402",
+    });
+    expect(scheme.createPaymentPayload).toHaveBeenCalledWith(2, large);
+  });
+
+  it("pays an approved offer in an asset x402 does not recognise", async () => {
+    const token = "CAS3J7GYLGXMF6TDJBBYYSE3HQ6BBSMLNUQ34T6TZMYMW2EVH34XOWMA";
+    const custom: PaymentRequirements = { ...stellarExact, asset: token };
+    const { fetch } = scriptedFetch(challenge(paymentRequired([custom])), paid());
+    await settler(fetch).settle({
+      resource: RESOURCE,
+      offer: { ...offer, asset: token },
+      model: "x402",
+    });
+    expect(scheme.createPaymentPayload).toHaveBeenCalledWith(2, custom);
+  });
+
   it("keeps the secret off the settler object", () => {
     const { fetch } = scriptedFetch();
     const created = settler(fetch);
@@ -247,6 +286,19 @@ describe("createX402Settler", () => {
       );
       const error = await rejection(fetch);
       expect(error.message).toContain(`pays ${other}`);
+    });
+
+    it("reports a signing failure as a Tollway payment failure", async () => {
+      scheme.createPaymentPayload.mockImplementationOnce(() => {
+        throw new Error("Stellar simulation failed");
+      });
+      const { fetch, calls } = scriptedFetch(challenge());
+      const error = await rejection(fetch);
+      expect(error.code).toBe("payment-failed");
+      expect(error.message).toBe(
+        `could not sign the x402 payment for ${RESOURCE}: Stellar simulation failed`,
+      );
+      expect(calls).toHaveLength(1);
     });
 
     it("rejects a second 402", async () => {
