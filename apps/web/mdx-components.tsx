@@ -1,6 +1,6 @@
 import defaultMdxComponents from "fumadocs-ui/mdx";
 import type { MDXComponents } from "mdx/types";
-import { PaymentPlayground } from "@/components/payment-playground";
+import { PaymentPlayground } from "@/components/payment-playground-loader";
 
 /**
  * The MDX component map for the docs corpus. Every MDX file picks these up

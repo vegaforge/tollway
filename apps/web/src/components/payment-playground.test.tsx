@@ -1,108 +1,180 @@
-import { fireEvent, render, screen } from "@testing-library/react";
-import { describe, expect, it, vi } from "vitest";
-import { Account, Address, Keypair, Networks, Operation, TransactionBuilder, nativeToScVal } from "@stellar/stellar-base";
-import { Ed25519Signer, buildReceipt, signReceipt, bytesToBase64Url, utf8Bytes } from "@vegaforge/tollway-core";
-import { encodePaymentRequiredHeader } from "@x402/core/http";
+import { cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
+import { bytesToBase64Url } from "@vegaforge/tollway-core";
+import { afterEach, beforeEach, describe, expect, it, type Mock, vi } from "vitest";
+
+import { headers, PAYER, signedReceipt } from "../test/fixtures";
 import { PaymentPlayground } from "./payment-playground";
-import { decodeHeaderValue, decodeStellarTransactionXdr, MAX_HEADER_LENGTH } from "@/lib/playground";
 
-describe("header decoder", () => {
-  it("decodes a valid Tollway base64url challenge", () => {
-    const challenge = {
-      x402Version: 2,
-      resource: { url: "https://api.example.test/quote", description: "quote", mimeType: "application/json" },
-      accepts: [{ scheme: "exact", network: "stellar:testnet", amount: "10000", asset: "USDC", payTo: "GABC", maxTimeoutSeconds: 300 }],
-    };
-    const encoded = bytesToBase64Url(utf8Bytes(JSON.stringify(challenge)));
-    expect(decodeHeaderValue("PAYMENT-REQUIRED", encoded)).toMatchObject({
-      encoding: "base64url",
-      shape: "x402 PaymentRequired v2",
-      valid: true,
+/**
+ * The playground promises that pasted values never leave the page. Every
+ * way a page can send a request on its own is replaced with a spy, and each
+ * test asserts none was called.
+ */
+type NetworkSpies = { fetch: Mock; xhrOpen: Mock; beacon: Mock; webSocket: Mock };
+
+let spies: NetworkSpies;
+const originals = {
+  fetch: globalThis.fetch,
+  xhrOpen: XMLHttpRequest.prototype.open,
+  beacon: navigator.sendBeacon,
+  webSocket: globalThis.WebSocket,
+};
+
+beforeEach(() => {
+  spies = { fetch: vi.fn(), xhrOpen: vi.fn(), beacon: vi.fn(), webSocket: vi.fn() };
+  Object.defineProperty(globalThis, "fetch", { configurable: true, value: spies.fetch });
+  XMLHttpRequest.prototype.open = spies.xhrOpen;
+  Object.defineProperty(navigator, "sendBeacon", { configurable: true, value: spies.beacon });
+  Object.defineProperty(globalThis, "WebSocket", { configurable: true, value: spies.webSocket });
+  window.history.replaceState(null, "", "/docs/playground");
+});
+
+afterEach(() => {
+  cleanup();
+  Object.defineProperty(globalThis, "fetch", { configurable: true, value: originals.fetch });
+  XMLHttpRequest.prototype.open = originals.xhrOpen;
+  Object.defineProperty(navigator, "sendBeacon", { configurable: true, value: originals.beacon });
+  Object.defineProperty(globalThis, "WebSocket", {
+    configurable: true,
+    value: originals.webSocket,
+  });
+});
+
+function expectNoNetwork() {
+  expect(spies.fetch).not.toHaveBeenCalled();
+  expect(spies.xhrOpen).not.toHaveBeenCalled();
+  expect(spies.beacon).not.toHaveBeenCalled();
+  expect(spies.webSocket).not.toHaveBeenCalled();
+}
+
+function decode(header: string, value: string) {
+  fireEvent.change(screen.getByLabelText("Header"), { target: { value: header } });
+  fireEvent.change(screen.getByLabelText("Header value"), { target: { value } });
+  fireEvent.click(screen.getByRole("button", { name: "Decode header" }));
+}
+
+describe("PaymentPlayground decode and verify", () => {
+  it("decodes and verifies a receipt without any network request", async () => {
+    const { header, signer } = await signedReceipt();
+    render(<PaymentPlayground />);
+
+    decode("TOLLWAY-RECEIPT", header);
+    expect(screen.getByText(/Tollway signed receipt, encoded as base64url/)).toBeTruthy();
+    expect(screen.getByText("Validation passed.")).toBeTruthy();
+    expect(screen.getByRole("table")).toHaveTextContent("receipt.amount");
+
+    fireEvent.change(screen.getByLabelText("Public key or key set"), {
+      target: { value: bytesToBase64Url(signer.publicKey) },
     });
+    fireEvent.click(screen.getByRole("button", { name: "Verify receipt" }));
+    expect(await screen.findByText(`Signature valid for key ${signer.keyId}.`)).toBeTruthy();
+    expectNoNetwork();
   });
 
-  it("rejects malformed input, wrong header shapes and oversized values", () => {
-    expect(decodeHeaderValue("PAYMENT-REQUIRED", "not-a-header").valid).toBe(false);
-    expect(decodeHeaderValue("PAYMENT-REQUIRED", JSON.stringify({ wrong: true })).valid).toBe(false);
-    expect(decodeHeaderValue("PAYMENT-REQUIRED", "x".repeat(MAX_HEADER_LENGTH + 1)).errors[0]).toMatch(/limited to/);
+  it("announces a failed verification", async () => {
+    const { header } = await signedReceipt();
+    const other = await signedReceipt();
+    render(<PaymentPlayground />);
+    decode("TOLLWAY-RECEIPT", header);
+    fireEvent.change(screen.getByLabelText("Public key or key set"), {
+      target: { value: bytesToBase64Url(other.signer.publicKey) },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "Verify receipt" }));
+    const alert = await screen.findByRole("alert");
+    expect(alert).toHaveTextContent(/Signature not valid/);
+    expectNoNetwork();
+  });
+
+  it("summarises a PAYMENT-SIGNATURE, decodes its transaction lazily and warns it is sensitive", async () => {
+    render(<PaymentPlayground />);
+    decode("PAYMENT-SIGNATURE", headers.x402Signature);
+    expect(screen.getByText(/treat it as sensitive/)).toBeTruthy();
+    const summary = screen.getByText("Signed payment summary").parentElement;
+    if (!summary) throw new Error("summary not rendered");
+    expect(within(summary).getByText("stellar:testnet")).toBeTruthy();
+    expect(within(summary).getByText("10000")).toBeTruthy();
+    expect(await within(summary).findByText(PAYER)).toBeTruthy();
+    expectNoNetwork();
+  });
+
+  it("announces decoding errors and marks the input invalid", () => {
+    render(<PaymentPlayground />);
+    decode("PAYMENT-REQUIRED", "not*base64");
+    expect(screen.getByRole("alert")).toHaveTextContent(/neither base64 nor base64url/);
+    expect(screen.getByLabelText("Header value")).toHaveAttribute("aria-invalid", "true");
+
+    decode("PAYMENT-REQUIRED", JSON.stringify({ x402Version: 2 }));
+    expect(screen.getByRole("alert")).toHaveTextContent("Validation failed");
+    expectNoNetwork();
   });
 });
 
-describe("Stellar transaction inspection", () => {
-  it("extracts the payer and integer transfer amount from a Soroban transfer XDR", async () => {
-    const payer = Keypair.random().publicKey();
-    const payee = Keypair.random().publicKey();
-    const contract = Address.contract(Buffer.alloc(32, 7)).toString();
-    const transaction = new TransactionBuilder(new Account(payer, "1"), {
-      fee: "100",
-      networkPassphrase: Networks.TESTNET,
-    })
-      .addOperation(Operation.invokeContractFunction({
-        contract,
-        function: "transfer",
-        args: [
-          nativeToScVal(payer, { type: "address" }),
-          nativeToScVal(payee, { type: "address" }),
-          nativeToScVal(12345n, { type: "i128" }),
-        ],
-      }))
-      .setTimeout(300)
-      .build();
+describe("PaymentPlayground encode", () => {
+  it("builds both encodings and rejects a non-integer amount next to the field", () => {
+    render(<PaymentPlayground />);
+    fireEvent.click(screen.getByRole("tab", { name: "Encode" }));
+    fireEvent.change(screen.getByLabelText("Pay to"), { target: { value: PAYER } });
+    fireEvent.change(screen.getByLabelText("Amount"), { target: { value: "0.001" } });
+    fireEvent.click(screen.getByRole("button", { name: "Build challenge" }));
+    expect(screen.getByRole("alert")).toHaveTextContent(/integer string/);
+    expect(screen.getByLabelText("Amount")).toHaveAttribute("aria-invalid", "true");
 
-    const details = await decodeStellarTransactionXdr(transaction.toXDR(), "stellar:testnet");
-    expect(details.payer).toBe(payer);
-    expect(details.payee).toBe(payee);
-    expect(details.amount).toBe("12345");
+    fireEvent.change(screen.getByLabelText("Amount"), { target: { value: "10000" } });
+    fireEvent.click(screen.getByRole("button", { name: "Build challenge" }));
+    const x402 = screen.getByLabelText(/x402 V2/);
+    const tollway = screen.getByLabelText(/Tollway gate today/);
+    expect((x402 as HTMLTextAreaElement).value).toMatch(/^[A-Za-z0-9+/]+=*$/);
+    expect((tollway as HTMLTextAreaElement).value).toMatch(/^[A-Za-z0-9_-]+$/);
+    expectNoNetwork();
   });
 });
 
-describe("PaymentPlayground", () => {
-  it("decodes a PAYMENT-REQUIRED header using the x402 helper", () => {
-    const challenge = {
-      x402Version: 2,
-      resource: { url: "https://api.example.test/quote", description: "quote", mimeType: "application/json" },
-      accepts: [{ scheme: "exact", network: "stellar:testnet", amount: "10000", asset: "USDC", payTo: "GABC", maxTimeoutSeconds: 300 }],
-    };
+describe("PaymentPlayground accessibility and sharing", () => {
+  it("moves between tabs with the arrow keys", () => {
+    render(<PaymentPlayground />);
+    const decodeTab = screen.getByRole("tab", { name: "Decode" });
+    expect(decodeTab).toHaveAttribute("aria-selected", "true");
+    fireEvent.keyDown(decodeTab, { key: "ArrowRight" });
+    const encodeTab = screen.getByRole("tab", { name: "Encode" });
+    expect(encodeTab).toHaveAttribute("aria-selected", "true");
+    expect(document.activeElement).toBe(encodeTab);
+    expect(screen.getByRole("tabpanel")).toBe(
+      document.getElementById(encodeTab.getAttribute("aria-controls") ?? ""),
+    );
+  });
+
+  it("writes share state to the fragment only when asked, and restores it", () => {
     render(<PaymentPlayground />);
     fireEvent.change(screen.getByLabelText("Header value"), {
-      target: { value: encodePaymentRequiredHeader(challenge as never) },
+      target: { value: headers.x402Required },
     });
-    fireEvent.click(screen.getByRole("button", { name: "Decode header" }));
-    expect(screen.getByText(/x402 PaymentRequired v2/)).toBeTruthy();
-    expect(screen.getByText("Validation passed")).toBeTruthy();
+    expect(window.location.hash).toBe("");
+    fireEvent.click(screen.getByRole("button", { name: "Create share link" }));
+    expect(window.location.pathname).toBe("/docs/playground");
+    expect(window.location.search).toBe("");
+    expect(window.location.hash).toMatch(/^#playground=/);
+    cleanup();
+
+    render(<PaymentPlayground />);
+    expect(screen.getByText("Restored the playground from the link.")).toBeTruthy();
+    expect(screen.getByText(/x402 PaymentRequired, encoded as base64/)).toBeTruthy();
+    expectNoNetwork();
   });
 
-  it("verifies a Tollway receipt in the browser without making network requests", async () => {
-    const signer = await Ed25519Signer.generate("playground-test-key");
-    const body = buildReceipt({
-      payer: "GCLIENT",
-      payee: "GSERVICE",
-      amount: "100",
-      asset: "USDC",
-      resource: "/api/quote",
-      model: "x402",
-      settlement: { kind: "transaction", txHash: "test-transaction" },
-      network: "testnet",
+  it("refuses to share a PAYMENT-SIGNATURE", () => {
+    render(<PaymentPlayground />);
+    fireEvent.change(screen.getByLabelText("Header"), { target: { value: "PAYMENT-SIGNATURE" } });
+    fireEvent.change(screen.getByLabelText("Header value"), {
+      target: { value: headers.x402Signature },
     });
-    const receipt = await signReceipt(body, signer);
-    const originalFetch = globalThis.fetch;
-    const fetchSpy = vi.fn();
-    Object.defineProperty(globalThis, "fetch", { configurable: true, value: fetchSpy });
-    try {
-      render(<PaymentPlayground />);
-      fireEvent.change(screen.getByLabelText("Header type"), { target: { value: "TOLLWAY-RECEIPT" } });
-      fireEvent.change(screen.getByLabelText("Header value"), {
-        target: { value: bytesToBase64Url(new TextEncoder().encode(JSON.stringify(receipt))) },
-      });
-      fireEvent.click(screen.getByRole("button", { name: "Decode header" }));
-      fireEvent.change(screen.getByLabelText("Public key or JWKS JSON"), {
-        target: { value: bytesToBase64Url(signer.publicKey) },
-      });
-      fireEvent.click(screen.getByRole("button", { name: "Verify receipt" }));
-      expect(await screen.findByText(new RegExp("Valid signature for key " + receipt.signature.keyId))).toBeTruthy();
-      expect(fetchSpy).not.toHaveBeenCalled();
-    } finally {
-      Object.defineProperty(globalThis, "fetch", { configurable: true, value: originalFetch });
-    }
+    fireEvent.click(screen.getByRole("button", { name: "Create share link" }));
+    expect(screen.getByRole("status")).toHaveTextContent(/cannot be put in a share link/);
+    expect(window.location.hash).toBe("");
+  });
+
+  it("says so when a playground link cannot be read", async () => {
+    window.history.replaceState(null, "", "/docs/playground#playground=%%%");
+    render(<PaymentPlayground />);
+    await waitFor(() => expect(screen.getByRole("status")).toHaveTextContent(/could not be read/));
   });
 });

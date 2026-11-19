@@ -1,16 +1,57 @@
 ---
-title: 402 Playground
-description: Decode, validate and create x402 and Tollway payment headers locally in your browser
+title: 402 playground
+description: Decode, validate and build x402 and Tollway payment headers in your browser.
 ---
 
-Use the playground to inspect a payment challenge, signed payment, settlement response or Tollway receipt. You can also construct a sample payment challenge in both x402 base64 and Tollway base64url formats.
+Paste a `PAYMENT-REQUIRED`, `PAYMENT-SIGNATURE`, `PAYMENT-RESPONSE` or
+`TOLLWAY-RECEIPT` header value to see it decoded, identified, validated and
+explained field by field. Or build a challenge from a form and get the header
+in both encodings.
 
 <PaymentPlayground />
 
-## Privacy and safety
+## Two encodings, labelled
 
-All decoding, validation and receipt verification happen locally in your browser. The playground does not send pasted header values or public keys to a server and does not load analytics. Do not paste secrets or signing keys. A PAYMENT-SIGNATURE contains a signed payment payload and should be treated as sensitive.
+Two header encodings are in use while the gate moves to the x402 V2 shapes
+(#43):
 
-The playground validates x402 PaymentRequired and PaymentPayload values with the schemas from @x402/core. Settlement responses are inspected structurally. Tollway receipts are checked with the canonical receipt schema and can be cryptographically verified against a public key or a JWKS-style JSON document.
+| Producer | Encoding | Shapes |
+| --- | --- | --- |
+| x402 V2 (`@x402/core/http`) | standard base64, padded | `PaymentRequired`, `PaymentPayload`, `SettleResponse` |
+| Tollway gate today (`encodeHeader` in `@vegaforge/tollway-server`) | base64url, unpadded | `PaymentOffer` in `PAYMENT-REQUIRED`, the signed receipt in `PAYMENT-RESPONSE` |
 
-The encoder generates an example challenge only; it does not contact a facilitator or settle a payment.
+The playground works out which alphabet a value uses and tells you when a
+shape arrives in the other producer's encoding, because a client that
+expects one rejects the other. A value that only uses characters both
+alphabets share decodes the same either way, and the result says so.
+
+Validation uses the schemas the packages use: `parsePaymentRequired` and
+`parsePaymentPayload` from `@x402/core/schemas`, and `signedReceiptSchema`
+from `@vegaforge/tollway-core`. `@x402/core` has no schema for
+`SettleResponse` and core has none for `PaymentOffer`, so the playground
+writes those two out from their TypeScript types and checks at compile time
+that they still match.
+
+## Verifying a receipt
+
+When a value decodes to a Tollway signed receipt, paste the service's public
+key to check the signature with `verifyReceipt` from
+`@vegaforge/tollway-core`. It accepts a base64url Ed25519 public key, a JWKS
+document with `OKP` / `Ed25519` keys, or the `{ keyId, publicKey }` object a
+service publishes.
+
+## Privacy
+
+- Everything runs in this browser. Pasted values and keys are never sent to
+  a server, and the page loads no analytics.
+- A `PAYMENT-SIGNATURE` is a signed payment: anyone who holds it can try to
+  settle it until it expires. Treat it as sensitive, like a password.
+- Share links are opt-in. **Create share link** puts the state after the `#`
+  in the address bar; browsers never send that part to the server. A
+  `PAYMENT-SIGNATURE` is never put in a link.
+- Decoding the Stellar transaction inside a signed payment loads
+  `@stellar/stellar-base` from this site only when you decode one.
+
+The playground does not fetch live challenges: cross-origin rules make that
+unreliable, and it would send requests on your behalf. To inspect a live
+endpoint, use `tollway inspect` (#170).
