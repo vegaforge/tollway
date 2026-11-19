@@ -3,8 +3,10 @@
 import { useMemo, useState } from "react";
 import {
   decodeHeaderValue,
+  decodeStellarTransactionXdr,
   encodeChallenge,
   getPaymentSignatureSummary,
+  getPaymentTransactionXdr,
   isSignedReceipt,
   verifyReceiptWithPublicKey,
   type DecodedHeader,
@@ -25,6 +27,8 @@ export function PaymentPlayground() {
   const [publicKey, setPublicKey] = useState("");
   const [decoded, setDecoded] = useState<DecodedHeader | null>(null);
   const [verification, setVerification] = useState<string | null>(null);
+  const [xdrSummary, setXdrSummary] = useState<string | null>(null);
+  const [xdrError, setXdrError] = useState<string | null>(null);
   const [encodeFields, setEncodeFields] = useState({
     resource: "https://api.example.com/quote",
     amount: "10000",
@@ -42,11 +46,28 @@ export function PaymentPlayground() {
       : [],
     [decoded],
   );
+  const transactionXdr = decoded?.header === "PAYMENT-SIGNATURE" && decoded.valid
+    ? getPaymentTransactionXdr(decoded.value)
+    : null;
+
+  async function decodeTransaction() {
+    if (!transactionXdr) return;
+    try {
+      const details = await decodeStellarTransactionXdr(transactionXdr.xdr, transactionXdr.network);
+      setXdrSummary(JSON.stringify(details, null, 2));
+      setXdrError(null);
+    } catch (error) {
+      setXdrSummary(null);
+      setXdrError(error instanceof Error ? error.message : "Unable to decode Stellar transaction XDR.");
+    }
+  }
 
   function decode() {
     const result = decodeHeaderValue(header, headerValue);
     setDecoded(result);
     setVerification(null);
+    setXdrSummary(null);
+    setXdrError(null);
   }
 
   async function verify() {
@@ -110,6 +131,13 @@ export function PaymentPlayground() {
                 <dl className="grid gap-2 sm:grid-cols-3">
                   {signatureSummary.map((item) => <div key={item.label}><dt className="text-xs opacity-70">{item.label}</dt><dd className="break-all text-sm">{item.value}</dd></div>)}
                 </dl>
+              )}
+              {transactionXdr && (
+                <div className="space-y-2">
+                  <button type="button" onClick={() => void decodeTransaction()} className="rounded-md border px-4 py-2">Decode Stellar transaction XDR</button>
+                  {xdrError && <p role="alert" className="text-sm text-red-700">{xdrError}</p>}
+                  {xdrSummary && <pre className="overflow-auto rounded-md bg-muted p-3 text-xs">{xdrSummary}</pre>}
+                </div>
               )}
               <pre className="max-h-80 overflow-auto rounded-md bg-muted p-3 text-xs">{JSON.stringify(decoded.value, null, 2)}</pre>
               {decoded.header === "TOLLWAY-RECEIPT" && decoded.valid && (

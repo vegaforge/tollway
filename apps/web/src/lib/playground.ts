@@ -141,26 +141,27 @@ export function decodeHeaderValue(header: HeaderName, rawValue: string): Decoded
   }
 
   const errors: string[] = [];
+  let fallback: DecodedHeader | null = null;
   for (const attempt of attempts) {
     try {
       const decoded = attempt.decode();
       const validation = describeValidation(header, decoded);
-      if (validation.valid || errors.length === 0) {
-        return {
-          header,
-          encoding: attempt.encoding,
-          shape: validation.shape,
-          value: decoded,
-          valid: validation.valid,
-          errors: validation.errors,
-        };
-      }
+      const candidate: DecodedHeader = {
+        header,
+        encoding: attempt.encoding,
+        shape: validation.shape,
+        value: decoded,
+        valid: validation.valid,
+        errors: validation.errors,
+      };
+      if (candidate.valid) return candidate;
+      fallback ??= candidate;
     } catch (error) {
       errors.push(error instanceof Error ? error.message : "Unable to decode this value.");
     }
   }
 
-  return {
+  return fallback ?? {
     header,
     encoding: "JSON",
     shape: "Invalid input",
@@ -183,6 +184,15 @@ export function getPaymentSignatureSummary(value: unknown): Array<{ label: strin
   return fields
     .filter((entry): entry is [string, string | number] => typeof entry[1] === "string" || typeof entry[1] === "number")
     .map(([label, fieldValue]) => ({ label, value: String(fieldValue) }));
+}
+
+export function getPaymentTransactionXdr(value: unknown): { xdr: string; network: string } | null {
+  if (!isRecord(value) || !isRecord(value.payload) || !isRecord(value.accepted)) return null;
+  const transaction = value.payload.transaction;
+  const network = value.accepted.network;
+  return typeof transaction === "string" && typeof network === "string"
+    ? { xdr: transaction, network }
+    : null;
 }
 
 export type ChallengeInput = {

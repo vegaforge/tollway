@@ -3,6 +3,15 @@ import { describe, expect, it, vi } from "vitest";
 import { Ed25519Signer, buildReceipt, signReceipt, bytesToBase64Url } from "@vegaforge/tollway-core";
 import { encodePaymentRequiredHeader } from "@x402/core/http";
 import { PaymentPlayground } from "./payment-playground";
+import { decodeHeaderValue, MAX_HEADER_LENGTH } from "@/lib/playground";
+
+describe("header decoder", () => {
+  it("rejects malformed input, wrong header shapes and oversized values", () => {
+    expect(decodeHeaderValue("PAYMENT-REQUIRED", "not-a-header").valid).toBe(false);
+    expect(decodeHeaderValue("PAYMENT-REQUIRED", JSON.stringify({ wrong: true })).valid).toBe(false);
+    expect(decodeHeaderValue("PAYMENT-REQUIRED", "x".repeat(MAX_HEADER_LENGTH + 1)).errors[0]).toMatch(/limited to/);
+  });
+});
 
 describe("PaymentPlayground", () => {
   it("decodes a PAYMENT-REQUIRED header using the x402 helper", () => {
