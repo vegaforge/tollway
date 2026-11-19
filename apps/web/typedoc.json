@@ -35,5 +35,6 @@
   "hidePageHeader": true,
   "disableSources": true,
   "cleanOutputDir": true,
-  "treatWarningsAsErrors": true
+  "treatWarningsAsErrors": true,
+  "sanitizeComments": true
 }

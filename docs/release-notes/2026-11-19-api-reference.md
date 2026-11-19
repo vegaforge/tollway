@@ -44,6 +44,8 @@ Choices the issue left open:
 - `@vegaforge/tollway-adapter-next/proxy` is documented as its own page next
   to the theme's `./preset`, since it is a public entry point too.
   `create-tollway` is a CLI with no library entry, so it has no page.
+- `sanitizeComments` is on: comment prose such as the theme preset's usage
+  example contains `{ }`, which MDX would otherwise parse as an expression.
 - `fumadocs-typescript` is not used; the reference pages are plain MDX.
 - The reference does not link to source lines (`disableSources`): the
   paths would point at a local checkout.
