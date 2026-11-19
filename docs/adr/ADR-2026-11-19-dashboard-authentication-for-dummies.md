@@ -1,6 +1,6 @@
 # ADR for Dummies: Dashboard authentication with server-side sessions and roles
 
-- **Status:** Proposed, awaiting maintainer approval
+- **Status:** Accepted 2026-11-19
 - **Date:** 2026-11-19
 - **Technical ADR:** [ADR-2026-11-19-dashboard-authentication](ADR-2026-11-19-dashboard-authentication.md)
 
