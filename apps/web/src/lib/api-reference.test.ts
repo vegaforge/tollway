@@ -1,11 +1,10 @@
 // @vitest-environment node
-import { spawnSync } from "node:child_process";
 import { mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 
-import { Application, LogLevel } from "typedoc";
+import { Application, LogLevel, TSConfigReader, TypeDocReader } from "typedoc";
 import { afterAll, describe, expect, it } from "vitest";
 
 import { checkApiReference } from "../../typedoc/check-api.mjs";
@@ -60,17 +59,19 @@ describe("API reference", () => {
     GENERATION_TIMEOUT_MS,
   );
 
-  const typedocBin = fileURLToPath(new URL("../../node_modules/.bin/typedoc", import.meta.url));
   const config = JSON.parse(readFileSync(configPath, "utf8")) as {
     validation: Record<string, boolean>;
     treatWarningsAsErrors: boolean;
   };
 
   /**
-   * Runs the TypeDoc CLI, as `pnpm run api` does, on one fixture file with
-   * the repository's validation settings, and returns its exit status.
+   * Runs TypeDoc on one fixture with the repository's validation settings and
+   * reports whether `pnpm run api` would fail. It reads options the way the
+   * CLI does (typedoc.json, then tsconfig.json) and applies the CLI's exit
+   * rule: any error fails, and with treatWarningsAsErrors so does any warning.
+   * It runs in-process because the security gate forbids spawning processes.
    */
-  function runCli(name: string, files: Record<string, string>): number | null {
+  async function typedocFails(name: string, files: Record<string, string>): Promise<boolean> {
     const folder = join(scratch, name);
     mkdirSync(folder, { recursive: true });
     for (const [file, code] of Object.entries(files)) {
@@ -80,39 +81,46 @@ describe("API reference", () => {
     // package, as every real entry point is.
     writeFileSync(join(folder, "package.json"), JSON.stringify({ name, version: "0.0.0" }));
     // An empty options file, so the repository's typedoc.json and its
-    // plugins are not picked up: only the flags below apply.
+    // plugins are not picked up: only the options below apply.
     writeFileSync(join(folder, "typedoc.json"), "{}");
     writeFileSync(
       join(folder, "tsconfig.json"),
       JSON.stringify({ compilerOptions: { strict: true }, files: Object.keys(files) }),
     );
-    const result = spawnSync(
-      typedocBin,
-      [
-        "--options",
-        join(folder, "typedoc.json"),
-        "--tsconfig",
-        join(folder, "tsconfig.json"),
-        "--entryPoints",
-        join(folder, "index.ts"),
-        "--emit",
-        "none",
-        "--validation.notExported",
-        String(config.validation.notExported),
-        "--validation.invalidLink",
-        String(config.validation.invalidLink),
-        "--treatWarningsAsErrors",
-        String(config.treatWarningsAsErrors),
-      ],
-      { cwd: folder, encoding: "utf8" },
+    const app = await Application.bootstrapWithPlugins(
+      {
+        options: join(folder, "typedoc.json"),
+        tsconfig: join(folder, "tsconfig.json"),
+        entryPoints: [join(folder, "index.ts")],
+        plugin: [],
+        logLevel: LogLevel.None,
+        validation: {
+          notExported: config.validation.notExported,
+          invalidLink: config.validation.invalidLink,
+        },
+        treatWarningsAsErrors: config.treatWarningsAsErrors,
+      },
+      [new TypeDocReader(), new TSConfigReader()],
     );
-    return result.status;
+    const failed = () =>
+      app.logger.hasErrors() || (config.treatWarningsAsErrors && app.logger.hasWarnings());
+    if (failed()) {
+      return true;
+    }
+    const project = await app.convert();
+    if (!project) {
+      return true;
+    }
+    app.validate(project);
+    return failed();
   }
 
   it(
     "accepts a documented, fully exported module",
-    () => {
-      expect(runCli("clean", { "index.ts": "/** A value. */\nexport const value = 1;\n" })).toBe(0);
+    async () => {
+      expect(
+        await typedocFails("clean", { "index.ts": "/** A value. */\nexport const value = 1;\n" }),
+      ).toBe(false);
     },
     GENERATION_TIMEOUT_MS,
   );
@@ -129,8 +137,8 @@ describe("API reference", () => {
     ],
   ])(
     "fails the build on %s",
-    (name, files) => {
-      expect(runCli(name, files)).not.toBe(0);
+    async (name, files) => {
+      expect(await typedocFails(name, files)).toBe(true);
     },
     GENERATION_TIMEOUT_MS,
   );
