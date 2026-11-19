@@ -5,7 +5,10 @@ import { Ed25519Signer, Ed25519Verifier } from "./signer.js";
 
 /** A fresh key in the PKCS#8 form `exportKey("pkcs8")` produces, as base64url. */
 async function freshPkcs8Key(): Promise<string> {
-  const pair = (await crypto.subtle.generateKey("Ed25519", true, ["sign", "verify"])) as CryptoKeyPair;
+  const pair = (await crypto.subtle.generateKey("Ed25519", true, [
+    "sign",
+    "verify",
+  ])) as CryptoKeyPair;
   return bytesToBase64Url(new Uint8Array(await crypto.subtle.exportKey("pkcs8", pair.privateKey)));
 }
 
