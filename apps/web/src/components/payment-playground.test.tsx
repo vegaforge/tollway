@@ -1,9 +1,9 @@
 import { fireEvent, render, screen } from "@testing-library/react";
 import { describe, expect, it, vi } from "vitest";
-import { Ed25519Signer, buildReceipt, signReceipt, bytesToBase64Url } from "@vegaforge/tollway-core";
+import { Ed25519Signer, buildReceipt, signReceipt, bytesToBase64Url, utf8Bytes } from "@vegaforge/tollway-core";
 import { encodePaymentRequiredHeader } from "@x402/core/http";
 import { PaymentPlayground } from "./payment-playground";
-import { decodeHeaderValue, MAX_HEADER_LENGTH, bytesToBase64Url, utf8Bytes } from "@/lib/playground";
+import { decodeHeaderValue, MAX_HEADER_LENGTH } from "@/lib/playground";
 
 describe("header decoder", () => {
   it("decodes a valid Tollway base64url challenge", () => {
