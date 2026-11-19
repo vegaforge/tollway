@@ -1,6 +1,6 @@
 # ADR for Dummies: Real Stellar payments for MPP and the agent client, and a cache that cleans up after itself
 
-- **Status:** Proposed, awaiting maintainer approval
+- **Status:** Accepted 2026-11-19
 - **Date:** 2026-11-19
 - **Technical ADR:** [ADR-2026-11-19-stellar-sdk-settlement](ADR-2026-11-19-stellar-sdk-settlement.md)
 

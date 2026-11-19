@@ -1,6 +1,6 @@
 # ADR: Real Stellar settlement for MPP charge, MPP channels and the x402 client, and a bounded settlement cache
 
-- **Status:** Proposed, awaiting maintainer approval
+- **Status:** Accepted 2026-11-19
 - **Date:** 2026-11-19
 - **Issue:** #100, #101, #102, #103
 - **Scope:** `@vegaforge/tollway-server` (MPP charge handler, gate's MPP path,
