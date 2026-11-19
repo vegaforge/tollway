@@ -371,6 +371,7 @@ describe("observability hub: record + summarize", () => {
     expect(summary).toEqual({
       totalAmount: "0",
       count: 0,
+      byAsset: {},
       byModel: {},
       byPayer: {},
       byPayee: {},
@@ -477,6 +478,19 @@ describe("observability hub: record + summarize", () => {
     // The garbage row is still counted, but it does not poison the sum.
     expect(summary.totalAmount).toBe("100");
     expect(summary.count).toBe(2);
+  });
+
+  // Regression for #223: summarize added amounts across assets, so a window
+  // holding USDC and XLM reported one total in mixed units. Amounts in
+  // different assets cannot be added, so they must be reported per asset.
+  it("reports amounts per asset instead of one sum in mixed units", () => {
+    const hub = createObservabilityHub({ sleep: noSleep });
+    hub.record(metric({ asset: "USDC:GA5Z", amount: "1000" }));
+    hub.record(metric({ asset: "USDC:GA5Z", amount: "250" }));
+    hub.record(metric({ asset: "native", amount: "7" }));
+
+    const summary = hub.summarize();
+    expect(summary.byAsset).toEqual({ "USDC:GA5Z": "1250", native: "7" });
   });
 });
 

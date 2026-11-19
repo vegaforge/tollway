@@ -1,0 +1,25 @@
+{
+  "name": "my-tollway-next-api",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "next dev",
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run"
+  },
+  "dependencies": {
+    "@vegaforge/tollway-adapter-next": "workspace:*",
+    "@vegaforge/tollway-core": "workspace:*",
+    "@vegaforge/tollway-server": "workspace:*",
+    "next": "^15.5.0",
+    "react": "^19.0.0",
+    "react-dom": "^19.0.0"
+  },
+  "devDependencies": {
+    "@types/node": "^22.19.20",
+    "@types/react": "^19.0.0",
+    "@types/react-dom": "^19.0.0",
+    "typescript": "^5.8.0",
+    "vitest": "^4.1.8"
+  }
+}

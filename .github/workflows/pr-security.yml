@@ -22,8 +22,11 @@ on:
 
 permissions: {}
 
+# One group per pull request and event. A new push cancels the previous push's
+# run, but a review (pull_request_review) never cancels the push run: a
+# cancelled run leaves a failing `security` check behind and blocks merging.
 concurrency:
-  group: pr-security-${{ github.event.pull_request.number }}
+  group: pr-security-${{ github.event.pull_request.number }}-${{ github.event_name }}
   cancel-in-progress: true
 
 env:
@@ -40,6 +43,49 @@ env:
   GOVULNCHECK_VERSION: v1.7.0
 
 jobs:
+  contribution-rules:
+    # Runs first and fails fast, in plain words, when a contributor's pull
+    # request closes no issue or more than four, closes one they are not
+    # assigned to, or marks an ADR as Accepted.
+    # ADR-2026-11-19-open-source-governance.
+    name: contribution rules
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    permissions:
+      contents: read
+      issues: read # read who is assigned to the issue the pull request closes
+    steps:
+      - name: Check out the pull request as data
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          path: pr
+          fetch-depth: 2
+          persist-credentials: false
+      - name: Check out the checks from the base branch
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.event.pull_request.base.sha }}
+          path: trusted
+          persist-credentials: false
+          sparse-checkout: |
+            scripts/security
+      - name: Use the base branch copy of the checks
+        run: |
+          if [ -f trusted/scripts/security/check_contribution.py ]; then
+            echo "CHECKS=$GITHUB_WORKSPACE/trusted" >> "$GITHUB_ENV"
+          else
+            echo "::warning::The base branch has no contribution check yet, so this first install uses the copy in the pull request."
+            echo "CHECKS=$GITHUB_WORKSPACE/pr" >> "$GITHUB_ENV"
+          fi
+      - name: Up to four issues, all assigned to the author, no self-accepted ADRs
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          PR_AUTHOR: ${{ github.event.pull_request.user.login }}
+          PR_AUTHOR_TYPE: ${{ github.event.pull_request.user.type }}
+          PR_AUTHOR_ASSOCIATION: ${{ github.event.pull_request.author_association }}
+          PR_BODY: ${{ github.event.pull_request.body }}
+        run: python3 -I "$CHECKS/scripts/security/check_contribution.py" --repo pr --base HEAD^1 --head HEAD
+
   diff-scan:
     name: diff scan
     runs-on: ubuntu-24.04
@@ -153,7 +199,9 @@ jobs:
           python3 -I "$CHECKS/scripts/security/semgrep_report.py" "$RUNNER_TEMP/semgrep.json"
 
   sensitive-paths:
-    name: sensitive paths
+    # Fails only while a maintainer still has to read and approve the files
+    # that can run code. The contributor has nothing to fix.
+    name: maintainer review
     runs-on: ubuntu-24.04
     timeout-minutes: 5
     permissions:
@@ -381,11 +429,29 @@ jobs:
           path: pr
           fetch-depth: 2
           persist-credentials: false
-      - name: Install ClamAV and fetch current signatures
+      - name: Pick today's signature cache key
+        id: day
+        run: echo "day=$(date -u +%F)" >> "$GITHUB_OUTPUT"
+      # The signature database is about 200 MB. clamav-cache.yml saves it once
+      # a day from the default branch; restoring the newest copy means
+      # freshclam below only fetches the small daily update instead of
+      # downloading everything on every run. Pull requests only read this
+      # cache, so they cannot poison it.
+      - name: Restore the ClamAV signature database
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ${{ runner.temp }}/clamav-db
+          key: clamav-db-${{ steps.day.outputs.day }}
+          restore-keys: clamav-db-
+      - name: Install ClamAV and bring the signatures up to date
         run: |
           sudo apt-get update -qq
-          sudo apt-get install -y -qq clamav clamav-freshclam > /dev/null
+          sudo apt-get install -y -qq --no-install-recommends clamav clamav-freshclam > /dev/null
           sudo systemctl stop clamav-freshclam || true
+          if [ -n "$(ls -A "$RUNNER_TEMP/clamav-db" 2>/dev/null)" ]; then
+            sudo cp -a "$RUNNER_TEMP/clamav-db/." /var/lib/clamav/
+            sudo chown -R clamav:clamav /var/lib/clamav
+          fi
           for attempt in 1 2 3; do
             sudo freshclam --quiet && break
             [ "$attempt" = 3 ] && { echo "::error::Could not download ClamAV signatures."; exit 1; }
@@ -412,7 +478,15 @@ jobs:
     name: security
     if: always()
     needs:
-      [diff-scan, malicious-patterns, sensitive-paths, dependencies, workflows, malware-signatures]
+      [
+        contribution-rules,
+        diff-scan,
+        malicious-patterns,
+        sensitive-paths,
+        dependencies,
+        workflows,
+        malware-signatures,
+      ]
     runs-on: ubuntu-24.04
     timeout-minutes: 2
     permissions: {}

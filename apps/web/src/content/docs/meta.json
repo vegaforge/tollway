@@ -3,11 +3,13 @@
   "pages": [
     "index",
     "getting-started",
+    "route-tables",
     "---Concepts---",
     "model-router",
     "channels",
     "policy",
     "receipts",
-    "reconciliation"
+    "reconciliation",
+    "observability"
   ]
 }

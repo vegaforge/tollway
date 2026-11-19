@@ -38,6 +38,7 @@ Useful commands:
 | `pnpm format:check` | Biome format check only |
 | `pnpm lint:fix` | Apply Biome fixes |
 | `pnpm --filter @vegaforge/tollway-core test` | Run one package's tests |
+| `pnpm --filter @vegaforge/tollway-integration-tests test` | Pay real transactions on a local Stellar network; needs Docker, see [docs/local-network-tests.md](docs/local-network-tests.md) |
 
 ## Where to start
 
@@ -54,6 +55,14 @@ Useful commands:
 - Do not invent x402 or MPP API surfaces. Where the exact SDK call is unknown, keep a typed interface and a TODO pointing at the upstream docs.
 - Tollway never custodies funds. Changes that would make Tollway hold value will not be accepted. See the [security model](docs/design.md#security-model).
 
+## Before you push
+
+> - Run `./scripts/preflight.sh`. Format, lint, types, tests and build must all pass.
+> - A pull request may close up to four issues, and you must be assigned to every one. The body closes each: `Closes #<number>` on its own line.
+> - Open the pull request against `dev`.
+> - Do not touch CI, scripts, `package.json`, lockfiles or `*.config.*` files unless the issue asks you to.
+> - Do not mark an ADR as Accepted. Only the maintainer approves a design.
+
 ## Pull request workflow
 
 1. Comment on the issue and wait to be assigned. Pull requests for issues you are not assigned to are closed without review.
@@ -64,7 +73,9 @@ Useful commands:
 6. Run `./scripts/preflight.sh`. All five gates must pass.
 7. Open a pull request **into `dev`** using the template. The body must include `Closes #<issue>`.
 
-Larger changes (a new public API, a change to the payment path, a new package) start with a short design proposal. See Directive 2 in [AGENTS.md](AGENTS.md) and the templates in `docs/adr/`.
+Each issue is the design the maintainer already approved, so you do not write an ADR or a plan for it. If you want to build it differently from what the issue describes, propose that in the issue thread and wait for the maintainer to agree before coding it. Only the maintainer marks a design (ADR) as Accepted. See "Contributors" in [AGENTS.md](AGENTS.md).
+
+When you open the pull request, a `contribution rules` check confirms that it closes between one and four issues, that you are assigned to each of them, and that no ADR is marked Accepted. It runs first and tells you in plain words what to change.
 
 Commit messages follow Conventional Commits, for example `feat(channels): add idle-timeout close heuristic`.
 
@@ -129,7 +140,8 @@ malicious pull requests. No approval overrides them.
 
 Changes to build scripts, Git hooks, workflows, dependency manifests and other
 files that run code (the list is in `.github/security/sensitive-paths.txt`) also
-wait for a maintainer to review and approve your latest commit. Pushing again
+wait for a maintainer to review and approve your latest commit. The
+`maintainer review` check shows that wait; it is not a problem with your code. Pushing again
 after that approval asks for a new review. This is expected, so leave those
 files out of your pull request unless the issue asks for them.
 

@@ -30,12 +30,15 @@
     "typecheck": "tsc --noEmit"
   },
   "dependencies": {
-    "@vegaforge/tollway-core": "workspace:*"
+    "@stellar/mpp": "0.7.1",
+    "@stellar/stellar-sdk": "15.1.0",
+    "@vegaforge/tollway-core": "workspace:*",
+    "mppx": "0.8.19"
   },
   "devDependencies": {
-    "tsup": "^8.5.0",
-    "typescript": "^5.8.0",
-    "vitest": "^4.1.8"
+    "tsup": "^8.5.1",
+    "typescript": "^5.9.3",
+    "vitest": "^4.1.12"
   },
   "publishConfig": {
     "access": "public"

@@ -1,0 +1,77 @@
+# Keeps a copy of the ClamAV signature database in the Actions cache, so the
+# `malware signatures` job in pr-security.yml restores it instead of
+# downloading about 200 MB on every pull request.
+#
+# It runs on the default branch, whose caches every pull request can read,
+# once a day and on demand. One cache entry per UTC day; pull requests fall
+# back to the newest entry and let freshclam fetch the small daily update, so
+# a missed day costs a little time, never a stale scan.
+
+name: ClamAV signature cache
+
+on:
+  schedule:
+    - cron: "17 3 * * *"
+  workflow_dispatch:
+
+permissions: {}
+
+concurrency:
+  group: clamav-cache
+  cancel-in-progress: false
+
+jobs:
+  refresh:
+    name: refresh signatures
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    permissions:
+      contents: read
+    steps:
+      - name: Pick today's cache key
+        id: day
+        run: echo "day=$(date -u +%F)" >> "$GITHUB_OUTPUT"
+
+      - name: Look for today's entry
+        id: today
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ${{ runner.temp }}/clamav-db
+          key: clamav-db-${{ steps.day.outputs.day }}
+          lookup-only: true
+
+      - name: Restore the newest earlier entry
+        if: steps.today.outputs.cache-hit != 'true'
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ${{ runner.temp }}/clamav-db
+          key: clamav-db-${{ steps.day.outputs.day }}
+          restore-keys: clamav-db-
+
+      - name: Install ClamAV and update the signatures
+        if: steps.today.outputs.cache-hit != 'true'
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq --no-install-recommends clamav clamav-freshclam > /dev/null
+          sudo systemctl stop clamav-freshclam || true
+          if [ -n "$(ls -A "$RUNNER_TEMP/clamav-db" 2>/dev/null)" ]; then
+            sudo cp -a "$RUNNER_TEMP/clamav-db/." /var/lib/clamav/
+            sudo chown -R clamav:clamav /var/lib/clamav
+          fi
+          for attempt in 1 2 3; do
+            sudo freshclam --quiet && break
+            [ "$attempt" = 3 ] && { echo "::error::Could not download ClamAV signatures."; exit 1; }
+            sleep 20
+          done
+          rm -rf "$RUNNER_TEMP/clamav-db"
+          mkdir -p "$RUNNER_TEMP/clamav-db"
+          sudo cp -a /var/lib/clamav/. "$RUNNER_TEMP/clamav-db/"
+          sudo chown -R "$(id -u):$(id -g)" "$RUNNER_TEMP/clamav-db"
+          du -sh "$RUNNER_TEMP/clamav-db"
+
+      - name: Save today's entry
+        if: steps.today.outputs.cache-hit != 'true'
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ${{ runner.temp }}/clamav-db
+          key: clamav-db-${{ steps.day.outputs.day }}

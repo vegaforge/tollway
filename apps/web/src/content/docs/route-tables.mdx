@@ -1,0 +1,21 @@
+---
+title: Route tables
+description: Configure prices for multiple paid endpoints in one place.
+---
+
+`createRouteTable` compiles method and path patterns once. Exact paths and more specific static prefixes win; methods must match. Query strings are excluded from matching and receipt resources, trailing slashes are removed (except `/`), and percent-encoded unreserved characters are decoded. A route can set `resource` to use a stable receipt identifier instead of the concrete path.
+
+```ts
+import { createRouteTable, createMockFacilitator } from "@vegaforge/tollway-server";
+import { Ed25519Signer } from "@vegaforge/tollway-core";
+import { expressRouteTable } from "@vegaforge/tollway-adapter-express";
+
+const routes = createRouteTable({
+  "GET /quotes/:symbol": { amount: "10000", asset, payTo, network: "testnet" },
+  "POST /inference": { amount: "50000", asset, payTo, network: "testnet", resource: "inference-v1" },
+}, { signer, facilitator: createMockFacilitator() });
+
+app.use(expressRouteTable(routes));
+```
+
+The same table is exposed through `fastifyRouteTable`, `honoRouteTable`, and `withRouteTable` from the corresponding adapters. Unmatched requests continue to the free route handler. `routes.list()` exposes configured methods, patterns, prices, and resources for operator tooling.

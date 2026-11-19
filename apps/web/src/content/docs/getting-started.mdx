@@ -7,6 +7,18 @@ description: Install the workspace and run the x402 demo
 
 Node 22 or later and pnpm 10 or later.
 
+## Scaffold a paid API
+
+Create a new API with one gated route and an offline mock payment test:
+
+```bash
+npm create tollway -- --template express --dir my-api --yes
+pnpm create tollway --template hono --dir my-api --yes
+npm create tollway -- --template next --dir my-api --yes
+```
+
+The templates use Express, Hono, and Next 15 respectively. Mock mode is on by default. The mock signer does not create a secret key and is not suitable for real payments. Use `--force` to write into a non-empty directory; an existing `.env` is always preserved.
+
 ## Install and verify
 
 ```bash
@@ -26,6 +38,33 @@ MOCK_MODE=true pnpm --filter @vegaforge/tollway-demo start
 ```
 
 Mock mode is the only demo path that works today. Without `MOCK_MODE`, the demo calls the mainnet OpenZeppelin facilitator URL, sends no API key, and uses placeholder addresses, so a real testnet run fails. Fixing those defaults is tracked in [#113](https://github.com/vegaforge/tollway/issues/113).
+
+## Next.js route paywalls
+
+For one App Router handler, wrap its export with `withPaywall` from `@vegaforge/tollway-adapter-next`:
+
+```ts
+// app/api/paid/route.ts
+import { withPaywall } from "@vegaforge/tollway-adapter-next";
+import { gate } from "@/lib/paywall";
+
+export const GET = withPaywall(gate, async (_request, { receipt }) =>
+  Response.json({ receiptId: receipt.receipt.id }),
+);
+```
+
+For a group of paths on Next 16, configure the proxy entry point:
+
+```ts
+// proxy.ts
+import { paywallProxy } from "@vegaforge/tollway-adapter-next/proxy";
+import { gate } from "./src/paywall.js";
+
+export const proxy = paywallProxy({ routes: [{ path: "/api/paid", gate }] });
+export const config = { matcher: ["/api/paid/:path*"] };
+```
+
+The proxy runs on Node.js. It strips a caller-supplied Tollway receipt header and forwards only the receipt returned by the gate. In a route handler, `getProxyReceipt(request)` reads and schema-validates that receipt. The proxy also returns the `PAYMENT-RESPONSE` header to the caller.
 
 ## What is built today
 

@@ -2,13 +2,16 @@ import { Ed25519Signer } from "@vegaforge/tollway-core";
 import {
   createInMemorySettlementCache,
   createMockFacilitator,
+  createMockMppChargeHandler,
   createPaywall,
+  createRouteTable,
+  type MppChargeHandler,
   PAYMENT_SIGNATURE_HEADER,
   type PaywallConfig,
 } from "@vegaforge/tollway-server";
 import express from "express";
 import { describe, expect, it } from "vitest";
-import { expressPaywall, RECEIPT_LOCALS_KEY } from "./index.js";
+import { expressPaywall, expressRouteTable, RECEIPT_LOCALS_KEY } from "./index.js";
 
 const config: PaywallConfig = {
   amount: "10000",
@@ -64,6 +67,30 @@ describe("expressPaywall", () => {
       expect(body.receiptId).toBeTruthy();
     } finally {
       await app.close();
+    }
+  });
+});
+
+describe("expressRouteTable", () => {
+  it("gates paid paths and passes free paths through", async () => {
+    const signer = await Ed25519Signer.generate("route-table-express");
+    const routes = createRouteTable(
+      { "GET /paid/:id": config },
+      { signer, facilitator: createMockFacilitator() },
+    );
+    const app = express();
+    app.use(expressRouteTable(routes));
+    app.get("/paid/:id", (_req, res) => res.send("paid"));
+    app.get("/free", (_req, res) => res.send("free"));
+    const server = app.listen(0);
+    await new Promise((resolve) => server.once("listening", resolve));
+    const address = server.address();
+    if (!address || typeof address === "string") throw new Error("expected a TCP address");
+    try {
+      expect((await fetch(`http://127.0.0.1:${address.port}/paid/1`)).status).toBe(402);
+      expect(await (await fetch(`http://127.0.0.1:${address.port}/free`)).text()).toBe("free");
+    } finally {
+      await new Promise((resolve) => server.close(resolve));
     }
   });
 });
@@ -139,6 +166,88 @@ describe("expressPaywall method binding", () => {
       expect(write.status).toBe(409);
     } finally {
       await new Promise((resolve) => server.close(resolve));
+    }
+  });
+});
+
+// MPP charge through the adapter: the challenge headers reach the client on
+// the 402, an Authorization: Payment credential settles, and a refused
+// credential comes back as the rejection status.
+async function mppGate() {
+  const signer = await Ed25519Signer.generate("test-key-mpp");
+  const base = createMockMppChargeHandler();
+  const handler: MppChargeHandler = {
+    ...base,
+    async challenge() {
+      return {
+        status: 402,
+        headers: { "www-authenticate": 'Payment id="test"', "cache-control": "no-store" },
+        body: null,
+      };
+    },
+    async verify(input) {
+      if (input.payment.payload === "Payment refused") {
+        return { valid: false, reason: "mpp challenge was not issued by this server" };
+      }
+      return base.verify(input);
+    },
+  };
+  return createPaywall(
+    { ...config, models: ["x402", "mpp-charge"] },
+    { signer, facilitator: createMockFacilitator(), mppChargeHandler: handler },
+  );
+}
+
+describe("expressPaywall with mpp-charge", () => {
+  async function start() {
+    const gate = await mppGate();
+    const app = express();
+    app.get("/quotes/latest", expressPaywall(gate), (_req, res) => {
+      res.json({ receiptModel: res.locals[RECEIPT_LOCALS_KEY].receipt.model });
+    });
+    const server = app.listen(0);
+    await new Promise((resolve) => server.once("listening", resolve));
+    const address = server.address();
+    if (!address || typeof address === "string") throw new Error("expected a TCP address");
+    return {
+      url: `http://127.0.0.1:${address.port}/quotes/latest`,
+      close: () => new Promise((resolve) => server.close(resolve)),
+    };
+  }
+
+  it("sends the MPP challenge headers with the 402", async () => {
+    const app = await start();
+    try {
+      const response = await fetch(app.url);
+      expect(response.status).toBe(402);
+      expect(response.headers.get("www-authenticate")).toBe('Payment id="test"');
+      expect(response.headers.get("payment-required")).toBeTruthy();
+    } finally {
+      await app.close();
+    }
+  });
+
+  it("settles an Authorization: Payment credential", async () => {
+    const app = await start();
+    try {
+      const response = await fetch(app.url, { headers: { authorization: "Payment ok" } });
+      expect(response.status).toBe(200);
+      expect(((await response.json()) as { receiptModel: string }).receiptModel).toBe("mpp-charge");
+    } finally {
+      await app.close();
+    }
+  });
+
+  it("answers a refused credential with the rejection status", async () => {
+    const app = await start();
+    try {
+      const response = await fetch(app.url, { headers: { authorization: "Payment refused" } });
+      expect(response.status).toBe(402);
+      expect(await response.json()).toEqual({
+        error: "mpp challenge was not issued by this server",
+      });
+    } finally {
+      await app.close();
     }
   });
 });

@@ -11,7 +11,7 @@
  */
 
 import type { SignedReceipt } from "@vegaforge/tollway-core";
-import type { Gate } from "@vegaforge/tollway-server";
+import type { Gate, RouteTable } from "@vegaforge/tollway-server";
 
 /** Extra argument a paid handler receives: the verified receipt. */
 export type PaidContext = { receipt: SignedReceipt };
@@ -58,6 +58,19 @@ export function withPaywall(
     }
 
     return jsonResponse({ error: outcome.reason }, outcome.status);
+  };
+}
+
+/** Applies the matching paid gate, while allowing free requests through the same handler. */
+export function withRouteTable(
+  table: RouteTable,
+  handler: (request: Request, context: { receipt?: SignedReceipt }) => Response | Promise<Response>,
+): (request: Request) => Promise<Response> {
+  return async (request) => {
+    const url = requestUrl(request);
+    const match = table.match(request.method, url);
+    if (match) return withPaywall(match.gate, handler)(request);
+    return handler(request, {});
   };
 }
 

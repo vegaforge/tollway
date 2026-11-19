@@ -2,13 +2,16 @@ import { Ed25519Signer } from "@vegaforge/tollway-core";
 import {
   createInMemorySettlementCache,
   createMockFacilitator,
+  createMockMppChargeHandler,
   createPaywall,
+  createRouteTable,
+  type MppChargeHandler,
   PAYMENT_SIGNATURE_HEADER,
   type PaywallConfig,
 } from "@vegaforge/tollway-server";
 import { Hono } from "hono";
 import { describe, expect, it } from "vitest";
-import { honoPaywall, RECEIPT_CONTEXT_KEY } from "./index.js";
+import { honoPaywall, honoRouteTable, RECEIPT_CONTEXT_KEY } from "./index.js";
 
 const config: PaywallConfig = {
   amount: "10000",
@@ -53,6 +56,22 @@ describe("honoPaywall", () => {
   });
 });
 
+describe("honoRouteTable", () => {
+  it("gates paid paths and passes free paths through", async () => {
+    const signer = await Ed25519Signer.generate("route-table-hono");
+    const routes = createRouteTable(
+      { "GET /paid/:id": config },
+      { signer, facilitator: createMockFacilitator() },
+    );
+    const app = new Hono();
+    app.use("*", honoRouteTable(routes));
+    app.get("/paid/:id", (c) => c.text("paid"));
+    app.get("/free", (c) => c.text("free"));
+    expect((await app.request("/paid/1")).status).toBe(402);
+    expect(await (await app.request("/free")).text()).toBe("free");
+  });
+});
+
 // Regression lock for ADR-2026-11-18-method-binding.
 describe("honoPaywall method binding", () => {
   it("does not let a payment made for GET unlock POST on the same path", async () => {
@@ -70,5 +89,67 @@ describe("honoPaywall method binding", () => {
     expect(read.status).toBe(200);
     const write = await app.request("/report", { method: "POST", headers });
     expect(write.status).toBe(409);
+  });
+});
+
+// MPP charge through the adapter: the challenge headers reach the client on
+// the 402, an Authorization: Payment credential settles, and a refused
+// credential comes back as the rejection status.
+async function mppGate() {
+  const signer = await Ed25519Signer.generate("test-key-mpp");
+  const base = createMockMppChargeHandler();
+  const handler: MppChargeHandler = {
+    ...base,
+    async challenge() {
+      return {
+        status: 402,
+        headers: { "www-authenticate": 'Payment id="test"', "cache-control": "no-store" },
+        body: null,
+      };
+    },
+    async verify(input) {
+      if (input.payment.payload === "Payment refused") {
+        return { valid: false, reason: "mpp challenge was not issued by this server" };
+      }
+      return base.verify(input);
+    },
+  };
+  return createPaywall(
+    { ...config, models: ["x402", "mpp-charge"] },
+    { signer, facilitator: createMockFacilitator(), mppChargeHandler: handler },
+  );
+}
+
+describe("honoPaywall with mpp-charge", () => {
+  async function build() {
+    const gate = await mppGate();
+    const app = new Hono();
+    app.get("/quotes/latest", honoPaywall(gate), (c) =>
+      c.json({ receiptModel: c.get(RECEIPT_CONTEXT_KEY).receipt.model }),
+    );
+    return app;
+  }
+
+  it("sends the MPP challenge headers with the 402", async () => {
+    const response = await (await build()).request("/quotes/latest");
+    expect(response.status).toBe(402);
+    expect(response.headers.get("www-authenticate")).toBe('Payment id="test"');
+    expect(response.headers.get("payment-required")).toBeTruthy();
+  });
+
+  it("settles an Authorization: Payment credential", async () => {
+    const response = await (await build()).request("/quotes/latest", {
+      headers: { authorization: "Payment ok" },
+    });
+    expect(response.status).toBe(200);
+    expect(((await response.json()) as { receiptModel: string }).receiptModel).toBe("mpp-charge");
+  });
+
+  it("answers a refused credential with the rejection status", async () => {
+    const response = await (await build()).request("/quotes/latest", {
+      headers: { authorization: "Payment refused" },
+    });
+    expect(response.status).toBe(402);
+    expect(await response.json()).toEqual({ error: "mpp challenge was not issued by this server" });
   });
 });

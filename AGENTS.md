@@ -1,8 +1,10 @@
 # Engineering Standards and AI Governance Rulebook
 
 This file is the rulebook for every coding agent that works in this repository
-(Claude Code, Codex, Antigravity, Qwen Code, and custom harnesses). Human
-contributors follow the same rules; see [CONTRIBUTING.md](CONTRIBUTING.md).
+(Claude Code, Codex, Antigravity, Qwen Code, and custom harnesses), whether it
+works for the maintainer or for a contributor. Human contributors follow the
+same craft rules; see [CONTRIBUTING.md](CONTRIBUTING.md) and "Contributors"
+below for how the process differs for them.
 
 The craft rules (architecture, correctness, comments, the defect checklist in
 detail) live in
@@ -69,6 +71,10 @@ Rules:
 
 Trivial work skips this step: a typo, a copy change, a one-line fix with a
 regression test. When unsure, it is not trivial.
+
+Work on an assigned issue skips it too: the issue is the design the
+maintainer already approved (see "Contributors" below). Write ADRs only when
+the maintainer asks for them, or for the maintainer's own architecture work.
 
 ### Directive 3: Red, then green
 
@@ -153,6 +159,31 @@ pull request and why.
 
 ---
 
+## Contributors
+
+Tollway is open source and runs Drips Waves, so most changes come from
+contributors picking up issues. For them, and for any agent working on their
+behalf
+([ADR-2026-11-19-open-source-governance](docs/adr/ADR-2026-11-19-open-source-governance.md)):
+
+- **The issue is the approved design.** Start coding once you are assigned.
+  No ADR pair and no plan file are needed.
+- **Changing the approach is agreed in the issue first.** If you want to
+  build it differently from what the issue describes, say so in the issue
+  thread and wait for the maintainer to agree there before coding it.
+- **Only the maintainer accepts a design.** An ADR a contributor adds stays
+  `Proposed, awaiting maintainer approval`. Marking one `Accepted` fails the
+  `contribution rules` check.
+- **Up to four assigned issues per pull request.** A contributor may work on
+  up to four issues at once and close them together. The `contribution rules`
+  check fails a pull request that closes no issue, more than four, or one the
+  author is not assigned to.
+- **Leave CI and tooling alone unless the issue asks.** Files under
+  `.github/`, `scripts/`, `package.json` files, lockfiles and `*.config.*`
+  wait for a maintainer to read every line (`maintainer review`).
+- Everything else in this file applies: red then green, no masking, and
+  `./scripts/preflight.sh` before you push.
+
 ## Reviewing contributor pull requests
 
 Some pull requests are written to attack the maintainer rather than to improve
@@ -177,6 +208,10 @@ rules cover what a scanner cannot:
   request pass. Fix the finding, or narrow the rule with a test case in a
   maintainer's own pull request.
 - Agents follow the same rules and never approve a pull request.
+- Once the diff is read, the maintainer approves and merges in one step with
+  `scripts/approve-and-merge.sh <pr-number>`. It approves the head commit,
+  re-runs the security run that failed only for want of that approval, and
+  turns on auto-merge, which still waits for `quality` and `security`.
 
 ## Pre-review defect checklist
 
@@ -215,13 +250,14 @@ Check every item before asking for review. SKILL.md explains each one.
 
 ## Git and pull requests
 
-- One issue, one branch, one pull request. Prefixes: `feat/`, `fix/`,
+- One branch and one pull request per piece of work. A contributor's pull
+  request may close up to four assigned issues. Prefixes: `feat/`, `fix/`,
   `chore/`, `docs/`, `test/`.
 - Conventional Commits, for example
   `fix(server): bind cached receipts to the offer`.
 - Pull requests into `dev` are squash-merged and the branch is deleted on
   merge. Promotions into `staging` and `main` use a merge commit.
-- The pull request body includes `Closes #<issue>`.
+- The pull request body includes `Closes #<issue>` for each issue it closes.
 - Never add AI co-author trailers, "generated with" footers, or session links
   to commits, pull requests, or files.
 - Never commit or push on a maintainer's or contributor's behalf unless asked.

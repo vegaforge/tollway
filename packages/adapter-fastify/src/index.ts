@@ -8,7 +8,7 @@
  * @vegaforge/tollway-adapter-next. See docs/design.md, "Repository layout".
  */
 
-import type { Gate, GateOutcome } from "@vegaforge/tollway-server";
+import type { Gate, GateOutcome, RouteTable } from "@vegaforge/tollway-server";
 import type { FastifyReply, FastifyRequest, preHandlerHookHandler } from "fastify";
 
 type SettledReceipt = Extract<GateOutcome, { kind: "settled" }>["receipt"];
@@ -31,26 +31,39 @@ declare module "fastify" {
  */
 export function fastifyPaywall(gate: Gate): preHandlerHookHandler {
   return async function preHandler(request: FastifyRequest, reply: FastifyReply): Promise<void> {
-    const outcome = await gate({
-      method: request.method,
-      url: request.url,
-      headers: request.headers,
-    });
-
-    if (outcome.kind === "settled") {
-      applyHeaders(reply, outcome.headers);
-      request.tollwayReceipt = outcome.receipt;
-      return;
-    }
-
-    if (outcome.kind === "payment-required") {
-      applyHeaders(reply, outcome.headers);
-      await reply.status(outcome.status).send(outcome.challenge);
-      return;
-    }
-
-    await reply.status(outcome.status).send({ error: outcome.reason });
+    await runGate(gate, request, reply);
   };
+}
+
+/** Routes paid requests through a compiled table; unmatched requests continue unchanged. */
+export function fastifyRouteTable(table: RouteTable): preHandlerHookHandler {
+  return async function preHandler(request: FastifyRequest, reply: FastifyReply): Promise<void> {
+    const match = table.match(request.method, request.url);
+    if (!match) return;
+    await runGate(match.gate, request, reply);
+  };
+}
+
+async function runGate(gate: Gate, request: FastifyRequest, reply: FastifyReply): Promise<void> {
+  const outcome = await gate({
+    method: request.method,
+    url: request.url,
+    headers: request.headers,
+  });
+
+  if (outcome.kind === "settled") {
+    applyHeaders(reply, outcome.headers);
+    request.tollwayReceipt = outcome.receipt;
+    return;
+  }
+
+  if (outcome.kind === "payment-required") {
+    applyHeaders(reply, outcome.headers);
+    await reply.status(outcome.status).send(outcome.challenge);
+    return;
+  }
+
+  await reply.status(outcome.status).send({ error: outcome.reason });
 }
 
 function applyHeaders(reply: FastifyReply, headers: Record<string, string>): void {

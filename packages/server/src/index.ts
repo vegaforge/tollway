@@ -9,6 +9,7 @@
 export {
   createInMemorySettlementCache,
   createRedisSettlementCache,
+  type InMemorySettlementCacheOptions,
   type LockingSettlementCache,
   type RedisLikeClient,
   type RedisSettlementCacheOptions,
@@ -37,15 +38,19 @@ export {
 export {
   decodeHeader,
   encodeHeader,
+  MPP_AUTHORIZATION_HEADER,
   PAYMENT_REQUIRED_HEADER,
   PAYMENT_RESPONSE_HEADER,
   PAYMENT_SIGNATURE_HEADER,
   readHeader,
+  readMppCredential,
 } from "./headers.js";
 export {
   createMockMppChargeHandler,
   createMppChargeHandler,
   deriveMppChargeNonce,
+  type MppChargeChallenge,
+  type MppChargeChallengeInput,
   type MppChargeHandler,
   type MppChargeOptions,
   type MppChargeSettleInput,
@@ -53,3 +58,9 @@ export {
   type MppChargeVerifyInput,
   type MppChargeVerifyResult,
 } from "./mpp-charge.js";
+export {
+  createRouteTable,
+  type RouteTable,
+  type RouteTableEntry,
+  type RouteTableMatch,
+} from "./route-table.js";

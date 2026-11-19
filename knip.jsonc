@@ -1,0 +1,8 @@
+{
+  "$schema": "https://unpkg.com/knip@6/schema-jsonc.json",
+  // `vite` is declared at the workspace root only to pin the version that
+  // Vitest and @vitejs/plugin-react resolve as a peer: pnpm overrides do not
+  // reach auto-installed peers, and vite <= 7.3.6 has open security
+  // advisories. Nothing imports it directly.
+  "ignoreDependencies": ["vite"]
+}

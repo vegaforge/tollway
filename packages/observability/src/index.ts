@@ -7,6 +7,30 @@
  */
 
 import type { SettlementModel } from "@vegaforge/tollway-core";
+import {
+  assertTimeseriesLimits,
+  computeTimeseries,
+  DEFAULT_MAX_TIMESERIES_BUCKETS,
+  DEFAULT_MAX_TIMESERIES_ROWS,
+  type TimeseriesQuery,
+  type TimeseriesResult,
+} from "./timeseries.js";
+
+export {
+  DEFAULT_MAX_TIMESERIES_BUCKETS,
+  DEFAULT_MAX_TIMESERIES_ROWS,
+  type LatencyPercentiles,
+  MetricsQueryTooLargeError,
+  nearestRankPercentile,
+  parseIsoTimestamp,
+  type TimeseriesBucket,
+  type TimeseriesBucketResult,
+  type TimeseriesGroupBy,
+  type TimeseriesQuery,
+  type TimeseriesResult,
+  type TimeseriesRow,
+  timeseriesBuckets,
+} from "./timeseries.js";
 
 /** Webhook event names, matching docs/design.md, "Observability". */
 export const webhookEvents = [
@@ -51,16 +75,38 @@ export type MetricsQuery = {
 /**
  * Aggregated spend over a query window. Amounts are integer strings in the
  * asset's smallest unit (same convention as `PaymentMetric.amount` and the
- * canonical receipt). Per-group buckets only carry the amount; per-group
- * counts and averages can be derived by combining with the `count` rollups
- * via a future query-side helper. Keys for `byPayer` / `byPayee` are the
- * payer / payee addresses exactly as they appear on the recorded metrics.
+ * canonical receipt). Every amount field counts metrics of every outcome
+ * (settled, failed and skipped); `count` is the number of matched metrics.
+ * Keys for `byPayer` / `byPayee` are the payer / payee addresses exactly as
+ * they appear on the recorded metrics. For settled-only amounts, an outcome
+ * split and latency, use `ObservabilityHub.timeseries`.
  */
 export type SpendSummary = {
+  /**
+   * @deprecated Adds amounts across assets, so it is only meaningful when the
+   * window holds a single asset. Use `byAsset`.
+   */
   totalAmount: string;
   count: number;
+  /**
+   * Amount per asset, keyed by `PaymentMetric.asset`. Amounts in different
+   * assets are never added together.
+   */
+  byAsset: Record<string, string>;
+  /**
+   * @deprecated Adds amounts across assets. Use `timeseries`, whose rows are
+   * keyed by model and asset.
+   */
   byModel: Partial<Record<SettlementModel, string>>;
+  /**
+   * @deprecated Adds amounts across assets. Use `timeseries` with
+   * `groupBy: "payer"`.
+   */
   byPayer: Record<string, string>;
+  /**
+   * @deprecated Adds amounts across assets. Use `timeseries` with
+   * `groupBy: "payee"`.
+   */
   byPayee: Record<string, string>;
 };
 
@@ -131,6 +177,18 @@ export type ObservabilityHubOptions = {
    * tests inject a no-op to keep the timeline synchronous.
    */
   sleep?: (ms: number) => Promise<void>;
+  /**
+   * Most buckets one `timeseries` query may produce before it is rejected
+   * with `MetricsQueryTooLargeError`. Defaults to 10080 (seven days of
+   * one-minute buckets).
+   */
+  maxTimeseriesBuckets?: number;
+  /**
+   * Most rows (buckets times groups) one `timeseries` query may produce
+   * before it is rejected with `MetricsQueryTooLargeError`. Defaults to
+   * 200000.
+   */
+  maxTimeseriesRows?: number;
 };
 
 export interface ObservabilityHub {
@@ -150,6 +208,18 @@ export interface ObservabilityHub {
   addWebhook(subscription: WebhookSubscription): void;
   /** Roll payment metrics into a spend summary. Implementation tracked in #31. */
   summarize(query?: MetricsQuery): SpendSummary;
+  /**
+   * Bucket matching metrics by time and return, per bucket, one row per
+   * model and asset (and payee or payer when `groupBy` asks): the settled
+   * amount, settled / failed / skipped counts, and nearest-rank latency
+   * percentiles. The range is `[from, to)` and every bucket in it is
+   * returned, empty ones included. Throws a `TollwayError` with code
+   * `invalid-metrics-query` for a malformed query, `invalid-metric` for a
+   * recorded metric that cannot be bucketed or summed, and
+   * `MetricsQueryTooLargeError` when the result would exceed the hub's
+   * limits.
+   */
+  timeseries(query: TimeseriesQuery): TimeseriesResult;
   /** Serialize matching metrics as JSON or CSV. Implementation tracked in #31. */
   export(format: ExportFormat, query?: MetricsQuery): string;
 }
@@ -320,7 +390,7 @@ async function deliverWebhook(
  * returned {@link DeliveryReport} and the optional `onDeliveryFailure`
  * callback rather than being swallowed.
  *
- * Metric collection (`record`, `summarize`, `export`) keeps an in-memory
+ * Metric collection (`record`, `summarize`, `timeseries`, `export`) keeps an in-memory
  * array of `PaymentMetric` values. The hub holds the rollup primitives a
  * service-side dashboard or exporter actually consumes; the storage is
  * deliberately ephemeral so production deployments can swap it for a
@@ -347,6 +417,12 @@ export function createObservabilityHub(options: ObservabilityHubOptions = {}): O
   const onDeliveryFailure = options.onDeliveryFailure;
   const requestTimeoutMs =
     options.requestTimeoutMs !== undefined ? options.requestTimeoutMs : DEFAULT_REQUEST_TIMEOUT_MS;
+  const timeseriesLimits = {
+    maxBuckets: options.maxTimeseriesBuckets ?? DEFAULT_MAX_TIMESERIES_BUCKETS,
+    maxRows: options.maxTimeseriesRows ?? DEFAULT_MAX_TIMESERIES_ROWS,
+  };
+  // Checked here so a bad limit fails at startup, not on the first query.
+  assertTimeseriesLimits(timeseriesLimits);
 
   return {
     record(metric) {
@@ -355,6 +431,7 @@ export function createObservabilityHub(options: ObservabilityHubOptions = {}): O
     summarize(query) {
       const matched = filterMetrics(metrics, query);
       let totalAmount = 0n;
+      const byAsset: Record<string, bigint> = {};
       const byModel: Partial<Record<SettlementModel, bigint>> = {};
       const byPayer: Record<string, bigint> = {};
       const byPayee: Record<string, bigint> = {};
@@ -370,6 +447,7 @@ export function createObservabilityHub(options: ObservabilityHubOptions = {}): O
           continue;
         }
         totalAmount += amount;
+        byAsset[m.asset] = (byAsset[m.asset] ?? 0n) + amount;
         byModel[m.model] = (byModel[m.model] ?? 0n) + amount;
         byPayer[m.payer] = (byPayer[m.payer] ?? 0n) + amount;
         byPayee[m.payee] = (byPayee[m.payee] ?? 0n) + amount;
@@ -378,10 +456,14 @@ export function createObservabilityHub(options: ObservabilityHubOptions = {}): O
       return {
         totalAmount: totalAmount.toString(),
         count: matched.length,
+        byAsset: stringifyBigintMap(byAsset),
         byModel: stringifyBigintMap(byModel) as Partial<Record<SettlementModel, string>>,
         byPayer: stringifyBigintMap(byPayer),
         byPayee: stringifyBigintMap(byPayee),
       };
+    },
+    timeseries(query) {
+      return computeTimeseries(metrics, query, timeseriesLimits);
     },
     export(format, query) {
       const matched = filterMetrics(metrics, query);

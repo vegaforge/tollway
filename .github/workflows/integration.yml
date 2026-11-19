@@ -1,0 +1,99 @@
+name: Integration
+
+# Pays real Soroban transactions through the gate on a disposable local
+# Stellar network (stellar/quickstart), see docs/local-network-tests.md.
+#
+# Not part of the `quality` aggregate in ci.yml yet: it joins once the
+# maintainer has seen its runtime and flakiness (issue #245).
+#
+# Actions are pinned to a full commit SHA with the release tag in a comment,
+# copied from ci.yml. The quickstart image is pinned by digest for the same
+# reason.
+
+on:
+  push:
+    branches: [dev, staging, main]
+  pull_request:
+
+concurrency:
+  group: integration-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions: {}
+
+env:
+  CI: true
+
+jobs:
+  local-network:
+    name: x402 and MPP on a local Stellar network
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    permissions:
+      contents: read
+    services:
+      stellar:
+        # stellar/quickstart v693-b1627.1-latest (the `latest` tag on 2026-11-12).
+        image: docker.io/stellar/quickstart@sha256:a61ce821add98adb4f3e3d6e757b2615dd169a2b39c7e30cd47cfa95074f97d9
+        ports:
+          - 8000:8000
+        env:
+          # Service containers take no arguments, so the image's `--local` and
+          # `--enable` flags are given as the environment variables its start
+          # script reads. Horizon runs because local friendbot needs it.
+          NETWORK: local
+          ENABLE: core,horizon,rpc
+          # @x402/stellar and @stellar/mpp only sign for stellar:testnet and
+          # stellar:pubnet. quickstart's local mode keeps a NETWORK_PASSPHRASE
+          # it is given instead of its standalone default, so the local
+          # network uses the testnet passphrase and the SDKs accept it as is.
+          NETWORK_PASSPHRASE: "Test SDF Network ; September 2015"
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - uses: pnpm/action-setup@ea17c68df8912ef543352723c149a84f56e3d413 # v6.1.0
+
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version-file: .nvmrc
+          cache: pnpm
+
+      - name: Install
+        run: pnpm install --frozen-lockfile
+
+      - name: Build the suite's workspace dependencies
+        run: pnpm --filter "@vegaforge/tollway-integration-tests^..." build
+
+      # quickstart serves RPC over plain HTTP, and two of the SDKs under test
+      # refuse an http: RPC URL. The suite puts an HTTPS proxy in front of it
+      # with this throwaway certificate, which Node trusts through
+      # NODE_EXTRA_CA_CERTS. It lives for one run and signs nothing else.
+      - name: Generate a certificate for the local RPC proxy
+        run: |
+          dir="$RUNNER_TEMP/local-rpc-tls"
+          mkdir -p "$dir"
+          openssl req -x509 -newkey rsa:2048 -nodes -days 1 \
+            -keyout "$dir/key.pem" -out "$dir/cert.pem" \
+            -subj "/CN=localhost" -addext "subjectAltName=DNS:localhost,IP:127.0.0.1"
+          {
+            echo "TOLLWAY_LOCAL_STELLAR_TLS_CERT=$dir/cert.pem"
+            echo "TOLLWAY_LOCAL_STELLAR_TLS_KEY=$dir/key.pem"
+            echo "NODE_EXTRA_CA_CERTS=$dir/cert.pem"
+          } >> "$GITHUB_ENV"
+
+      - name: Run the local-network suite
+        timeout-minutes: 12
+        env:
+          TOLLWAY_LOCAL_STELLAR: "true"
+          TOLLWAY_LOCAL_STELLAR_RPC_URL: http://localhost:8000/rpc
+        run: pnpm --filter @vegaforge/tollway-integration-tests test
+
+      # quickstart prints the network root account's secret at start. It is
+      # derived from the public passphrase, but it is still left out.
+      - name: quickstart logs on failure
+        if: failure()
+        env:
+          CONTAINER: ${{ job.services.stellar.id }}
+        run: docker logs "$CONTAINER" 2>&1 | grep -v "root secret key" | tail -n 300
