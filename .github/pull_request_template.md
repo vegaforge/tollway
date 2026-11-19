@@ -30,7 +30,7 @@ See AGENTS.md and `.claude/skills/tollway-engineering-standards/SKILL.md` for wh
 
 - [ ] **Assigned**: I was assigned the linked issue before opening this pull request.
 - [ ] **Branch**: the work was done on its own branch, cut from an up-to-date `dev`, and this pull request targets `dev`.
-- [ ] **Approval**: the ADR pair or plan was approved by the maintainer (non-trivial changes only).
+- [ ] **Design**: I built what the issue describes, or the maintainer agreed to my change of approach in the issue thread. Any ADR I added says `Proposed`.
 - [ ] **Test first**: a bug fix is locked by a test that failed before the fix.
 - [ ] **Boundary validation**: external payloads (x402 and MPP headers, facilitator responses, webhook bodies, shared-store reads) are parsed with a schema and mapped to Tollway types.
 - [ ] **Integer base units**: amounts stay integer strings in the asset's smallest unit and are compared as `bigint`. No floats.
