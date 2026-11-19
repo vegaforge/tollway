@@ -467,6 +467,8 @@ async function settleAndRecord<TPayment>(
   return { ok: true, receipt, method, replayed: false };
 }
 
+const BODY_HEADERS = new Set(["content-type", "content-length", "content-encoding"]);
+
 /**
  * The 402 for a request with no payment. It always carries the x402
  * PAYMENT-REQUIRED header. When the route accepts mpp-charge, the MPP
@@ -485,7 +487,13 @@ async function paymentRequired(
       offer,
       request: { method: request.method, url: request.url },
     });
-    Object.assign(headers, mpp.headers);
+    for (const [name, value] of Object.entries(mpp.headers)) {
+      // The adapters send the offer as the JSON body, so headers that
+      // describe mppx's own body would mislabel it.
+      if (!BODY_HEADERS.has(name.toLowerCase())) {
+        headers[name] = value;
+      }
+    }
   }
   return { kind: "payment-required", status: 402, headers, challenge: offer };
 }

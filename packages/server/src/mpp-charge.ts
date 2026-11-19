@@ -48,7 +48,10 @@ export type MppChargeChallenge = {
   status: number;
   /** Includes `WWW-Authenticate: Payment ...`, the challenge itself. */
   headers: Record<string, string>;
-  /** `mppx` sends no body with a fresh challenge, so this is usually null. */
+  /**
+   * The body `mppx` sent (a problem+json description in mppx 0.8), or null.
+   * The gate keeps its own JSON body and only forwards the headers.
+   */
   body: string | null;
 };
 
@@ -104,7 +107,8 @@ export type MppChargeOptions = {
   network: StellarNetwork;
   /**
    * HMAC key `mppx` binds its challenges to, so it only accepts credentials
-   * for challenges it issued. Keep it secret and stable across restarts.
+   * for challenges it issued. At least 32 bytes (`mppx` refuses shorter
+   * keys); keep it secret and stable across restarts.
    */
   secretKey: string;
   /**
@@ -255,13 +259,18 @@ export function createMppChargeHandler(options: MppChargeOptions): MppChargeHand
           scope: offer.resource,
         });
       } catch (error) {
-        if (error instanceof Errors.PaymentError || error instanceof StellarMppError) {
-          return { settled: false, reason: `mpp charge rejected: ${error.message}` };
+        // A network failure says nothing about the payment, so it is thrown
+        // for the caller to retry or alert on. Everything else came out of
+        // mppx or @stellar/mpp judging this credential (an mppx PaymentError,
+        // a StellarMppError, or an SDK error on a malformed transaction) and
+        // is a rejection of the payment.
+        if (isTransportFailure(error)) {
+          throw new TollwayError(
+            "payment-failed",
+            `mpp charge settlement failed: ${errorMessage(error)}`,
+          );
         }
-        throw new TollwayError(
-          "payment-failed",
-          `mpp charge settlement failed: ${errorMessage(error)}`,
-        );
+        return { settled: false, reason: `mpp charge rejected: ${rejectionMessage(error)}` };
       }
       return { settled: true, txHash: receipt.reference };
     },
@@ -275,6 +284,39 @@ function payerFromSource(source: string | undefined, network: string): string | 
   if (!source.startsWith(prefix)) return null;
   const account = source.slice(prefix.length);
   return STELLAR_ACCOUNT.test(account) ? account : null;
+}
+
+const TRANSPORT_ERROR_CODES = new Set([
+  "ECONNREFUSED",
+  "ECONNRESET",
+  "ENOTFOUND",
+  "EAI_AGAIN",
+  "ETIMEDOUT",
+  "EPIPE",
+  "UND_ERR_CONNECT_TIMEOUT",
+  "UND_ERR_SOCKET",
+]);
+
+/**
+ * True for errors raised by the HTTP layer rather than by payment checks:
+ * axios errors (stellar-sdk's RPC client), fetch's `TypeError`, aborts and
+ * timeouts, and socket error codes.
+ */
+function isTransportFailure(error: unknown): boolean {
+  if (!(error instanceof Error)) return false;
+  if (error instanceof Errors.PaymentError || error instanceof StellarMppError) return false;
+  if ("isAxiosError" in error && error.isAxiosError === true) return true;
+  if (error.name === "AbortError" || error.name === "TimeoutError") return true;
+  if (error instanceof TypeError && error.message === "fetch failed") return true;
+  const code = "code" in error ? error.code : undefined;
+  return typeof code === "string" && TRANSPORT_ERROR_CODES.has(code);
+}
+
+function rejectionMessage(error: unknown): string {
+  if (error instanceof Errors.PaymentError || error instanceof StellarMppError) {
+    return error.message;
+  }
+  return `invalid payment: ${errorMessage(error)}`;
 }
 
 function errorMessage(error: unknown): string {

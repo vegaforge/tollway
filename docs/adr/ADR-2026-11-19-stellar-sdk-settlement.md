@@ -25,8 +25,14 @@
   was read after expiry, so the `Map` grew for the life of the process
   (`packages/server/src/cache.ts`).
 - Installed upstream versions, read from their type definitions:
-  `@stellar/mpp` 0.7.1 (peer `mppx` `^0.6.29`, peer `@stellar/stellar-sdk`
-  `^15.1.0`), `mppx` 0.6.31, `@x402/core` and `@x402/stellar` 2.16.0.
+  `@stellar/mpp` 0.7.1 (the latest; peer `mppx` `^0.6.29`, peer
+  `@stellar/stellar-sdk` `^15.1.0`), `mppx` 0.8.19, `@x402/core` and
+  `@x402/stellar` 2.16.0.
+- Every `mppx` below 0.8.2 carries GHSA-vc9j-9wph-qghj and
+  GHSA-727h-3vm5-qwq6 (gas draining in its EVM code). The `security` check
+  fails a pull request that adds a known vulnerability, and no `@stellar/mpp`
+  release accepts `mppx` 0.8 yet. `@stellar/stellar-sdk` 15.1.0 pins axios
+  1.15.0, which has advisories the repository's axios 1.18.0 does not.
   - `mppx/dist/server/Mppx.d.ts`: `Mppx.create({ methods, secretKey, realm })`,
     `mppx.charge(options)(request)` returns `{ status: 402, challenge }` or
     `{ status: 200, withReceipt }`, `verifyCredential(credential, { request,
@@ -50,6 +56,13 @@
 
 ## Decision
 
+0. Pin `mppx` 0.8.19 (latest 0.8.x) outside `@stellar/mpp`'s declared peer
+   range, and override axios below 1.16.0 to the 1.18.0 already in the
+   lockfile, so the pull request adds no advisory. The `mppx` APIs Tollway
+   and `@stellar/mpp` call were exercised offline against the real packages
+   (challenge, HMAC, route and scope binding, payload validation, channel
+   `createCredential` up to the RPC simulation). Return to the declared range
+   when `@stellar/mpp` widens it.
 1. `createMppChargeHandler(options)` builds one `Mppx` instance with
    `stellar.charge({ recipient, currency, network, decimals: 0, store,
    feePayer, rpcUrl })`. `decimals: 0` keeps amounts integer base units end
@@ -117,6 +130,9 @@ sequenceDiagram
 ## Consequences
 
 - A route can serve x402 and MPP charge at once; switching is configuration.
+- `mppx` 0.8.19 is outside `@stellar/mpp` 0.7.1's peer range, so pnpm warns
+  about the peer; the opt-in testnet tests are the check that the pair works
+  on chain.
 - `@vegaforge/tollway-server` and `@vegaforge/tollway-channels` take
   `@stellar/mpp` and `mppx` as runtime dependencies, and through peers
   `@stellar/stellar-sdk` 15 and `viem`. The x402 packages still use
@@ -134,6 +150,8 @@ sequenceDiagram
 
 ## Alternatives considered
 
+- `mppx` 0.6.31, inside the peer range. Rejected: it adds two advisories,
+  which fails the `security` check.
 - Calling `mppx.charge(...)(request)` for the credential path too. It
   verifies and settles in one call, which skips the gate's dedupe and cache
   lookup before settlement. Rejected.

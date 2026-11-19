@@ -303,6 +303,32 @@ describe("createMppChargeHandler", () => {
     });
   });
 
+  describe("settle error classification", () => {
+    async function settleWith(error: unknown) {
+      stub.mppx.verifyCredential.mockRejectedValue(error);
+      const handler = createMppChargeHandler(options());
+      return handler.settle({ payment: payment(credential()), offer, payer: PAYER, nonce: "n" });
+    }
+
+    it("rejects, rather than throws, on an SDK error from a malformed transaction", async () => {
+      await expect(
+        settleWith(new Error("XDR Read Error: attempt to read outside the boundary of the buffer")),
+      ).resolves.toEqual({
+        settled: false,
+        reason:
+          "mpp charge rejected: invalid payment: XDR Read Error: attempt to read outside the boundary of the buffer",
+      });
+    });
+
+    it.each([
+      ["an axios error", Object.assign(new Error("socket hang up"), { isAxiosError: true })],
+      ["an abort", Object.assign(new Error("aborted"), { name: "AbortError" })],
+      ["a refused connection", Object.assign(new Error("connect"), { code: "ECONNREFUSED" })],
+    ])("throws payment-failed on %s", async (_name, error) => {
+      await expect(settleWith(error)).rejects.toMatchObject({ code: "payment-failed" });
+    });
+  });
+
   describe("through the gate", () => {
     async function gate() {
       return createPaywall(

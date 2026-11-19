@@ -9,13 +9,17 @@ scenario-impact: none
 # Real Stellar settlement for MPP and the agent client
 
 `createMppChargeHandler` now accepts MPP charge payments on Stellar through
-`mppx` 0.6.31 and `@stellar/mpp` 0.7.1. A route that accepts `mpp-charge`
+`mppx` 0.8.19 and `@stellar/mpp` 0.7.1. A route that accepts `mpp-charge`
 adds the `WWW-Authenticate: Payment ...` challenge `mppx` builds to its 402,
 reads the agent's credential from `Authorization: Payment ...`, checks it
 offline, dedupes retries through the settlement cache, and only then settles
 on chain. The receipt has `model: "mpp-charge"` and the transaction hash. The
 x402 path is unchanged. For `mpp-charge`, the paywall `asset` must be the
-SEP-41 contract address the handler charges.
+SEP-41 contract address the handler charges, and `secretKey` must be at
+least 32 bytes. `mppx` 0.8.19 is newer than `@stellar/mpp` 0.7.1's declared
+peer range (`^0.6.29`): every older `mppx` carries two advisories. A root
+override moves the axios that `@stellar/stellar-sdk` 15 pins (1.15.0) to the
+1.18.0 already in the lockfile.
 
 `createStellarMppChannelAdapter` in `@vegaforge/tollway-channels` drives a
 deployed one-way-channel contract: it checks the contract on open, signs

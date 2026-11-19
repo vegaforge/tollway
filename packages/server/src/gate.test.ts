@@ -174,8 +174,12 @@ describe("createPaywall", () => {
         ...createMockMppChargeHandler(),
         challenge: vi.fn().mockResolvedValue({
           status: 402,
-          headers: { "www-authenticate": 'Payment id="abc"', "cache-control": "no-store" },
-          body: null,
+          headers: {
+            "www-authenticate": 'Payment id="abc"',
+            "cache-control": "no-store",
+            "content-type": "application/problem+json",
+          },
+          body: '{"title":"Payment Required"}',
         }),
       };
       const gate = createPaywall(
@@ -186,6 +190,9 @@ describe("createPaywall", () => {
       expect(outcome.kind).toBe("payment-required");
       if (outcome.kind !== "payment-required") return;
       expect(outcome.headers["www-authenticate"]).toBe('Payment id="abc"');
+      expect(outcome.headers["cache-control"]).toBe("no-store");
+      // The adapters send the offer as JSON, so mppx's body headers are dropped.
+      expect(outcome.headers["content-type"]).toBeUndefined();
       expect(outcome.headers[PAYMENT_REQUIRED_HEADER]).toBeDefined();
       expect(handler.challenge).toHaveBeenCalledWith({
         offer: outcome.challenge,
