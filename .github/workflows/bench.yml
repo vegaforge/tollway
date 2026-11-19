@@ -1,0 +1,83 @@
+name: Bench
+
+# Gate benchmark regression check, issue #248. On a pull request that
+# touches the payment path, it builds the base and the head in the same job,
+# runs the benchmark suite on each on the same runner, and fails when a
+# gate-level median is confirmed more than 15% slower. Absolute timings on a
+# shared runner vary from run to run, so only same-job comparisons count.
+# The rule and how to read the table are in docs/benchmarks.md.
+#
+# This check is advisory: it is not part of the quality aggregate in ci.yml
+# and branch protection does not require it. A real regression is fixed, or
+# accepted in review by a maintainer; the threshold is not raised to pass.
+#
+# Actions are pinned to the same commit SHAs as ci.yml, with the release tag
+# in a comment. Dependabot updates both together.
+
+on:
+  pull_request:
+    paths:
+      - "packages/server/**"
+      - "packages/core/**"
+      - "packages/adapter-*/**"
+      - "packages/bench/**"
+      - "scripts/bench-compare.sh"
+      - ".github/workflows/bench.yml"
+
+concurrency:
+  group: bench-${{ github.ref }}
+  cancel-in-progress: true
+
+# Nothing by default; the job asks for what it needs.
+permissions: {}
+
+env:
+  CI: true
+
+jobs:
+  compare:
+    name: gate benchmarks (base vs head)
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    permissions:
+      contents: read
+    steps:
+      # The head is the pull request merged into its base, the same commit
+      # the other CI jobs test.
+      - name: Check out the head
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          path: head
+          persist-credentials: false
+
+      - name: Check out the base
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.event.pull_request.base.sha }}
+          path: base
+          persist-credentials: false
+
+      - uses: pnpm/action-setup@ea17c68df8912ef543352723c149a84f56e3d413 # v6.1.0
+        with:
+          package_json_file: head/package.json
+
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version-file: head/.nvmrc
+          cache: pnpm
+          cache-dependency-path: |
+            head/pnpm-lock.yaml
+            base/pnpm-lock.yaml
+
+      - name: Install (head)
+        working-directory: head
+        run: pnpm install --frozen-lockfile
+
+      - name: Install (base)
+        working-directory: base
+        run: pnpm install --frozen-lockfile
+
+      # Builds both trees, runs the head's suite against each build for up to
+      # three rounds, and appends the comparison table to the job summary.
+      - name: Compare base and head
+        run: bash head/scripts/bench-compare.sh base head bench-results
