@@ -4,11 +4,7 @@ import Link from "next/link";
 import { usePathname } from "next/navigation";
 import { Icon } from "@/components/icon";
 import { LogoMark } from "@/components/logo";
-import { navItems } from "./nav";
-
-function isActive(pathname: string, href: string): boolean {
-  return href === "/" ? pathname === "/" : pathname.startsWith(href);
-}
+import { isActive, navItems } from "./nav";
 
 export function Sidebar() {
   const pathname = usePathname();

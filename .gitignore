@@ -10,6 +10,8 @@ out/
 
 # Test
 coverage/
+playwright-report/
+test-results/
 
 # Environment. Every .env variant stays local; only the example is shared.
 .env*

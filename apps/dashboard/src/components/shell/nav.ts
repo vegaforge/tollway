@@ -57,3 +57,12 @@ export const navItems: NavItem[] = [
     summary: "JSON and CSV exports and outgoing webhooks.",
   },
 ];
+
+/**
+ * Whether a nav entry is the current section. `/agents/<id>` still counts
+ * as Agents, but `/agentsx` does not.
+ */
+export function isActive(pathname: string, href: string): boolean {
+  if (href === "/") return pathname === "/";
+  return pathname === href || pathname.startsWith(`${href}/`);
+}
