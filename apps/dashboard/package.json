@@ -10,18 +10,24 @@
     "build": "next build",
     "start": "next start",
     "test": "vitest run",
+    "test:e2e": "next build && playwright test",
     "typecheck": "tsc --noEmit"
   },
   "dependencies": {
     "@vegaforge/tollway-channels": "workspace:*",
     "@vegaforge/tollway-core": "workspace:*",
+    "@vegaforge/tollway-observability": "workspace:*",
     "@vegaforge/tollway-theme": "workspace:*",
+    "bcryptjs": "3.0.3",
+    "jose": "6.2.18",
     "next": "^16.4.6",
     "next-themes": "^0.4.6",
     "react": "^19.3.1",
     "react-dom": "^19.3.1"
   },
   "devDependencies": {
+    "@axe-core/playwright": "4.14.0",
+    "@playwright/test": "1.65.1",
     "@tailwindcss/postcss": "^4.3.5",
     "@testing-library/jest-dom": "^6.9.1",
     "@testing-library/react": "^16.3.3",

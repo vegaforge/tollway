@@ -162,6 +162,7 @@ function ChannelsTable({
             return (
               <tr
                 key={row.id}
+                id={`channel-row-${row.id}`}
                 data-testid={`channel-row-${row.id}`}
                 data-nearing-close={nearing ? "true" : undefined}
                 className={`border-b border-border last:border-b-0 ${
@@ -174,13 +175,19 @@ function ChannelsTable({
                     {nearing ? (
                       <span
                         data-testid={`nearing-close-${row.id}`}
-                        className="rounded-full bg-accent/15 px-2 py-0.5 text-[10px] font-medium uppercase tracking-wide text-accent"
+                        className="rounded-full bg-accent/15 px-2 py-0.5 text-[10px] font-medium uppercase tracking-wide text-foreground"
                       >
                         Nearing close
                       </span>
                     ) : null}
                   </div>
-                  <span className="font-mono text-xs text-muted">{row.id}</span>
+                  <a
+                    href={`#channel-row-${row.id}`}
+                    data-testid={`channel-link-${row.id}`}
+                    className="font-mono text-xs text-muted underline-offset-2 hover:text-foreground hover:underline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-primary"
+                  >
+                    {row.id}
+                  </a>
                 </td>
                 <td className="px-3 py-3">
                   <DrawdownCell row={row} ratio={ratio} />
@@ -217,11 +224,11 @@ function DrawdownCell({ row, ratio }: { row: OpenChannelRow; ratio: number }) {
 }
 
 const STATUS_PILL_CLASSES: Record<ChannelStatus, string> = {
-  open: "bg-success/15 text-success",
-  closing: "bg-warning/15 text-warning",
+  open: "bg-success/15 text-foreground",
+  closing: "bg-warning/15 text-foreground",
   closed: "bg-surface-2 text-muted",
-  recovering: "bg-danger/15 text-danger",
-  recovered: "bg-success/15 text-success",
+  recovering: "bg-danger/15 text-foreground",
+  recovered: "bg-success/15 text-foreground",
 };
 
 function StatusPill({ status }: { status: ChannelStatus }) {

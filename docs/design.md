@@ -124,6 +124,8 @@ A dashboard and an exporter. Per-agent and per-service spend over time, model mi
 
 For how the dashboard views actually consume this data, including the three UI primitives every widget composes from and the data-layer seam each wired view holds with its source, see `docs/dashboard-data-contracts.md`.
 
+The dashboard has its own sign-in, separate from payment tenancy: users with bcrypt-hashed passwords and a `viewer` or `admin` role, server-side sessions in an `HttpOnly`, `Secure`, `SameSite=Lax` cookie that logout and revocation end at once, CSRF protection on every state change, and the role checked in each route handler and server action rather than only in `proxy.ts`. The service API key never reaches the browser. See `docs/dashboard-data-contracts.md`, "Dashboard security".
+
 ## Design notes
 
 A few decisions worth recording, since each one came up early and will come up again.
