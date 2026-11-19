@@ -174,9 +174,10 @@ behalf
 - **Only the maintainer accepts a design.** An ADR a contributor adds stays
   `Proposed, awaiting maintainer approval`. Marking one `Accepted` fails the
   `contribution rules` check.
-- **One issue, one pull request, assigned to you.** The `contribution rules`
-  check fails a pull request that closes no issue, closes several, or closes
-  one you are not assigned to.
+- **Up to four assigned issues per pull request.** A contributor may work on
+  up to four issues at once and close them together. The `contribution rules`
+  check fails a pull request that closes no issue, more than four, or one the
+  author is not assigned to.
 - **Leave CI and tooling alone unless the issue asks.** Files under
   `.github/`, `scripts/`, `package.json` files, lockfiles and `*.config.*`
   wait for a maintainer to read every line (`maintainer review`).
@@ -249,13 +250,14 @@ Check every item before asking for review. SKILL.md explains each one.
 
 ## Git and pull requests
 
-- One issue, one branch, one pull request. Prefixes: `feat/`, `fix/`,
+- One branch and one pull request per piece of work. A contributor's pull
+  request may close up to four assigned issues. Prefixes: `feat/`, `fix/`,
   `chore/`, `docs/`, `test/`.
 - Conventional Commits, for example
   `fix(server): bind cached receipts to the offer`.
 - Pull requests into `dev` are squash-merged and the branch is deleted on
   merge. Promotions into `staging` and `main` use a merge commit.
-- The pull request body includes `Closes #<issue>`.
+- The pull request body includes `Closes #<issue>` for each issue it closes.
 - Never add AI co-author trailers, "generated with" footers, or session links
   to commits, pull requests, or files.
 - Never commit or push on a maintainer's or contributor's behalf unless asked.

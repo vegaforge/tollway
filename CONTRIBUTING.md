@@ -57,7 +57,7 @@ Useful commands:
 ## Before you push
 
 > - Run `./scripts/preflight.sh`. Format, lint, types, tests and build must all pass.
-> - One issue per pull request, and you must be assigned to it. The body closes it: `Closes #<number>`.
+> - A pull request may close up to four issues, and you must be assigned to every one. The body closes each: `Closes #<number>` on its own line.
 > - Open the pull request against `dev`.
 > - Do not touch CI, scripts, `package.json`, lockfiles or `*.config.*` files unless the issue asks you to.
 > - Do not mark an ADR as Accepted. Only the maintainer approves a design.
@@ -74,7 +74,7 @@ Useful commands:
 
 Each issue is the design the maintainer already approved, so you do not write an ADR or a plan for it. If you want to build it differently from what the issue describes, propose that in the issue thread and wait for the maintainer to agree before coding it. Only the maintainer marks a design (ADR) as Accepted. See "Contributors" in [AGENTS.md](AGENTS.md).
 
-When you open the pull request, a `contribution rules` check confirms that it closes exactly one issue, that you are assigned to it, and that no ADR is marked Accepted. It runs first and tells you in plain words what to change.
+When you open the pull request, a `contribution rules` check confirms that it closes between one and four issues, that you are assigned to each of them, and that no ADR is marked Accepted. It runs first and tells you in plain words what to change.
 
 Commit messages follow Conventional Commits, for example `feat(channels): add idle-timeout close heuristic`.
 
