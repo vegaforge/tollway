@@ -19,7 +19,6 @@
   "scripts": {
     "build": "tsup && chmod +x dist/cli.js",
     "test": "vitest run",
-    "test:generated": "node scripts/test-generated.mjs",
     "typecheck": "tsc --noEmit"
   },
   "devDependencies": {

@@ -1,6 +1,6 @@
 import { readFileSync } from "node:fs";
-import { describe, expect, it } from "vitest";
 import { Ed25519Signer } from "@vegaforge/tollway-core";
+import { describe, expect, it } from "vitest";
 import { createInMemorySettlementCache } from "./cache.js";
 import { createMockFacilitator } from "./facilitator.js";
 import { createPaywall, type PaywallConfig } from "./gate.js";
@@ -18,9 +18,23 @@ describe("TM-01 settled payment replay", () => {
     const signer = await Ed25519Signer.generate();
     const inner = createMockFacilitator();
     let settlements = 0;
-    const facilitator = { ...inner, async settle(input: Parameters<typeof inner.settle>[0]) { settlements++; return inner.settle(input); } };
-    const gate = createPaywall(config, { signer, facilitator, cache: createInMemorySettlementCache() });
-    const request = { method: "GET", url: "/resource", headers: { [PAYMENT_SIGNATURE_HEADER]: "one-payment" } };
+    const facilitator = {
+      ...inner,
+      async settle(input: Parameters<typeof inner.settle>[0]) {
+        settlements++;
+        return inner.settle(input);
+      },
+    };
+    const gate = createPaywall(config, {
+      signer,
+      facilitator,
+      cache: createInMemorySettlementCache(),
+    });
+    const request = {
+      method: "GET",
+      url: "/resource",
+      headers: { [PAYMENT_SIGNATURE_HEADER]: "one-payment" },
+    };
     const first = await gate(request);
     const replay = await gate(request);
     expect(first.kind).toBe("settled");
@@ -31,7 +45,7 @@ describe("TM-01 settled payment replay", () => {
 
 describe("TM-07 malformed payment header", () => {
   it("rejects malformed and oversized base64url JSON", () => {
-    expect(() => decodeHeader("%%%not-json%%%" )).toThrow();
+    expect(() => decodeHeader("%%%not-json%%%")).toThrow();
     expect(() => decodeHeader("A".repeat(1_000_000))).toThrow();
   });
 });
@@ -44,8 +58,11 @@ describe("threat model cross-check", () => {
       readFileSync("src/threat-model.test.ts", "utf8"),
       readFileSync("../core/src/receipt/receipt.test.ts", "utf8"),
     ].join("\n");
-    const defended = [...model.matchAll(/^\| (TM-\d+) \|.*\| defended \|$/gm)].map((match) => match[1]);
+    const defended = [...model.matchAll(/^\| (TM-\d+) \|.*\| defended \|$/gm)].map(
+      (match) => match[1],
+    );
     expect(defended.length).toBeGreaterThan(0);
-    for (const id of defended) expect(suites, `${id} needs a matching test suite`).toContain(`describe("${id}`);
+    for (const id of defended)
+      expect(suites, `${id} needs a matching test suite`).toContain(`describe("${id}`);
   });
 });

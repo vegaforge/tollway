@@ -57,3 +57,21 @@ describe("route-table matching", () => {
     });
   });
 });
+
+// A request path is attacker input. Trimming trailing slashes with a
+// backtracking regex took quadratic time on a long run of slashes that does
+// not end the path, which let one request stall the event loop.
+describe("route-table path normalization cost", () => {
+  it("handles a path of 50 000 slashes followed by a character in linear time", () => {
+    const routes = table({ "GET /quotes/latest": config });
+    const hostile = `/${"/".repeat(50_000)}x`;
+    const started = performance.now();
+    expect(routes.match("GET", hostile)).toBeUndefined();
+    expect(performance.now() - started).toBeLessThan(500);
+  });
+
+  it("still trims trailing slashes", () => {
+    const routes = table({ "GET /quotes/latest": config });
+    expect(routes.match("GET", "/quotes/latest///")?.resource).toBe("/quotes/latest");
+  });
+});

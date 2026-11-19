@@ -62,7 +62,9 @@ export function honoRouteTable(table: RouteTable): MiddlewareHandler {
       await next();
       return;
     }
-    await honoPaywall(match.gate)(c, next);
+    // Return the inner middleware's response: for an unpaid or rejected
+    // request it is the 402 or error, and dropping it leaves Hono with none.
+    return honoPaywall(match.gate)(c, next);
   };
 }
 

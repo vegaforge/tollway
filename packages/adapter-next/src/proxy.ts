@@ -130,7 +130,18 @@ function normalizePath(path: string): string {
   if (!path.startsWith("/") || path.includes("?") || path.includes("#")) {
     throw new TypeError(`Proxy route path must be an absolute pathname: ${path}`);
   }
-  return path === "/" ? path : path.replace(/\/+$/, "");
+  return trimTrailingSlashes(path);
+}
+
+/**
+ * Drops trailing slashes in one pass. A regex like /\/+$/ backtracks on a
+ * long run of slashes that is not at the end, which made this quadratic on
+ * hostile input.
+ */
+function trimTrailingSlashes(path: string): string {
+  let end = path.length;
+  while (end > 1 && path.charCodeAt(end - 1) === 47) end--;
+  return path.slice(0, end);
 }
 
 function methodsOverlap(first?: readonly string[], second?: readonly string[]): boolean {

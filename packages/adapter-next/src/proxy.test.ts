@@ -161,3 +161,14 @@ describe("paywallProxy runtime", () => {
     );
   });
 });
+
+// Route paths are public configuration input; normalising them must not use a
+// backtracking regex (CodeQL js/polynomial-redos).
+describe("paywallProxy route path normalization cost", () => {
+  it("normalizes a configured path with a long run of slashes in linear time", async () => {
+    const { gate } = await build();
+    const started = performance.now();
+    paywallProxy({ routes: [{ path: `/api${"/".repeat(50_000)}x`, gate }] });
+    expect(performance.now() - started).toBeLessThan(500);
+  });
+});

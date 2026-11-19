@@ -218,34 +218,34 @@ describe("TM-02 cross-offer replay", () => {
   });
 
   describe("TM-03 same-process concurrent duplicate", () => {
-  it("settles concurrent identical payments once", async () => {
-    const inner = createMockFacilitator();
-    let settleCalls = 0;
-    const slowFacilitator: FacilitatorClient = {
-      ...inner,
-      async settle(input) {
-        settleCalls++;
-        await new Promise((resolve) => setTimeout(resolve, 20));
-        return inner.settle(input);
-      },
-    };
-    const gate = createPaywall(config, {
-      signer,
-      facilitator: slowFacilitator,
-      cache: createInMemorySettlementCache(),
+    it("settles concurrent identical payments once", async () => {
+      const inner = createMockFacilitator();
+      let settleCalls = 0;
+      const slowFacilitator: FacilitatorClient = {
+        ...inner,
+        async settle(input) {
+          settleCalls++;
+          await new Promise((resolve) => setTimeout(resolve, 20));
+          return inner.settle(input);
+        },
+      };
+      const gate = createPaywall(config, {
+        signer,
+        facilitator: slowFacilitator,
+        cache: createInMemorySettlementCache(),
+      });
+
+      const [first, second] = await Promise.all([
+        gate({ ...baseRequest, headers }),
+        gate({ ...baseRequest, headers }),
+      ]);
+
+      expect(settleCalls).toBe(1);
+      expect(first.kind).toBe("settled");
+      expect(second.kind).toBe("settled");
+      if (first.kind !== "settled" || second.kind !== "settled") return;
+      expect(second.receipt).toEqual(first.receipt);
     });
-
-    const [first, second] = await Promise.all([
-      gate({ ...baseRequest, headers }),
-      gate({ ...baseRequest, headers }),
-    ]);
-
-    expect(settleCalls).toBe(1);
-    expect(first.kind).toBe("settled");
-    expect(second.kind).toBe("settled");
-    if (first.kind !== "settled" || second.kind !== "settled") return;
-    expect(second.receipt).toEqual(first.receipt);
-  });
   });
 
   it("does not leave a cache write rejection unhandled", async () => {

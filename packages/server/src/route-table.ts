@@ -174,7 +174,18 @@ function normalizePath(url: string): string {
     const character = String.fromCharCode(Number.parseInt(code.slice(1), 16));
     return /^[A-Za-z0-9\-._~]$/.test(character) ? character : code.toUpperCase();
   });
-  return encoded === "/" ? encoded : encoded.replace(/\/+$/, "");
+  return trimTrailingSlashes(encoded);
+}
+
+/**
+ * Drops trailing slashes in one pass. A regex like /\/+$/ backtracks on a
+ * long run of slashes that is not at the end, which made this quadratic on
+ * hostile input.
+ */
+function trimTrailingSlashes(path: string): string {
+  let end = path.length;
+  while (end > 1 && path.charCodeAt(end - 1) === 47) end--;
+  return path.slice(0, end);
 }
 
 function matches(route: CompiledRoute, path: string): boolean {

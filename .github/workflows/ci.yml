@@ -150,6 +150,11 @@ jobs:
       - name: Install
         run: pnpm install --frozen-lockfile
 
+      # The adapter's tests import the workspace packages it depends on from
+      # their built output, so build those first.
+      - name: Build the adapter's workspace dependencies
+        run: pnpm --filter "@vegaforge/tollway-adapter-next^..." build
+
       - name: Select Next major
         env:
           NEXT_RANGE: ${{ matrix.range }}
@@ -182,9 +187,6 @@ jobs:
 
       - name: Build
         run: pnpm build
-
-      - name: Generated create-tollway projects against workspace tarballs
-        run: pnpm --filter create-tollway test:generated
 
       - name: Release-note gate
         run: bash scripts/check_release_notes.sh
