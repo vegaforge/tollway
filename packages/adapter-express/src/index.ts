@@ -7,7 +7,7 @@
  * "Repository layout".
  */
 
-import type { Gate } from "@vegaforge/tollway-server";
+import type { Gate, RouteTable } from "@vegaforge/tollway-server";
 import type { NextFunction, Request, RequestHandler, Response } from "express";
 
 /** Where the verified receipt is stashed on res.locals for downstream handlers. */
@@ -40,5 +40,17 @@ export function expressPaywall(gate: Gate): RequestHandler {
         res.status(outcome.status).json({ error: outcome.reason });
       })
       .catch(next);
+  };
+}
+
+/** Routes paid requests through a compiled table; unmatched requests continue unchanged. */
+export function expressRouteTable(table: RouteTable): RequestHandler {
+  return (req, res, next) => {
+    const match = table.match(req.method, req.originalUrl);
+    if (!match) {
+      next();
+      return;
+    }
+    expressPaywall(match.gate)(req, res, next);
   };
 }

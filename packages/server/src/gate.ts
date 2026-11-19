@@ -131,6 +131,9 @@ type SettlementResult =
     }
   | { ok: false; outcome: RejectedOutcome };
 
+/** Shared internally by gates created from one route table. */
+export type InFlightSettlementResult = SettlementResult;
+
 type SettlementContext = {
   signer: ReceiptSigner;
   cache?: SettlementCache;
@@ -504,13 +507,22 @@ async function paymentRequired(
  * mishandled. See docs/design.md, "Build plan", Phase 1.
  */
 export function createPaywall(config: PaywallConfig, deps: PaywallDeps): Gate {
+  return createPaywallWithInFlight(config, deps, new Map());
+}
+
+/** Internal constructor used by route tables to share duplicate coordination. */
+export function createPaywallWithInFlight(
+  config: PaywallConfig,
+  deps: PaywallDeps,
+  inFlight: Map<string, Promise<InFlightSettlementResult>>,
+): Gate {
   assertCompleteLocking(deps.cache);
   const acceptedModels = config.models ?? ["x402"];
   const context: SettlementContext = {
     signer: deps.signer,
     cache: deps.cache,
     onCacheError: deps.onCacheError,
-    inFlight: new Map(),
+    inFlight,
     lockTtlMs: deps.settlementLockTtlMs ?? DEFAULT_SETTLEMENT_LOCK_TTL_MS,
   };
 

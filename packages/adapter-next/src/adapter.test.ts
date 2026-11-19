@@ -4,13 +4,14 @@ import {
   createMockFacilitator,
   createMockMppChargeHandler,
   createPaywall,
+  createRouteTable,
   type MppChargeHandler,
   PAYMENT_SIGNATURE_HEADER,
   type PaywallConfig,
 } from "@vegaforge/tollway-server";
 import { NextRequest } from "next/server";
 import { describe, expect, it } from "vitest";
-import { withPaywall } from "./index.js";
+import { withPaywall, withRouteTable } from "./index.js";
 
 const config: PaywallConfig = {
   amount: "10000",
@@ -79,6 +80,23 @@ describe("withPaywall", () => {
     const body = (await response.json()) as { error?: string; quote?: number };
     expect(body.quote).toBeUndefined();
     expect(body.error).toMatch(/mpp-channel/);
+  });
+});
+
+describe("withRouteTable", () => {
+  it("gates paid paths and runs free paths directly", async () => {
+    const signer = await Ed25519Signer.generate("route-table-next");
+    const routes = createRouteTable(
+      { "GET /paid/:id": config },
+      { signer, facilitator: createMockFacilitator() },
+    );
+    const handler = withRouteTable(routes, async (_request, { receipt }) =>
+      Response.json({ paid: Boolean(receipt) }),
+    );
+    expect((await handler(new Request("http://example.test/paid/1"))).status).toBe(402);
+    expect(await (await handler(new Request("http://example.test/free"))).json()).toEqual({
+      paid: false,
+    });
   });
 });
 

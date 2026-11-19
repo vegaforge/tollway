@@ -156,6 +156,16 @@ Apps: `apps/web` (landing page and docs), `apps/dashboard` (observability UI), `
 
 Requires Node 22+ and pnpm 10+.
 
+Scaffold a fresh paid API with Express, Hono, or Next.js:
+
+```bash
+npm create tollway -- --template express --dir my-api --yes
+pnpm create tollway --template hono --dir my-api --yes
+npm create tollway -- --template next --dir my-api --yes
+```
+
+Each generated project starts in mock mode, includes a testnet `.env.example`, and has a test that exercises its paid route. The mock signer creates no key and is only for local examples; bring a real signer before accepting real payments.
+
 ```bash
 git clone https://github.com/vegaforge/tollway.git
 cd tollway
@@ -217,6 +227,34 @@ const client = createClient({
 
 const { receipt } = await client.pay({ resource: "https://api.example.com/quotes/latest", offer });
 ```
+
+For services with several priced endpoints, compile them in one route table and attach one adapter middleware:
+
+```ts
+import { createRouteTable } from "@vegaforge/tollway-server";
+import { expressRouteTable } from "@vegaforge/tollway-adapter-express";
+
+const routes = createRouteTable({
+  "GET /quotes/:symbol": { amount: "10000", asset, payTo, network: "testnet" },
+  "POST /inference": { amount: "50000", asset, payTo, network: "testnet" },
+}, { signer, facilitator });
+app.use(expressRouteTable(routes));
+```
+
+Fastify, Hono, and Next adapters expose `fastifyRouteTable`, `honoRouteTable`, and `withRouteTable`. See [the route tables guide](apps/web/src/content/docs/route-tables.mdx).
+
+Next.js App Router services can either wrap a handler with `withPaywall`, or protect a route group in Next 16 `proxy.ts`:
+
+```ts
+// proxy.ts
+import { paywallProxy } from "@vegaforge/tollway-adapter-next/proxy";
+import { gate } from "./src/paywall.js";
+
+export const proxy = paywallProxy({ routes: [{ path: "/api/paid", gate }] });
+export const config = { matcher: ["/api/paid/:path*"] };
+```
+
+The proxy runs in Next 16's Node.js runtime. It removes caller-supplied receipt headers, then forwards the gate-produced receipt only to the downstream route. A route can read it with `getProxyReceipt(request)` from `@vegaforge/tollway-adapter-next/proxy`; the helper validates the signed-receipt schema. `PAYMENT-RESPONSE` remains on the client response.
 
 ## Status
 

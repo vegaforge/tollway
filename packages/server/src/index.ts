@@ -58,3 +58,9 @@ export {
   type MppChargeVerifyInput,
   type MppChargeVerifyResult,
 } from "./mpp-charge.js";
+export {
+  createRouteTable,
+  type RouteTable,
+  type RouteTableEntry,
+  type RouteTableMatch,
+} from "./route-table.js";

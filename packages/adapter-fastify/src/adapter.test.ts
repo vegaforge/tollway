@@ -4,13 +4,14 @@ import {
   createMockFacilitator,
   createMockMppChargeHandler,
   createPaywall,
+  createRouteTable,
   type MppChargeHandler,
   PAYMENT_SIGNATURE_HEADER,
   type PaywallConfig,
 } from "@vegaforge/tollway-server";
 import Fastify from "fastify";
 import { describe, expect, it } from "vitest";
-import { fastifyPaywall, RECEIPT_REQUEST_KEY } from "./index.js";
+import { fastifyPaywall, fastifyRouteTable, RECEIPT_REQUEST_KEY } from "./index.js";
 
 const config: PaywallConfig = {
   amount: "10000",
@@ -97,6 +98,27 @@ describe("fastifyPaywall", () => {
       const body = response.json<{ error?: string; quote?: number }>();
       expect(body.quote).toBeUndefined();
       expect(body.error).toMatch(/mpp-channel/);
+    } finally {
+      await app.close();
+    }
+  });
+});
+
+describe("fastifyRouteTable", () => {
+  it("gates paid paths and passes free paths through", async () => {
+    const signer = await Ed25519Signer.generate("route-table-fastify");
+    const routes = createRouteTable(
+      { "GET /paid/:id": config },
+      { signer, facilitator: createMockFacilitator() },
+    );
+    const app = Fastify();
+    app.addHook("preHandler", fastifyRouteTable(routes));
+    app.get("/paid/:id", async () => "paid");
+    app.get("/free", async () => "free");
+    await app.ready();
+    try {
+      expect((await app.inject({ url: "/paid/1" })).statusCode).toBe(402);
+      expect((await app.inject({ url: "/free" })).body).toBe("free");
     } finally {
       await app.close();
     }

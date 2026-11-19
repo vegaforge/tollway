@@ -4,13 +4,14 @@ import {
   createMockFacilitator,
   createMockMppChargeHandler,
   createPaywall,
+  createRouteTable,
   type MppChargeHandler,
   PAYMENT_SIGNATURE_HEADER,
   type PaywallConfig,
 } from "@vegaforge/tollway-server";
 import express from "express";
 import { describe, expect, it } from "vitest";
-import { expressPaywall, RECEIPT_LOCALS_KEY } from "./index.js";
+import { expressPaywall, expressRouteTable, RECEIPT_LOCALS_KEY } from "./index.js";
 
 const config: PaywallConfig = {
   amount: "10000",
@@ -66,6 +67,30 @@ describe("expressPaywall", () => {
       expect(body.receiptId).toBeTruthy();
     } finally {
       await app.close();
+    }
+  });
+});
+
+describe("expressRouteTable", () => {
+  it("gates paid paths and passes free paths through", async () => {
+    const signer = await Ed25519Signer.generate("route-table-express");
+    const routes = createRouteTable(
+      { "GET /paid/:id": config },
+      { signer, facilitator: createMockFacilitator() },
+    );
+    const app = express();
+    app.use(expressRouteTable(routes));
+    app.get("/paid/:id", (_req, res) => res.send("paid"));
+    app.get("/free", (_req, res) => res.send("free"));
+    const server = app.listen(0);
+    await new Promise((resolve) => server.once("listening", resolve));
+    const address = server.address();
+    if (!address || typeof address === "string") throw new Error("expected a TCP address");
+    try {
+      expect((await fetch(`http://127.0.0.1:${address.port}/paid/1`)).status).toBe(402);
+      expect(await (await fetch(`http://127.0.0.1:${address.port}/free`)).text()).toBe("free");
+    } finally {
+      await new Promise((resolve) => server.close(resolve));
     }
   });
 });
