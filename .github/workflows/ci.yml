@@ -121,6 +121,48 @@ jobs:
       - name: Test
         run: pnpm test
 
+  adapter-next-matrix:
+    name: Next adapter (Next ${{ matrix.major }})
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - major: 14
+            range: ^14.0.0
+          - major: 15
+            range: ^15.0.0
+          - major: 16
+            range: ^16.0.0
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - uses: pnpm/action-setup@ea17c68df8912ef543352723c149a84f56e3d413 # v6.1.0
+
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version-file: .nvmrc
+          cache: pnpm
+
+      - name: Install
+        run: pnpm install --frozen-lockfile
+
+      # The adapter's tests import the workspace packages it depends on from
+      # their built output, so build those first.
+      - name: Build the adapter's workspace dependencies
+        run: pnpm --filter "@vegaforge/tollway-adapter-next^..." build
+
+      - name: Select Next major
+        env:
+          NEXT_RANGE: ${{ matrix.range }}
+        run: pnpm --filter @vegaforge/tollway-adapter-next add --save-dev "next@$NEXT_RANGE"
+
+      - name: Test adapter on selected Next major
+        run: pnpm --filter @vegaforge/tollway-adapter-next test
+
   build:
     name: build, release notes
     runs-on: ubuntu-latest
@@ -156,7 +198,7 @@ jobs:
     name: quality
     runs-on: ubuntu-latest
     timeout-minutes: 5
-    needs: [branch-flow, checks, tests, build]
+    needs: [branch-flow, checks, tests, adapter-next-matrix, build]
     if: always()
     steps:
       # Anything other than success fails this job, including a cancelled or
@@ -168,6 +210,7 @@ jobs:
           echo "  branch flow: ${{ needs.branch-flow.result }}"
           echo "  checks: ${{ needs.checks.result }}"
           echo "  tests:  ${{ needs.tests.result }}"
+          echo "  Next adapter matrix: ${{ needs.adapter-next-matrix.result }}"
           echo "  build:  ${{ needs.build.result }}"
           exit 1
 

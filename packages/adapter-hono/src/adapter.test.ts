@@ -3,12 +3,13 @@ import {
   createInMemorySettlementCache,
   createMockFacilitator,
   createPaywall,
+  createRouteTable,
   PAYMENT_SIGNATURE_HEADER,
   type PaywallConfig,
 } from "@vegaforge/tollway-server";
 import { Hono } from "hono";
 import { describe, expect, it } from "vitest";
-import { honoPaywall, RECEIPT_CONTEXT_KEY } from "./index.js";
+import { honoPaywall, honoRouteTable, RECEIPT_CONTEXT_KEY } from "./index.js";
 
 const config: PaywallConfig = {
   amount: "10000",
@@ -50,6 +51,22 @@ describe("honoPaywall", () => {
     const body = (await response.json()) as { quote: number; receiptId: string };
     expect(body.quote).toBe(42);
     expect(body.receiptId).toBeTruthy();
+  });
+});
+
+describe("honoRouteTable", () => {
+  it("gates paid paths and passes free paths through", async () => {
+    const signer = await Ed25519Signer.generate("route-table-hono");
+    const routes = createRouteTable(
+      { "GET /paid/:id": config },
+      { signer, facilitator: createMockFacilitator() },
+    );
+    const app = new Hono();
+    app.use("*", honoRouteTable(routes));
+    app.get("/paid/:id", (c) => c.text("paid"));
+    app.get("/free", (c) => c.text("free"));
+    expect((await app.request("/paid/1")).status).toBe(402);
+    expect(await (await app.request("/free")).text()).toBe("free");
   });
 });
 

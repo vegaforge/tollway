@@ -1,0 +1,33 @@
+{
+  "name": "create-tollway",
+  "version": "0.1.0",
+  "description": "Scaffold a paid Tollway API with Express, Hono, or Next.js",
+  "license": "Apache-2.0",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/vegaforge/tollway.git",
+    "directory": "packages/create-tollway"
+  },
+  "type": "module",
+  "bin": {
+    "create-tollway": "./dist/cli.js"
+  },
+  "files": [
+    "dist",
+    "templates"
+  ],
+  "scripts": {
+    "build": "tsup && chmod +x dist/cli.js",
+    "test": "vitest run",
+    "typecheck": "tsc --noEmit"
+  },
+  "devDependencies": {
+    "@types/node": "^22.19.20",
+    "tsup": "^8.5.0",
+    "typescript": "^5.8.0",
+    "vitest": "^4.1.8"
+  },
+  "publishConfig": {
+    "access": "public"
+  }
+}

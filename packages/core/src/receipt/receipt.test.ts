@@ -46,7 +46,7 @@ describe("buildReceipt", () => {
   });
 });
 
-describe("sign and verify", () => {
+describe("TM-06 receipt signed by untrusted key", () => {
   it("round-trips a receipt", async () => {
     const signer = await Ed25519Signer.generate("test-key");
     const verifier = Ed25519Verifier.forSigner(signer);
@@ -99,7 +99,7 @@ describe("sign and verify", () => {
 
 // Regression lock for ADR-2026-11-18-strict-receipt-verification: every field
 // of a verified receipt was covered by the signature.
-describe("strict verification", () => {
+describe("TM-05 tampered receipt fields", () => {
   async function signedPair() {
     const signer = await Ed25519Signer.generate("strict-key");
     const signed = await signReceipt(buildReceipt(x402Input), signer);
