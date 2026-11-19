@@ -1,8 +1,10 @@
 # Engineering Standards and AI Governance Rulebook
 
 This file is the rulebook for every coding agent that works in this repository
-(Claude Code, Codex, Antigravity, Qwen Code, and custom harnesses). Human
-contributors follow the same rules; see [CONTRIBUTING.md](CONTRIBUTING.md).
+(Claude Code, Codex, Antigravity, Qwen Code, and custom harnesses), whether it
+works for the maintainer or for a contributor. Human contributors follow the
+same craft rules; see [CONTRIBUTING.md](CONTRIBUTING.md) and "Contributors"
+below for how the process differs for them.
 
 The craft rules (architecture, correctness, comments, the defect checklist in
 detail) live in
@@ -69,6 +71,10 @@ Rules:
 
 Trivial work skips this step: a typo, a copy change, a one-line fix with a
 regression test. When unsure, it is not trivial.
+
+Work on an assigned issue skips it too: the issue is the design the
+maintainer already approved (see "Contributors" below). Write ADRs only when
+the maintainer asks for them, or for the maintainer's own architecture work.
 
 ### Directive 3: Red, then green
 
@@ -152,6 +158,30 @@ Hooks are installed by `pnpm install` (lefthook's postinstall, allowed in
 pull request and why.
 
 ---
+
+## Contributors
+
+Tollway is open source and runs Drips Waves, so most changes come from
+contributors picking up issues. For them, and for any agent working on their
+behalf
+([ADR-2026-11-19-open-source-governance](docs/adr/ADR-2026-11-19-open-source-governance.md)):
+
+- **The issue is the approved design.** Start coding once you are assigned.
+  No ADR pair and no plan file are needed.
+- **Changing the approach is agreed in the issue first.** If you want to
+  build it differently from what the issue describes, say so in the issue
+  thread and wait for the maintainer to agree there before coding it.
+- **Only the maintainer accepts a design.** An ADR a contributor adds stays
+  `Proposed, awaiting maintainer approval`. Marking one `Accepted` fails the
+  `contribution rules` check.
+- **One issue, one pull request, assigned to you.** The `contribution rules`
+  check fails a pull request that closes no issue, closes several, or closes
+  one you are not assigned to.
+- **Leave CI and tooling alone unless the issue asks.** Files under
+  `.github/`, `scripts/`, `package.json` files, lockfiles and `*.config.*`
+  wait for a maintainer to read every line (`maintainer review`).
+- Everything else in this file applies: red then green, no masking, and
+  `./scripts/preflight.sh` before you push.
 
 ## Reviewing contributor pull requests
 

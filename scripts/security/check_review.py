@@ -147,7 +147,7 @@ def decide(pr: PullRequest, touched: list[str], globs: list[str], api: Api, repo
         return True, lines
     if stale:
         lines.append("A maintainer approved an earlier commit (" + ", ".join(f"@{u}" for u in stale) + "), but new commits were pushed since. The latest commit needs a fresh review.")
-    lines.append(f"A maintainer (admin or maintain role) has to review these files and approve commit {pr.head_sha[:12]}. Approving re-runs this check.")
+    lines.append(f"Waiting for a maintainer to review these files and approve commit {pr.head_sha[:12]}. There is nothing for you to fix; approving re-runs this check.")
     return False, lines
 
 
