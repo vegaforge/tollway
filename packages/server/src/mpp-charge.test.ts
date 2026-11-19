@@ -1,4 +1,8 @@
 import { StellarMppError } from "@stellar/mpp";
+// A top-level type import, not typeof import(...) inside the generic below:
+// Semgrep cannot parse the inline form, and the security check rejects files
+// it cannot read.
+import type * as ChargeServer from "@stellar/mpp/charge/server";
 import { Store } from "@stellar/mpp/charge/server";
 import {
   Ed25519Signer,
@@ -29,7 +33,7 @@ const stub = vi.hoisted(() => ({
 }));
 
 vi.mock("@stellar/mpp/charge/server", async (importOriginal) => {
-  const actual = await importOriginal<typeof import("@stellar/mpp/charge/server")>();
+  const actual = await importOriginal<typeof ChargeServer>();
   return {
     ...actual,
     Mppx: { create: stub.create },
