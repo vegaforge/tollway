@@ -91,40 +91,123 @@ The nav order in `apps/dashboard/src/components/shell/nav.ts` matches this table
 
 ## Agent detail contract
 
-`/agents/[agentId]` consumes `AgentDetail` from `src/data/agent-detail.ts` through the `useAgentDetail(agentId)` hook. It carries identity (`id`, `label`, `payerAddresses`), settled spend as a time series per asset and bucket (`series`), spend by model and by payee (`byModel`, `byPayee`), the current policy with its usage (`policy`, or `null` when the agent has none), and `recentStops`.
+`/agents/[agentId]` reads `AgentDetail` from `src/data/agent-detail.ts` through `useAgentDetail(agentId, { bucket, range })`, which loads again whenever the bucket (`hour`, `day`) or range (`24h`, `7d`, `30d`) changes. `AgentDetail` carries:
+
+| Field | Meaning |
+| ----- | ------- |
+| `id`, `label`, `payerAddresses` | The agent's identity and the payer addresses it pays from |
+| `query`, `from`, `to` | The bucket and range asked for, and the `[from, to)` window in UTC |
+| `series` | One `AssetSeries` per asset: every bucket in the window, in time order, empty buckets as `"0"` |
+| `byModel`, `byPayee` | Settled spend in the window, per `(model, asset)` and per `(payee, asset)` |
+| `policy` | `AgentPolicyUsage`, or `null` when no policy governs the agent |
+| `recentStops` | `PolicyStop`s, newest first |
 
 ### Agent to payer mapping
 
-`Policy` in `packages/core/src/policy.ts` has no agent identity and `PaymentIntent` has no payer. `PaymentMetric.payer` in `@vegaforge/tollway-observability` is a payer address, not an agent id. The detail contract therefore carries an explicit `payerAddresses: string[]` per agent. The deterministic stub owns that map; the page never derives a payer from an agent id by string convention. A real implementation of `fetchAgentDetail` must keep the mapping explicit so spend cannot be attributed to the wrong agent.
+`Policy` in `packages/core/src/policy.ts` has no agent identity and `PaymentIntent` has no payer. `PaymentMetric.payer` in `@vegaforge/tollway-observability` is a payer address, not an agent id. The contract therefore carries an explicit `payerAddresses` list per agent, and every spend query runs once per address with the hub's `payer` filter and merges the rows. The page never derives a payer from an agent id by convention. Today the stub owns the map; the service will own it once #228 stores policies per agent id.
 
-### Amounts, buckets, and budget usage
+### Spend over time, model mix and services paid
 
-Every amount is an integer base-unit string. `bucketSeries` and `seriesByAsset` count only metrics with `outcome === "settled"`, group by UTC hour or UTC day, and never sum across assets. `byModel` and `byPayee` are keyed by `(key, asset)` for the same reason.
+All three come from the observability hub's `timeseries` query (`packages/observability/src/timeseries.ts`), with bucket `1h` or `1d` and `groupBy` `model` or `payee`. The window ends at the end of the bucket that holds "now" and spans the range, so buckets fall on UTC hour and day boundaries. `timeseries` sums settled payments only, so a failed or skipped payment never adds to a total, and its rows are keyed by asset, so amounts in different assets are never added together. When #226 serves the same query over HTTP, `fetchAgentDetail` swaps the in-process hub for that call and keeps the shape.
 
-`percentageBasisPoints(used, budget)` multiplies by 10,000 before dividing, so a percentage is a `bigint` in basis points at every step and becomes a display string only in the view. The daily budget is labelled as a UTC day, matching `utcDate` in `packages/core/src/policy.ts`. Each asset's usage is compared against the policy's single-number budget separately; a zero budget with spend is shown as fully consumed. The view states the unit ambiguity until #191 keys budgets by asset. An agent without a policy renders an explicit message instead of an empty budget bar.
+### Budget usage
 
-Recent stops carry a rule name, a detail string, and a timestamp. Each links to `/anomalies?agent=<id>`.
+`AgentPolicyUsage` measures each limit over the window the policy engine itself uses (`packages/core/src/policy.ts`):
+
+| Limit | Window |
+| ----- | ------ |
+| `budgets.daily` | The current UTC day, the day `utcDate` names; the view labels it `UTC day YYYY-MM-DD` |
+| `budgets.total` | Since the policy took effect (`effectiveFrom`) |
+| `perService[payee].cap` | Since the policy took effect, for that payee |
+
+The engine compares each asset's spend against the same single number, and the view does the same: one row per asset, each in that asset's own units, with a note that the unit is ambiguous until #191 keys budgets by asset. A limit the policy does not set reads "Not set in this policy". An agent without a policy shows a sentence saying nothing limits its spend, not an empty bar.
+
+`percentageBasisPoints(used, limit)` multiplies by 10,000 before dividing, so the percentage is a `bigint` in basis points until the view formats it. A zero limit returns `null`, shown as "limit is 0", rather than an invented percentage. Usage over 100% is flagged "Over limit". Amounts are shown exactly in display units (7 decimals, the Stellar default) next to the base-unit limit, never rounded.
+
+### Policy stops
+
+A `PolicyStop` is a stored `PolicyTrace` from `@vegaforge/tollway-core`. `stopFromTrace` parses it with `policyTraceSchema`, which rejects an unknown trace version or a summary that contradicts its entries, and refuses a trace that did not block. The stop shows the blocking entry's rule id and its `detail`. The stub produces its traces by running the real engine's `evaluate()` over the agent's history, so the wording is exactly what the engine writes. The panel links to `/anomalies?agent=<id>`, which shows the filter until the anomaly feed is wired.
 
 ## Adding a new view
 
 1. Add an entry to `navItems` in `src/components/shell/nav.ts`.
-2. Create the route under `src/app/<href>/page.tsx`. Use `PageHeader` for the title and lead.
+2. Create the route under `src/app/(dashboard)/<href>/page.tsx`, inside the route group whose layout checks the session. Use `PageHeader` for the title and lead.
 3. If the view will be wired immediately, add a typed data module under `src/data/`. Export the row shape, a snapshot type, and a `fetchXxx` function; add a `useXxx` hook returning a `loading | error | ready` discriminated union over the snapshot. Mirror the conventions in `agent-spend.ts` and `open-channels.ts`.
 4. If the view is a placeholder for now, use a `Panel` containing an `EmptyState` and name the future source via the `source` prop. That keeps the contributor map intact.
 5. Cover the wired case with a Vitest component test that drives each state of the discriminated union (see `channels-view.test.tsx` and `agents-view.test.tsx`).
 
-## Authentication contract
+## Dashboard security
 
-The dashboard session is independent of the service API key. `DASHBOARD_USERS` is a server-side JSON array of `{ username, passwordHash, role }`, where `role` is `viewer` or `admin`, and `DASHBOARD_SESSION_SECRET` signs the session token. `apps/dashboard/.env.example` shows the shape with a throwaway hash. Never commit real credentials.
+### Setup
 
-`src/lib/session.ts` signs and verifies the compact HS256 token; `src/lib/session-store.ts` tracks active and revoked session ids in memory; `src/lib/users.ts` verifies bcrypt password hashes; `src/lib/csrf.ts` checks request origin and a session-bound token; `src/lib/rate-limit.ts` counts failed logins per username and client address. All of these are server-only. `proxy.ts` redirects unauthenticated page requests to `/login?next=<path>` and returns JSON 401 for `/api/**`, while `POST /api/auth/login`, `POST /api/auth/logout`, `GET /api/session`, and `DELETE /api/admin/sessions/[sid]` re-check the session and role before doing work. Revocation and rate limits reset on restart, so a multi-instance deployment needs a shared store before production use.
+The dashboard has its own users, separate from the service's API-key tenancy (#231). Configure it with server-side environment variables; `apps/dashboard/.env.example` shows the shape.
 
-When #237 lands, the service API key stays server side. A browser component may use the session identity from `GET /api/session`, but it must never import or read the service key.
+| Variable | Required | Meaning |
+| -------- | -------- | ------- |
+| `DASHBOARD_SESSION_SECRET` | yes | Signs session tokens and CSRF tokens. At least 32 bytes; generate one with `openssl rand -base64 48`. Changing it signs everyone out. |
+| `DASHBOARD_AUTH_PROVIDER` | no | The identity provider. `credentials` (the default) is the only one today. |
+| `DASHBOARD_USERS` | for `credentials` | JSON array of `{ "username", "passwordHash", "role" }`. `passwordHash` is a bcrypt hash of cost 10 or more; `role` is `viewer` or `admin`. |
+| `DASHBOARD_ORIGIN` | behind a proxy | The public origin, for example `https://dashboard.example.com`. State-changing requests must carry exactly this `Origin`. Without it, the origin's host must match the `Host` (or `X-Forwarded-Host`) header. |
+| `DASHBOARD_CLIENT_IP_HEADER` | no | A header your reverse proxy sets to the client address, such as `X-Real-IP`, to also rate-limit per client. Never name a header the proxy appends to. |
 
-## Browser tests
+Create a hash from `apps/dashboard` without the password reaching your shell history or the process list:
 
-Run `pnpm --filter @vegaforge/tollway-dashboard test:e2e`. The script builds the production dashboard, then Playwright starts `next start` on `127.0.0.1:3124` and runs the suites in light, dark, and mobile Chromium projects. A local Chromium override is available through `PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH`; CI installs the matching browser with `playwright install --with-deps chromium`.
+```bash
+read -rs PW && printf %s "$PW" | node -e 'let s="";process.stdin.on("data",(d)=>{s+=d}).on("end",()=>console.log(require("bcryptjs").hashSync(s,12)))'; unset PW
+```
 
-The route suite generates cases from `navItems`, so a new navigation entry must render a `PageHeader` with its `data-testid="page-header"` hook. Flow tests cover UI sign-in, protected navigation, sign-out, and keyboard theme toggling. The keyboard test uses the focusable receipt-select button, and the accessibility suite runs axe with serious and critical violations failing the build. The shell's skip link targets `<main id="main-content">`. Keep these hooks and controls when changing the shell.
+The dashboard refuses to start a sign-in with a missing or short secret, a malformed user list, a plain-text or low-cost hash, or a duplicate username. Missing configuration is an error, not an open dashboard.
 
-CI runs the browser suite in the `e2e` job of `.github/workflows/ci.yml`, adds it to `quality.needs`, and reports success without a browser run when the pull request touches none of `apps/dashboard/**`, `pnpm-lock.yaml`, or that workflow. Failures upload the Playwright report and test results.
+### Roles
+
+| Role | Can |
+| ---- | --- |
+| `viewer` | Read every page and every read-only route |
+| `admin` | Everything a viewer can, plus actions: today, revoking a session (`DELETE /api/admin/sessions/<sid>`); channel close (#227) and policy edits (#241) when they land |
+
+Roles are checked on the server in every route handler through `authorizeRequest(request, role, { mutation })` in `src/lib/authorize.ts`, in server components through `currentSession()`, and in server actions through `requireSession(role)`, which throws before the action calls anything. `proxy.ts` makes the same session check first, but it is an early refusal, not the authority: a request that slips past the matcher is still refused by the handler. Hiding a button is never the control. When #237 adds service calls, an admin action checks the role before it calls the service, so a viewer cannot reach an admin call by crafting a request.
+
+### Sessions
+
+Signing in creates a session with a random id, stored in the server's session store, and sets the `tollway_dashboard_session` cookie: an HS256 token, `HttpOnly`, `Secure`, `SameSite=Lax`, `Path=/`, with an expiry. A session lasts 8 hours from sign-in and is not extended by activity. Every check verifies the token and then asks the store whether that session is still live, so logging out or an admin revocation ends it at once, not at expiry. Logging out also clears the cookie.
+
+The store, like the login rate limiter, is in the dashboard's memory. A restart signs everyone out and resets the limiter. Run one dashboard process; several replicas need a shared store first.
+
+### Requests that change state
+
+Every state-changing route handler requires the request's `Origin` to be the dashboard's own and an `x-csrf-token` header equal to the token bound to the session. The browser gets the token from the dashboard layout (or `GET /api/session`) and a cross-site page can neither read it nor set the header. Server actions get Next.js's own origin check on top of `requireSession`. Sign-in itself requires a same-origin `Origin`, so another site cannot sign a visitor in as someone else.
+
+### Sign-in throttling and errors
+
+Failed sign-ins are counted per username from every source (5 a minute), per client address when `DASHBOARD_CLIENT_IP_HEADER` is set (20 a minute), and in total (100 a minute); past a limit the route answers 429 with `Retry-After`. Successful sign-ins are not counted. An unknown username and a wrong password get the same 401 and the same message, and both run a bcrypt comparison of the same cost, so neither the answer nor its timing reveals which usernames exist. After sign-in the browser returns only to a path on the dashboard's own origin.
+
+### What the browser never sees
+
+The browser receives the session cookie (which scripts cannot read), the username, the role and the CSRF token. It never receives the session secret, password hashes, or the service API key: those stay in server-only modules, and no client component may import them.
+
+## End-to-end tests
+
+The Playwright suite in `apps/dashboard/e2e/` drives the production build in Chromium. Run it with:
+
+```bash
+pnpm --filter "@vegaforge/tollway-dashboard^..." build   # the workspace packages it imports
+pnpm --filter @vegaforge/tollway-dashboard exec playwright install chromium   # once
+pnpm --filter @vegaforge/tollway-dashboard test:e2e
+```
+
+`test:e2e` runs `next build`, then Playwright starts `next start` on `127.0.0.1:3124` with test-only users (`e2e`, a viewer, and `e2e-admin`; see `playwright.config.ts`) and runs every spec in three projects: `light` and `dark` desktop Chrome, and `mobile` (Pixel 7). It is not part of `pnpm test` or `./scripts/preflight.sh`, which stay browser-free. `PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH` points it at a system Chromium instead of the downloaded one.
+
+| Spec | Covers |
+| ---- | ------ |
+| `routes.spec.ts` | Every `navItems` route loads, shows its `PageHeader` with the right title, and is reachable from the sidebar (or the mobile menu); the agent detail page from the agents table |
+| `flows.spec.ts` | Sorting the agents table, a receipt showing "Signature valid", a channel-commitment receipt linking to its channel, the theme surviving a reload, the agent detail controls, the anomalies link |
+| `auth.spec.ts` | Redirect to login and back, 401 from the API, cookie flags, logout invalidating a replayed cookie, the uniform failure message, cross-origin and CSRF refusals, a viewer refused an admin route |
+| `keyboard.spec.ts` | The skip link, Tab reaching every section with visible focus, receipt rows and the sort control from the keyboard |
+| `mobile.spec.ts` | The topbar brand and the navigation menu on a small screen |
+| `accessibility.spec.ts` | axe (WCAG 2.0 and 2.1 A and AA) on the login page and every route in each project, failing on serious or critical violations, with no rule disabled |
+
+Every test also fails on a console error or uncaught exception (the `consoleErrors` fixture in `e2e/fixtures.ts`), which is how a hydration mismatch shows up.
+
+To extend it: a new `navItems` entry is picked up by the route, keyboard and accessibility specs automatically, as long as the page renders a `PageHeader` (it carries `data-testid="page-header"`). Use roles and labels to find elements, and the existing `data-testid` hooks where a role is ambiguous. A finding from axe is a bug to fix in the component, never a rule to disable.
+
+In CI the `dashboard e2e` job in `.github/workflows/ci.yml` runs the suite whenever a change touches `apps/dashboard`, the workspace packages it builds from, the lockfile or the workflow, caches the Playwright browsers, and uploads the report and traces when it fails. It is part of `quality`.
