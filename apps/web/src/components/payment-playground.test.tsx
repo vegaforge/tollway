@@ -1,9 +1,10 @@
 import { fireEvent, render, screen } from "@testing-library/react";
 import { describe, expect, it, vi } from "vitest";
+import { Account, Address, Keypair, Networks, Operation, TransactionBuilder, nativeToScVal } from "@stellar/stellar-base";
 import { Ed25519Signer, buildReceipt, signReceipt, bytesToBase64Url, utf8Bytes } from "@vegaforge/tollway-core";
 import { encodePaymentRequiredHeader } from "@x402/core/http";
 import { PaymentPlayground } from "./payment-playground";
-import { decodeHeaderValue, MAX_HEADER_LENGTH } from "@/lib/playground";
+import { decodeHeaderValue, decodeStellarTransactionXdr, MAX_HEADER_LENGTH } from "@/lib/playground";
 
 describe("header decoder", () => {
   it("decodes a valid Tollway base64url challenge", () => {
@@ -24,6 +25,34 @@ describe("header decoder", () => {
     expect(decodeHeaderValue("PAYMENT-REQUIRED", "not-a-header").valid).toBe(false);
     expect(decodeHeaderValue("PAYMENT-REQUIRED", JSON.stringify({ wrong: true })).valid).toBe(false);
     expect(decodeHeaderValue("PAYMENT-REQUIRED", "x".repeat(MAX_HEADER_LENGTH + 1)).errors[0]).toMatch(/limited to/);
+  });
+});
+
+describe("Stellar transaction inspection", () => {
+  it("extracts the payer and integer transfer amount from a Soroban transfer XDR", async () => {
+    const payer = Keypair.random().publicKey();
+    const payee = Keypair.random().publicKey();
+    const contract = Address.contract(Buffer.alloc(32, 7)).toString();
+    const transaction = new TransactionBuilder(new Account(payer, "1"), {
+      fee: "100",
+      networkPassphrase: Networks.TESTNET,
+    })
+      .addOperation(Operation.invokeContractFunction({
+        contract,
+        function: "transfer",
+        args: [
+          nativeToScVal(payer, { type: "address" }),
+          nativeToScVal(payee, { type: "address" }),
+          nativeToScVal(12345n, { type: "i128" }),
+        ],
+      }))
+      .setTimeout(300)
+      .build();
+
+    const details = await decodeStellarTransactionXdr(transaction.toXDR(), "stellar:testnet");
+    expect(details.payer).toBe(payer);
+    expect(details.payee).toBe(payee);
+    expect(details.amount).toBe("12345");
   });
 });
 
