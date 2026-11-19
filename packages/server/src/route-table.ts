@@ -32,6 +32,7 @@ interface CompiledRoute {
   staticSegments: number;
 }
 
+/** One configured paid route, as {@link RouteTable} lists it. */
 export interface RouteTableEntry {
   key: string;
   method: string;
@@ -43,12 +44,17 @@ export interface RouteTableEntry {
   resource?: string;
 }
 
+/** The gate for a matched request and the resource its receipt names. */
 export interface RouteTableMatch {
   gate: Gate;
   /** Canonical concrete path used as the default receipt resource. */
   resource: string;
 }
 
+/**
+ * Paid routes compiled once by {@link createRouteTable}. `match` finds the
+ * gate for a request; `list` returns every configured route.
+ */
 export interface RouteTable {
   match(method: string, url: string): RouteTableMatch | undefined;
   list(): RouteTableEntry[];

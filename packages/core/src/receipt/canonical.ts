@@ -1,6 +1,7 @@
 import { utf8Bytes } from "../encoding.js";
 import { TollwayError } from "../errors.js";
 
+/** A value that survives a JSON round trip, which is all a receipt body may hold. */
 export type JsonValue =
   | string
   | number
@@ -39,6 +40,10 @@ export function canonicalJson(value: JsonValue): string {
   return `{${parts.join(",")}}`;
 }
 
+/**
+ * The UTF-8 bytes of {@link canonicalJson}. These are the exact bytes a
+ * receipt signature covers.
+ */
 export function canonicalBytes(value: JsonValue): Uint8Array {
   return utf8Bytes(canonicalJson(value));
 }

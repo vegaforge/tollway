@@ -13,6 +13,11 @@ export interface ReceiptSigner {
   sign(message: Uint8Array): Promise<Uint8Array>;
 }
 
+/**
+ * Checks a receipt signature against keys the caller trusts. Implementations
+ * return false, rather than throw, for an unknown key or algorithm, so
+ * {@link verifyReceipt} reports every failure the same way.
+ */
 export interface ReceiptVerifier {
   verify(input: {
     message: Uint8Array;

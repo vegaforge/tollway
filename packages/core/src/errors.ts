@@ -24,6 +24,7 @@ export type TollwayErrorCode =
   | "invalid-metric"
   | "metrics-query-too-large";
 
+/** An error Tollway throws on purpose. Branch on `code`, which is stable across releases. */
 export class TollwayError extends Error {
   readonly code: TollwayErrorCode;
 

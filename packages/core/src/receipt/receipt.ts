@@ -9,6 +9,10 @@ import {
 } from "./schema.js";
 import type { ReceiptSigner, ReceiptVerifier } from "./signer.js";
 
+/**
+ * What `buildReceipt` needs. `version` is fixed, and `id` and `issuedAt` are
+ * generated when omitted (a random UUID and the current time).
+ */
 export type BuildReceiptInput = Omit<ReceiptBody, "version" | "id" | "issuedAt"> & {
   id?: string;
   issuedAt?: string;
@@ -39,6 +43,11 @@ export function buildReceipt(input: BuildReceiptInput): ReceiptBody {
   return parsed.data;
 }
 
+/**
+ * Signs a receipt body over its canonical bytes, so any party that knows the
+ * signer's public key can verify it later with {@link verifyReceipt}. The body
+ * is parsed again first, so an invalid body throws instead of being signed.
+ */
 export async function signReceipt(
   body: ReceiptBody,
   signer: ReceiptSigner,
@@ -55,6 +64,7 @@ export async function signReceipt(
   };
 }
 
+/** The result of {@link verifyReceipt}: the verified receipt, or why it was refused. */
 export type ReceiptVerification =
   | {
       valid: true;

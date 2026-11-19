@@ -12,6 +12,7 @@ export type TrafficSnapshot = {
   windowSeconds: number;
 };
 
+/** Everything the router weighs when it picks a settlement model for one payment. */
 export type RouteInput = {
   /** The service (or agent) on the other side of this payment. */
   counterparty: string;
@@ -26,13 +27,22 @@ export type RouteInput = {
   allowedModels?: SettlementModel[];
 };
 
+/**
+ * Why the router chose a model: an explicit override, the counterparty's
+ * offer, observed traffic, or the fallback when nothing else applies.
+ */
 export type RouteReason = "override" | "offer" | "traffic" | "default";
 
+/** The model the router chose and the reason, so the choice can be logged and explained. */
 export type RouteDecision = {
   model: SettlementModel;
   reason: RouteReason;
 };
 
+/**
+ * Decides how a payment settles. {@link createDefaultRouter} is the built-in
+ * implementation; see docs/design.md, "The model router".
+ */
 export interface ModelRouter {
   decide(input: RouteInput): Promise<RouteDecision>;
 }

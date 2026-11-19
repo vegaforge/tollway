@@ -2,7 +2,12 @@ import { base64UrlToBytes, bytesToBase64Url, utf8Bytes } from "@vegaforge/tollwa
 
 /** The x402 header names, per docs/design.md, "The problem". */
 export const PAYMENT_REQUIRED_HEADER = "PAYMENT-REQUIRED";
+/** The request header that carries the agent's signed x402 payment. */
 export const PAYMENT_SIGNATURE_HEADER = "PAYMENT-SIGNATURE";
+/**
+ * The response header on a settled request. The gate sends the signed
+ * receipt in it today; #43 moves the receipt to its own header.
+ */
 export const PAYMENT_RESPONSE_HEADER = "PAYMENT-RESPONSE";
 
 /** MPP sends its credential as `Authorization: Payment <credential>`. */

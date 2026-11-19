@@ -14,6 +14,16 @@
     "dev": {
       "cache": false,
       "persistent": true
+    },
+    "@vegaforge/tollway-web#build": {
+      "dependsOn": ["^build"],
+      "inputs": [
+        "$TURBO_DEFAULT$",
+        "$TURBO_ROOT$/packages/*/src/**",
+        "$TURBO_ROOT$/packages/*/package.json",
+        "$TURBO_ROOT$/tsconfig.base.json"
+      ],
+      "outputs": [".next/**", "!.next/cache/**", "src/content/docs/api/**"]
     }
   }
 }

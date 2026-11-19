@@ -6,10 +6,16 @@
 /** The three ways a payment can settle. See docs/design.md, "The model router". */
 export const settlementModels = ["x402", "mpp-charge", "mpp-channel"] as const;
 
+/** One of the three settlement models: x402, MPP charge, or MPP channel. */
 export type SettlementModel = (typeof settlementModels)[number];
 
+/**
+ * The Stellar networks Tollway settles on, by Tollway's own names. The x402
+ * path maps them to the CAIP-2 ids `stellar:testnet` and `stellar:pubnet`.
+ */
 export const stellarNetworks = ["testnet", "mainnet"] as const;
 
+/** A Stellar network Tollway settles on: `testnet` or `mainnet`. */
 export type StellarNetwork = (typeof stellarNetworks)[number];
 
 /**
@@ -48,6 +54,7 @@ export type X402Payment = {
   paymentSignature: string;
 };
 
+/** An MPP charge: a single payment authorized by an MPP credential. */
 export type MppChargePayment = {
   model: "mpp-charge";
   /**
@@ -60,6 +67,10 @@ export type MppChargePayment = {
   payload: string;
 };
 
+/**
+ * One commitment in an MPP payment channel. The agent funds the channel once
+ * and then signs a growing cumulative total for each payment.
+ */
 export type MppChannelPayment = {
   model: "mpp-channel";
   channelId: string;
@@ -71,4 +82,5 @@ export type MppChannelPayment = {
   commitment: string;
 };
 
+/** The payment an agent submits, whichever model it settles through. Narrow on `model`. */
 export type PaymentPayload = X402Payment | MppChargePayment | MppChannelPayment;

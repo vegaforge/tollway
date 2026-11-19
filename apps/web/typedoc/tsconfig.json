@@ -1,0 +1,19 @@
+{
+  "extends": "../../../tsconfig.base.json",
+  "compilerOptions": {
+    "lib": ["ES2022", "DOM"],
+    "types": ["node"],
+    "baseUrl": ".",
+    "paths": {
+      "@vegaforge/tollway-core": ["../../../packages/core/src/index.ts"],
+      "@vegaforge/tollway-server": ["../../../packages/server/src/index.ts"],
+      "@vegaforge/tollway-theme": ["../../../packages/theme/src/index.ts"]
+    }
+  },
+  "include": ["../../../packages/*/src/**/*.ts"],
+  "exclude": [
+    "../../../packages/*/src/**/*.test.ts",
+    "../../../packages/bench",
+    "../../../packages/create-tollway"
+  ]
+}

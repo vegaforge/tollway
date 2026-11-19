@@ -22,10 +22,15 @@ export type MppChargeVerifyInput = {
   offer: PaymentOffer;
 };
 
+/**
+ * The outcome of the offline checks on an MPP credential. A valid one carries
+ * the payer and the nonce used to settle it at most once.
+ */
 export type MppChargeVerifyResult =
   | { valid: true; payer: string; nonce: string }
   | { valid: false; reason: string };
 
+/** A verified MPP charge to settle, with the payer and nonce verification returned. */
 export type MppChargeSettleInput = {
   payment: MppChargePayment;
   offer: PaymentOffer;
@@ -33,10 +38,12 @@ export type MppChargeSettleInput = {
   nonce: string;
 };
 
+/** The outcome of settling an MPP charge: the transaction hash, or why it failed. */
 export type MppChargeSettleResult =
   | { settled: true; txHash: string }
   | { settled: false; reason: string };
 
+/** What a handler needs to build the MPP challenge for an unpaid request. */
 export type MppChargeChallengeInput = {
   offer: PaymentOffer;
   /** The request being challenged; only its method and URL are used. */
@@ -55,6 +62,11 @@ export type MppChargeChallenge = {
   body: string | null;
 };
 
+/**
+ * Handles MPP charge payments for the gate. {@link createMppChargeHandler}
+ * settles on Stellar through `@stellar/mpp`; {@link createMockMppChargeHandler}
+ * runs offline.
+ */
 export interface MppChargeHandler {
   /**
    * Builds the MPP challenge for a request that carries no credential. A
@@ -96,6 +108,7 @@ export function createMockMppChargeHandler(): MppChargeHandler {
 /** A key pair or `S...` secret, as `@stellar/mpp` accepts it. */
 type StellarSigner = NonNullable<stellar.Parameters["feePayer"]>["envelopeSigner"];
 
+/** Configuration for {@link createMppChargeHandler}. */
 export type MppChargeOptions = {
   /** Stellar account (G...) or contract (C...) that receives the payment. */
   recipient: string;
