@@ -1,4 +1,5 @@
 import type { PaymentOffer, X402Payment } from "@vegaforge/tollway-core";
+import type { PaymentRequirements } from "@x402/core/types";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { createHttpFacilitator } from "./facilitator.js";
 
@@ -12,7 +13,24 @@ const offer: PaymentOffer = {
   models: ["x402"],
 };
 
-const payment: X402Payment = { model: "x402", paymentSignature: "AAAA-base64-stellar-tx" };
+const requirements: PaymentRequirements = {
+  scheme: "exact",
+  network: "stellar:testnet",
+  asset: offer.asset,
+  amount: offer.amount,
+  payTo: offer.payTo,
+  maxTimeoutSeconds: 60,
+  extra: {},
+};
+
+const payment: X402Payment = {
+  model: "x402",
+  payload: {
+    x402Version: 2,
+    accepted: requirements,
+    payload: { transaction: "AAAA-base64-stellar-tx" },
+  },
+};
 
 const FACILITATOR_URL = "https://facilitator.test";
 
@@ -79,8 +97,17 @@ describe("createHttpFacilitator", () => {
       payTo: offer.payTo,
       maxTimeoutSeconds: 60,
     });
-    // x402 V2 carries the base64 Stellar transaction envelope, not a bare signature.
-    expect(body.paymentPayload.payload).toEqual({ transaction: payment.paymentSignature });
+    // The decoded V2 payload is forwarded exactly as received, `accepted` and all.
+    expect(body.paymentPayload).toEqual(payment.payload);
+  });
+
+  it("rejects a payload with no transaction without calling the facilitator", async () => {
+    const result = await createHttpFacilitator(FACILITATOR_URL).verify({
+      payment: { model: "x402", payload: { ...payment.payload, payload: {} } },
+      offer,
+    });
+    expect(result).toEqual({ valid: false, reason: "payment payload carries no transaction" });
+    expect(fetchMock).not.toHaveBeenCalled();
   });
 
   it("derives a stable nonce from the same payment", async () => {

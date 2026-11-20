@@ -1,4 +1,5 @@
 import { Keypair } from "@stellar/stellar-sdk";
+import type { PaymentPayload, PaymentRequirements } from "@x402/core/types";
 import { USDC_TESTNET_ADDRESS } from "@x402/stellar";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { runDemo } from "./demo.js";
@@ -33,8 +34,13 @@ describe("runDemo in live mode", () => {
   const realFetch = globalThis.fetch;
   let facilitatorCalls: Array<{ url: string; headers: Headers }>;
 
-  // Signs nothing: returns a fixed transaction so no Stellar RPC is needed.
-  const payer = async () => "AAAAAgAAAAB0ZXN0LXRyYW5zYWN0aW9u";
+  // Signs nothing: returns a V2 payload with a fixed transaction, so no
+  // Stellar RPC is needed.
+  const payer = async (requirements: PaymentRequirements): Promise<PaymentPayload> => ({
+    x402Version: 2,
+    accepted: requirements,
+    payload: { transaction: "AAAAAgAAAAB0ZXN0LXRyYW5zYWN0aW9u" },
+  });
 
   beforeEach(() => {
     facilitatorCalls = [];

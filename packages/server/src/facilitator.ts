@@ -5,11 +5,9 @@ import type {
   X402Payment,
 } from "@vegaforge/tollway-core";
 import { bytesToBase64Url, TollwayError, utf8Bytes } from "@vegaforge/tollway-core";
-import { x402Version } from "@x402/core";
 import { type FacilitatorConfig, HTTPFacilitatorClient } from "@x402/core/http";
 import {
   type Network,
-  type PaymentPayload,
   type PaymentRequirements,
   SettleError,
   type SettleResponse,
@@ -17,11 +15,7 @@ import {
   VerifyError,
   type VerifyResponse,
 } from "@x402/core/types";
-import {
-  type ExactStellarPayloadV2,
-  STELLAR_PUBNET_CAIP2,
-  STELLAR_TESTNET_CAIP2,
-} from "@x402/stellar";
+import { STELLAR_PUBNET_CAIP2, STELLAR_TESTNET_CAIP2 } from "@x402/stellar";
 import { mockAccount, mockHex } from "./hash.js";
 
 /**
@@ -74,20 +68,31 @@ export interface FacilitatorClient {
 }
 
 /**
- * Offline facilitator for tests and the demo. Any non-empty signature is
- * valid; payer, nonce, and tx hash are derived from it, so runs and retries
- * are deterministic with no network.
+ * The signed Stellar transaction inside a V2 `PaymentPayload`, or undefined
+ * when the payload carries none. The transaction is what the facilitator
+ * verifies, and its digest is the idempotency nonce.
+ */
+function transactionOf(payment: X402Payment): string | undefined {
+  const transaction = payment.payload.payload.transaction;
+  return typeof transaction === "string" && transaction.length > 0 ? transaction : undefined;
+}
+
+/**
+ * Offline facilitator for tests and the demo. Any payload with a transaction
+ * is valid; payer, nonce, and tx hash are derived from it, so runs and
+ * retries are deterministic with no network.
  */
 export function createMockFacilitator(): FacilitatorClient {
   return {
     async verify({ payment }) {
-      if (!payment.paymentSignature) {
-        return { valid: false, reason: "empty payment signature" };
+      const transaction = transactionOf(payment);
+      if (!transaction) {
+        return { valid: false, reason: "payment payload carries no transaction" };
       }
       return {
         valid: true,
-        payer: mockAccount(payment.paymentSignature),
-        nonce: mockHex(payment.paymentSignature, 32),
+        payer: mockAccount(transaction),
+        nonce: mockHex(transaction, 32),
       };
     },
     async settle({ nonce, offer }) {
@@ -100,7 +105,7 @@ export function createMockFacilitator(): FacilitatorClient {
 }
 
 /** The x402 scheme @x402/stellar implements; see `ExactStellarScheme.scheme`. */
-const STELLAR_EXACT_SCHEME = "exact";
+export const STELLAR_EXACT_SCHEME = "exact";
 
 /** Tollway's networks mapped to the CAIP-2 ids @x402/stellar speaks. */
 const NETWORK_CAIP2: Record<StellarNetwork, Network> = {
@@ -108,26 +113,66 @@ const NETWORK_CAIP2: Record<StellarNetwork, Network> = {
   mainnet: STELLAR_PUBNET_CAIP2,
 };
 
-const DEFAULT_MAX_TIMEOUT_SECONDS = 60;
+/** The default for `PaymentRequirements.maxTimeoutSeconds`. */
+export const DEFAULT_MAX_TIMEOUT_SECONDS = 60;
 
-export type HttpFacilitatorOptions = {
+/** The x402 terms an offer becomes: the timeout and the scheme's `extra` data. */
+export type X402Terms = {
   /**
-   * How long, in seconds, the facilitator should hold the payment valid. Maps
-   * to `PaymentRequirements.maxTimeoutSeconds`. Defaults to 60.
+   * How long, in seconds, the payment stays valid. Maps to
+   * `PaymentRequirements.maxTimeoutSeconds`. Defaults to 60.
    */
   maxTimeoutSeconds?: number;
   /** Scheme-specific data passed through as `PaymentRequirements.extra`. */
   extra?: Record<string, unknown>;
+};
+
+/**
+ * Maps a Tollway network to the CAIP-2 id @x402/stellar speaks. Throws a
+ * TollwayError for a network x402 has no id for, rather than guessing.
+ */
+export function stellarCaip2(network: StellarNetwork): Network {
+  const caip2 = NETWORK_CAIP2[network];
+  if (!caip2) {
+    throw new TollwayError(
+      "payment-failed",
+      `no CAIP-2 mapping for network "${network}"; the x402 facilitator needs stellar:testnet or stellar:pubnet`,
+    );
+  }
+  return caip2;
+}
+
+/**
+ * Builds the x402 `PaymentRequirements` for an offer. The gate sends the same
+ * object in its 402 challenge, so the client signs exactly what the
+ * facilitator is asked to verify.
+ */
+export function toPaymentRequirements(
+  offer: PaymentOffer,
+  terms: X402Terms = {},
+): PaymentRequirements {
+  return {
+    scheme: STELLAR_EXACT_SCHEME,
+    network: stellarCaip2(offer.network),
+    asset: offer.asset,
+    amount: offer.amount,
+    payTo: offer.payTo,
+    maxTimeoutSeconds: terms.maxTimeoutSeconds ?? DEFAULT_MAX_TIMEOUT_SECONDS,
+    extra: terms.extra ?? {},
+  };
+}
+
+export type HttpFacilitatorOptions = X402Terms & {
   /** Per-call auth headers, for facilitators that gate /verify and /settle. */
   createAuthHeaders?: FacilitatorConfig["createAuthHeaders"];
 };
 
 /**
  * Calls a real facilitator over HTTP, speaking the x402 V2 wire format from
- * `@x402/core` and `@x402/stellar`. It maps Tollway's offer and payment onto
- * `PaymentRequirements` and a `PaymentPayload` (the agent's base64 Stellar
- * transaction), delegates to `@x402/core`'s `HTTPFacilitatorClient`, and maps
- * the `VerifyResponse` / `SettleResponse` back to Tollway's result shapes.
+ * `@x402/core` and `@x402/stellar`. It maps Tollway's offer onto
+ * `PaymentRequirements`, forwards the agent's decoded `PaymentPayload`
+ * unchanged, delegates to `@x402/core`'s `HTTPFacilitatorClient`, and maps the
+ * `VerifyResponse` / `SettleResponse` back to Tollway's result shapes.
  *
  * For offline runs use `createMockFacilitator` (MOCK_MODE in the demo).
  */
@@ -139,45 +184,24 @@ export function createHttpFacilitator(
     url: baseUrl,
     createAuthHeaders: options.createAuthHeaders,
   });
-  const maxTimeoutSeconds = options.maxTimeoutSeconds ?? DEFAULT_MAX_TIMEOUT_SECONDS;
-  const extra = options.extra ?? {};
-
-  function toRequirements(offer: PaymentOffer): PaymentRequirements {
-    const network = NETWORK_CAIP2[offer.network];
-    if (!network) {
-      throw new TollwayError(
-        "payment-failed",
-        `no CAIP-2 mapping for network "${offer.network}"; the x402 facilitator needs stellar:testnet or stellar:pubnet`,
-      );
-    }
-    return {
-      scheme: STELLAR_EXACT_SCHEME,
-      network,
-      asset: offer.asset,
-      amount: offer.amount,
-      payTo: offer.payTo,
-      maxTimeoutSeconds,
-      extra,
-    };
-  }
-
-  function toPayload(payment: X402Payment, requirements: PaymentRequirements): PaymentPayload {
-    return {
-      x402Version,
-      accepted: requirements,
-      // x402 V2 carries a base64 Stellar transaction envelope, not a bare signature.
-      payload: { transaction: payment.paymentSignature } satisfies ExactStellarPayloadV2,
-    };
-  }
+  const terms: X402Terms = {
+    maxTimeoutSeconds: options.maxTimeoutSeconds,
+    extra: options.extra,
+  };
 
   return {
     async verify({ payment, offer }) {
-      const requirements = toRequirements(offer);
-      const payload = toPayload(payment, requirements);
+      const requirements = toPaymentRequirements(offer, terms);
+      const transaction = transactionOf(payment);
+      if (!transaction) {
+        return { valid: false, reason: "payment payload carries no transaction" };
+      }
 
       let response: VerifyResponse;
       try {
-        response = await client.verify(payload, requirements);
+        // The payload arrives decoded from the gate's header parse; forward it
+        // as received so the facilitator sees the agent's own `accepted` terms.
+        response = await client.verify(payment.payload, requirements);
       } catch (error) {
         // A structured rejection (often a 4xx with an `isValid: false` body) is
         // a declined payment, not a transport failure: surface it as invalid.
@@ -205,17 +229,19 @@ export function createHttpFacilitator(
       return {
         valid: true,
         payer: response.payer,
-        nonce: await deriveNonce(payment.paymentSignature),
+        nonce: await deriveNonce(transaction),
       };
     },
 
     async settle({ payment, offer }) {
-      const requirements = toRequirements(offer);
-      const payload = toPayload(payment, requirements);
+      const requirements = toPaymentRequirements(offer, terms);
+      if (!transactionOf(payment)) {
+        return { settled: false, reason: "payment payload carries no transaction" };
+      }
 
       let response: SettleResponse;
       try {
-        response = await client.settle(payload, requirements);
+        response = await client.settle(payment.payload, requirements);
       } catch (error) {
         if (error instanceof SettleError) {
           return {

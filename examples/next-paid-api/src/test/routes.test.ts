@@ -1,9 +1,11 @@
 import { Ed25519Verifier, type SignedReceipt, verifyReceipt } from "@vegaforge/tollway-core";
 import {
   decodeHeader,
+  decodePaymentRequiredHeader,
+  encodePaymentSignatureHeader,
   PAYMENT_REQUIRED_HEADER,
-  PAYMENT_RESPONSE_HEADER,
   PAYMENT_SIGNATURE_HEADER,
+  TOLLWAY_RECEIPT_HEADER,
 } from "@vegaforge/tollway-server";
 import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
 import { GET as quote } from "../app/api/quote/route";
@@ -23,8 +25,25 @@ async function publishedVerifier(): Promise<Ed25519Verifier> {
   return new Ed25519Verifier({ [body.keyId]: body.publicKey });
 }
 
+/** A standard-base64 x402 V2 payment header, as a stock client writes it. */
+function paymentHeader(transaction: string): string {
+  return encodePaymentSignatureHeader({
+    x402Version: 2,
+    accepted: {
+      scheme: "exact",
+      network: "stellar:testnet",
+      asset: "CBIELTK6YBZJU5UP2WWQEUCYKLPU6AUNZ2BQ4WWFEIE3USCIHMXQDAMA",
+      amount: "10000",
+      payTo: "GSERVICEXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX",
+      maxTimeoutSeconds: 60,
+      extra: {},
+    },
+    payload: { transaction },
+  });
+}
+
 function receiptOf(response: Response): SignedReceipt {
-  return decodeHeader<SignedReceipt>(response.headers.get(PAYMENT_RESPONSE_HEADER) ?? "");
+  return decodeHeader<SignedReceipt>(response.headers.get(TOLLWAY_RECEIPT_HEADER) ?? "");
 }
 
 beforeAll(() => {
@@ -42,15 +61,17 @@ describe("GET /api/quote", () => {
   it("answers an unpaid request with 402 and the challenge header", async () => {
     const response = await quote(new Request(`${BASE}/api/quote`));
     expect(response.status).toBe(402);
-    const challenge = decodeHeader<{ amount: string }>(
+    const challenge = decodePaymentRequiredHeader(
       response.headers.get(PAYMENT_REQUIRED_HEADER) ?? "",
     );
-    expect(challenge.amount).toBe(QUOTE_PRICE);
+    expect(challenge.accepts[0]?.amount).toBe(QUOTE_PRICE);
   });
 
   it("serves a paid request with a receipt that verifies against the published key", async () => {
     const response = await quote(
-      new Request(`${BASE}/api/quote`, { headers: { [PAYMENT_SIGNATURE_HEADER]: "quote-pay-1" } }),
+      new Request(`${BASE}/api/quote`, {
+        headers: { [PAYMENT_SIGNATURE_HEADER]: paymentHeader("quote-pay-1") },
+      }),
     );
     expect(response.status).toBe(200);
     const receipt = receiptOf(response);
@@ -66,7 +87,7 @@ describe("GET /api/quote", () => {
     const paid = () =>
       quote(
         new Request(`${BASE}/api/quote`, {
-          headers: { [PAYMENT_SIGNATURE_HEADER]: "quote-pay-replayed" },
+          headers: { [PAYMENT_SIGNATURE_HEADER]: paymentHeader("quote-pay-replayed") },
         }),
       );
     const first = await paid();
@@ -89,13 +110,14 @@ describe("POST /api/summarize", () => {
     );
     expect(unpaid.status).toBe(402);
     expect(
-      decodeHeader<{ amount: string }>(unpaid.headers.get(PAYMENT_REQUIRED_HEADER) ?? "").amount,
+      decodePaymentRequiredHeader(unpaid.headers.get(PAYMENT_REQUIRED_HEADER) ?? "").accepts[0]
+        ?.amount,
     ).toBe(SUMMARIZE_PRICE);
 
     const paid = await summarize(
       new Request(`${BASE}/api/summarize`, {
         method: "POST",
-        headers: { [PAYMENT_SIGNATURE_HEADER]: "summarize-pay-1" },
+        headers: { [PAYMENT_SIGNATURE_HEADER]: paymentHeader("summarize-pay-1") },
         body: JSON.stringify({ text: "Tollway charges agents. It settles on Stellar." }),
       }),
     );
@@ -112,7 +134,7 @@ describe("POST /api/summarize", () => {
     const response = await summarize(
       new Request(`${BASE}/api/summarize`, {
         method: "POST",
-        headers: { [PAYMENT_SIGNATURE_HEADER]: "summarize-pay-bad-body" },
+        headers: { [PAYMENT_SIGNATURE_HEADER]: paymentHeader("summarize-pay-bad-body") },
         body: "not json",
       }),
     );

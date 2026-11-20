@@ -5,6 +5,7 @@ import {
   createMockMppChargeHandler,
   createPaywall,
   createRouteTable,
+  encodePaymentSignatureHeader,
   type MppChargeHandler,
   PAYMENT_SIGNATURE_HEADER,
   type PaywallConfig,
@@ -19,6 +20,23 @@ const config: PaywallConfig = {
   payTo: "GSERVICE",
   network: "testnet",
 };
+
+/** A standard-base64 x402 V2 payment header, as a stock client writes it. */
+function paymentHeader(transaction = "mock-signed-auth-entry"): string {
+  return encodePaymentSignatureHeader({
+    x402Version: 2,
+    accepted: {
+      scheme: "exact",
+      network: "stellar:testnet",
+      asset: config.asset,
+      amount: config.amount,
+      payTo: config.payTo,
+      maxTimeoutSeconds: 60,
+      extra: {},
+    },
+    payload: { transaction },
+  });
+}
 
 async function startApp() {
   const signer = await Ed25519Signer.generate("test-key");
@@ -47,8 +65,8 @@ describe("expressPaywall", () => {
     try {
       const response = await fetch(app.url);
       expect(response.status).toBe(402);
-      const challenge = (await response.json()) as { amount: string };
-      expect(challenge.amount).toBe("10000");
+      const challenge = (await response.json()) as { accepts: Array<{ amount: string }> };
+      expect(challenge.accepts[0]?.amount).toBe("10000");
     } finally {
       await app.close();
     }
@@ -58,7 +76,7 @@ describe("expressPaywall", () => {
     const app = await startApp();
     try {
       const response = await fetch(app.url, {
-        headers: { [PAYMENT_SIGNATURE_HEADER]: "mock-signed-auth-entry" },
+        headers: { [PAYMENT_SIGNATURE_HEADER]: paymentHeader() },
       });
       expect(response.status).toBe(200);
       expect(response.headers.get("payment-response")).toBeTruthy();
@@ -123,7 +141,7 @@ describe("expressPaywall with a shared settlement cache", () => {
         throw new Error("expected a TCP address");
       }
       const base = `http://127.0.0.1:${address.port}`;
-      const headers = { [PAYMENT_SIGNATURE_HEADER]: "mock-signed-auth-entry" };
+      const headers = { [PAYMENT_SIGNATURE_HEADER]: paymentHeader() };
 
       const paid = await fetch(`${base}/quotes/latest`, { headers });
       expect(paid.status).toBe(200);
@@ -158,7 +176,7 @@ describe("expressPaywall method binding", () => {
     const address = server.address();
     if (!address || typeof address === "string") throw new Error("expected a TCP address");
     const url = `http://127.0.0.1:${address.port}/report`;
-    const headers = { [PAYMENT_SIGNATURE_HEADER]: "mock-signed-auth-entry-method" };
+    const headers = { [PAYMENT_SIGNATURE_HEADER]: paymentHeader("mock-signed-auth-entry-method") };
     try {
       const read = await fetch(url, { headers });
       expect(read.status).toBe(200);

@@ -11,15 +11,21 @@ import {
   signReceipt,
   type X402Payment,
 } from "@vegaforge/tollway-core";
+import { x402Version } from "@x402/core";
+import type { PaymentRequired, PaymentPayload as X402Payload } from "@x402/core/types";
 import type { SettlementCache, SettlementLock } from "./cache.js";
-import type { FacilitatorClient } from "./facilitator.js";
+import { type FacilitatorClient, stellarCaip2, toPaymentRequirements } from "./facilitator.js";
 import {
+  decodePaymentSignatureHeader,
   encodeHeader,
+  encodePaymentRequiredHeader,
+  encodePaymentResponseHeader,
   PAYMENT_REQUIRED_HEADER,
   PAYMENT_RESPONSE_HEADER,
   PAYMENT_SIGNATURE_HEADER,
   readHeader,
   readMppCredential,
+  TOLLWAY_RECEIPT_HEADER,
 } from "./headers.js";
 import type { MppChargeHandler } from "./mpp-charge.js";
 
@@ -49,6 +55,10 @@ export type PaywallConfig = {
   /** Overrides the request URL as the resource identifier in the receipt. */
   resource?: string;
   facilitatorUrl?: string;
+  /** x402: how long the payment stays valid, in seconds. Defaults to 60. */
+  maxTimeoutSeconds?: number;
+  /** x402: scheme-specific data, sent as `PaymentRequirements.extra`. */
+  extra?: Record<string, unknown>;
 };
 
 /**
@@ -61,7 +71,8 @@ export type GateOutcome =
       kind: "payment-required";
       status: 402;
       headers: Record<string, string>;
-      challenge: PaymentOffer;
+      /** The x402 V2 `PaymentRequired`, also sent as the 402's JSON body. */
+      challenge: PaymentRequired;
     }
   | {
       kind: "settled";
@@ -127,6 +138,24 @@ type Handler<TPayment> = {
 };
 
 type RejectedOutcome = Extract<GateOutcome, { kind: "rejected" }>;
+
+/**
+ * The headers on a settled response: the x402 V2 `SettleResponse` in
+ * PAYMENT-RESPONSE, and Tollway's signed receipt in TOLLWAY-RECEIPT. The
+ * facilitator settled the payment, so `success` is always true here.
+ */
+function settlementHeaders(signed: SignedReceipt): Record<string, string> {
+  const { settlement, network } = signed.receipt;
+  const headers: Record<string, string> = { [TOLLWAY_RECEIPT_HEADER]: encodeHeader(signed) };
+  if (settlement.kind === "transaction") {
+    headers[PAYMENT_RESPONSE_HEADER] = encodePaymentResponseHeader({
+      success: true,
+      transaction: settlement.txHash,
+      network: stellarCaip2(network),
+    });
+  }
+  return headers;
+}
 
 /** The shared result of one settlement attempt, before it is checked against an offer. */
 type SettlementResult =
@@ -260,7 +289,7 @@ function toOutcome(
   const outcome: GateOutcome = {
     kind: "settled",
     status: 200,
-    headers: { [PAYMENT_RESPONSE_HEADER]: encodeHeader(result.receipt) },
+    headers: settlementHeaders(result.receipt),
     receipt: result.receipt,
     replayed: waited || result.replayed,
   };
@@ -483,18 +512,32 @@ async function settleAndRecord<TPayment>(
 const BODY_HEADERS = new Set(["content-type", "content-length", "content-encoding"]);
 
 /**
- * The 402 for a request with no payment. It always carries the x402
- * PAYMENT-REQUIRED header. When the route accepts mpp-charge, the MPP
- * challenge `mppx` built (its `WWW-Authenticate: Payment ...` header) is
- * added alongside, so an agent can answer with either protocol.
+ * The 402 for a request with no payment. It carries the x402 V2
+ * `PaymentRequired` in the PAYMENT-REQUIRED header and as the JSON body.
+ * When the route accepts mpp-charge, the MPP challenge `mppx` built (its
+ * `WWW-Authenticate: Payment ...` header) is added alongside, so an agent can
+ * answer with either protocol.
  */
 async function paymentRequired(
   offer: PaymentOffer,
   request: TollwayRequest,
   acceptedModels: SettlementModel[],
   mppChargeHandler: MppChargeHandler | undefined,
+  config: PaywallConfig,
 ): Promise<GateOutcome> {
-  const headers: Record<string, string> = { [PAYMENT_REQUIRED_HEADER]: encodeHeader(offer) };
+  const challenge: PaymentRequired = {
+    x402Version,
+    resource: { url: offer.resource },
+    accepts: [
+      toPaymentRequirements(offer, {
+        maxTimeoutSeconds: config.maxTimeoutSeconds,
+        extra: config.extra,
+      }),
+    ],
+  };
+  const headers: Record<string, string> = {
+    [PAYMENT_REQUIRED_HEADER]: encodePaymentRequiredHeader(challenge),
+  };
   if (acceptedModels.includes("mpp-charge") && mppChargeHandler?.challenge) {
     const mpp = await mppChargeHandler.challenge({
       offer,
@@ -508,7 +551,7 @@ async function paymentRequired(
       }
     }
   }
-  return { kind: "payment-required", status: 402, headers, challenge: offer };
+  return { kind: "payment-required", status: 402, headers, challenge };
 }
 
 /**
@@ -575,7 +618,25 @@ export function createPaywallWithInFlight(
     }
 
     if (!signatureHeader) {
-      return paymentRequired(offer, request, acceptedModels, deps.mppChargeHandler);
+      return paymentRequired(offer, request, acceptedModels, deps.mppChargeHandler, config);
+    }
+
+    let x402Payment: X402Payload;
+    try {
+      x402Payment = decodePaymentSignatureHeader(signatureHeader);
+    } catch (error) {
+      return {
+        kind: "rejected",
+        status: 400,
+        reason: `PAYMENT-SIGNATURE is not a base64 x402 PaymentPayload: ${asError(error, "invalid header").message}`,
+      };
+    }
+    if (x402Payment.x402Version !== x402Version) {
+      return {
+        kind: "rejected",
+        status: 400,
+        reason: `unsupported x402Version ${String(x402Payment.x402Version)}; this gate speaks x402 version ${x402Version}`,
+      };
     }
 
     const decision = deps.router
@@ -583,7 +644,7 @@ export function createPaywallWithInFlight(
       : ({ model: acceptedModels[0], reason: "default" } as const);
 
     if (decision.model === "x402") {
-      const payment: X402Payment = { model: "x402", paymentSignature: signatureHeader };
+      const payment: X402Payment = { model: "x402", payload: x402Payment };
       return settleWithHandler(payment, offer, "x402", method, deps.facilitator, context);
     }
 

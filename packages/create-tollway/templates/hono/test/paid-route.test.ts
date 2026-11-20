@@ -1,21 +1,39 @@
 import { type SignedReceipt, verifyReceipt } from "@vegaforge/tollway-core";
 import {
   decodeHeader,
-  PAYMENT_RESPONSE_HEADER,
+  encodePaymentSignatureHeader,
   PAYMENT_SIGNATURE_HEADER,
+  TOLLWAY_RECEIPT_HEADER,
 } from "@vegaforge/tollway-server";
 import { describe, expect, it } from "vitest";
 import { app, signer } from "../src/index.js";
+
+/** A standard-base64 x402 V2 payment header, as a stock client writes it. */
+function paymentHeader(): string {
+  return encodePaymentSignatureHeader({
+    x402Version: 2,
+    accepted: {
+      scheme: "exact",
+      network: "stellar:testnet",
+      asset: "CBIELTK6YBZJU5UP2WWQEUCYKLPU6AUNZ2BQ4WWFEIE3USCIHMXQDAMA",
+      amount: "10000",
+      payTo: "GSERVICEXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX",
+      maxTimeoutSeconds: 60,
+      extra: {},
+    },
+    payload: { transaction: "mock-payment" },
+  });
+}
 
 describe("paid Hono route", () => {
   it("challenges, settles in mock mode, and returns a verified receipt", async () => {
     const challenge = await app.request("/api/paid");
     expect(challenge.status).toBe(402);
     const paid = await app.request("/api/paid", {
-      headers: { [PAYMENT_SIGNATURE_HEADER]: "mock-payment" },
+      headers: { [PAYMENT_SIGNATURE_HEADER]: paymentHeader() },
     });
     expect(paid.status).toBe(200);
-    const encoded = paid.headers.get(PAYMENT_RESPONSE_HEADER);
+    const encoded = paid.headers.get(TOLLWAY_RECEIPT_HEADER);
     expect(encoded).toBeTruthy();
     const signed = decodeHeader<SignedReceipt>(encoded ?? "");
     expect(await verifyReceipt(signed, signer)).toMatchObject({ valid: true });
