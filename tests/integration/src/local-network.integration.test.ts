@@ -5,7 +5,6 @@ import { Operation } from "@stellar/stellar-sdk";
 import {
   Ed25519Signer,
   Ed25519Verifier,
-  type PaymentOffer,
   type SettlementModel,
   type SignedReceipt,
   verifyReceipt,
@@ -17,11 +16,14 @@ import {
   createMppChargeHandler,
   createPaywall,
   decodeHeader,
+  decodePaymentRequiredHeader,
+  decodePaymentResponseHeader,
   type GateOutcome,
   MPP_AUTHORIZATION_HEADER,
   PAYMENT_REQUIRED_HEADER,
   PAYMENT_RESPONSE_HEADER,
   PAYMENT_SIGNATURE_HEADER,
+  TOLLWAY_RECEIPT_HEADER,
 } from "@vegaforge/tollway-server";
 import { InsufficientBalanceError } from "@x402/stellar";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
@@ -41,6 +43,7 @@ import {
   type PaidService,
   SPONSORED_FEES,
   startPaidService,
+  type X402Requirements,
 } from "./harness/service.js";
 
 /**
@@ -89,6 +92,8 @@ describe.skipIf(!LOCAL_STELLAR_ENABLED)("Tollway on a local Stellar network", ()
         payTo: network.recipient.publicKey(),
         network: "testnet",
         models: ["x402"],
+        maxTimeoutSeconds: MAX_TIMEOUT_SECONDS,
+        extra: SPONSORED_FEES,
       },
       {
         signer,
@@ -102,10 +107,17 @@ describe.skipIf(!LOCAL_STELLAR_ENABLED)("Tollway on a local Stellar network", ()
     return { service: await startPaidService(gate), signer };
   }
 
-  async function challenge(service: PaidService): Promise<PaymentOffer> {
+  /** The challenge's single x402 requirement, as a V2 client reads it. */
+  async function challenge(service: PaidService): Promise<X402Requirements> {
     const response = await fetch(service.url);
     expect(response.status).toBe(402);
-    return decodeHeader<PaymentOffer>(response.headers.get(PAYMENT_REQUIRED_HEADER) ?? "");
+    const required = decodePaymentRequiredHeader(
+      response.headers.get(PAYMENT_REQUIRED_HEADER) ?? "",
+    );
+    expect(required.x402Version).toBe(2);
+    const [requirements] = required.accepts;
+    if (!requirements) throw new Error("the 402 challenge lists no payment options");
+    return requirements;
   }
 
   function pay(service: PaidService, paymentSignature: string): Promise<Response> {
@@ -114,7 +126,11 @@ describe.skipIf(!LOCAL_STELLAR_ENABLED)("Tollway on a local Stellar network", ()
 
   async function receiptOf(response: Response): Promise<SignedReceipt> {
     expect(response.status, await response.clone().text()).toBe(200);
-    return decodeHeader<SignedReceipt>(response.headers.get(PAYMENT_RESPONSE_HEADER) ?? "");
+    const settlement = decodePaymentResponseHeader(
+      response.headers.get(PAYMENT_RESPONSE_HEADER) ?? "",
+    );
+    expect(settlement.success).toBe(true);
+    return decodeHeader<SignedReceipt>(response.headers.get(TOLLWAY_RECEIPT_HEADER) ?? "");
   }
 
   function txHashOf(receipt: SignedReceipt): string {
@@ -339,6 +355,8 @@ describe.skipIf(!LOCAL_STELLAR_ENABLED)("Tollway on a local Stellar network", ()
             payTo: network.recipient.publicKey(),
             network: "testnet",
             models: ["mpp-charge"],
+            maxTimeoutSeconds: MAX_TIMEOUT_SECONDS,
+            extra: SPONSORED_FEES,
           },
           {
             signer,
