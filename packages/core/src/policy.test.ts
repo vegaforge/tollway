@@ -229,6 +229,177 @@ describe("createPolicyEngine", () => {
       const result = await engine.check(intent({ amount: "100", asset: "EURC:GBBB" }));
       expect(result).toEqual({ allowed: true });
     });
+
+    it("does not block during adaptive warm-up, then blocks a spike", async () => {
+      let now = Date.parse("2026-06-10T12:00:00Z");
+      const engine = createPolicyEngine(
+        {
+          anomaly: {
+            adaptive: {
+              kind: "ewma",
+              smoothing: { numerator: "1", denominator: "2" },
+              sensitivity: { numerator: "3", denominator: "1" },
+              warmupPeriods: 2,
+              scope: "asset",
+            },
+          },
+        },
+        { clock: () => now },
+      );
+
+      await engine.record(intent({ amount: "100" }));
+      now += 60_000;
+      await engine.record(intent({ amount: "100" }));
+      now += 60_000;
+      await engine.record(intent({ amount: "100" }));
+      now += 60_000;
+      expect(await engine.check(intent({ amount: "1000" }))).toEqual({
+        allowed: false,
+        rule: "anomaly-adaptive",
+        detail: expect.stringContaining("baseline 100"),
+      });
+    });
+
+    it("caps baseline growth per completed minute", async () => {
+      let now = Date.parse("2026-06-10T12:00:00Z");
+      const engine = createPolicyEngine(
+        {
+          anomaly: {
+            adaptive: {
+              kind: "ewma",
+              smoothing: { numerator: "1", denominator: "1" },
+              sensitivity: { numerator: "3", denominator: "1" },
+              warmupPeriods: 1,
+              maxBaselineGrowthPerMinute: "10",
+            },
+          },
+        },
+        { clock: () => now },
+      );
+      await engine.record(intent({ amount: "100" }));
+      now += 60_000;
+      await engine.record(intent({ amount: "1000" }));
+      now += 60_000;
+      await engine.record(intent({ amount: "0" }));
+      const trace = await engine.evaluate(intent({ amount: "1000" }));
+      expect(trace.entries.find((entry) => entry.id === "anomaly-adaptive")?.detail).toContain(
+        "baseline 110",
+      );
+    });
+
+    it("isolates adaptive baselines by payee when configured", async () => {
+      let now = Date.parse("2026-06-10T12:00:00Z");
+      const engine = createPolicyEngine(
+        {
+          anomaly: {
+            adaptive: {
+              kind: "ewma",
+              smoothing: { numerator: "1", denominator: "1" },
+              sensitivity: { numerator: "1", denominator: "1" },
+              warmupPeriods: 1,
+              scope: "asset-payee",
+            },
+          },
+        },
+        { clock: () => now },
+      );
+      await engine.record(intent({ amount: "100", payee: "A" }));
+      now += 60_000;
+      await engine.record(intent({ amount: "100", payee: "A" }));
+      expect(await engine.check(intent({ amount: "1000", payee: "B" }))).toEqual({ allowed: true });
+    });
+
+    it("reports an adaptive block through the anomaly callback", async () => {
+      let now = Date.parse("2026-06-10T12:00:00Z");
+      const events: string[] = [];
+      const engine = createPolicyEngine(
+        {
+          anomaly: {
+            adaptive: {
+              kind: "ewma",
+              smoothing: { numerator: "1", denominator: "1" },
+              sensitivity: { numerator: "1", denominator: "1" },
+              warmupPeriods: 1,
+            },
+          },
+        },
+        {
+          clock: () => now,
+          onAnomalyDetected: (event) => {
+            events.push(event.detail);
+          },
+        },
+      );
+      await engine.record(intent({ amount: "100" }));
+      now += 60_000;
+      await engine.record(intent({ amount: "100" }));
+      now += 60_000;
+      await expect(engine.check(intent({ amount: "1000" }))).resolves.toMatchObject({
+        allowed: false,
+        rule: "anomaly-adaptive",
+      });
+      expect(events).toHaveLength(1);
+      expect(events[0]).toContain("adaptive anomaly stop");
+    });
+
+    it("keeps a stationary stream below a generous sensitivity across seeds", async () => {
+      for (let seed = 1; seed <= 25; seed += 1) {
+        let now = Date.parse("2026-06-10T12:00:00Z");
+        const engine = createPolicyEngine(
+          {
+            anomaly: {
+              adaptive: {
+                kind: "ewma",
+                smoothing: { numerator: "1", denominator: "2" },
+                sensitivity: { numerator: "10", denominator: "1" },
+                warmupPeriods: 2,
+              },
+            },
+          },
+          { clock: () => now },
+        );
+        const amount = 100 + (seed % 3);
+        await engine.record(intent({ amount: String(amount) }));
+        for (let minute = 1; minute < 8; minute += 1) {
+          now += 60_000;
+          expect((await engine.check(intent({ amount: String(amount) }))).allowed).toBe(true);
+          await engine.record(intent({ amount: String(amount) }));
+        }
+      }
+    });
+
+    it("is monotone for larger spikes from the same learned state", async () => {
+      const makeEngine = () => {
+        let now = Date.parse("2026-06-10T12:00:00Z");
+        const engine = createPolicyEngine(
+          {
+            anomaly: {
+              adaptive: {
+                kind: "ewma",
+                smoothing: { numerator: "1", denominator: "2" },
+                sensitivity: { numerator: "3", denominator: "1" },
+                warmupPeriods: 2,
+              },
+            },
+          },
+          { clock: () => now },
+        );
+        return { engine, advance: () => (now += 60_000) };
+      };
+      const small = makeEngine();
+      const large = makeEngine();
+      for (const pair of [small, large]) {
+        await pair.engine.record(intent({ amount: "100" }));
+        pair.advance();
+        await pair.engine.record(intent({ amount: "100" }));
+        pair.advance();
+        await pair.engine.record(intent({ amount: "100" }));
+      }
+      const smallDecision = await small.engine.check(intent({ amount: "150" }));
+      const largeDecision = await large.engine.check(intent({ amount: "1000" }));
+      expect(largeDecision.allowed).toBe(false);
+      expect(smallDecision.allowed || !largeDecision.allowed).toBe(true);
+    });
   });
 
   describe("invalid amount", () => {

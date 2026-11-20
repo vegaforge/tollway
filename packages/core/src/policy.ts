@@ -49,6 +49,17 @@ export type Policy = {
   anomaly?: {
     /** Trips the anomaly stop when spend in any minute exceeds this. */
     maxSpendPerMinute?: string;
+    /** An explainable EWMA detector over committed per-minute spend. */
+    adaptive?: {
+      kind: "ewma";
+      smoothing: { numerator: string; denominator: string };
+      sensitivity: { numerator: string; denominator: string };
+      /** Number of completed minute buckets before this rule can block. */
+      warmupPeriods: number;
+      scope?: "asset" | "asset-payee";
+      /** Maximum increase allowed when a completed bucket trains the baseline. */
+      maxBaselineGrowthPerMinute?: string;
+    };
   };
 };
 
@@ -78,6 +89,12 @@ export interface PolicyEngine {
   /** Records a settled payment so budgets and anomaly windows advance. */
   record(intent: PaymentIntent): Promise<void>;
 }
+
+export type AdaptiveAnomalyEvent = {
+  type: "anomaly.detected";
+  intent: PaymentIntent;
+  detail: string;
+};
 
 const WINDOW_MS = 60_000;
 const MINUTE_WINDOW: PolicyWindow = { kind: "sliding", seconds: WINDOW_MS / 1000 };
@@ -128,6 +145,15 @@ type EngineState = {
   serviceSpend: Map<string, bigint>;
   requestTimestamps: number[];
   anomalySamples: { amount: bigint; asset: string; ts: number }[];
+  adaptive: Map<string, AdaptiveState>;
+};
+
+type AdaptiveState = {
+  bucketStart: number;
+  bucketSpend: bigint;
+  baseline: bigint | undefined;
+  deviation: bigint;
+  samples: number;
 };
 
 /** Everything one evaluation needs, computed once and shared by every rule. */
@@ -143,6 +169,48 @@ type RuleEvaluator = (input: RuleInput) => PolicyTraceEntry;
 
 function serviceKey(payee: string, asset: string): string {
   return `${payee}:${asset}`;
+}
+
+const FIXED_SCALE = 1_000_000n;
+
+function parseRational(value: { numerator: string; denominator: string }, label: string): [bigint, bigint] {
+  const numerator = parseAmount(value.numerator);
+  const denominator = parseAmount(value.denominator);
+  if (numerator <= 0n || denominator <= 0n) {
+    throw new TollwayError("invalid-policy", `${label} must be a positive rational`);
+  }
+  return [numerator, denominator];
+}
+
+function adaptiveKey(intent: PaymentIntent, scope: "asset" | "asset-payee"): string {
+  return scope === "asset" ? intent.asset : `${intent.asset}:${intent.payee}`;
+}
+
+function floorFixed(value: bigint): bigint {
+  return value / FIXED_SCALE;
+}
+
+function updateAdaptive(state: AdaptiveState, sample: bigint, config: NonNullable<NonNullable<Policy["anomaly"]>["adaptive"]>): void {
+  const [alphaNumerator, alphaDenominator] = parseRational(config.smoothing, "anomaly.adaptive.smoothing");
+  if (alphaNumerator > alphaDenominator) {
+    throw new TollwayError("invalid-policy", "anomaly.adaptive.smoothing must be no greater than one");
+  }
+  const growth = config.maxBaselineGrowthPerMinute == null ? undefined : parseAmount(config.maxBaselineGrowthPerMinute);
+  const sampleFixed = sample * FIXED_SCALE;
+  if (state.baseline === undefined) {
+    state.baseline = sampleFixed;
+    state.deviation = 0n;
+    state.samples = 1;
+    return;
+  }
+  const baseline = state.baseline;
+  const delta = sampleFixed - baseline;
+  let change = (delta * alphaNumerator) / alphaDenominator;
+  if (growth !== undefined && change > growth * FIXED_SCALE) change = growth * FIXED_SCALE;
+  state.baseline = baseline + change;
+  const deviationDelta = (delta < 0n ? -delta : delta) - state.deviation;
+  state.deviation += (deviationDelta * alphaNumerator) / alphaDenominator;
+  state.samples += 1;
 }
 
 const perModelDisabled: RuleEvaluator = ({ policy, intent }) => {
@@ -355,6 +423,54 @@ const anomaly: RuleEvaluator = ({ policy, intent, amount, now, state }) => {
   };
 };
 
+const adaptiveAnomaly: RuleEvaluator = ({ policy, intent, amount, state }) => {
+  const base = { id: "anomaly-adaptive", rule: "anomaly-adaptive" } as const;
+  const config = policy.anomaly?.adaptive;
+  if (config == null) {
+    return {
+      ...base,
+      configured: false,
+      outcome: "not-applicable",
+      limit: null,
+      current: null,
+      projected: null,
+      window: null,
+      detail: "policy sets no adaptive anomaly detector",
+    };
+  }
+  if (config.kind !== "ewma") {
+    throw new TollwayError("invalid-policy", `unknown adaptive anomaly detector: ${config.kind}`);
+  }
+  if (!Number.isSafeInteger(config.warmupPeriods) || config.warmupPeriods < 1) {
+    throw new TollwayError("invalid-policy", "anomaly.adaptive.warmupPeriods must be a positive integer");
+  }
+  const [sensitivityNumerator, sensitivityDenominator] = parseRational(
+    config.sensitivity,
+    "anomaly.adaptive.sensitivity",
+  );
+  const detector = state.adaptive.get(adaptiveKey(intent, config.scope ?? "asset"));
+  const samples = detector?.samples ?? 0;
+  const baseline = detector?.baseline ?? 0n;
+  const deviation = detector?.deviation ?? 0n;
+  const observed = (detector?.bucketSpend ?? 0n) + amount;
+  const threshold = baseline + (deviation * sensitivityNumerator) / sensitivityDenominator;
+  const fails = samples >= config.warmupPeriods && observed * FIXED_SCALE > threshold;
+  return {
+    ...base,
+    configured: true,
+    outcome: fails ? "fail" : "pass",
+    limit: floorFixed(threshold).toString(),
+    current: floorFixed(baseline).toString(),
+    projected: observed.toString(),
+    window: MINUTE_WINDOW,
+    detail: fails
+      ? `adaptive anomaly stop: observed rate ${observed} exceeds threshold ${floorFixed(threshold)} (baseline ${floorFixed(baseline)})`
+      : samples < config.warmupPeriods
+        ? `adaptive anomaly warm-up: ${samples} of ${config.warmupPeriods} completed periods`
+        : `adaptive anomaly stop: observed rate ${observed} within threshold ${floorFixed(threshold)} (baseline ${floorFixed(baseline)})`,
+  };
+};
+
 /**
  * Rebuilds an entry with its keys in the documented order. Stored traces are
  * read and diffed by people, and a stable key order keeps those diffs to the
@@ -387,6 +503,7 @@ const RULES: readonly RuleEvaluator[] = [
   perService,
   rateLimit,
   anomaly,
+  adaptiveAnomaly,
 ];
 
 /**
@@ -396,7 +513,13 @@ const RULES: readonly RuleEvaluator[] = [
  *
  * Throws `invalid-policy` when `policy.mode` is not a known mode.
  */
-export function createPolicyEngine(policy: Policy, opts?: { clock?: () => number }): PolicyEngine {
+export function createPolicyEngine(
+  policy: Policy,
+  opts?: {
+    clock?: () => number;
+    onAnomalyDetected?: (event: AdaptiveAnomalyEvent) => void | Promise<void>;
+  },
+): PolicyEngine {
   const clock = opts?.clock ?? Date.now;
   const mode = resolveMode(policy);
   const state: EngineState = {
@@ -406,6 +529,7 @@ export function createPolicyEngine(policy: Policy, opts?: { clock?: () => number
     serviceSpend: new Map(),
     requestTimestamps: [],
     anomalySamples: [],
+    adaptive: new Map(),
   };
 
   function resetDailyIfNeeded(): void {
@@ -429,6 +553,25 @@ export function createPolicyEngine(policy: Policy, opts?: { clock?: () => number
     }
   }
 
+  function rollAdaptive(now: number): void {
+    const config = policy.anomaly?.adaptive;
+    if (config === undefined) return;
+    if (config.kind !== "ewma") {
+      throw new TollwayError("invalid-policy", `unknown adaptive anomaly detector: ${config.kind}`);
+    }
+    if (!Number.isSafeInteger(config.warmupPeriods) || config.warmupPeriods < 1) {
+      throw new TollwayError("invalid-policy", "anomaly.adaptive.warmupPeriods must be a positive integer");
+    }
+    const bucketStart = Math.floor(now / WINDOW_MS) * WINDOW_MS;
+    for (const detector of state.adaptive.values()) {
+      while (detector.bucketStart < bucketStart) {
+        updateAdaptive(detector, detector.bucketSpend, config);
+        detector.bucketStart += WINDOW_MS;
+        detector.bucketSpend = 0n;
+      }
+    }
+  }
+
   function applyRecord(intent: PaymentIntent): void {
     resetDailyIfNeeded();
     const amount = parseAmount(intent.amount);
@@ -440,6 +583,27 @@ export function createPolicyEngine(policy: Policy, opts?: { clock?: () => number
     serviceSpend.set(svcKey, (serviceSpend.get(svcKey) ?? 0n) + amount);
 
     const now = clock();
+    rollAdaptive(now);
+    const config = policy.anomaly?.adaptive;
+    if (config !== undefined) {
+      if (config.kind !== "ewma") {
+        throw new TollwayError("invalid-policy", `unknown adaptive anomaly detector: ${config.kind}`);
+      }
+      if (!Number.isSafeInteger(config.warmupPeriods) || config.warmupPeriods < 1) {
+        throw new TollwayError("invalid-policy", "anomaly.adaptive.warmupPeriods must be a positive integer");
+      }
+      const key = adaptiveKey(intent, config.scope ?? "asset");
+      const bucketStart = Math.floor(now / WINDOW_MS) * WINDOW_MS;
+      const detector = state.adaptive.get(key) ?? {
+        bucketStart,
+        bucketSpend: 0n,
+        baseline: undefined,
+        deviation: 0n,
+        samples: 0,
+      };
+      detector.bucketSpend += amount;
+      state.adaptive.set(key, detector);
+    }
     state.requestTimestamps.push(now);
     state.anomalySamples.push({ amount, asset: intent.asset, ts: now });
   }
@@ -449,6 +613,7 @@ export function createPolicyEngine(policy: Policy, opts?: { clock?: () => number
     const amount = parseAmount(intent.amount);
     const now = clock();
     pruneWindow(now);
+    rollAdaptive(now);
 
     const input: RuleInput = { policy, intent, amount, now, state };
     const entries = RULES.map((rule) => inFieldOrder(rule(input)));
@@ -479,7 +644,13 @@ export function createPolicyEngine(policy: Policy, opts?: { clock?: () => number
     evaluate,
 
     async check(intent: PaymentIntent): Promise<PolicyDecision> {
-      return decisionFromTrace(await evaluate(intent));
+      const trace = await evaluate(intent);
+      const decision = decisionFromTrace(trace);
+      const adaptiveEntry = trace.entries.find((entry) => entry.id === "anomaly-adaptive");
+      if (!decision.allowed && adaptiveEntry?.outcome === "fail") {
+        await opts?.onAnomalyDetected?.({ type: "anomaly.detected", intent, detail: adaptiveEntry.detail });
+      }
+      return decision;
     },
 
     async record(intent: PaymentIntent): Promise<void> {

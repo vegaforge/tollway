@@ -9,7 +9,12 @@ import {
 } from "./cache.js";
 import { createMockFacilitator, type FacilitatorClient } from "./facilitator.js";
 import { createPaywall, type PaywallConfig, type TollwayRequest } from "./gate.js";
-import { decodeHeader, PAYMENT_REQUIRED_HEADER, PAYMENT_SIGNATURE_HEADER } from "./headers.js";
+import {
+  decodeHeader,
+  PAYMENT_REQUIRED_HEADER,
+  PAYMENT_SIGNATURE_HEADER,
+  TOLLWAY_QUOTE_HEADER,
+} from "./headers.js";
 import { createMockMppChargeHandler, type MppChargeHandler } from "./mpp-charge.js";
 
 const MPP_CREDENTIAL = "Payment mock-mpp-charge-payload";
@@ -99,6 +104,82 @@ describe("createPaywall", () => {
       headers: { [PAYMENT_SIGNATURE_HEADER]: "" },
     });
     expect(outcome.kind).toBe("payment-required");
+  });
+
+  it("binds a dynamic quote to the verified and receipted amount", async () => {
+    let calls = 0;
+    const seenAmounts: string[] = [];
+    const facilitator: FacilitatorClient = {
+      async verify({ offer }) {
+        seenAmounts.push(offer.amount);
+        return { valid: true, payer: "GPAYER", nonce: "NONCE-DYNAMIC" };
+      },
+      async settle({ offer }) {
+        seenAmounts.push(offer.amount);
+        return { settled: true, txHash: "a".repeat(64) };
+      },
+      async supported() {
+        return { models: ["x402"], assets: [] };
+      },
+    };
+    const gate = createPaywall(
+      {
+        ...config,
+        amount: () => {
+          calls += 1;
+          return String(100 + calls);
+        },
+        minAmount: "100",
+        maxAmount: "200",
+        quoteSecret: "a sufficiently long quote secret",
+      },
+      { signer, facilitator },
+    );
+    const challenge = await gate(baseRequest);
+    expect(challenge.kind).toBe("payment-required");
+    if (challenge.kind !== "payment-required") return;
+    const quote = challenge.headers[TOLLWAY_QUOTE_HEADER];
+    expect(quote).toBeTruthy();
+
+    const paid = await gate({
+      ...baseRequest,
+      headers: {
+        [PAYMENT_SIGNATURE_HEADER]: "signed-payment",
+        [TOLLWAY_QUOTE_HEADER]: quote,
+      },
+    });
+    expect(paid.kind).toBe("settled");
+    if (paid.kind !== "settled") return;
+    expect(calls).toBe(1);
+    expect(seenAmounts).toEqual(["101", "101"]);
+    expect(paid.receipt.receipt.amount).toBe("101");
+  });
+
+  it("rejects a tampered dynamic quote with a fresh challenge", async () => {
+    const price = vi.fn().mockReturnValue("100");
+    const gate = createPaywall(
+      {
+        ...config,
+        amount: price,
+        minAmount: "1",
+        maxAmount: "200",
+        quoteSecret: "a sufficiently long quote secret",
+      },
+      { signer, facilitator: createMockFacilitator() },
+    );
+    const first = await gate(baseRequest);
+    if (first.kind !== "payment-required") throw new Error("expected challenge");
+    const quote = first.headers[TOLLWAY_QUOTE_HEADER] ?? "";
+    const tampered = `${quote.slice(0, -1)}${quote.endsWith("A") ? "B" : "A"}`;
+    const second = await gate({
+      ...baseRequest,
+      headers: {
+        [PAYMENT_SIGNATURE_HEADER]: "signed-payment",
+        [TOLLWAY_QUOTE_HEADER]: tampered,
+      },
+    });
+    expect(second.kind).toBe("payment-required");
+    expect(price).toHaveBeenCalledTimes(2);
   });
 
   describe("with mpp-charge model", () => {
@@ -397,7 +478,7 @@ describe("TM-04 shared-lock duplicate settlement", () => {
     // The mock facilitator's nonce for this header, as the gate keys it.
     const verification = await facilitator.verify({
       payment: { model: "x402", paymentSignature: headers[PAYMENT_SIGNATURE_HEADER] },
-      offer: { ...config, resource: baseRequest.url, models: ["x402"] },
+      offer: { ...config, amount: config.amount as string, resource: baseRequest.url, models: ["x402"] },
     });
     if (!verification.valid) throw new Error("expected the mock to accept the payment");
     const otherProcess = createRedisSettlementCache({ client, keyPrefix });

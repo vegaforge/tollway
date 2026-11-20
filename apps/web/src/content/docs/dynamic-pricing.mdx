@@ -1,0 +1,31 @@
+---
+title: Dynamic paywall pricing
+description: Quote and verify a bounded price per request
+---
+
+Set `PaywallConfig.amount` to a function when a route's price depends on the
+request. Dynamic routes must also set `minAmount`, `maxAmount`, and a stable
+`quoteSecret`.
+
+```ts
+createPaywall({
+  amount: async (request) => request.url.includes("large") ? "200" : "100",
+  minAmount: "100",
+  maxAmount: "200",
+  quoteSecret: process.env.TOLLWAY_QUOTE_SECRET,
+  asset,
+  payTo,
+  network: "testnet",
+}, deps);
+```
+
+The first request receives a 402 with a signed `TOLLWAY-QUOTE` header. The
+client must echo that header on the paid request. The quote binds the exact
+amount to the resource, has a short expiry, and is authenticated with
+WebCrypto HMAC. The gate does not call the price function again for a valid
+quote, so the amount verified, settled, and written to the receipt is the same.
+
+An expired, forged, or resource-mismatched quote receives a fresh 402. The
+price function result must be a non-negative integer string within the bounds;
+invalid results are rejected before settlement. Keep the quote secret stable
+across processes and separate from receipt-signing keys.

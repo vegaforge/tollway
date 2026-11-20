@@ -7,9 +7,13 @@ import {
   type ReceiptSigner,
   type SettlementModel,
   type SignedReceipt,
+  TollwayError,
   type StellarNetwork,
   signReceipt,
   type X402Payment,
+  bytesToBase64Url,
+  base64UrlToBytes,
+  utf8Bytes,
 } from "@vegaforge/tollway-core";
 import type { SettlementCache, SettlementLock } from "./cache.js";
 import type { FacilitatorClient } from "./facilitator.js";
@@ -18,6 +22,7 @@ import {
   PAYMENT_REQUIRED_HEADER,
   PAYMENT_RESPONSE_HEADER,
   PAYMENT_SIGNATURE_HEADER,
+  TOLLWAY_QUOTE_HEADER,
   readHeader,
   readMppCredential,
 } from "./headers.js";
@@ -36,10 +41,21 @@ export type TollwayRequest = {
   headers: Record<string, string | string[] | undefined>;
 };
 
+export type DynamicPriceFunction = (
+  request: TollwayRequest,
+) => string | Promise<string>;
+
 /** What the service charges for a resource. */
 export type PaywallConfig = {
   /** Price as an integer string in the asset's smallest unit. */
-  amount: string;
+  amount: string | DynamicPriceFunction;
+  /** Required bounds for a dynamic price function. */
+  minAmount?: string;
+  maxAmount?: string;
+  /** Secret used to authenticate dynamic-price quotes. */
+  quoteSecret?: string;
+  /** Quote validity in seconds. Defaults to 60. */
+  quoteTtlSeconds?: number;
   asset: string;
   /** Stellar address the payment settles to. Tollway never sits in between. */
   payTo: string;
@@ -111,6 +127,8 @@ export type PaywallDeps = {
    * that implements locks.
    */
   settlementLockTtlMs?: number;
+  /** Clock for quote expiry; injected tests can avoid waiting. */
+  clock?: () => number;
 };
 
 type Handler<TPayment> = {
@@ -127,6 +145,124 @@ type Handler<TPayment> = {
 };
 
 type RejectedOutcome = Extract<GateOutcome, { kind: "rejected" }>;
+
+type QuotePayload = {
+  version: 1;
+  id: string;
+  resource: string;
+  amount: string;
+  expiresAt: number;
+};
+
+const DEFAULT_QUOTE_TTL_SECONDS = 60;
+const INTEGER_AMOUNT = /^[0-9]+$/;
+
+function parsePriceAmount(value: string, field: string): bigint {
+  if (typeof value !== "string" || !INTEGER_AMOUNT.test(value)) {
+    throw new TollwayError("invalid-amount", `${field} must be a non-negative integer string`);
+  }
+  return BigInt(value);
+}
+
+function quoteBytes(payload: QuotePayload): ArrayBuffer {
+  const bytes = new Uint8Array(utf8Bytes(JSON.stringify(payload)));
+  return bytes.buffer;
+}
+
+function isQuotePayload(value: unknown): value is QuotePayload {
+  if (typeof value !== "object" || value === null) return false;
+  const candidate = value as Record<string, unknown>;
+  return (
+    candidate.version === 1 &&
+    typeof candidate.id === "string" &&
+    typeof candidate.resource === "string" &&
+    typeof candidate.amount === "string" &&
+    typeof candidate.expiresAt === "number"
+  );
+}
+
+async function quoteMac(payload: QuotePayload, secret: string): Promise<string> {
+  const key = await crypto.subtle.importKey(
+    "raw",
+    new Uint8Array(utf8Bytes(secret)).buffer,
+    { name: "HMAC", hash: "SHA-256" },
+    false,
+    ["sign"],
+  );
+  return bytesToBase64Url(
+    new Uint8Array(await crypto.subtle.sign("HMAC", key, quoteBytes(payload))),
+  );
+}
+
+async function createQuote(
+  resource: string,
+  amount: string,
+  now: number,
+  ttlSeconds: number,
+  secret: string,
+): Promise<string> {
+  const payload: QuotePayload = {
+    version: 1,
+    id: crypto.randomUUID(),
+    resource,
+    amount,
+    expiresAt: now + ttlSeconds * 1000,
+  };
+  const encoded = bytesToBase64Url(utf8Bytes(JSON.stringify(payload)));
+  return `${encoded}.${await quoteMac(payload, secret)}`;
+}
+
+async function readQuote(
+  token: string,
+  resource: string,
+  now: number,
+  secret: string,
+): Promise<QuotePayload | undefined> {
+  const [encoded, mac, ...rest] = token.split(".");
+  if (!encoded || !mac || rest.length !== 0) return undefined;
+  let payload: QuotePayload;
+  try {
+    const decoded: unknown = JSON.parse(new TextDecoder().decode(base64UrlToBytes(encoded)));
+    if (!isQuotePayload(decoded)) return undefined;
+    payload = decoded;
+  } catch {
+    return undefined;
+  }
+  if (
+    payload.version !== 1 ||
+    typeof payload.id !== "string" ||
+    payload.resource !== resource ||
+    !INTEGER_AMOUNT.test(payload.amount) ||
+    !Number.isSafeInteger(payload.expiresAt) ||
+    payload.expiresAt < now
+  ) {
+    return undefined;
+  }
+  const expected = await quoteMac(payload, secret);
+  if (expected.length !== mac.length) return undefined;
+  let mismatch = 0;
+  for (let index = 0; index < expected.length; index += 1) {
+    mismatch |= expected.charCodeAt(index) ^ mac.charCodeAt(index);
+  }
+  return mismatch === 0 ? payload : undefined;
+}
+
+function validateDynamicPriceConfig(config: PaywallConfig): void {
+  if (typeof config.amount !== "function") return;
+  if (config.minAmount == null || config.maxAmount == null || !config.quoteSecret) {
+    throw new TollwayError(
+      "invalid-policy",
+      "dynamic pricing requires minAmount, maxAmount, and quoteSecret",
+    );
+  }
+  const min = parsePriceAmount(config.minAmount, "minAmount");
+  const max = parsePriceAmount(config.maxAmount, "maxAmount");
+  if (min > max) throw new TollwayError("invalid-policy", "minAmount must not exceed maxAmount");
+  const ttl = config.quoteTtlSeconds ?? DEFAULT_QUOTE_TTL_SECONDS;
+  if (!Number.isSafeInteger(ttl) || ttl <= 0) {
+    throw new TollwayError("invalid-policy", "quoteTtlSeconds must be a positive integer");
+  }
+}
 
 /** The shared result of one settlement attempt, before it is checked against an offer. */
 type SettlementResult =
@@ -493,8 +629,10 @@ async function paymentRequired(
   request: TollwayRequest,
   acceptedModels: SettlementModel[],
   mppChargeHandler: MppChargeHandler | undefined,
+  quote: string | undefined,
 ): Promise<GateOutcome> {
   const headers: Record<string, string> = { [PAYMENT_REQUIRED_HEADER]: encodeHeader(offer) };
+  if (quote !== undefined) headers[TOLLWAY_QUOTE_HEADER] = quote;
   if (acceptedModels.includes("mpp-charge") && mppChargeHandler?.challenge) {
     const mpp = await mppChargeHandler.challenge({
       offer,
@@ -526,8 +664,10 @@ export function createPaywallWithInFlight(
   deps: PaywallDeps,
   inFlight: Map<string, Promise<InFlightSettlementResult>>,
 ): Gate {
+  validateDynamicPriceConfig(config);
   assertCompleteLocking(deps.cache);
   const acceptedModels = config.models ?? ["x402"];
+  const clock = deps.clock ?? Date.now;
   const context: SettlementContext = {
     signer: deps.signer,
     cache: deps.cache,
@@ -537,15 +677,56 @@ export function createPaywallWithInFlight(
   };
 
   return async function gate(request): Promise<GateOutcome> {
+    const resource = config.resource ?? request.url;
+    let amount: string;
+    let quote: string | undefined;
+    let candidateQuote: string | undefined;
+    if (typeof config.amount !== "function") {
+      amount = config.amount;
+    } else {
+      const now = clock();
+      candidateQuote = readHeader(request.headers, TOLLWAY_QUOTE_HEADER);
+      const verified = candidateQuote
+        ? await readQuote(candidateQuote, resource, now, config.quoteSecret ?? "")
+        : undefined;
+      if (verified) {
+        amount = verified.amount;
+        quote = candidateQuote;
+      } else {
+        const priced = await config.amount(request);
+        const pricedAmount = parsePriceAmount(priced, "dynamic price");
+        const min = parsePriceAmount(config.minAmount as string, "minAmount");
+        const max = parsePriceAmount(config.maxAmount as string, "maxAmount");
+        if (pricedAmount < min || pricedAmount > max) {
+          throw new TollwayError(
+            "invalid-amount",
+            `dynamic price ${priced} is outside the configured bounds`,
+          );
+        }
+        amount = priced;
+        quote = await createQuote(
+          resource,
+          amount,
+          now,
+          config.quoteTtlSeconds ?? DEFAULT_QUOTE_TTL_SECONDS,
+          config.quoteSecret ?? "",
+        );
+      }
+    }
     const offer: PaymentOffer = {
-      resource: config.resource ?? request.url,
-      amount: config.amount,
+      resource,
+      amount,
       asset: config.asset,
       payTo: config.payTo,
       network: config.network,
       models: acceptedModels,
       facilitatorUrl: config.facilitatorUrl,
+      quote,
     };
+
+    if (typeof config.amount === "function" && candidateQuote !== quote) {
+      return paymentRequired(offer, request, acceptedModels, deps.mppChargeHandler, quote);
+    }
 
     const method = request.method.toUpperCase();
     const signatureHeader = readHeader(request.headers, PAYMENT_SIGNATURE_HEADER);
@@ -575,7 +756,7 @@ export function createPaywallWithInFlight(
     }
 
     if (!signatureHeader) {
-      return paymentRequired(offer, request, acceptedModels, deps.mppChargeHandler);
+      return paymentRequired(offer, request, acceptedModels, deps.mppChargeHandler, quote);
     }
 
     const decision = deps.router

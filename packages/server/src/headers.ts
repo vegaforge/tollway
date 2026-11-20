@@ -9,6 +9,8 @@ export const PAYMENT_SIGNATURE_HEADER = "PAYMENT-SIGNATURE";
  * receipt in it today; #43 moves the receipt to its own header.
  */
 export const PAYMENT_RESPONSE_HEADER = "PAYMENT-RESPONSE";
+/** Signed quote returned by a dynamic-price paywall and echoed by the client. */
+export const TOLLWAY_QUOTE_HEADER = "TOLLWAY-QUOTE";
 
 /** MPP sends its credential as `Authorization: Payment <credential>`. */
 export const MPP_AUTHORIZATION_HEADER = "Authorization";

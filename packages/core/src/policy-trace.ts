@@ -37,6 +37,7 @@ export const policyRuleIds = [
   "per-service",
   "rate-limit",
   "anomaly",
+  "anomaly-adaptive",
 ] as const;
 /** The identifier of one policy rule, as it appears in a trace entry. */
 export type PolicyRuleId = (typeof policyRuleIds)[number];
@@ -53,6 +54,7 @@ export const policyRuleNames = [
   "per-service",
   "rate-limit",
   "anomaly",
+  "anomaly-adaptive",
 ] as const;
 /** The coarser rule name a blocked decision reports; see {@link policyRuleNames}. */
 export type PolicyRuleName = (typeof policyRuleNames)[number];
