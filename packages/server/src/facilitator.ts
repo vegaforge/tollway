@@ -62,6 +62,13 @@ export type SupportedResult = {
  * {@link createMockFacilitator} runs offline.
  */
 export interface FacilitatorClient {
+  /**
+   * The nonce `verify` would return for this payment, derived without a
+   * network call, or undefined when it cannot be. The gate uses it to find a
+   * settled payment in its cache before verifying: once a payment settles on
+   * chain its authorization nonce is spent, so verifying a retry fails (#284).
+   */
+  idempotencyKey?(input: { payment: X402Payment }): Promise<string | undefined>;
   verify(input: VerifyInput): Promise<VerifyResult>;
   settle(input: SettleInput): Promise<SettleResult>;
   supported(): Promise<SupportedResult>;
@@ -84,6 +91,10 @@ function transactionOf(payment: X402Payment): string | undefined {
  */
 export function createMockFacilitator(): FacilitatorClient {
   return {
+    async idempotencyKey({ payment }) {
+      const transaction = transactionOf(payment);
+      return transaction ? mockHex(transaction, 32) : undefined;
+    },
     async verify({ payment }) {
       const transaction = transactionOf(payment);
       if (!transaction) {
@@ -190,6 +201,11 @@ export function createHttpFacilitator(
   };
 
   return {
+    async idempotencyKey({ payment }) {
+      const transaction = transactionOf(payment);
+      return transaction ? deriveNonce(transaction) : undefined;
+    },
+
     async verify({ payment, offer }) {
       const requirements = toPaymentRequirements(offer, terms);
       const transaction = transactionOf(payment);

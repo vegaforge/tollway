@@ -125,6 +125,7 @@ export type PaywallDeps = {
 };
 
 type Handler<TPayment> = {
+  idempotencyKey?(input: { payment: TPayment }): Promise<string | undefined>;
   verify(input: {
     payment: TPayment;
     offer: PaymentOffer;
@@ -236,9 +237,41 @@ async function settleWithHandler<TPayment>(
   handler: Handler<TPayment>,
   context: SettlementContext,
 ): Promise<GateOutcome> {
+  // A payment that already settled is answered from the cache before it is
+  // verified again: on chain its authorization nonce is spent, so a second
+  // verify fails and the retry would get a 402 instead of its receipt (#284).
+  // The binding checks in toOutcome still apply to the cached receipt.
+  const knownNonce = await handler.idempotencyKey?.({ payment });
+  if (knownNonce !== undefined) {
+    const knownKey = `${model}:${knownNonce}`;
+    const pending = context.inFlight.get(knownKey);
+    if (pending) {
+      return toOutcome(await pending, offer, model, method, true);
+    }
+    const cached = await context.cache?.get(knownKey);
+    if (cached) {
+      const replay: SettlementResult = {
+        ok: true,
+        receipt: cached.receipt,
+        method: cached.method,
+        replayed: true,
+      };
+      return toOutcome(replay, offer, model, method, false);
+    }
+  }
+
   const verification = await handler.verify({ payment, offer });
   if (!verification.valid) {
     return { kind: "rejected", status: 402, reason: verification.reason };
+  }
+  // The cache lookup above used the derived nonce; a facilitator whose verify
+  // disagrees with it would store under a key retries never look up.
+  if (knownNonce !== undefined && verification.nonce !== knownNonce) {
+    return {
+      kind: "rejected",
+      status: 500,
+      reason: "facilitator verify returned a nonce that differs from its idempotency key",
+    };
   }
 
   // The model is part of the key because two models can derive the same

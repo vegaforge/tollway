@@ -220,6 +220,68 @@ describe("createPaywall", () => {
     expect(second.receipt.receipt.id).toBe(first.receipt.receipt.id);
   });
 
+  // #284: on chain, a settled payment's auth nonce is spent, so verifying the
+  // same payment again fails. A retry must find the cached receipt first.
+  it("replays a settled payment without verifying it again", async () => {
+    const mock = createMockFacilitator();
+    const spent = new Set<string>();
+    const verify = vi.fn(mock.verify);
+    const chainLike: FacilitatorClient = {
+      ...mock,
+      async verify(input) {
+        const result = await verify(input);
+        if (result.valid && spent.has(result.nonce)) {
+          return { valid: false, reason: "nonce already exists for address" };
+        }
+        return result;
+      },
+      async settle(input) {
+        const result = await mock.settle(input);
+        if (result.settled) spent.add(input.nonce);
+        return result;
+      },
+    };
+    const gate = createPaywall(
+      { ...config, models: ["x402"] },
+      { signer, facilitator: chainLike, cache: createInMemorySettlementCache() },
+    );
+    const request = {
+      ...baseRequest,
+      headers: { [PAYMENT_SIGNATURE_HEADER]: paymentHeader("retried-transaction") },
+    };
+
+    const first = await gate(request);
+    const retry = await gate(request);
+
+    expect(first.kind).toBe("settled");
+    expect(retry.kind).toBe("settled");
+    if (first.kind !== "settled" || retry.kind !== "settled") return;
+    expect(retry.replayed).toBe(true);
+    expect(retry.receipt).toEqual(first.receipt);
+    expect(verify).toHaveBeenCalledTimes(1);
+  });
+
+  it("refuses to settle when verify disagrees with the idempotency key", async () => {
+    const mock = createMockFacilitator();
+    const settle = vi.fn(mock.settle);
+    const gate = createPaywall(
+      { ...config, models: ["x402"] },
+      {
+        signer,
+        facilitator: { ...mock, settle, idempotencyKey: async () => "a-different-nonce" },
+        cache: createInMemorySettlementCache(),
+      },
+    );
+    const outcome = await gate({
+      ...baseRequest,
+      headers: { [PAYMENT_SIGNATURE_HEADER]: paymentHeader("mismatched-transaction") },
+    });
+    expect(outcome.kind).toBe("rejected");
+    if (outcome.kind !== "rejected") return;
+    expect(outcome.status).toBe(500);
+    expect(settle).not.toHaveBeenCalled();
+  });
+
   it("treats an empty signature header as no payment at all", async () => {
     const outcome = await makeGate()({
       ...baseRequest,
