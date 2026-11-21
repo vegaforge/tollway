@@ -44,6 +44,8 @@ export type PaymentOffer = {
   mppSessionSupported?: boolean;
   /** Base URL of the facilitator the service settles through. */
   facilitatorUrl?: string;
+  /** Signed dynamic-price quote, present when the route uses a price function. */
+  quote?: string;
 };
 
 /**

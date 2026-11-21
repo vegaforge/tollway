@@ -355,6 +355,7 @@ describe("evaluation after an earlier failure", () => {
       ["per-service", "fail"],
       ["rate-limit", "pass"],
       ["anomaly", "pass"],
+      ["anomaly-adaptive", "not-applicable"],
     ]);
     expect(trace).toMatchObject({
       allowed: false,

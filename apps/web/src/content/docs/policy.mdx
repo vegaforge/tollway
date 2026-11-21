@@ -20,7 +20,17 @@ type Policy = {
     minChannelDeposit?: string;
   }>>;
   rateLimit?: { requestsPerMinute?: number };
-  anomaly?: { maxSpendPerMinute?: string };
+  anomaly?: {
+    maxSpendPerMinute?: string;
+    adaptive?: {
+      kind: "ewma";
+      smoothing: { numerator: string; denominator: string };
+      sensitivity: { numerator: string; denominator: string };
+      warmupPeriods: number;
+      scope?: "asset" | "asset-payee";
+      maxBaselineGrowthPerMinute?: string;
+    };
+  };
 };
 ```
 
@@ -41,6 +51,10 @@ Every amount is an integer string in the asset's smallest unit, the same convent
 **`rateLimit.requestsPerMinute`** is a sliding-window cap. The window is one minute.
 
 **`anomaly.maxSpendPerMinute`** is the per-minute spend ceiling. Crossing it trips the anomaly stop, which the agent surfaces as a hard error: a sudden burst of spending is the most common signal of a compromised key or a runaway agent, and the engine fails closed rather than rationalize the spike.
+
+**`anomaly.adaptive`** adds an EWMA (exponentially weighted moving average) of committed spend in completed one-minute buckets, plus an EWMA of the absolute deviation from that baseline. The observed rate blocks when it is above `baseline + sensitivity * deviation`. `smoothing` and `sensitivity` are positive rational values represented as integer strings, so amounts and decisions stay deterministic and float-free. The default scope is per asset; `asset-payee` gives each counterparty its own baseline. The rule never blocks during `warmupPeriods`, and only `record()` calls train it, so rejected attempts cannot raise the baseline.
+
+Set `maxBaselineGrowthPerMinute` to cap how much the baseline can rise when a new bucket is learned. This prevents a slow or sustained ramp from ratcheting the detector upward without bound. The cap can also make a legitimate step-up produce alerts until the operator changes the policy. The adaptive rule is application-layer defense in depth: it is stateful and must be persisted through the policy-state seam when multiple processes share one policy.
 
 ## Two layers of enforcement
 
@@ -81,6 +95,7 @@ Rules are evaluated in this order. Static checks on the payment come first, then
 | 5 | `per-service` | `per-service` | `lifetime` |
 | 6 | `rate-limit` | `rate-limit` | `sliding`, 60 seconds |
 | 7 | `anomaly` | `anomaly` | `sliding`, 60 seconds |
+| 8 | `anomaly-adaptive` | `anomaly-adaptive` | `sliding`, 60 seconds |
 
 Both budget rules report `budget` to `check()` and `PolicyBlockedError`, as they always have. The trace keeps them apart with `id`.
 

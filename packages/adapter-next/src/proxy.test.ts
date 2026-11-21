@@ -23,12 +23,12 @@ import {
   paywallProxy,
 } from "./proxy.js";
 
-const config: PaywallConfig = {
+const config = {
   amount: "10000",
   asset: "USDC:GA5Z",
   payTo: "GSERVICE",
   network: "testnet",
-};
+} satisfies PaywallConfig;
 
 /** A standard-base64 x402 V2 payment header, as a stock client writes it. */
 function paymentHeader(transaction = "mock-signed-auth-entry"): string {

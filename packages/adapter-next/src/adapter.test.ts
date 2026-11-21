@@ -14,12 +14,12 @@ import { NextRequest } from "next/server";
 import { describe, expect, it } from "vitest";
 import { withPaywall, withRouteTable } from "./index.js";
 
-const config: PaywallConfig = {
+const config = {
   amount: "10000",
   asset: "USDC:GA5Z",
   payTo: "GSERVICE",
   network: "testnet",
-};
+} satisfies PaywallConfig;
 
 /** A standard-base64 x402 V2 payment header, as a stock client writes it. */
 function paymentHeader(transaction = "mock-signed-auth-entry"): string {

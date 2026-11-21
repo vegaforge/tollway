@@ -6,12 +6,12 @@ import { createMockFacilitator } from "./facilitator.js";
 import { createPaywall, type PaywallConfig } from "./gate.js";
 import { decodeHeader, encodePaymentSignatureHeader, PAYMENT_SIGNATURE_HEADER } from "./headers.js";
 
-const config: PaywallConfig = {
+const config = {
   amount: "10000",
   asset: "USDC:GA5ZSEJYB37JRC5AVCIA5MOP4RHTM335X2KGX3IHOJAPP5RE34K4KZVN",
   payTo: "GSERVICEXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX",
   network: "testnet",
-};
+} satisfies PaywallConfig;
 
 describe("TM-01 settled payment replay", () => {
   it("returns the prior receipt without settling again", async () => {

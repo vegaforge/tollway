@@ -20,12 +20,12 @@ import {
 
 export const RESOURCE_PATH = "/quotes/latest";
 
-export const PRICE: PaywallConfig = {
+export const PRICE = {
   amount: "10000",
   asset: "USDC:GA5ZSEJYB37JRC5AVCIA5MOP4RHTM335X2KGX3IHOJAPP5RE34K4KZVN",
   payTo: "GSERVICEXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX",
   network: "testnet",
-};
+} satisfies PaywallConfig;
 
 /** How many callers send the same payment at once in the concurrency benchmark. */
 export const CONCURRENT_CALLERS = 16;
