@@ -93,7 +93,9 @@ Its inputs are declared offer hints, observed traffic shape, explicit configurat
 
 ### The x402 request path
 
-The x402 path runs end to end through `@vegaforge/tollway-core`, `@vegaforge/tollway-server`, an adapter, and a facilitator. The header encoding and payload shapes do not yet match the x402 V2 wire format that stock x402 clients send; that work is tracked in [#43](https://github.com/vegaforge/tollway/issues/43).
+The x402 path runs end to end through `@vegaforge/tollway-core`, `@vegaforge/tollway-server`, an adapter, and a facilitator. The gate speaks the x402 V2 wire format (`@x402/core` 2.31): `PAYMENT-REQUIRED` carries standard base64 JSON of a `PaymentRequired`, `PAYMENT-SIGNATURE` carries a `PaymentPayload`, and `PAYMENT-RESPONSE` carries the facilitator's `SettleResponse`. The signed Tollway receipt travels beside it in `TOLLWAY-RECEIPT`. A stock x402 V2 client can pay a Tollway-gated route without changes ([#43](https://github.com/vegaforge/tollway/issues/43)).
+
+For x402, `PaywallConfig.asset` is the Soroban asset contract address (`C...`, for example the USDC SAC), because that is what `PaymentRequirements.asset` names.
 
 ```mermaid
 sequenceDiagram
@@ -102,16 +104,16 @@ sequenceDiagram
   participant Fac as Facilitator
 
   Agent->>Gate: GET /resource
-  Gate-->>Agent: 402 + PAYMENT-REQUIRED (offer)
+  Gate-->>Agent: 402 + PAYMENT-REQUIRED (PaymentRequired: x402Version, resource, accepts)
   Agent->>Agent: sign Soroban authorization entry
-  Agent->>Gate: GET /resource + PAYMENT-SIGNATURE
+  Agent->>Gate: GET /resource + PAYMENT-SIGNATURE (PaymentPayload)
   Gate->>Fac: POST /verify
   Fac-->>Gate: valid, payer, nonce
   Note over Gate: idempotency cache keyed by nonce
   Gate->>Fac: POST /settle
-  Fac-->>Gate: transaction hash
+  Fac-->>Gate: SettleResponse (transaction hash)
   Gate->>Gate: build + sign canonical receipt
-  Gate-->>Agent: 200 + resource + PAYMENT-RESPONSE (receipt)
+  Gate-->>Agent: 200 + resource + PAYMENT-RESPONSE (SettleResponse) + TOLLWAY-RECEIPT (receipt)
 ```
 
 A short-lived settlement cache keyed by the authorization nonce makes a duplicate submission idempotent rather than a second charge. In channel mode the cumulative-commitment design is naturally idempotent, since a repeated commitment at the same sequence is a no-op.
@@ -209,7 +211,7 @@ app.get("/quotes/latest", expressPaywall(gate), (_req, res) => {
 });
 ```
 
-Pay a route from the agent side with x402 on Stellar. The secret goes only to `createEd25519Signer`; the settler never holds it. The settler speaks x402 V2 (`PAYMENT-REQUIRED`, `PAYMENT-SIGNATURE`) and reads the Tollway receipt from `TOLLWAY-RECEIPT`, so it pays services that use that wire format ([#43](https://github.com/vegaforge/tollway/issues/43) brings the gate to it).
+Pay a route from the agent side with x402 on Stellar. The secret goes only to `createEd25519Signer`; the settler never holds it. The settler speaks x402 V2 (`PAYMENT-REQUIRED`, `PAYMENT-SIGNATURE`) and reads the Tollway receipt from `TOLLWAY-RECEIPT`, the same wire format the gate speaks ([#43](https://github.com/vegaforge/tollway/issues/43)).
 
 ```ts
 import { createClient, createX402Settler } from "@vegaforge/tollway-client";
@@ -254,7 +256,7 @@ export const proxy = paywallProxy({ routes: [{ path: "/api/paid", gate }] });
 export const config = { matcher: ["/api/paid/:path*"] };
 ```
 
-The proxy runs in Next 16's Node.js runtime. It removes caller-supplied receipt headers, then forwards the gate-produced receipt only to the downstream route. A route can read it with `getProxyReceipt(request)` from `@vegaforge/tollway-adapter-next/proxy`; the helper validates the signed-receipt schema. `PAYMENT-RESPONSE` remains on the client response.
+The proxy runs in Next 16's Node.js runtime. It removes caller-supplied receipt headers, then forwards the gate-produced receipt only to the downstream route. A route can read it with `getProxyReceipt(request)` from `@vegaforge/tollway-adapter-next/proxy`; the helper validates the signed-receipt schema. `PAYMENT-RESPONSE` and `TOLLWAY-RECEIPT` remain on the client response.
 
 ## Status
 

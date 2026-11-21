@@ -15,7 +15,7 @@ export const RECEIPT_LOCALS_KEY = "tollwayReceipt";
 
 /**
  * Wraps a gate as Express middleware. On a settled payment it sets the
- * PAYMENT-RESPONSE header, attaches the receipt to res.locals, and calls
+ * PAYMENT-RESPONSE and TOLLWAY-RECEIPT headers, attaches the receipt to res.locals, and calls
  * next() so the route handler can serve the resource. Otherwise it answers
  * the request itself (402 with the challenge, or the rejection status).
  */

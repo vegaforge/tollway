@@ -22,7 +22,7 @@ export type PaidHandler = (request: Request, context: PaidContext) => Response |
 /**
  * Wraps a gate around an App Router route handler. The wrapped handler runs
  * only on a settled payment, receives the verified receipt via the second
- * argument, and has the PAYMENT-RESPONSE header added to its response.
+ * argument, and has the PAYMENT-RESPONSE and TOLLWAY-RECEIPT headers added to its response.
  * Otherwise the wrapper answers the request itself (402 with the challenge,
  * or the rejection status with `{ error: reason }`).
  *

@@ -25,7 +25,7 @@ type JsonStatus = Parameters<Context["json"]>[1];
 
 /**
  * Wraps a gate as Hono middleware. On a settled payment it sets the
- * PAYMENT-RESPONSE header, attaches the receipt to the Hono context, and
+ * PAYMENT-RESPONSE and TOLLWAY-RECEIPT headers, attaches the receipt to the Hono context, and
  * calls next() so the route handler can serve the resource. Otherwise it
  * answers the request itself (402 with the challenge, or the rejection
  * status).

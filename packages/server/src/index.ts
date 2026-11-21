@@ -32,12 +32,17 @@ export {
 export {
   createHttpFacilitator,
   createMockFacilitator,
+  DEFAULT_MAX_TIMEOUT_SECONDS,
   type FacilitatorClient,
   type SettleInput,
   type SettleResult,
+  STELLAR_EXACT_SCHEME,
   type SupportedResult,
+  stellarCaip2,
+  toPaymentRequirements,
   type VerifyInput,
   type VerifyResult,
+  type X402Terms,
 } from "./facilitator.js";
 export {
   createPaywall,
@@ -50,7 +55,13 @@ export {
 } from "./gate.js";
 export {
   decodeHeader,
+  decodePaymentRequiredHeader,
+  decodePaymentResponseHeader,
+  decodePaymentSignatureHeader,
   encodeHeader,
+  encodePaymentRequiredHeader,
+  encodePaymentResponseHeader,
+  encodePaymentSignatureHeader,
   MPP_AUTHORIZATION_HEADER,
   PAYMENT_REQUIRED_HEADER,
   PAYMENT_RESPONSE_HEADER,
@@ -58,6 +69,7 @@ export {
   readHeader,
   readMppCredential,
   TOLLWAY_QUOTE_HEADER,
+  TOLLWAY_RECEIPT_HEADER,
 } from "./headers.js";
 export {
   createMockMppChargeHandler,

@@ -3,6 +3,8 @@
  * @stellar/mpp) are left opaque rather than guessed at.
  */
 
+import type { PaymentPayload as X402PaymentPayload } from "@x402/core/types";
+
 /** The three ways a payment can settle. See docs/design.md, "The model router". */
 export const settlementModels = ["x402", "mpp-charge", "mpp-channel"] as const;
 
@@ -27,7 +29,11 @@ export type PaymentOffer = {
   resource: string;
   /** Price as an integer string in the asset's smallest unit. */
   amount: string;
-  /** Asset identifier, for example "USDC:GA5Z...". */
+  /**
+   * Asset identifier. For x402 this is the Soroban asset contract address
+   * (`C...`, for example the USDC Sac), which is what `PaymentRequirements.asset`
+   * carries; the MPP settlement models may use another identifier.
+   */
   asset: string;
   /** Stellar address the payment settles to. Tollway never sits in between. */
   payTo: string;
@@ -48,12 +54,13 @@ export type PaymentOffer = {
 export type X402Payment = {
   model: "x402";
   /**
-   * The agent's signed payment from the PAYMENT-SIGNATURE header: a base64
-   * Stellar transaction envelope (x402 V2's `ExactStellarPayloadV2.transaction`),
-   * carrying the signed Soroban authorization entry. Opaque to Tollway;
-   * @x402/stellar owns the format.
+   * The decoded `PaymentPayload` from the PAYMENT-SIGNATURE header, in the x402
+   * V2 shape: `accepted` (the requirement it pays) and `payload.transaction`,
+   * the base64 Stellar transaction envelope with the signed Soroban
+   * authorization entry. Validated at the server boundary; @x402/stellar owns
+   * the inner format.
    */
-  paymentSignature: string;
+  payload: X402PaymentPayload;
 };
 
 /** An MPP charge: a single payment authorized by an MPP credential. */

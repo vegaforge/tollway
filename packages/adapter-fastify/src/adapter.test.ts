@@ -5,6 +5,7 @@ import {
   createMockMppChargeHandler,
   createPaywall,
   createRouteTable,
+  encodePaymentSignatureHeader,
   type MppChargeHandler,
   PAYMENT_SIGNATURE_HEADER,
   type PaywallConfig,
@@ -13,12 +14,29 @@ import Fastify from "fastify";
 import { describe, expect, it } from "vitest";
 import { fastifyPaywall, fastifyRouteTable, RECEIPT_REQUEST_KEY } from "./index.js";
 
-const config: PaywallConfig = {
+const config = {
   amount: "10000",
   asset: "USDC:GA5Z",
   payTo: "GSERVICE",
   network: "testnet",
-};
+} satisfies PaywallConfig;
+
+/** A standard-base64 x402 V2 payment header, as a stock client writes it. */
+function paymentHeader(transaction = "mock-signed-auth-entry"): string {
+  return encodePaymentSignatureHeader({
+    x402Version: 2,
+    accepted: {
+      scheme: "exact",
+      network: "stellar:testnet",
+      asset: config.asset,
+      amount: config.amount,
+      payTo: config.payTo,
+      maxTimeoutSeconds: 60,
+      extra: {},
+    },
+    payload: { transaction },
+  });
+}
 
 async function buildApp() {
   const signer = await Ed25519Signer.generate("test-key");
@@ -41,8 +59,8 @@ describe("fastifyPaywall", () => {
       const response = await app.inject({ method: "GET", url: "/quotes/latest" });
 
       expect(response.statusCode).toBe(402);
-      const challenge = response.json<{ amount: string }>();
-      expect(challenge.amount).toBe("10000");
+      const challenge = response.json<{ accepts: Array<{ amount: string }> }>();
+      expect(challenge.accepts[0]?.amount).toBe("10000");
     } finally {
       await app.close();
     }
@@ -54,7 +72,7 @@ describe("fastifyPaywall", () => {
       const response = await app.inject({
         method: "GET",
         url: "/quotes/latest",
-        headers: { [PAYMENT_SIGNATURE_HEADER]: "mock-signed-auth-entry" },
+        headers: { [PAYMENT_SIGNATURE_HEADER]: paymentHeader() },
       });
 
       expect(response.statusCode).toBe(200);
@@ -91,7 +109,7 @@ describe("fastifyPaywall", () => {
       const response = await app.inject({
         method: "GET",
         url: "/quotes/latest",
-        headers: { [PAYMENT_SIGNATURE_HEADER]: "mock-signed-auth-entry" },
+        headers: { [PAYMENT_SIGNATURE_HEADER]: paymentHeader() },
       });
 
       expect(response.statusCode).toBe(501);
@@ -142,7 +160,7 @@ describe("fastifyPaywall method binding", () => {
       handler: async () => ({ ok: true }),
     });
     await app.ready();
-    const headers = { [PAYMENT_SIGNATURE_HEADER]: "mock-signed-auth-entry-method" };
+    const headers = { [PAYMENT_SIGNATURE_HEADER]: paymentHeader("mock-signed-auth-entry-method") };
     try {
       const read = await app.inject({ method: "GET", url: "/report", headers });
       expect(read.statusCode).toBe(200);

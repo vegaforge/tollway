@@ -7,6 +7,7 @@ import {
 import {
   createMockFacilitator,
   createPaywall,
+  encodePaymentSignatureHeader,
   type Gate,
   PAYMENT_REQUIRED_HEADER,
   PAYMENT_RESPONSE_HEADER,
@@ -22,12 +23,29 @@ import {
   paywallProxy,
 } from "./proxy.js";
 
-const config: PaywallConfig = {
+const config = {
   amount: "10000",
   asset: "USDC:GA5Z",
   payTo: "GSERVICE",
   network: "testnet",
-};
+} satisfies PaywallConfig;
+
+/** A standard-base64 x402 V2 payment header, as a stock client writes it. */
+function paymentHeader(transaction = "mock-signed-auth-entry"): string {
+  return encodePaymentSignatureHeader({
+    x402Version: 2,
+    accepted: {
+      scheme: "exact",
+      network: "stellar:testnet",
+      asset: config.asset,
+      amount: config.amount,
+      payTo: config.payTo,
+      maxTimeoutSeconds: 60,
+      extra: {},
+    },
+    payload: { transaction },
+  });
+}
 
 afterEach(() => vi.unstubAllEnvs());
 
@@ -65,7 +83,7 @@ describe("paywallProxy", () => {
     const response = await proxy(
       new NextRequest("https://example.test/api/paid", {
         headers: {
-          [PAYMENT_SIGNATURE_HEADER]: "mock-signed-auth-entry",
+          [PAYMENT_SIGNATURE_HEADER]: paymentHeader(),
           [PROXY_RECEIPT_HEADER]: "caller-forgery",
         },
       }),

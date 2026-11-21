@@ -1,4 +1,5 @@
 import { Ed25519Signer, Ed25519Verifier, verifyReceipt } from "@vegaforge/tollway-core";
+import type { PaymentRequirements } from "@x402/core/types";
 import RedisMock from "ioredis-mock";
 import { beforeAll, describe, expect, it, vi } from "vitest";
 import {
@@ -8,29 +9,76 @@ import {
   type SettlementCache,
 } from "./cache.js";
 import { createMockFacilitator, type FacilitatorClient } from "./facilitator.js";
-import { createPaywall, type PaywallConfig, type TollwayRequest } from "./gate.js";
+import {
+  createPaywall,
+  type GateOutcome,
+  type PaywallConfig,
+  type TollwayRequest,
+} from "./gate.js";
 import {
   decodeHeader,
+  decodePaymentRequiredHeader,
+  decodePaymentResponseHeader,
+  decodePaymentSignatureHeader,
+  encodePaymentSignatureHeader,
   PAYMENT_REQUIRED_HEADER,
+  PAYMENT_RESPONSE_HEADER,
   PAYMENT_SIGNATURE_HEADER,
   TOLLWAY_QUOTE_HEADER,
+  TOLLWAY_RECEIPT_HEADER,
 } from "./headers.js";
 import { createMockMppChargeHandler, type MppChargeHandler } from "./mpp-charge.js";
 
 const MPP_CREDENTIAL = "Payment mock-mpp-charge-payload";
 
-const config: PaywallConfig = {
+const config = {
   amount: "10000",
   asset: "USDC:GA5ZSEJYB37JRC5AVCIA5MOP4RHTM335X2KGX3IHOJAPP5RE34K4KZVN",
   payTo: "GSERVICEXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX",
   network: "testnet",
-};
+} satisfies PaywallConfig;
 
 const baseRequest: TollwayRequest = {
   method: "GET",
   url: "/quotes/latest",
   headers: {},
 };
+
+/** A standard-base64 x402 V2 payment header, as a stock client writes it. */
+function paymentHeader(transaction = "mock-signed-auth-entry"): string {
+  return encodePaymentSignatureHeader({
+    x402Version: 2,
+    accepted: {
+      scheme: "exact",
+      network: "stellar:testnet",
+      asset: config.asset,
+      amount: config.amount,
+      payTo: config.payTo,
+      maxTimeoutSeconds: 60,
+      extra: {},
+    },
+    payload: { transaction },
+  });
+}
+
+/**
+ * Pays a 402 the way a stock x402 V2 client does: it copies the challenge's
+ * first `accepts` entry, `extra` included, into `accepted` and signs that.
+ */
+function payChallenge(
+  challenge: Extract<GateOutcome, { kind: "payment-required" }>,
+  transaction = "mock-signed-auth-entry",
+  edit: (accepted: PaymentRequirements) => PaymentRequirements = (accepted) => accepted,
+): string {
+  const required = decodePaymentRequiredHeader(challenge.headers[PAYMENT_REQUIRED_HEADER] ?? "");
+  const accepted = required.accepts[0];
+  if (!accepted) throw new Error("the challenge offers no payment requirements");
+  return encodePaymentSignatureHeader({
+    x402Version: 2,
+    accepted: edit(accepted),
+    payload: { transaction },
+  });
+}
 
 let signer: Ed25519Signer;
 beforeAll(async () => {
@@ -50,23 +98,123 @@ function makeGate(mppCharge = false) {
 }
 
 describe("createPaywall", () => {
-  it("answers 402 with an encoded challenge when no payment is present", async () => {
+  it("answers 402 with an x402 V2 challenge when no payment is present", async () => {
     const outcome = await makeGate()(baseRequest);
     expect(outcome.kind).toBe("payment-required");
     if (outcome.kind !== "payment-required") return;
 
     expect(outcome.status).toBe(402);
-    const decoded = decodeHeader<{ amount: string; resource: string }>(
-      outcome.headers[PAYMENT_REQUIRED_HEADER] ?? "",
+    const decoded = decodePaymentRequiredHeader(outcome.headers[PAYMENT_REQUIRED_HEADER] ?? "");
+    expect(decoded).toEqual(outcome.challenge);
+    expect(decoded.x402Version).toBe(2);
+    expect(decoded.resource.url).toBe("/quotes/latest");
+    expect(decoded.accepts).toEqual([
+      expect.objectContaining({
+        scheme: "exact",
+        network: "stellar:testnet",
+        asset: config.asset,
+        amount: "10000",
+        payTo: config.payTo,
+        maxTimeoutSeconds: 60,
+      }),
+    ]);
+  });
+
+  it("sends the x402 challenge terms the paywall config declares", async () => {
+    const gate = createPaywall(
+      { ...config, maxTimeoutSeconds: 30, extra: { areFeesSponsored: true } },
+      { signer, facilitator: createMockFacilitator() },
     );
-    expect(decoded.amount).toBe("10000");
-    expect(decoded.resource).toBe("/quotes/latest");
+    const outcome = await gate(baseRequest);
+    if (outcome.kind !== "payment-required") throw new Error("expected a challenge");
+    expect(
+      decodePaymentRequiredHeader(outcome.headers[PAYMENT_REQUIRED_HEADER] ?? "").accepts[0],
+    ).toMatchObject({ maxTimeoutSeconds: 30, extra: { areFeesSponsored: true } });
+  });
+
+  it("rejects a malformed PAYMENT-SIGNATURE with 400", async () => {
+    const outcome = await makeGate()({
+      ...baseRequest,
+      headers: { [PAYMENT_SIGNATURE_HEADER]: "%%%not-base64%%%" },
+    });
+    expect(outcome).toMatchObject({ kind: "rejected", status: 400 });
+    if (outcome.kind !== "rejected") return;
+    expect(outcome.reason).toMatch(/not a base64 x402 PaymentPayload/);
+  });
+
+  it("rejects a base64url PAYMENT-SIGNATURE with 400", async () => {
+    // U+0080 U+00BE encode to bytes that standard base64 spells with `+`, so
+    // the base64url form contains `-` and cannot pass @x402/core's
+    // standard-alphabet check.
+    const standard = encodePaymentSignatureHeader({
+      x402Version: 2,
+      accepted: {
+        scheme: "exact",
+        network: "stellar:testnet",
+        asset: config.asset,
+        amount: config.amount,
+        payTo: config.payTo,
+        maxTimeoutSeconds: 60,
+        extra: {},
+      },
+      payload: { transaction: "mock-signed-auth-entry" },
+      extensions: { probe: "\u0080\u00be" },
+    });
+    const base64url = Buffer.from(standard, "base64").toString("base64url");
+    expect(base64url).not.toBe(standard);
+    expect(() => decodePaymentSignatureHeader(base64url)).toThrow();
+    const outcome = await makeGate()({
+      ...baseRequest,
+      headers: { [PAYMENT_SIGNATURE_HEADER]: base64url },
+    });
+    expect(outcome).toMatchObject({ kind: "rejected", status: 400 });
+  });
+
+  it("rejects a payment whose x402Version is not 2 with 400", async () => {
+    const outcome = await makeGate()({
+      ...baseRequest,
+      headers: {
+        [PAYMENT_SIGNATURE_HEADER]: encodePaymentSignatureHeader({
+          x402Version: 1,
+          accepted: {
+            scheme: "exact",
+            network: "stellar:testnet",
+            asset: config.asset,
+            amount: config.amount,
+            payTo: config.payTo,
+            maxTimeoutSeconds: 60,
+            extra: {},
+          },
+          payload: { transaction: "mock-signed-auth-entry" },
+        }),
+      },
+    });
+    expect(outcome).toMatchObject({
+      kind: "rejected",
+      status: 400,
+      reason: expect.stringContaining("unsupported x402Version 1"),
+    });
+  });
+
+  it("sends the x402 SettleResponse and the Tollway receipt on settlement", async () => {
+    const outcome = await makeGate()({
+      ...baseRequest,
+      headers: { [PAYMENT_SIGNATURE_HEADER]: paymentHeader() },
+    });
+    if (outcome.kind !== "settled") throw new Error("expected a settlement");
+
+    const settlement = decodePaymentResponseHeader(outcome.headers[PAYMENT_RESPONSE_HEADER] ?? "");
+    expect(settlement).toMatchObject({ success: true, network: "stellar:testnet" });
+    const { settlement: settled } = outcome.receipt.receipt;
+    if (settled.kind !== "transaction") throw new Error("expected a transaction settlement");
+    expect(settlement.transaction).toBe(settled.txHash);
+    expect(decodeHeader(outcome.headers[TOLLWAY_RECEIPT_HEADER] ?? "")).toEqual(outcome.receipt);
   });
 
   it("settles a signed request and produces a verifiable receipt", async () => {
     const outcome = await makeGate()({
       ...baseRequest,
-      headers: { [PAYMENT_SIGNATURE_HEADER]: "mock-signed-auth-entry" },
+      headers: { [PAYMENT_SIGNATURE_HEADER]: paymentHeader() },
     });
     expect(outcome.kind).toBe("settled");
     if (outcome.kind !== "settled") return;
@@ -85,7 +233,7 @@ describe("createPaywall", () => {
 
   it("treats a repeated payment as idempotent rather than a second charge", async () => {
     const gate = makeGate();
-    const headers = { [PAYMENT_SIGNATURE_HEADER]: "mock-signed-auth-entry" };
+    const headers = { [PAYMENT_SIGNATURE_HEADER]: paymentHeader() };
 
     const first = await gate({ ...baseRequest, headers });
     const second = await gate({ ...baseRequest, headers });
@@ -140,13 +288,13 @@ describe("createPaywall", () => {
     if (challenge.kind !== "payment-required") return;
     const quote = challenge.headers[TOLLWAY_QUOTE_HEADER];
     expect(quote).toBeTruthy();
+    expect(challenge.challenge.accepts[0]?.extra.tollwayQuote).toBe(quote);
+    expect(challenge.challenge.accepts[0]?.amount).toBe("101");
 
+    // The quote comes back inside the signed payload; no extra header.
     const paid = await gate({
       ...baseRequest,
-      headers: {
-        [PAYMENT_SIGNATURE_HEADER]: "signed-payment",
-        [TOLLWAY_QUOTE_HEADER]: quote,
-      },
+      headers: { [PAYMENT_SIGNATURE_HEADER]: payChallenge(challenge) },
     });
     expect(paid.kind).toBe("settled");
     if (paid.kind !== "settled") return;
@@ -169,16 +317,65 @@ describe("createPaywall", () => {
     );
     const first = await gate(baseRequest);
     if (first.kind !== "payment-required") throw new Error("expected challenge");
-    const quote = first.headers[TOLLWAY_QUOTE_HEADER] ?? "";
+    const quote = String(first.challenge.accepts[0]?.extra.tollwayQuote ?? "");
     const tampered = `${quote.slice(0, -1)}${quote.endsWith("A") ? "B" : "A"}`;
     const second = await gate({
       ...baseRequest,
       headers: {
-        [PAYMENT_SIGNATURE_HEADER]: "signed-payment",
-        [TOLLWAY_QUOTE_HEADER]: tampered,
+        [PAYMENT_SIGNATURE_HEADER]: payChallenge(first, "mock-signed-auth-entry", (accepted) => ({
+          ...accepted,
+          extra: { ...accepted.extra, tollwayQuote: tampered },
+        })),
       },
     });
     expect(second.kind).toBe("payment-required");
+    expect(price).toHaveBeenCalledTimes(2);
+  });
+
+  it("does not let a quote for one resource pay for another", async () => {
+    const price = vi.fn().mockReturnValue("100");
+    const gate = createPaywall(
+      {
+        ...config,
+        amount: price,
+        minAmount: "1",
+        maxAmount: "200",
+        quoteSecret: "a sufficiently long quote secret",
+      },
+      { signer, facilitator: createMockFacilitator() },
+    );
+    const cheap = await gate({ ...baseRequest, url: "/quotes/cheap" });
+    if (cheap.kind !== "payment-required") throw new Error("expected challenge");
+    const outcome = await gate({
+      ...baseRequest,
+      headers: { [PAYMENT_SIGNATURE_HEADER]: payChallenge(cheap) },
+    });
+    expect(outcome.kind).toBe("payment-required");
+    expect(price).toHaveBeenCalledTimes(2);
+  });
+
+  it("rejects an expired dynamic quote with a fresh challenge", async () => {
+    let now = 1_000_000;
+    const price = vi.fn().mockReturnValue("100");
+    const gate = createPaywall(
+      {
+        ...config,
+        amount: price,
+        minAmount: "1",
+        maxAmount: "200",
+        quoteSecret: "a sufficiently long quote secret",
+        quoteTtlSeconds: 30,
+      },
+      { signer, facilitator: createMockFacilitator(), clock: () => now },
+    );
+    const first = await gate(baseRequest);
+    if (first.kind !== "payment-required") throw new Error("expected challenge");
+    now += 31_000;
+    const outcome = await gate({
+      ...baseRequest,
+      headers: { [PAYMENT_SIGNATURE_HEADER]: payChallenge(first) },
+    });
+    expect(outcome.kind).toBe("payment-required");
     expect(price).toHaveBeenCalledTimes(2);
   });
 
@@ -276,7 +473,11 @@ describe("createPaywall", () => {
       expect(outcome.headers["content-type"]).toBeUndefined();
       expect(outcome.headers[PAYMENT_REQUIRED_HEADER]).toBeDefined();
       expect(handler.challenge).toHaveBeenCalledWith({
-        offer: outcome.challenge,
+        offer: expect.objectContaining({
+          resource: "/quotes/latest",
+          amount: "10000",
+          asset: config.asset,
+        }),
         request: { method: "GET", url: "/quotes/latest" },
       });
     });
@@ -304,7 +505,7 @@ describe("createPaywall", () => {
     it("rejects a PAYMENT-SIGNATURE that the router sends to mpp-charge", async () => {
       const outcome = await makeGate(true)({
         ...baseRequest,
-        headers: { [PAYMENT_SIGNATURE_HEADER]: "mock-signed-auth-entry" },
+        headers: { [PAYMENT_SIGNATURE_HEADER]: paymentHeader() },
       });
       expect(outcome).toEqual({
         kind: "rejected",
@@ -317,7 +518,7 @@ describe("createPaywall", () => {
 });
 
 describe("TM-02 cross-offer replay", () => {
-  const headers = { [PAYMENT_SIGNATURE_HEADER]: "mock-signed-auth-entry" };
+  const headers = { [PAYMENT_SIGNATURE_HEADER]: paymentHeader() };
 
   function gateFor(overrides: Partial<PaywallConfig>, cache: SettlementCache) {
     return createPaywall(
@@ -364,13 +565,11 @@ describe("TM-02 cross-offer replay", () => {
   });
 
   it("does not serve an x402 receipt to an mpp-charge offer that shares the cache", async () => {
-    // Both mock handlers derive the nonce from the raw payment value, so the
-    // same value gives the same nonce under either model.
     const cache = createInMemorySettlementCache();
     const x402 = await gateFor(
       { models: ["x402"] },
       cache,
-    )({ ...baseRequest, headers: { [PAYMENT_SIGNATURE_HEADER]: MPP_CREDENTIAL } });
+    )({ ...baseRequest, headers: { [PAYMENT_SIGNATURE_HEADER]: paymentHeader() } });
     expect(x402.kind).toBe("settled");
 
     const mpp = await gateFor(
@@ -449,7 +648,7 @@ describe("TM-02 cross-offer replay", () => {
 });
 
 describe("TM-04 shared-lock duplicate settlement", () => {
-  const headers = { [PAYMENT_SIGNATURE_HEADER]: "mock-signed-auth-entry" };
+  const headers = { [PAYMENT_SIGNATURE_HEADER]: paymentHeader() };
 
   function countingFacilitator() {
     const inner = createMockFacilitator();
@@ -477,7 +676,10 @@ describe("TM-04 shared-lock duplicate settlement", () => {
 
     // The mock facilitator's nonce for this header, as the gate keys it.
     const verification = await facilitator.verify({
-      payment: { model: "x402", paymentSignature: headers[PAYMENT_SIGNATURE_HEADER] },
+      payment: {
+        model: "x402",
+        payload: decodePaymentSignatureHeader(headers[PAYMENT_SIGNATURE_HEADER]),
+      },
       offer: {
         ...config,
         amount: config.amount as string,
@@ -632,7 +834,7 @@ describe("TM-04 shared-lock duplicate settlement", () => {
 // Regression lock for ADR-2026-11-18-method-binding: one payment pays for one
 // HTTP method, even when a single gate is mounted on several methods.
 describe("method binding", () => {
-  const headers = { [PAYMENT_SIGNATURE_HEADER]: "mock-signed-auth-entry-method" };
+  const headers = { [PAYMENT_SIGNATURE_HEADER]: paymentHeader("mock-signed-auth-entry-method") };
 
   function countingGate(cache = createInMemorySettlementCache()) {
     const inner = createMockFacilitator();
