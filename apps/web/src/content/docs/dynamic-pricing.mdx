@@ -24,12 +24,55 @@ in `accepts[0].extra.tollwayQuote`. A stock x402 V2 client copies the accepted
 requirements, `extra` included, into its payment, so the quote comes back
 inside `PAYMENT-SIGNATURE` with nothing extra to send. The 402 also has the
 quote in a `TOLLWAY-QUOTE` header, which an MPP client echoes on its paid
-request instead. The quote binds the exact
-amount to the resource, has a short expiry, and is authenticated with
+request instead. The quote binds the exact amount to the resource, has a
+short expiry (`quoteTtlSeconds`, 60 by default), and is authenticated with
 WebCrypto HMAC. The gate does not call the price function again for a valid
 quote, so the amount verified, settled, and written to the receipt is the same.
 
-An expired, forged, or resource-mismatched quote receives a fresh 402. The
-price function result must be a non-negative integer string within the bounds;
-invalid results are rejected before settlement. Keep the quote secret stable
-across processes and separate from receipt-signing keys.
+## Quotes that fail
+
+A forged quote, or a quote for another resource, receives a fresh 402 with a
+new price and quote.
+
+An expired quote never pays for anything new: an unsettled payment under it
+receives a fresh 402. It can still replay a receipt. If a client paid under a
+quote, the payment settled, and the client retries the same `PAYMENT-SIGNATURE`
+after the quote expired, the gate returns the cached receipt with `replayed`
+set. Without that, the client would see a 402 for a resource it already paid
+for, and pay again. MPP credentials carry no idempotency key the gate can look
+up before settling, so an MPP retry under an expired quote receives a 402.
+
+## The price function
+
+The price function receives the request and returns the price as an integer
+string in the asset's smallest unit. It runs once per challenge; a paid
+request with a valid quote does not call it again.
+
+The request is rejected with `500` and nothing is charged when the function:
+
+- throws (the error goes to `PaywallDeps.onPriceError`, never to the agent);
+- returns anything other than a non-negative integer string, such as a
+  number, a decimal or a negative value;
+- returns a value below `minAmount` or above `maxAmount`.
+
+The reason starts with `invalid-amount:`. A bad price is the service's
+misconfiguration, not the agent's, which is why it is a 500 and not a 4xx.
+
+## The quote secret
+
+Quotes are authenticated with WebCrypto HMAC-SHA-256 under `quoteSecret`.
+Keep it stable across every process that serves the route, and separate from
+the receipt-signing key.
+
+To rotate it without failing quotes already handed out:
+
+1. Set the new secret as `quoteSecret` and move the old one into
+   `previousQuoteSecrets`. New quotes are signed with the new secret; quotes
+   signed with either are accepted.
+2. Wait at least `quoteTtlSeconds` (60 by default) on every process, so every
+   quote signed with the old secret has expired.
+3. Remove the old secret from `previousQuoteSecrets`.
+
+Until step 3, a settled payment's retry under an old quote still replays its
+receipt. After step 3, it receives a fresh 402, so leave the old secret in
+place for as long as clients may retry; a few minutes is usually enough.

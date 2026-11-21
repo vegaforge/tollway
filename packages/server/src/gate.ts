@@ -58,6 +58,12 @@ export type PaywallConfig = {
   maxAmount?: string;
   /** Secret used to authenticate dynamic-price quotes. */
   quoteSecret?: string;
+  /**
+   * Secrets from before a rotation. Quotes signed with them are still
+   * accepted until they expire; new quotes are always signed with
+   * `quoteSecret`. Drop an old secret once its quotes have expired.
+   */
+  previousQuoteSecrets?: readonly string[];
   /** Quote validity in seconds. Defaults to 60. */
   quoteTtlSeconds?: number;
   asset: string;
@@ -130,6 +136,11 @@ export type PaywallDeps = {
    * same error is also set as `cacheError` on the outcome.
    */
   onCacheError?: (error: Error, key: string) => void;
+  /**
+   * Called when a dynamic price function throws. The request is rejected
+   * with 500 and nothing is charged; the error goes here, not to the agent.
+   */
+  onPriceError?: (error: unknown, request: TollwayRequest) => void;
   /**
    * How long a cross-process settlement lock lives if its holder stops
    * renewing it, in milliseconds. Defaults to 30 000. Only used with a cache
@@ -222,12 +233,18 @@ async function createQuote(
   return `${encoded}.${await quoteMac(payload, secret)}`;
 }
 
+/**
+ * Reads a quote token. Returns the payload when its MAC matches one of the
+ * secrets and it names this resource, with `expired` set when its lifetime
+ * is over; the caller decides what an expired quote may still do. Anything
+ * malformed, forged or for another resource is undefined.
+ */
 async function readQuote(
   token: string,
   resource: string,
   now: number,
-  secret: string,
-): Promise<QuotePayload | undefined> {
+  secrets: readonly string[],
+): Promise<{ payload: QuotePayload; expired: boolean } | undefined> {
   const [encoded, mac, ...rest] = token.split(".");
   if (!encoded || !mac || rest.length !== 0) return undefined;
   let payload: QuotePayload;
@@ -243,18 +260,31 @@ async function readQuote(
     typeof payload.id !== "string" ||
     payload.resource !== resource ||
     !INTEGER_AMOUNT.test(payload.amount) ||
-    !Number.isSafeInteger(payload.expiresAt) ||
-    payload.expiresAt < now
+    !Number.isSafeInteger(payload.expiresAt)
   ) {
     return undefined;
   }
-  const expected = await quoteMac(payload, secret);
-  if (expected.length !== mac.length) return undefined;
+  for (const secret of secrets) {
+    if (sameMac(await quoteMac(payload, secret), mac)) {
+      return { payload, expired: payload.expiresAt < now };
+    }
+  }
+  return undefined;
+}
+
+/** Compares two MACs without stopping at the first differing character. */
+function sameMac(expected: string, actual: string): boolean {
+  if (expected.length !== actual.length) return false;
   let mismatch = 0;
   for (let index = 0; index < expected.length; index += 1) {
-    mismatch |= expected.charCodeAt(index) ^ mac.charCodeAt(index);
+    mismatch |= expected.charCodeAt(index) ^ actual.charCodeAt(index);
   }
-  return mismatch === 0 ? payload : undefined;
+  return mismatch === 0;
+}
+
+/** The secrets a quote may be signed with: the current one first. */
+function quoteSecrets(config: PaywallConfig): string[] {
+  return [config.quoteSecret ?? "", ...(config.previousQuoteSecrets ?? [])];
 }
 
 /** The quote an x402 payment echoes in `accepted.extra.tollwayQuote`, if any. */
@@ -274,10 +304,55 @@ function validateDynamicPriceConfig(config: PaywallConfig): void {
   const min = parsePriceAmount(config.minAmount, "minAmount");
   const max = parsePriceAmount(config.maxAmount, "maxAmount");
   if (min > max) throw new TollwayError("invalid-policy", "minAmount must not exceed maxAmount");
+  if (config.previousQuoteSecrets?.some((secret) => typeof secret !== "string" || !secret)) {
+    throw new TollwayError("invalid-policy", "previousQuoteSecrets must be non-empty strings");
+  }
   const ttl = config.quoteTtlSeconds ?? DEFAULT_QUOTE_TTL_SECONDS;
   if (!Number.isSafeInteger(ttl) || ttl <= 0) {
     throw new TollwayError("invalid-policy", "quoteTtlSeconds must be a positive integer");
   }
+}
+
+/**
+ * Runs the route's price function and checks its result against the bounds.
+ * Anything wrong with the price is the service's misconfiguration, not the
+ * agent's, so it is a 500 and nothing is charged. The reason names the
+ * `invalid-amount` code but never echoes what the function threw, which may
+ * carry internal detail.
+ */
+async function priceRequest(
+  config: PaywallConfig,
+  request: TollwayRequest,
+  onPriceError: PaywallDeps["onPriceError"],
+): Promise<{ ok: true; amount: string } | { ok: false; outcome: RejectedOutcome }> {
+  const reject = (problem: string) =>
+    ({
+      ok: false,
+      outcome: {
+        kind: "rejected",
+        status: 500,
+        reason: `invalid-amount: dynamic price ${problem}`,
+      },
+    }) as const;
+  if (typeof config.amount !== "function") return { ok: true, amount: config.amount };
+
+  let priced: unknown;
+  try {
+    priced = await config.amount(request);
+  } catch (error) {
+    onPriceError?.(error, request);
+    return reject("function failed");
+  }
+  if (typeof priced !== "string" || !INTEGER_AMOUNT.test(priced)) {
+    return reject("must be a non-negative integer string");
+  }
+  const value = BigInt(priced);
+  const min = parsePriceAmount(config.minAmount as string, "minAmount");
+  const max = parsePriceAmount(config.maxAmount as string, "maxAmount");
+  if (value < min || value > max) {
+    return reject("is outside the configured bounds");
+  }
+  return { ok: true, amount: priced };
 }
 
 /**
@@ -376,6 +451,7 @@ async function settleWithHandler<TPayment>(
   method: string,
   handler: Handler<TPayment>,
   context: SettlementContext,
+  replayOnly?: () => Promise<GateOutcome>,
 ): Promise<GateOutcome> {
   // A payment that already settled is answered from the cache before it is
   // verified again: on chain its authorization nonce is spent, so a second
@@ -398,6 +474,11 @@ async function settleWithHandler<TPayment>(
       };
       return toOutcome(replay, offer, model, method, false);
     }
+  }
+  // The caller allows only a replay here (an expired quote): a payment that
+  // has not settled is never verified or settled under it.
+  if (replayOnly) {
+    return replayOnly();
   }
 
   const verification = await handler.verify({ payment, offer });
@@ -789,6 +870,7 @@ export function createPaywallWithInFlight(
     let amount: string;
     let quote: string | undefined;
     let candidateQuote: string | undefined;
+    let quoteExpired = false;
     if (typeof config.amount !== "function") {
       amount = config.amount;
     } else {
@@ -797,23 +879,20 @@ export function createPaywallWithInFlight(
         ? quoteFromPayload(x402Payment)
         : readHeader(request.headers, TOLLWAY_QUOTE_HEADER);
       const verified = candidateQuote
-        ? await readQuote(candidateQuote, resource, now, config.quoteSecret ?? "")
+        ? await readQuote(candidateQuote, resource, now, quoteSecrets(config))
         : undefined;
-      if (verified) {
-        amount = verified.amount;
+      // An expired quote is still honoured for an x402 payment, but only to
+      // replay a receipt that payment already settled under it; a client that
+      // retries after expiry must get its receipt, not a 402 it would pay
+      // again. MPP credentials carry no idempotency key, so they get a 402.
+      if (verified && (!verified.expired || x402Payment)) {
+        amount = verified.payload.amount;
         quote = candidateQuote;
+        quoteExpired = verified.expired;
       } else {
-        const priced = await config.amount(request);
-        const pricedAmount = parsePriceAmount(priced, "dynamic price");
-        const min = parsePriceAmount(config.minAmount as string, "minAmount");
-        const max = parsePriceAmount(config.maxAmount as string, "maxAmount");
-        if (pricedAmount < min || pricedAmount > max) {
-          throw new TollwayError(
-            "invalid-amount",
-            `dynamic price ${priced} is outside the configured bounds`,
-          );
-        }
-        amount = priced;
+        const priced = await priceRequest(config, request, deps.onPriceError);
+        if (!priced.ok) return priced.outcome;
+        amount = priced.amount;
         quote = await createQuote(
           resource,
           amount,
@@ -871,7 +950,36 @@ export function createPaywallWithInFlight(
 
     if (decision.model === "x402") {
       const payment: X402Payment = { model: "x402", payload: x402Payment };
-      return settleWithHandler(payment, offer, "x402", method, deps.facilitator, context);
+      // Under an expired quote the payment may only replay; if it never
+      // settled, the agent gets a fresh price and quote instead.
+      const freshChallenge = async (): Promise<GateOutcome> => {
+        const priced = await priceRequest(config, request, deps.onPriceError);
+        if (!priced.ok) return priced.outcome;
+        const fresh = await createQuote(
+          resource,
+          priced.amount,
+          clock(),
+          config.quoteTtlSeconds ?? DEFAULT_QUOTE_TTL_SECONDS,
+          config.quoteSecret ?? "",
+        );
+        return paymentRequired(
+          { ...offer, amount: priced.amount, quote: fresh },
+          request,
+          acceptedModels,
+          deps.mppChargeHandler,
+          config,
+          fresh,
+        );
+      };
+      return settleWithHandler(
+        payment,
+        offer,
+        "x402",
+        method,
+        deps.facilitator,
+        context,
+        quoteExpired ? freshChallenge : undefined,
+      );
     }
 
     if (decision.model === "mpp-charge") {

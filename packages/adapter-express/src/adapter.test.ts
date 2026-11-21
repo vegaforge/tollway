@@ -5,8 +5,10 @@ import {
   createMockMppChargeHandler,
   createPaywall,
   createRouteTable,
+  decodePaymentRequiredHeader,
   encodePaymentSignatureHeader,
   type MppChargeHandler,
+  PAYMENT_REQUIRED_HEADER,
   PAYMENT_SIGNATURE_HEADER,
   type PaywallConfig,
 } from "@vegaforge/tollway-server";
@@ -20,6 +22,37 @@ const config = {
   payTo: "GSERVICE",
   network: "testnet",
 } satisfies PaywallConfig;
+
+/**
+ * A dynamic-price route: every call to the price function returns a higher
+ * price, so a paid request that re-priced instead of using its quote would
+ * settle a different amount than the 402 named.
+ */
+function dynamicConfig(price: () => string) {
+  return {
+    ...config,
+    amount: price,
+    minAmount: "1",
+    maxAmount: "100000",
+    quoteSecret: "adapter test quote secret",
+  } satisfies PaywallConfig;
+}
+
+function risingPrice(): () => string {
+  let calls = 0;
+  return () => String(100 + ++calls);
+}
+
+/** Pays a 402 the way a stock x402 V2 client does: `accepts[0]` becomes `accepted`. */
+function payFrom(paymentRequired: string | null | undefined, transaction: string): string {
+  const accepted = decodePaymentRequiredHeader(paymentRequired ?? "").accepts[0];
+  if (!accepted) throw new Error("the 402 offers no payment requirements");
+  return encodePaymentSignatureHeader({ x402Version: 2, accepted, payload: { transaction } });
+}
+
+const throwingPrice = (): string => {
+  throw new Error("pricing backend down");
+};
 
 /** A standard-base64 x402 V2 payment header, as a stock client writes it. */
 function paymentHeader(transaction = "mock-signed-auth-entry"): string {
@@ -264,6 +297,60 @@ describe("expressPaywall with mpp-charge", () => {
       expect(await response.json()).toEqual({
         error: "mpp challenge was not issued by this server",
       });
+    } finally {
+      await app.close();
+    }
+  });
+});
+
+describe("expressPaywall with a dynamic price", () => {
+  async function startDynamic(price: () => string) {
+    const signer = await Ed25519Signer.generate("dynamic-express");
+    const gate = createPaywall(dynamicConfig(price), {
+      signer,
+      facilitator: createMockFacilitator(),
+    });
+    const app = express();
+    app.get("/quotes/latest", expressPaywall(gate), (_req, res) => {
+      res.json({ amount: res.locals[RECEIPT_LOCALS_KEY].receipt.amount });
+    });
+    const server = app.listen(0);
+    await new Promise((resolve) => server.once("listening", resolve));
+    const address = server.address();
+    if (!address || typeof address === "string") throw new Error("expected a TCP address");
+    return {
+      url: `http://127.0.0.1:${address.port}/quotes/latest`,
+      close: () => new Promise((resolve) => server.close(resolve)),
+    };
+  }
+
+  it("settles the quoted amount from a payment built from the 402", async () => {
+    const app = await startDynamic(risingPrice());
+    try {
+      const challenge = await fetch(app.url);
+      expect(challenge.status).toBe(402);
+      const header = challenge.headers.get(PAYMENT_REQUIRED_HEADER);
+      const quoted = decodePaymentRequiredHeader(header ?? "").accepts[0];
+      expect(quoted?.amount).toBe("101");
+      expect(quoted?.extra.tollwayQuote).toEqual(expect.any(String));
+
+      const paid = await fetch(app.url, {
+        headers: { [PAYMENT_SIGNATURE_HEADER]: payFrom(header, "dynamic-express") },
+      });
+      expect(paid.status).toBe(200);
+      expect(await paid.json()).toEqual({ amount: "101" });
+    } finally {
+      await app.close();
+    }
+  });
+
+  it("answers 500 and charges nothing when the price function throws", async () => {
+    const app = await startDynamic(throwingPrice);
+    try {
+      const response = await fetch(app.url, {
+        headers: { [PAYMENT_SIGNATURE_HEADER]: paymentHeader("dynamic-express-throws") },
+      });
+      expect(response.status).toBe(500);
     } finally {
       await app.close();
     }
