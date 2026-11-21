@@ -12,7 +12,8 @@ route is built from `createPaywall` and `withPaywall` and nothing else.
 
 Prices are integer strings in USDC's smallest unit (7 decimals). An unpaid
 request gets `402` with a `PAYMENT-REQUIRED` header. A paid request gets `200`
-with the signed Tollway receipt in the `PAYMENT-RESPONSE` header.
+with the x402 `SettleResponse` in the `PAYMENT-RESPONSE` header and the signed
+Tollway receipt in the `TOLLWAY-RECEIPT` header.
 `/api/summarize` checks its body before the gate, so a malformed request is
 refused with `400` and never charged.
 

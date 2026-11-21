@@ -12,13 +12,13 @@ in both encodings.
 
 ## Two encodings, labelled
 
-Two header encodings are in use while the gate moves to the x402 V2 shapes
-(#43):
+Two header encodings are in use. Since #43 the gate sends the x402 V2 shapes,
+and only the Tollway receipt keeps Tollway's own encoding:
 
 | Producer | Encoding | Shapes |
 | --- | --- | --- |
 | x402 V2 (`@x402/core/http`) | standard base64, padded | `PaymentRequired`, `PaymentPayload`, `SettleResponse` |
-| Tollway gate today (`encodeHeader` in `@vegaforge/tollway-server`) | base64url, unpadded | `PaymentOffer` in `PAYMENT-REQUIRED`, the signed receipt in `PAYMENT-RESPONSE` |
+| Tollway receipt (`encodeHeader` in `@vegaforge/tollway-server`) | base64url, unpadded | The signed receipt in `TOLLWAY-RECEIPT`. Gates from before #43 also sent a `PaymentOffer` in `PAYMENT-REQUIRED` and the receipt in `PAYMENT-RESPONSE` |
 
 The playground works out which alphabet a value uses and tells you when a
 shape arrives in the other producer's encoding, because a client that

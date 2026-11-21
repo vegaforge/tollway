@@ -28,8 +28,8 @@ on it.
 
 | File | Benchmark | Scope | What it measures |
 | --- | --- | --- | --- |
-| `gate.bench.ts` | 402 challenge | gate | A request with no payment: build the offer, read the headers, encode the `PAYMENT-REQUIRED` challenge. |
-| | x402 fresh settlement | gate | A new x402 payment: verify, cache miss, settle, build and sign the receipt with Ed25519, write the cache, bind the receipt to the offer, encode `PAYMENT-RESPONSE`. |
+| `gate.bench.ts` | 402 challenge | gate | A request with no payment: build the offer, read the headers, encode the x402 V2 `PAYMENT-REQUIRED` challenge. |
+| | x402 fresh settlement | gate | A new x402 payment: decode the V2 `PAYMENT-SIGNATURE`, verify, cache miss, settle, build and sign the receipt with Ed25519, write the cache, bind the receipt to the offer, encode the `PAYMENT-RESPONSE` and `TOLLWAY-RECEIPT` headers. |
 | | x402 replayed settlement | gate | The same payment again: verify, cache hit, offer binding, header encoding. No settlement. |
 | | mpp-charge fresh settlement | gate | A new MPP charge credential (`Authorization: Payment ...`) through the mock MPP handler, otherwise as the fresh x402 case. |
 | | x402 16 concurrent identical payments | gate | 16 callers send one new payment at the same moment. One sample is the time until all 16 have an answer; exactly one settles and 15 wait on it. |
@@ -38,7 +38,7 @@ on it.
 | `micro.bench.ts` | canonicalJson receipt body, canonicalJson offer binding | micro | `canonicalJson` on a full receipt body (what is signed) and on the six-field binding the gate builds twice per settled request. |
 | | buildReceipt (schema parse) | micro | Assembling and schema-checking a receipt body. |
 | | signReceipt (Ed25519), verifyReceipt (Ed25519) | micro | Signing a receipt, and verifying one with `Ed25519Verifier`. |
-| | encodeHeader receipt, decodeHeader receipt | micro | The JSON and base64url encoding of the `PAYMENT-RESPONSE` header, and the reverse. |
+| | encodeHeader receipt, decodeHeader receipt | micro | The JSON and base64url encoding of the `TOLLWAY-RECEIPT` header, and the reverse. |
 | | nonce digest (SHA-256, 600-byte payload) | micro | The idempotency-key digest: UTF-8 encode, SHA-256 over WebCrypto, base64url. It calls `deriveMppChargeNonce`; the x402 HTTP facilitator's `deriveNonce` is not exported and does the same three steps. |
 
 The Redis numbers measure Tollway's lock and cache code plus `ioredis-mock`,
