@@ -14,7 +14,7 @@ import {
   TOLLWAY_RECEIPT_HEADER,
 } from "@vegaforge/tollway-server";
 import { x402Client, x402HTTPClient } from "@x402/core/client";
-import type { PaymentPayload } from "@x402/core/types";
+import type { PaymentPayload, SchemeNetworkClient } from "@x402/core/types";
 import express from "express";
 import { describe, expect, it, vi } from "vitest";
 import { expressPaywall } from "./index.js";
@@ -25,14 +25,14 @@ import { expressPaywall } from "./index.js";
  * the SettleResponse and the Tollway receipt. The facilitator is stubbed, so
  * no Stellar RPC is involved.
  */
-const config: PaywallConfig = {
+const config = {
   amount: "10000",
   // USDC testnet SAC: the Soroban contract address x402 names as the asset.
   asset: "CBIELTK6YBZJU5UP2WWQEUCYKLPU6AUNZ2BQ4WWFEIE3USCIHMXQDAMA",
   payTo: "GSERVICEXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX",
   network: "testnet",
   extra: { areFeesSponsored: true },
-};
+} satisfies PaywallConfig;
 
 const RESOURCE = "/quotes/latest";
 const TRANSACTION = "AAAAAgAAAAB4NDAyLXN0ZWxsYXItdHJhbnNhY3Rpb24=";
@@ -122,6 +122,76 @@ describe("x402 V2 client round trip through expressPaywall", () => {
       });
     } finally {
       await gate.close();
+    }
+  });
+});
+
+/**
+ * Issue #293: a stock x402 client pays a dynamic-price route. The client's
+ * own `createPaymentPayload` builds `accepted` from the 402, so this proves
+ * the quote in `extra` comes back unchanged without any Tollway code on the
+ * client. The scheme client is a stub that only supplies the transaction.
+ */
+describe("x402 V2 client round trip through a dynamic-price route", () => {
+  const stubStellarScheme: SchemeNetworkClient = {
+    scheme: "exact",
+    async createPaymentPayload(x402Version) {
+      return { x402Version, payload: { transaction: TRANSACTION } };
+    },
+  };
+
+  it("pays the quoted amount with the quote echoed by the client", async () => {
+    const signer = await Ed25519Signer.generate("x402-dynamic-round-trip");
+    let calls = 0;
+    const gate = createPaywall(
+      {
+        ...config,
+        amount: () => String(10_000 + ++calls),
+        minAmount: "1",
+        maxAmount: "1000000",
+        quoteSecret: "round trip quote secret",
+      },
+      { signer, facilitator: createMockFacilitator() },
+    );
+    const app = express();
+    app.get(RESOURCE, expressPaywall(gate), (_req, res) => {
+      res.json({ ok: true });
+    });
+    const server = app.listen(0);
+    await new Promise((resolve) => server.once("listening", resolve));
+    const address = server.address();
+    if (!address || typeof address === "string") throw new Error("expected a TCP address");
+    const url = `http://127.0.0.1:${address.port}${RESOURCE}`;
+
+    try {
+      // The stub scheme has no default-asset table, so the client treats USDC as
+      // a non-default asset; the test lists it with a cap, as an agent would.
+      const client = new x402Client()
+        .register("stellar:testnet", stubStellarScheme)
+        .setSpendControls({
+          allowedAssets: [
+            { network: "stellar:testnet", asset: config.asset, maxAmountPerPayment: "1000000" },
+          ],
+        });
+      const http = new x402HTTPClient(client);
+
+      const unpaid = await fetch(url);
+      expect(unpaid.status).toBe(402);
+      const challenge = http.getPaymentRequiredResponse((name) => unpaid.headers.get(name));
+      const quote = challenge.accepts[0]?.extra.tollwayQuote;
+      expect(quote).toEqual(expect.any(String));
+
+      const payment = await client.createPaymentPayload(challenge);
+      expect(payment.accepted.extra.tollwayQuote).toBe(quote);
+
+      const paid = await fetch(url, { headers: http.encodePaymentSignatureHeader(payment) });
+      expect(paid.status).toBe(200);
+      const receipt = decodeHeader<SignedReceipt>(paid.headers.get(TOLLWAY_RECEIPT_HEADER) ?? "");
+      expect(receipt.receipt.amount).toBe("10001");
+      // The price function ran once, for the 402; the paid request used the quote.
+      expect(calls).toBe(1);
+    } finally {
+      await new Promise((resolve) => server.close(resolve));
     }
   });
 });

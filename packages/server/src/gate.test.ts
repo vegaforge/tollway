@@ -394,6 +394,201 @@ describe("createPaywall", () => {
     expect(price).toHaveBeenCalledTimes(2);
   });
 
+  describe("a price function that misbehaves", () => {
+    const cases: { name: string; price: () => unknown }[] = [
+      {
+        name: "throws",
+        price: () => {
+          throw new Error("pricing backend down");
+        },
+      },
+      { name: "returns more than maxAmount", price: () => "201" },
+      { name: "returns less than minAmount", price: () => "0" },
+      { name: "returns a negative amount", price: () => "-5" },
+      { name: "returns a decimal amount", price: () => "1.5" },
+      { name: "returns a number, not a string", price: () => 100 },
+    ];
+    for (const { name, price } of cases) {
+      it(`rejects the request, never charges, when it ${name}`, async () => {
+        const mock = createMockFacilitator();
+        const settle = vi.fn(mock.settle);
+        const gate = createPaywall(
+          {
+            ...config,
+            amount: price as () => string,
+            minAmount: "1",
+            maxAmount: "200",
+            quoteSecret: "a sufficiently long quote secret",
+          },
+          { signer, facilitator: { ...mock, settle } },
+        );
+        const challenge = await gate(baseRequest);
+        expect(challenge).toMatchObject({ kind: "rejected", status: 500 });
+        if (challenge.kind !== "rejected") return;
+        expect(challenge.reason).toMatch(/^invalid-amount: dynamic price/);
+
+        const paid = await gate({
+          ...baseRequest,
+          headers: { [PAYMENT_SIGNATURE_HEADER]: paymentHeader("misbehaving-price") },
+        });
+        expect(paid).toMatchObject({ kind: "rejected", status: 500 });
+        expect(settle).not.toHaveBeenCalled();
+      });
+    }
+  });
+
+  it("hands a price function's error to onPriceError, not to the agent", async () => {
+    const failure = new Error("pricing backend down: db password rejected");
+    const onPriceError = vi.fn();
+    const gate = createPaywall(
+      {
+        ...config,
+        amount: () => {
+          throw failure;
+        },
+        minAmount: "1",
+        maxAmount: "200",
+        quoteSecret: "a sufficiently long quote secret",
+      },
+      { signer, facilitator: createMockFacilitator(), onPriceError },
+    );
+    const outcome = await gate(baseRequest);
+    expect(onPriceError).toHaveBeenCalledWith(failure, baseRequest);
+    expect(outcome).toMatchObject({ kind: "rejected", status: 500 });
+    if (outcome.kind !== "rejected") return;
+    expect(outcome.reason).not.toContain("password");
+  });
+
+  it("replays a settled payment retried after its quote expired", async () => {
+    let now = 1_000_000;
+    const mock = createMockFacilitator();
+    const settle = vi.fn(mock.settle);
+    const gate = createPaywall(
+      {
+        ...config,
+        amount: () => "120",
+        minAmount: "1",
+        maxAmount: "200",
+        quoteSecret: "a sufficiently long quote secret",
+        quoteTtlSeconds: 30,
+      },
+      {
+        signer,
+        facilitator: { ...mock, settle },
+        cache: createInMemorySettlementCache(),
+        clock: () => now,
+      },
+    );
+    const challenge = await gate(baseRequest);
+    if (challenge.kind !== "payment-required") throw new Error("expected challenge");
+    const request = {
+      ...baseRequest,
+      headers: { [PAYMENT_SIGNATURE_HEADER]: payChallenge(challenge, "settled-then-expired") },
+    };
+    const paid = await gate(request);
+    expect(paid).toMatchObject({ kind: "settled", replayed: false });
+
+    // A 402 here would make a stock client pay a second time.
+    now += 31_000;
+    const retry = await gate(request);
+    expect(retry).toMatchObject({ kind: "settled", replayed: true });
+    expect(settle).toHaveBeenCalledTimes(1);
+  });
+
+  describe("quote secret rotation", () => {
+    const priced = {
+      ...config,
+      amount: () => "100",
+      minAmount: "1",
+      maxAmount: "200",
+    };
+
+    async function quoteSignedWith(quoteSecret: string) {
+      const gate = createPaywall(
+        { ...priced, quoteSecret },
+        { signer, facilitator: createMockFacilitator() },
+      );
+      const challenge = await gate(baseRequest);
+      if (challenge.kind !== "payment-required") throw new Error("expected challenge");
+      return challenge;
+    }
+
+    it("accepts a quote signed with a previous secret", async () => {
+      const challenge = await quoteSignedWith("the old quote secret");
+      const gate = createPaywall(
+        {
+          ...priced,
+          quoteSecret: "the new quote secret",
+          previousQuoteSecrets: ["the old quote secret"],
+        },
+        { signer, facilitator: createMockFacilitator() },
+      );
+      const outcome = await gate({
+        ...baseRequest,
+        headers: { [PAYMENT_SIGNATURE_HEADER]: payChallenge(challenge, "rotated") },
+      });
+      expect(outcome).toMatchObject({ kind: "settled" });
+    });
+
+    it("refuses a quote whose secret was dropped", async () => {
+      const challenge = await quoteSignedWith("the old quote secret");
+      const gate = createPaywall(
+        { ...priced, quoteSecret: "the new quote secret" },
+        { signer, facilitator: createMockFacilitator() },
+      );
+      const outcome = await gate({
+        ...baseRequest,
+        headers: { [PAYMENT_SIGNATURE_HEADER]: payChallenge(challenge, "dropped") },
+      });
+      expect(outcome.kind).toBe("payment-required");
+    });
+
+    it("rejects an empty previous secret at construction", () => {
+      expect(() =>
+        createPaywall(
+          { ...priced, quoteSecret: "the new quote secret", previousQuoteSecrets: [""] },
+          { signer, facilitator: createMockFacilitator() },
+        ),
+      ).toThrow(/previousQuoteSecrets/);
+    });
+  });
+
+  it("does not let a payment settled under one quote unlock a new price", async () => {
+    let current = "101";
+    const mock = createMockFacilitator();
+    const settle = vi.fn(mock.settle);
+    const gate = createPaywall(
+      {
+        ...config,
+        amount: () => current,
+        minAmount: "1",
+        maxAmount: "200",
+        quoteSecret: "a sufficiently long quote secret",
+      },
+      { signer, facilitator: { ...mock, settle }, cache: createInMemorySettlementCache() },
+    );
+    const first = await gate(baseRequest);
+    if (first.kind !== "payment-required") throw new Error("expected challenge");
+    const paid = await gate({
+      ...baseRequest,
+      headers: { [PAYMENT_SIGNATURE_HEADER]: payChallenge(first, "quoted-transaction") },
+    });
+    expect(paid).toMatchObject({ kind: "settled", replayed: false });
+
+    // The price moves. A fresh, valid quote at the new price, wrapped around
+    // the transaction that already settled at the old one, must not replay
+    // the old receipt.
+    current = "150";
+    const second = await gate(baseRequest);
+    if (second.kind !== "payment-required") throw new Error("expected challenge");
+    const replay = await gate({
+      ...baseRequest,
+      headers: { [PAYMENT_SIGNATURE_HEADER]: payChallenge(second, "quoted-transaction") },
+    });
+    expect(replay).toMatchObject({ kind: "rejected", status: 409 });
+    expect(settle).toHaveBeenCalledTimes(1);
+  });
+
   it("does not let a quote for one resource pay for another", async () => {
     const price = vi.fn().mockReturnValue("100");
     const gate = createPaywall(
