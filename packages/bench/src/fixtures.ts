@@ -4,6 +4,7 @@ import {
   createMockFacilitator,
   createMockMppChargeHandler,
   createPaywall,
+  encodePaymentSignatureHeader,
   type Gate,
   type GateOutcome,
   type PaywallConfig,
@@ -49,11 +50,44 @@ export const BENCH_OPTIONS = {
 export const signer = await Ed25519Signer.generate("bench-key");
 
 /**
- * Returns a function that yields a new payment credential on every call:
- * `<prefix>-0`, `<prefix>-1`, and so on. A fresh settlement needs a payment
- * the cache has never seen, and a counter gives that without randomness.
+ * A PAYMENT-SIGNATURE header value as a stock x402 V2 client writes it: the
+ * standard-base64 JSON of a `PaymentPayload` that accepts the bench price.
+ * The mock facilitator derives the payer and nonce from `transaction`, so
+ * two headers with the same transaction are the same payment.
+ */
+export function paymentHeader(transaction: string): string {
+  return encodePaymentSignatureHeader({
+    x402Version: 2,
+    accepted: {
+      scheme: "exact",
+      network: "stellar:testnet",
+      asset: PRICE.asset,
+      amount: PRICE.amount,
+      payTo: PRICE.payTo,
+      maxTimeoutSeconds: 60,
+      extra: {},
+    },
+    payload: { transaction },
+  });
+}
+
+/**
+ * Returns a function that yields a new payment header on every call, for
+ * the transactions `<prefix>-0`, `<prefix>-1`, and so on. A fresh settlement
+ * needs a payment the cache has never seen, and a counter gives that
+ * without randomness.
  */
 export function paymentSequence(prefix: string): () => string {
+  const nextCredential = credentialSequence(prefix);
+  return () => paymentHeader(nextCredential());
+}
+
+/**
+ * Returns a function that yields a new raw credential on every call:
+ * `<prefix>-0`, `<prefix>-1`, and so on. The mock MPP handler takes the
+ * credential as is from `Authorization: Payment <credential>`.
+ */
+export function credentialSequence(prefix: string): () => string {
   let next = 0;
   return () => `${prefix}-${next++}`;
 }
@@ -100,7 +134,7 @@ export async function seedOutcome(): Promise<GateOutcome> {
   return gate({
     method: "GET",
     url: RESOURCE_PATH,
-    headers: { "PAYMENT-SIGNATURE": "seed-payment" },
+    headers: { "PAYMENT-SIGNATURE": paymentHeader("seed-payment") },
   });
 }
 

@@ -1,7 +1,7 @@
 import { createServer } from "node:http";
 import { expressPaywall } from "@vegaforge/tollway-adapter-express";
-import type { PaymentOffer } from "@vegaforge/tollway-core";
 import type { Gate, GateOutcome } from "@vegaforge/tollway-server";
+import { encodePaymentSignatureHeader } from "@vegaforge/tollway-server";
 import { createEd25519Signer, ExactStellarScheme, STELLAR_TESTNET_CAIP2 } from "@x402/stellar";
 import express from "express";
 import { listen } from "./tls-proxy.js";
@@ -19,6 +19,9 @@ export const MAX_TIMEOUT_SECONDS = 60;
 export const SPONSORED_FEES = { areFeesSponsored: true };
 
 export const PAID_PATH = "/paid/quote";
+
+/** The x402 requirements the local client signs against. */
+export type X402Requirements = Parameters<ExactStellarScheme["createPaymentPayload"]>[1];
 
 export type PaidService = {
   url: string;
@@ -44,31 +47,24 @@ export async function startPaidService(gate: Gate): Promise<PaidService> {
 }
 
 /**
- * Signs an x402 payment for an offer, the way `createStellarPayer` in
- * apps/demo/src/demo.ts does: `@x402/stellar`'s client scheme builds and
- * signs a SEP-41 transfer and returns the base64 transaction that goes in
- * PAYMENT-SIGNATURE. `amount` overrides the offer's amount to build a
- * payment for the wrong price.
+ * Signs an x402 V2 payment for one requirement, the way `createStellarPayer`
+ * in apps/demo/src/demo.ts does: `@x402/stellar`'s client scheme builds and
+ * signs a SEP-41 transfer, and the result is encoded as the spec's
+ * PAYMENT-SIGNATURE value. `amount` overrides the requirement's amount to
+ * build a payment for the wrong price.
  */
 export function createX402Payer(options: { secret: string; rpcUrl: string }) {
   const signer = createEd25519Signer(options.secret, STELLAR_TESTNET_CAIP2);
   const scheme = new ExactStellarScheme(signer, { url: options.rpcUrl });
-  return async (offer: PaymentOffer, overrides: { amount?: string } = {}): Promise<string> => {
-    if (offer.network !== "testnet") {
-      throw new Error(`the local suite only pays testnet offers, got "${offer.network}"`);
-    }
-    const { payload } = await scheme.createPaymentPayload(2, {
-      scheme: "exact",
-      network: STELLAR_TESTNET_CAIP2,
-      asset: offer.asset,
-      amount: overrides.amount ?? offer.amount,
-      payTo: offer.payTo,
-      maxTimeoutSeconds: MAX_TIMEOUT_SECONDS,
-      extra: SPONSORED_FEES,
-    });
+  return async (
+    requirement: X402Requirements,
+    overrides: { amount?: string } = {},
+  ): Promise<string> => {
+    const accepted = { ...requirement, amount: overrides.amount ?? requirement.amount };
+    const { payload } = await scheme.createPaymentPayload(2, accepted);
     if (typeof payload.transaction !== "string") {
       throw new Error("@x402/stellar returned a payment payload without a transaction");
     }
-    return payload.transaction;
+    return encodePaymentSignatureHeader({ x402Version: 2, accepted, payload });
   };
 }

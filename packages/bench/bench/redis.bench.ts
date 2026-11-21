@@ -9,6 +9,7 @@ import {
   BENCH_OPTIONS,
   createBenchGate,
   expectSettled,
+  paymentHeader,
   paymentSequence,
   RESOURCE_PATH,
 } from "../src/fixtures.js";
@@ -24,7 +25,7 @@ import {
 
 let gate: Gate;
 const nextPayment = paymentSequence("redis-x402");
-const REPLAYED_PAYMENT = "redis-replayed-payment";
+const REPLAYED_PAYMENT = paymentHeader("redis-replayed-payment");
 
 beforeAll(async () => {
   // ioredis-mock's types describe the full ioredis client, whose overloads

@@ -5,6 +5,7 @@ import {
   createMockMppChargeHandler,
   createPaywall,
   createRouteTable,
+  encodePaymentSignatureHeader,
   type MppChargeHandler,
   PAYMENT_SIGNATURE_HEADER,
   type PaywallConfig,
@@ -19,6 +20,23 @@ const config: PaywallConfig = {
   payTo: "GSERVICE",
   network: "testnet",
 };
+
+/** A standard-base64 x402 V2 payment header, as a stock client writes it. */
+function paymentHeader(transaction = "mock-signed-auth-entry"): string {
+  return encodePaymentSignatureHeader({
+    x402Version: 2,
+    accepted: {
+      scheme: "exact",
+      network: "stellar:testnet",
+      asset: config.asset,
+      amount: config.amount,
+      payTo: config.payTo,
+      maxTimeoutSeconds: 60,
+      extra: {},
+    },
+    payload: { transaction },
+  });
+}
 
 async function buildApp() {
   const signer = await Ed25519Signer.generate("test-key");
@@ -38,14 +56,14 @@ describe("honoPaywall", () => {
     const response = await app.request("/quotes/latest");
 
     expect(response.status).toBe(402);
-    const challenge = (await response.json()) as { amount: string };
-    expect(challenge.amount).toBe("10000");
+    const challenge = (await response.json()) as { accepts: Array<{ amount: string }> };
+    expect(challenge.accepts[0]?.amount).toBe("10000");
   });
 
   it("serves the resource once a valid payment is supplied", async () => {
     const app = await buildApp();
     const response = await app.request("/quotes/latest", {
-      headers: { [PAYMENT_SIGNATURE_HEADER]: "mock-signed-auth-entry" },
+      headers: { [PAYMENT_SIGNATURE_HEADER]: paymentHeader() },
     });
 
     expect(response.status).toBe(200);
@@ -83,7 +101,7 @@ describe("honoPaywall method binding", () => {
     });
     const app = new Hono();
     app.on(["GET", "POST"], "/report", honoPaywall(gate), (c) => c.json({ ok: true }));
-    const headers = { [PAYMENT_SIGNATURE_HEADER]: "mock-signed-auth-entry-method" };
+    const headers = { [PAYMENT_SIGNATURE_HEADER]: paymentHeader("mock-signed-auth-entry-method") };
 
     const read = await app.request("/report", { headers });
     expect(read.status).toBe(200);

@@ -24,7 +24,7 @@ declare module "fastify" {
 
 /**
  * Wraps a gate as a Fastify `preHandler` hook. On a settled payment it
- * sets the PAYMENT-RESPONSE header, attaches the receipt to
+ * sets the PAYMENT-RESPONSE and TOLLWAY-RECEIPT headers, attaches the receipt to
  * `request.tollwayReceipt`, and returns so the downstream route handler
  * runs. Otherwise it answers the request itself (402 with the challenge,
  * or the rejection status).

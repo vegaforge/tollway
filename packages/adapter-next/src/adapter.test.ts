@@ -5,6 +5,7 @@ import {
   createMockMppChargeHandler,
   createPaywall,
   createRouteTable,
+  encodePaymentSignatureHeader,
   type MppChargeHandler,
   PAYMENT_SIGNATURE_HEADER,
   type PaywallConfig,
@@ -20,6 +21,23 @@ const config: PaywallConfig = {
   network: "testnet",
 };
 
+/** A standard-base64 x402 V2 payment header, as a stock client writes it. */
+function paymentHeader(transaction = "mock-signed-auth-entry"): string {
+  return encodePaymentSignatureHeader({
+    x402Version: 2,
+    accepted: {
+      scheme: "exact",
+      network: "stellar:testnet",
+      asset: config.asset,
+      amount: config.amount,
+      payTo: config.payTo,
+      maxTimeoutSeconds: 60,
+      extra: {},
+    },
+    payload: { transaction },
+  });
+}
+
 async function buildHandler() {
   const signer = await Ed25519Signer.generate("test-key");
   const gate = createPaywall(config, { signer, facilitator: createMockFacilitator() });
@@ -34,15 +52,15 @@ describe("withPaywall", () => {
     const response = await handler(new Request("http://example.test/quotes/latest"));
 
     expect(response.status).toBe(402);
-    const challenge = (await response.json()) as { amount: string };
-    expect(challenge.amount).toBe("10000");
+    const challenge = (await response.json()) as { accepts: Array<{ amount: string }> };
+    expect(challenge.accepts[0]?.amount).toBe("10000");
   });
 
   it("runs the wrapped handler and adds the PAYMENT-RESPONSE header once payment settles", async () => {
     const handler = await buildHandler();
     const response = await handler(
       new Request("http://example.test/quotes/latest", {
-        headers: { [PAYMENT_SIGNATURE_HEADER]: "mock-signed-auth-entry" },
+        headers: { [PAYMENT_SIGNATURE_HEADER]: paymentHeader() },
       }),
     );
 
@@ -72,7 +90,7 @@ describe("withPaywall", () => {
 
     const response = await handler(
       new Request("http://example.test/quotes/latest", {
-        headers: { [PAYMENT_SIGNATURE_HEADER]: "mock-signed-auth-entry" },
+        headers: { [PAYMENT_SIGNATURE_HEADER]: paymentHeader() },
       }),
     );
 
@@ -113,7 +131,7 @@ describe("withPaywall method binding", () => {
     const handler = withPaywall(gate, async () => Response.json({ ok: true }));
     const GET = handler;
     const POST = handler;
-    const headers = { [PAYMENT_SIGNATURE_HEADER]: "mock-signed-auth-entry-method" };
+    const headers = { [PAYMENT_SIGNATURE_HEADER]: paymentHeader("mock-signed-auth-entry-method") };
 
     const read = await GET(new Request("http://example.test/report", { headers }));
     expect(read.status).toBe(200);
@@ -135,7 +153,7 @@ describe("withPaywall with a real NextRequest", () => {
 
     const paid = await handler(
       new NextRequest("http://example.test/quotes/latest", {
-        headers: { [PAYMENT_SIGNATURE_HEADER]: "mock-signed-auth-entry" },
+        headers: { [PAYMENT_SIGNATURE_HEADER]: paymentHeader() },
       }),
     );
     expect(paid.status).toBe(200);

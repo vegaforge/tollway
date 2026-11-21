@@ -4,9 +4,11 @@ import {
   BENCH_OPTIONS,
   CONCURRENT_CALLERS,
   createBenchGate,
+  credentialSequence,
   expectChallenge,
   expectSettled,
   fullInMemoryCache,
+  paymentHeader,
   paymentSequence,
   RESOURCE_PATH,
   seedOutcome,
@@ -22,9 +24,9 @@ let x402Gate: Gate;
 let replayGate: Gate;
 let mppGate: Gate;
 const nextX402Payment = paymentSequence("gate-x402");
-const nextMppPayment = paymentSequence("gate-mpp");
+const nextMppPayment = credentialSequence("gate-mpp");
 const nextConcurrentPayment = paymentSequence("gate-concurrent");
-const REPLAYED_PAYMENT = "gate-replayed-payment";
+const REPLAYED_PAYMENT = paymentHeader("gate-replayed-payment");
 
 beforeAll(async () => {
   const seed = await seedOutcome();

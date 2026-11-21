@@ -2,6 +2,7 @@ import { Ed25519Signer } from "@vegaforge/tollway-core";
 import { beforeAll, describe, expect, it } from "vitest";
 import { createInMemorySettlementCache } from "./cache.js";
 import { createMockFacilitator } from "./facilitator.js";
+import { encodePaymentSignatureHeader } from "./headers.js";
 import { createRouteTable } from "./route-table.js";
 
 const config = {
@@ -42,7 +43,21 @@ describe("route-table matching", () => {
 
   it("rejects a receipt replay across routes with the same payment", async () => {
     const routes = table({ "GET /first": config, "GET /second": config });
-    const signature = { "payment-signature": "mock-signed-auth-entry" };
+    const signature = {
+      "payment-signature": encodePaymentSignatureHeader({
+        x402Version: 2,
+        accepted: {
+          scheme: "exact",
+          network: "stellar:testnet",
+          asset: config.asset,
+          amount: config.amount,
+          payTo: config.payTo,
+          maxTimeoutSeconds: 60,
+          extra: {},
+        },
+        payload: { transaction: "mock-signed-auth-entry" },
+      }),
+    };
     const firstMatch = routes.match("GET", "/first");
     const secondMatch = routes.match("GET", "/second");
     expect(firstMatch).toBeDefined();

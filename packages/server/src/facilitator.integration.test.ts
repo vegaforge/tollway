@@ -48,7 +48,22 @@ describe.skipIf(!RUN)("createHttpFacilitator (integration)", () => {
       network: "testnet",
       models: ["x402"],
     };
-    const payment: X402Payment = { model: "x402", paymentSignature: transaction as string };
+    const payment: X402Payment = {
+      model: "x402",
+      payload: {
+        x402Version: 2,
+        accepted: {
+          scheme: "exact",
+          network: "stellar:testnet",
+          asset: offer.asset,
+          amount: offer.amount,
+          payTo: offer.payTo,
+          maxTimeoutSeconds: 60,
+          extra: {},
+        },
+        payload: { transaction: transaction as string },
+      },
+    };
 
     const result = await facilitator.verify({ payment, offer });
     // The facilitator may accept or reject; either way it returns a structured result.

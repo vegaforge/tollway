@@ -4,7 +4,7 @@ import { describe, expect, it } from "vitest";
 import { createInMemorySettlementCache } from "./cache.js";
 import { createMockFacilitator } from "./facilitator.js";
 import { createPaywall, type PaywallConfig } from "./gate.js";
-import { decodeHeader, PAYMENT_SIGNATURE_HEADER } from "./headers.js";
+import { decodeHeader, encodePaymentSignatureHeader, PAYMENT_SIGNATURE_HEADER } from "./headers.js";
 
 const config: PaywallConfig = {
   amount: "10000",
@@ -33,7 +33,21 @@ describe("TM-01 settled payment replay", () => {
     const request = {
       method: "GET",
       url: "/resource",
-      headers: { [PAYMENT_SIGNATURE_HEADER]: "one-payment" },
+      headers: {
+        [PAYMENT_SIGNATURE_HEADER]: encodePaymentSignatureHeader({
+          x402Version: 2,
+          accepted: {
+            scheme: "exact",
+            network: "stellar:testnet",
+            asset: config.asset,
+            amount: config.amount,
+            payTo: config.payTo,
+            maxTimeoutSeconds: 60,
+            extra: {},
+          },
+          payload: { transaction: "one-payment" },
+        }),
+      },
     };
     const first = await gate(request);
     const replay = await gate(request);
