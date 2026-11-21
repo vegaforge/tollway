@@ -2,6 +2,7 @@ import { TollwayError } from "@vegaforge/tollway-core";
 import { createInMemorySettlementCache } from "./cache.js";
 import {
   createPaywallWithInFlight,
+  type DynamicPriceFunction,
   type Gate,
   type InFlightSettlementResult,
   type PaywallConfig,
@@ -37,7 +38,7 @@ export interface RouteTableEntry {
   key: string;
   method: string;
   pattern: string;
-  amount: string;
+  amount: string | DynamicPriceFunction;
   asset: string;
   payTo: string;
   network: PaywallConfig["network"];
@@ -129,7 +130,7 @@ function compileEntry(key: string, config: PaywallConfig): CompiledRoute {
     throw new TollwayError("policy-blocked", `unknown method in route entry: ${key}`);
   }
   const pattern = normalizePattern(rawPattern, key);
-  if (!/^[0-9]+$/.test(config.amount)) {
+  if (typeof config.amount === "string" && !/^[0-9]+$/.test(config.amount)) {
     throw new TollwayError(
       "invalid-amount",
       `invalid amount in route entry ${key}: ${config.amount}`,

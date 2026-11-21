@@ -15,6 +15,12 @@ export const PAYMENT_RESPONSE_HEADER = "PAYMENT-RESPONSE";
  * `SettleResponse`, because `PAYMENT-RESPONSE` belongs to x402 now.
  */
 export const TOLLWAY_RECEIPT_HEADER = "TOLLWAY-RECEIPT";
+/**
+ * A signed dynamic-price quote. The gate sends it on the 402 beside the x402
+ * challenge (which also carries it in `accepts[0].extra.tollwayQuote`); a
+ * client that does not speak x402, such as an MPP client, echoes it here.
+ */
+export const TOLLWAY_QUOTE_HEADER = "TOLLWAY-QUOTE";
 
 /** MPP sends its credential as `Authorization: Payment <credential>`. */
 export const MPP_AUTHORIZATION_HEADER = "Authorization";

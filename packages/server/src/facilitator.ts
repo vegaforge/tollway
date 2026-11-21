@@ -169,7 +169,12 @@ export function toPaymentRequirements(
     amount: offer.amount,
     payTo: offer.payTo,
     maxTimeoutSeconds: terms.maxTimeoutSeconds ?? DEFAULT_MAX_TIMEOUT_SECONDS,
-    extra: terms.extra ?? {},
+    // A dynamic-price quote rides in `extra`, so the client signs it and
+    // echoes it back unchanged; the facilitator ignores keys it does not read.
+    extra:
+      offer.quote === undefined
+        ? (terms.extra ?? {})
+        : { ...terms.extra, tollwayQuote: offer.quote },
   };
 }
 

@@ -1,0 +1,32 @@
+---
+title: Smart-account policy mapping
+description: Compare Tollway policy rules with OpenZeppelin Stellar spending limits
+---
+
+Tollway can plan an OpenZeppelin Stellar spending-limit policy, but it never
+holds a smart-account key or submits the installation transaction. The account
+owner signs the unsigned invocation description returned by the planner.
+
+The mapping was checked against the [OpenZeppelin Stellar policy documentation](https://docs.openzeppelin.com/stellar-contracts/accounts/policies)
+and its [spending-limit source](https://github.com/OpenZeppelin/stellar-contracts/tree/main/packages/stellar-contracts/src/accounts/policies/spending_limit).
+The policy applies to token `transfer` calls scoped to a token contract and
+counts amount in a rolling ledger window.
+
+| Tollway rule | On-chain equivalent | Residual application enforcement |
+| --- | --- | --- |
+| `budgets.daily` | Per-token spending limit and supplied ledger period | UTC-day boundary is not the same as a rolling ledger window |
+| `budgets.total` | None | Lifetime total |
+| `perService` | None | Payee/counterparty scope |
+| `rateLimit` | None | Request count |
+| `anomaly.maxSpendPerMinute` | None | Minute window |
+| `anomaly.adaptive` | None | EWMA baseline and warm-up state |
+| `perModel` | None | Settlement-model routing |
+
+`planSmartAccountPolicy()` returns constraints, unsigned installation
+descriptions, and residuals. `checkSmartAccountPolicy()` accepts a reader
+backed by Soroban simulation and reports installed limits as weaker, equal,
+stronger, or missing.
+
+The on-chain policy only helps when the payment actually authorises through the
+smart account. A facilitator or client path that signs from another payer does
+not receive this protection.
