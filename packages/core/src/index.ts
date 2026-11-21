@@ -9,8 +9,8 @@
 export { base64UrlToBytes, bytesToBase64Url, utf8Bytes } from "./encoding.js";
 export { NotImplementedError, TollwayError, type TollwayErrorCode } from "./errors.js";
 export {
-  createPolicyEngine,
   type AdaptiveAnomalyEvent,
+  createPolicyEngine,
   type PaymentIntent,
   type Policy,
   type PolicyEngine,
@@ -38,18 +38,6 @@ export {
   policyWindowSchema,
 } from "./policy-trace.js";
 export { canonicalBytes, canonicalJson, type JsonValue } from "./receipt/canonical.js";
-export {
-  checkSmartAccountPolicy,
-  planSmartAccountPolicy,
-  type InstalledSpendingLimit,
-  type SmartAccountCheck,
-  type SmartAccountConstraint,
-  type SmartAccountInvocation,
-  type SmartAccountPlan,
-  type SmartAccountPlannerOptions,
-  type SmartAccountPolicyReader,
-  type SmartAccountResidual,
-} from "./smart-account-policy.js";
 export {
   type BuildReceiptInput,
   buildReceipt,
@@ -81,6 +69,18 @@ export {
   type RouteReason,
   type TrafficSnapshot,
 } from "./router.js";
+export {
+  checkSmartAccountPolicy,
+  type InstalledSpendingLimit,
+  planSmartAccountPolicy,
+  type SmartAccountCheck,
+  type SmartAccountConstraint,
+  type SmartAccountInvocation,
+  type SmartAccountPlan,
+  type SmartAccountPlannerOptions,
+  type SmartAccountPolicyReader,
+  type SmartAccountResidual,
+} from "./smart-account-policy.js";
 export {
   type MppChannelPayment,
   type MppChargePayment,

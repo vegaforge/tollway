@@ -1,7 +1,7 @@
 import { describe, expect, it, vi } from "vitest";
 import {
-  createChannelWatchtower,
   type ChannelWatchRpc,
+  createChannelWatchtower,
   type WatchtowerChannel,
 } from "./channel-watchtower.js";
 

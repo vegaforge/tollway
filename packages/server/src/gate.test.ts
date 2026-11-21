@@ -478,7 +478,12 @@ describe("TM-04 shared-lock duplicate settlement", () => {
     // The mock facilitator's nonce for this header, as the gate keys it.
     const verification = await facilitator.verify({
       payment: { model: "x402", paymentSignature: headers[PAYMENT_SIGNATURE_HEADER] },
-      offer: { ...config, amount: config.amount as string, resource: baseRequest.url, models: ["x402"] },
+      offer: {
+        ...config,
+        amount: config.amount as string,
+        resource: baseRequest.url,
+        models: ["x402"],
+      },
     });
     if (!verification.valid) throw new Error("expected the mock to accept the payment");
     const otherProcess = createRedisSettlementCache({ client, keyPrefix });

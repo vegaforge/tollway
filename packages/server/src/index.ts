@@ -18,6 +18,18 @@ export {
   type SettlementLock,
 } from "./cache.js";
 export {
+  type ChannelDispute,
+  type ChannelLoss,
+  type ChannelWatchRegistry,
+  type ChannelWatchRpc,
+  type ChannelWatchSettlement,
+  type ChannelWatchtower,
+  type CreateChannelWatchtowerOptions,
+  createChannelWatchtower,
+  createStellarChannelWatchRpc,
+  type WatchtowerChannel,
+} from "./channel-watchtower.js";
+export {
   createHttpFacilitator,
   createMockFacilitator,
   type FacilitatorClient,
@@ -29,9 +41,9 @@ export {
 } from "./facilitator.js";
 export {
   createPaywall,
+  type DynamicPriceFunction,
   type Gate,
   type GateOutcome,
-  type DynamicPriceFunction,
   type PaywallConfig,
   type PaywallDeps,
   type TollwayRequest,
@@ -43,9 +55,9 @@ export {
   PAYMENT_REQUIRED_HEADER,
   PAYMENT_RESPONSE_HEADER,
   PAYMENT_SIGNATURE_HEADER,
-  TOLLWAY_QUOTE_HEADER,
   readHeader,
   readMppCredential,
+  TOLLWAY_QUOTE_HEADER,
 } from "./headers.js";
 export {
   createMockMppChargeHandler,
@@ -60,18 +72,6 @@ export {
   type MppChargeVerifyInput,
   type MppChargeVerifyResult,
 } from "./mpp-charge.js";
-export {
-  createChannelWatchtower,
-  createStellarChannelWatchRpc,
-  type ChannelDispute,
-  type ChannelLoss,
-  type ChannelWatchRegistry,
-  type ChannelWatchRpc,
-  type ChannelWatchSettlement,
-  type ChannelWatchtower,
-  type CreateChannelWatchtowerOptions,
-  type WatchtowerChannel,
-} from "./channel-watchtower.js";
 export {
   createRouteTable,
   type RouteTable,

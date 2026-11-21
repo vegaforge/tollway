@@ -1,5 +1,5 @@
-import type { StellarNetwork } from "@vegaforge/tollway-core";
 import { getChannelState, watchChannel } from "@stellar/mpp/channel/server";
+import type { StellarNetwork } from "@vegaforge/tollway-core";
 
 export type WatchtowerChannel = {
   channelId: string;

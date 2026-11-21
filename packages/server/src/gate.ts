@@ -1,5 +1,7 @@
 import {
+  base64UrlToBytes,
   buildReceipt,
+  bytesToBase64Url,
   canonicalJson,
   type ModelRouter,
   type MppChargePayment,
@@ -7,13 +9,11 @@ import {
   type ReceiptSigner,
   type SettlementModel,
   type SignedReceipt,
-  TollwayError,
   type StellarNetwork,
   signReceipt,
-  type X402Payment,
-  bytesToBase64Url,
-  base64UrlToBytes,
+  TollwayError,
   utf8Bytes,
+  type X402Payment,
 } from "@vegaforge/tollway-core";
 import type { SettlementCache, SettlementLock } from "./cache.js";
 import type { FacilitatorClient } from "./facilitator.js";
@@ -22,9 +22,9 @@ import {
   PAYMENT_REQUIRED_HEADER,
   PAYMENT_RESPONSE_HEADER,
   PAYMENT_SIGNATURE_HEADER,
-  TOLLWAY_QUOTE_HEADER,
   readHeader,
   readMppCredential,
+  TOLLWAY_QUOTE_HEADER,
 } from "./headers.js";
 import type { MppChargeHandler } from "./mpp-charge.js";
 
@@ -41,9 +41,7 @@ export type TollwayRequest = {
   headers: Record<string, string | string[] | undefined>;
 };
 
-export type DynamicPriceFunction = (
-  request: TollwayRequest,
-) => string | Promise<string>;
+export type DynamicPriceFunction = (request: TollwayRequest) => string | Promise<string>;
 
 /** What the service charges for a resource. */
 export type PaywallConfig = {

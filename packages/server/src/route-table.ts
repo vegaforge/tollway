@@ -2,9 +2,9 @@ import { TollwayError } from "@vegaforge/tollway-core";
 import { createInMemorySettlementCache } from "./cache.js";
 import {
   createPaywallWithInFlight,
+  type DynamicPriceFunction,
   type Gate,
   type InFlightSettlementResult,
-  type DynamicPriceFunction,
   type PaywallConfig,
   type PaywallDeps,
   type TollwayRequest,

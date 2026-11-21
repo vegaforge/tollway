@@ -173,7 +173,10 @@ function serviceKey(payee: string, asset: string): string {
 
 const FIXED_SCALE = 1_000_000n;
 
-function parseRational(value: { numerator: string; denominator: string }, label: string): [bigint, bigint] {
+function parseRational(
+  value: { numerator: string; denominator: string },
+  label: string,
+): [bigint, bigint] {
   const numerator = parseAmount(value.numerator);
   const denominator = parseAmount(value.denominator);
   if (numerator <= 0n || denominator <= 0n) {
@@ -190,12 +193,43 @@ function floorFixed(value: bigint): bigint {
   return value / FIXED_SCALE;
 }
 
-function updateAdaptive(state: AdaptiveState, sample: bigint, config: NonNullable<NonNullable<Policy["anomaly"]>["adaptive"]>): void {
-  const [alphaNumerator, alphaDenominator] = parseRational(config.smoothing, "anomaly.adaptive.smoothing");
-  if (alphaNumerator > alphaDenominator) {
-    throw new TollwayError("invalid-policy", "anomaly.adaptive.smoothing must be no greater than one");
+type AdaptiveConfig = NonNullable<NonNullable<Policy["anomaly"]>["adaptive"]>;
+
+/**
+ * The policy's adaptive anomaly section after its shape checks, or undefined
+ * when the policy has none. Every reader goes through here, so the checks
+ * live in one place.
+ */
+function adaptiveConfig(policy: Policy): AdaptiveConfig | undefined {
+  const config = policy.anomaly?.adaptive;
+  if (config === undefined) return undefined;
+  if (config.kind !== "ewma") {
+    throw new TollwayError("invalid-policy", `unknown adaptive anomaly detector: ${config.kind}`);
   }
-  const growth = config.maxBaselineGrowthPerMinute == null ? undefined : parseAmount(config.maxBaselineGrowthPerMinute);
+  if (!Number.isSafeInteger(config.warmupPeriods) || config.warmupPeriods < 1) {
+    throw new TollwayError(
+      "invalid-policy",
+      "anomaly.adaptive.warmupPeriods must be a positive integer",
+    );
+  }
+  return config;
+}
+
+function updateAdaptive(state: AdaptiveState, sample: bigint, config: AdaptiveConfig): void {
+  const [alphaNumerator, alphaDenominator] = parseRational(
+    config.smoothing,
+    "anomaly.adaptive.smoothing",
+  );
+  if (alphaNumerator > alphaDenominator) {
+    throw new TollwayError(
+      "invalid-policy",
+      "anomaly.adaptive.smoothing must be no greater than one",
+    );
+  }
+  const growth =
+    config.maxBaselineGrowthPerMinute == null
+      ? undefined
+      : parseAmount(config.maxBaselineGrowthPerMinute);
   const sampleFixed = sample * FIXED_SCALE;
   if (state.baseline === undefined) {
     state.baseline = sampleFixed;
@@ -425,8 +459,8 @@ const anomaly: RuleEvaluator = ({ policy, intent, amount, now, state }) => {
 
 const adaptiveAnomaly: RuleEvaluator = ({ policy, intent, amount, state }) => {
   const base = { id: "anomaly-adaptive", rule: "anomaly-adaptive" } as const;
-  const config = policy.anomaly?.adaptive;
-  if (config == null) {
+  const config = adaptiveConfig(policy);
+  if (config === undefined) {
     return {
       ...base,
       configured: false,
@@ -437,12 +471,6 @@ const adaptiveAnomaly: RuleEvaluator = ({ policy, intent, amount, state }) => {
       window: null,
       detail: "policy sets no adaptive anomaly detector",
     };
-  }
-  if (config.kind !== "ewma") {
-    throw new TollwayError("invalid-policy", `unknown adaptive anomaly detector: ${config.kind}`);
-  }
-  if (!Number.isSafeInteger(config.warmupPeriods) || config.warmupPeriods < 1) {
-    throw new TollwayError("invalid-policy", "anomaly.adaptive.warmupPeriods must be a positive integer");
   }
   const [sensitivityNumerator, sensitivityDenominator] = parseRational(
     config.sensitivity,
@@ -554,14 +582,8 @@ export function createPolicyEngine(
   }
 
   function rollAdaptive(now: number): void {
-    const config = policy.anomaly?.adaptive;
+    const config = adaptiveConfig(policy);
     if (config === undefined) return;
-    if (config.kind !== "ewma") {
-      throw new TollwayError("invalid-policy", `unknown adaptive anomaly detector: ${config.kind}`);
-    }
-    if (!Number.isSafeInteger(config.warmupPeriods) || config.warmupPeriods < 1) {
-      throw new TollwayError("invalid-policy", "anomaly.adaptive.warmupPeriods must be a positive integer");
-    }
     const bucketStart = Math.floor(now / WINDOW_MS) * WINDOW_MS;
     for (const detector of state.adaptive.values()) {
       while (detector.bucketStart < bucketStart) {
@@ -584,14 +606,8 @@ export function createPolicyEngine(
 
     const now = clock();
     rollAdaptive(now);
-    const config = policy.anomaly?.adaptive;
+    const config = adaptiveConfig(policy);
     if (config !== undefined) {
-      if (config.kind !== "ewma") {
-        throw new TollwayError("invalid-policy", `unknown adaptive anomaly detector: ${config.kind}`);
-      }
-      if (!Number.isSafeInteger(config.warmupPeriods) || config.warmupPeriods < 1) {
-        throw new TollwayError("invalid-policy", "anomaly.adaptive.warmupPeriods must be a positive integer");
-      }
       const key = adaptiveKey(intent, config.scope ?? "asset");
       const bucketStart = Math.floor(now / WINDOW_MS) * WINDOW_MS;
       const detector = state.adaptive.get(key) ?? {
@@ -648,7 +664,11 @@ export function createPolicyEngine(
       const decision = decisionFromTrace(trace);
       const adaptiveEntry = trace.entries.find((entry) => entry.id === "anomaly-adaptive");
       if (!decision.allowed && adaptiveEntry?.outcome === "fail") {
-        await opts?.onAnomalyDetected?.({ type: "anomaly.detected", intent, detail: adaptiveEntry.detail });
+        await opts?.onAnomalyDetected?.({
+          type: "anomaly.detected",
+          intent,
+          detail: adaptiveEntry.detail,
+        });
       }
       return decision;
     },
