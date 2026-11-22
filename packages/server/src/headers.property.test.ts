@@ -36,21 +36,45 @@ function expectDecodeToReturnValueOrThrow(value: string): void {
   }
 }
 
+/**
+ * JSON has no negative zero: `JSON.stringify(-0)` is `"0"`. That is a limit
+ * of the format, not of the header codec, so the round trip expects `0`
+ * wherever the input held `-0` and is exact everywhere else.
+ */
+function withoutNegativeZero(value: unknown): unknown {
+  if (Object.is(value, -0)) return 0;
+  if (Array.isArray(value)) return value.map(withoutNegativeZero);
+  if (value !== null && typeof value === "object") {
+    return Object.fromEntries(
+      Object.entries(value).map(([key, entry]) => [key, withoutNegativeZero(entry)]),
+    );
+  }
+  return value;
+}
+
+// `binary` strings cover every UTF-16 code unit, so they include non-ASCII
+// text, astral characters and lone surrogates. fast-check's default unit is
+// ASCII only.
+const ANY_TEXT = { unit: "binary" } as const;
+
 describe("header properties", () => {
   it("round-trips arbitrary JSON values through the encode/decode pair", () => {
     fc.assert(
-      fc.property(fc.jsonValue(), (value) => {
-        const expected: unknown = JSON.parse(JSON.stringify(value));
-        expect(decodeHeader<unknown>(encodeHeader(value))).toEqual(expected);
+      fc.property(fc.jsonValue({ stringUnit: "binary" }), (value) => {
+        expect(decodeHeader<unknown>(encodeHeader(value))).toEqual(withoutNegativeZero(value));
       }),
       ASSERT_OPTS,
     );
   });
 
+  it("turns negative zero into zero, as JSON does", () => {
+    expect(Object.is(decodeHeader<{ n: number }>(encodeHeader({ n: -0 })).n, 0)).toBe(true);
+  });
+
   it("round-trips non-ASCII text, including lone surrogates", () => {
     fc.assert(
-      fc.property(fc.string({ maxLength: 40 }), (text) => {
-        const value = { note: text, sample: "🚀-ñ-漢字" };
+      fc.property(fc.string({ ...ANY_TEXT, maxLength: 40 }), (text) => {
+        const value = { note: text, sample: "🚀-ñ-漢字", lone: "\ud800x\udc00" };
         expect(decodeHeader<typeof value>(encodeHeader(value))).toEqual(value);
       }),
       ASSERT_OPTS,
@@ -95,7 +119,7 @@ describe("header properties", () => {
 
   it("never returns undefined or a non-Error throw for arbitrary strings", () => {
     fc.assert(
-      fc.property(fc.string({ maxLength: 200 }), (raw) => {
+      fc.property(fc.string({ ...ANY_TEXT, maxLength: 200 }), (raw) => {
         expectDecodeToReturnValueOrThrow(raw);
       }),
       ASSERT_OPTS,

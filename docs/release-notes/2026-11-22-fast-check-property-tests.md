@@ -22,7 +22,16 @@ total, per-service and 60-second rate ceilings. Server covers the
 `encodeHeader`/`decodeHeader` pair for arbitrary JSON including non-ASCII,
 case-insensitive and first-value header reads, malformed-header fuzzing, and
 the Redis cache boundary: arbitrary stored text is either a miss or a value
-that parses as a signed receipt.
+that parses as a signed receipt, and stored values close to a real entry
+(wrong or empty `method`, extra keys, one receipt field replaced, a bare
+legacy receipt) return exactly the documented entry or a miss.
+
+Strings are generated over every UTF-16 code unit, so non-ASCII text, astral
+characters and lone surrogates are covered; numbers include fractions, `-0`
+and both ends of the exponent range. The policy limits are set so each
+ceiling actually blocks payments during the run, and the test asserts that it
+did. JSON has no negative zero, so `-0` comes back as `0` from the header and
+canonical round trips; the tests state that rather than normalising it away.
 
 No production behaviour changes. These properties state the behaviour the
 current functions already claim, so they keep passing when issue #165 replaces

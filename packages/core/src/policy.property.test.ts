@@ -7,19 +7,25 @@ import { type SettlementModel, settlementModels } from "./types.js";
 const SEED = 0x517fa72e;
 const ASSERT_OPTS = { seed: SEED, numRuns: 200 };
 
-const DAILY_LIMIT = 10_000n;
-const TOTAL_LIMIT = 50_000n;
-const SERVICE_CAP = 2_000n;
+// The ceilings sit below what the per-service caps allow together, and one
+// payee has no cap, so every ceiling can be the one that blocks. A limit no
+// sequence can reach would let a broken check pass.
+const DAILY_LIMIT = 1_500n;
+const TOTAL_LIMIT = 2_000n;
+const SERVICE_CAP = 600n;
 const REQUESTS_PER_MINUTE = 3;
 const WINDOW_MS = 60_000;
 const START_MS = Date.parse("2026-06-10T20:00:00Z");
 
-const PAYEES = ["svc-a", "svc-b", "svc-c"] as const;
+const CAPPED_PAYEES = ["svc-a", "svc-b", "svc-c"] as const;
+const PAYEES = [...CAPPED_PAYEES, "svc-uncapped"] as const;
 const ASSETS = ["USDC:GA5Z", "EURC:GBBB"] as const;
 
 const POLICY: Policy = {
   budgets: { daily: DAILY_LIMIT.toString(), total: TOTAL_LIMIT.toString() },
-  perService: Object.fromEntries(PAYEES.map((payee) => [payee, { cap: SERVICE_CAP.toString() }])),
+  perService: Object.fromEntries(
+    CAPPED_PAYEES.map((payee) => [payee, { cap: SERVICE_CAP.toString() }]),
+  ),
   rateLimit: { requestsPerMinute: REQUESTS_PER_MINUTE },
 };
 
@@ -32,7 +38,11 @@ function textArb(minLength: number, maxLength: number): fc.Arbitrary<string> {
 }
 
 const amountArb = fc
-  .oneof(fc.bigInt({ min: 0n, max: 300n }), fc.constantFrom(1_999n, 2_000n, 2_001n))
+  .oneof(
+    fc.bigInt({ min: 0n, max: 300n }),
+    fc.bigInt({ min: 300n, max: 1_600n }),
+    fc.constantFrom(599n, 600n, 601n, 1_499n, 1_500n, 1_501n, 1_999n, 2_000n, 2_001n),
+  )
   .map(String);
 
 type Step = {
@@ -50,8 +60,12 @@ const stepArb: fc.Arbitrary<Step> = fc.record({
   asset: fc.constantFrom(...ASSETS),
   model: fc.constantFrom(...settlementModels),
   resource: textArb(1, 12),
-  // Six hours can cross a UTC midnight, which exercises the daily reset.
-  stepMs: fc.integer({ min: 0, max: 6 * 60 * 60 * 1000 }),
+  // Short steps fill the one-minute rate window; six hours can cross a UTC
+  // midnight, which exercises the daily reset.
+  stepMs: fc.oneof(
+    fc.integer({ min: 0, max: 30_000 }),
+    fc.integer({ min: 0, max: 6 * 60 * 60 * 1000 }),
+  ),
 });
 
 function intentFor(step: Step): PaymentIntent {
@@ -62,6 +76,10 @@ function intentFor(step: Step): PaymentIntent {
     asset: step.asset,
     model: step.model,
   };
+}
+
+function serviceCap(payee: string): bigint | null {
+  return (CAPPED_PAYEES as readonly string[]).includes(payee) ? SERVICE_CAP : null;
 }
 
 function serviceKey(payee: string, asset: string): string {
@@ -95,10 +113,15 @@ function traceCurrent(
   return trace.entries.find((entry) => entry.id === id)?.current ?? null;
 }
 
+const CEILINGS = ["budget-daily", "budget-total", "per-service", "rate-limit"] as const;
+
 describe("createPolicyEngine invariants", () => {
   it("never exceeds daily, total, per-service or rate ceilings over arbitrary sequences", async () => {
+    // Which ceiling blocked, across every run: the property only means
+    // something if each one actually blocks a payment at least once.
+    const blockedBy = new Set<string>();
     await fc.assert(
-      fc.asyncProperty(fc.array(stepArb, { maxLength: 18 }), async (steps) => {
+      fc.asyncProperty(fc.array(stepArb, { maxLength: 24 }), async (steps) => {
         let now = START_MS;
         const engine = createPolicyEngine(POLICY, { clock: () => now });
         const reference: ReferenceState = {
@@ -121,12 +144,15 @@ describe("createPolicyEngine invariants", () => {
           const intent = intentFor(step);
           const amount = BigInt(step.amount);
           const service = serviceKey(intent.payee, intent.asset);
+          const cap = serviceCap(intent.payee);
+          const before = await engine.evaluate(intent);
           const decision = await engine.check(intent);
+          if (!decision.allowed && before.blockedBy) blockedBy.add(before.blockedBy);
 
           const expectedAllowed =
             (reference.daily.get(intent.asset) ?? 0n) + amount <= DAILY_LIMIT &&
             (reference.total.get(intent.asset) ?? 0n) + amount <= TOTAL_LIMIT &&
-            (reference.service.get(service) ?? 0n) + amount <= SERVICE_CAP &&
+            (cap === null || (reference.service.get(service) ?? 0n) + amount <= cap) &&
             reference.allowedChecks.length + 1 <= REQUESTS_PER_MINUTE;
           expect(decision.allowed).toBe(expectedAllowed);
 
@@ -136,30 +162,30 @@ describe("createPolicyEngine invariants", () => {
             reference.daily.set(intent.asset, (reference.daily.get(intent.asset) ?? 0n) + amount);
             reference.total.set(intent.asset, (reference.total.get(intent.asset) ?? 0n) + amount);
             reference.service.set(service, (reference.service.get(service) ?? 0n) + amount);
-
-            const trace = await engine.evaluate(intent);
-            expect(traceCurrent(trace, "budget-daily")).toBe(
-              (reference.daily.get(intent.asset) ?? 0n).toString(),
-            );
-            expect(traceCurrent(trace, "budget-total")).toBe(
-              (reference.total.get(intent.asset) ?? 0n).toString(),
-            );
-            expect(traceCurrent(trace, "per-service")).toBe(
-              (reference.service.get(service) ?? 0n).toString(),
-            );
-            expect(traceCurrent(trace, "rate-limit")).toBe(
-              reference.allowedChecks.length.toString(),
-            );
           }
 
-          expect(reference.daily.get(intent.asset) ?? 0n).toBeLessThanOrEqual(DAILY_LIMIT);
-          expect(reference.total.get(intent.asset) ?? 0n).toBeLessThanOrEqual(TOTAL_LIMIT);
-          expect(reference.service.get(service) ?? 0n).toBeLessThanOrEqual(SERVICE_CAP);
-          expect(reference.allowedChecks.length).toBeLessThanOrEqual(REQUESTS_PER_MINUTE);
+          // The engine's own counters, read after every step whether or not
+          // it paid: they match the reference and never pass a ceiling.
+          const trace = await engine.evaluate(intent);
+          const daily = BigInt(traceCurrent(trace, "budget-daily") ?? "0");
+          const total = BigInt(traceCurrent(trace, "budget-total") ?? "0");
+          expect(daily).toBe(reference.daily.get(intent.asset) ?? 0n);
+          expect(total).toBe(reference.total.get(intent.asset) ?? 0n);
+          expect(daily).toBeLessThanOrEqual(DAILY_LIMIT);
+          expect(total).toBeLessThanOrEqual(TOTAL_LIMIT);
+          if (cap !== null) {
+            const spent = BigInt(traceCurrent(trace, "per-service") ?? "0");
+            expect(spent).toBe(reference.service.get(service) ?? 0n);
+            expect(spent).toBeLessThanOrEqual(cap);
+          }
+          const requests = Number(traceCurrent(trace, "rate-limit") ?? "0");
+          expect(requests).toBe(reference.allowedChecks.length);
+          expect(requests).toBeLessThanOrEqual(REQUESTS_PER_MINUTE);
         }
       }),
       ASSERT_OPTS,
     );
+    expect([...blockedBy].sort()).toEqual([...CEILINGS].sort());
   });
 
   it("never changes a later decision just because check was called extra times", async () => {

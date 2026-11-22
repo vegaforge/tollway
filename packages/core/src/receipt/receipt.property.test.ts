@@ -1,25 +1,31 @@
 import fc from "fast-check";
-import { describe, expect, it } from "vitest";
+import { beforeAll, describe, expect, it } from "vitest";
 import { type SettlementModel, stellarNetworks } from "../types.js";
 import { type BuildReceiptInput, buildReceipt, signReceipt, verifyReceipt } from "./receipt.js";
-import type { ReceiptBody } from "./schema.js";
+import { type ReceiptBody, signedReceiptSchema } from "./schema.js";
 import { Ed25519Signer, Ed25519Verifier } from "./signer.js";
 
 /** Pinned seed so a CI failure replays exactly, as in reconcile.property.test.ts. */
 const SEED = 0x517fa72e;
 const ASSERT_OPTS = { seed: SEED, numRuns: 200 };
 
-const signer = await Ed25519Signer.generate("property-signing-key");
-const verifier = Ed25519Verifier.forSigner(signer);
-const otherSigner = await Ed25519Signer.generate("property-other-key");
-const otherVerifier = Ed25519Verifier.forSigner(otherSigner);
+const SIGNATURE_MISMATCH = "signature does not verify against any trusted key";
 
-const TEXT_CHARS = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789-_";
+let signer: Ed25519Signer;
+let verifier: Ed25519Verifier;
+let otherVerifier: Ed25519Verifier;
+beforeAll(async () => {
+  signer = await Ed25519Signer.generate("property-signing-key");
+  verifier = Ed25519Verifier.forSigner(signer);
+  otherVerifier = Ed25519Verifier.forSigner(await Ed25519Signer.generate("property-other-key"));
+});
 
+/**
+ * Non-empty text over every UTF-16 code unit: non-ASCII, astral characters
+ * and lone surrogates all have to sign and verify.
+ */
 function textArb(minLength = 1, maxLength = 16): fc.Arbitrary<string> {
-  return fc
-    .array(fc.constantFrom(...TEXT_CHARS.split("")), { minLength, maxLength })
-    .map((letters) => letters.join(""));
+  return fc.string({ unit: "binary", minLength, maxLength });
 }
 
 /** Integer strings in the asset's smallest unit, never floats. */
@@ -72,7 +78,8 @@ type TamperField =
   | "model"
   | "settlement"
   | "network"
-  | "issuedAt";
+  | "issuedAt"
+  | "sequence";
 
 const TAMPER_FIELDS: TamperField[] = [
   "id",
@@ -85,11 +92,14 @@ const TAMPER_FIELDS: TamperField[] = [
   "settlement",
   "network",
   "issuedAt",
+  "sequence",
 ];
 
 /**
  * Changes exactly one body field while keeping the receipt schema-valid, so a
  * verification failure can only come from the signature no longer covering it.
+ * The test asserts both. `version` is left out: any other value fails the
+ * schema, so it cannot show what the signature covers.
  */
 function tamperBody(body: ReceiptBody, field: TamperField, nonce: number): ReceiptBody {
   switch (field) {
@@ -106,7 +116,20 @@ function tamperBody(body: ReceiptBody, field: TamperField, nonce: number): Recei
     case "resource":
       return { ...body, resource: `${body.resource}-t${nonce}` };
     case "model":
+      // A channel receipt can only carry mpp-channel, so for it the change is
+      // to its settlement sequence instead (covered by "sequence" too).
+      if (body.settlement.kind === "channel-commitment") {
+        return tamperBody(body, "sequence", nonce);
+      }
       return { ...body, model: body.model === "x402" ? "mpp-charge" : "x402" };
+    case "sequence":
+      if (body.settlement.kind === "transaction") {
+        return tamperBody(body, "settlement", nonce);
+      }
+      return {
+        ...body,
+        settlement: { ...body.settlement, sequence: body.settlement.sequence + 1 },
+      };
     case "settlement":
       if (body.settlement.kind === "transaction") {
         return {
@@ -146,13 +169,19 @@ describe("signed receipt properties", () => {
   it("fails after any single body field is changed", async () => {
     await fc.assert(
       fc.asyncProperty(
-        transactionInputArb,
+        receiptInputArb,
         fc.constantFrom(...TAMPER_FIELDS),
         fc.nat(10_000),
         async (input, field, nonce) => {
           const signed = await signReceipt(buildReceipt(input), signer);
           const tampered = { ...signed, receipt: tamperBody(signed.receipt, field, nonce) };
-          expect((await verifyReceipt(tampered, verifier)).valid).toBe(false);
+          expect(tampered.receipt).not.toEqual(signed.receipt);
+          // Still schema-valid, so the rejection below is the signature's.
+          expect(signedReceiptSchema.safeParse(tampered).success).toBe(true);
+          expect(await verifyReceipt(tampered, verifier)).toEqual({
+            valid: false,
+            reason: SIGNATURE_MISMATCH,
+          });
         },
       ),
       ASSERT_OPTS,
@@ -161,7 +190,7 @@ describe("signed receipt properties", () => {
 
   it("fails with a different key, keyId or signature value", async () => {
     await fc.assert(
-      fc.asyncProperty(transactionInputArb, async (input) => {
+      fc.asyncProperty(receiptInputArb, async (input) => {
         const signed = await signReceipt(buildReceipt(input), signer);
 
         expect((await verifyReceipt(signed, otherVerifier)).valid).toBe(false);
