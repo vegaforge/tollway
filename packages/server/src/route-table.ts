@@ -9,6 +9,7 @@ import {
   type PaywallDeps,
   type TollwayRequest,
 } from "./gate.js";
+import { createInMemoryServicePolicyStore } from "./service-policy.js";
 
 const HTTP_METHODS = new Set([
   "GET",
@@ -89,7 +90,14 @@ export function createRouteTable(
   }
 
   const sharedCache = deps.cache ?? createInMemorySettlementCache();
-  const sharedDeps: PaywallDeps = { ...deps, cache: sharedCache };
+  const sharedServicePolicyStore =
+    deps.servicePolicyStore ??
+    (deps.servicePolicy ? createInMemoryServicePolicyStore() : undefined);
+  const sharedDeps: PaywallDeps = {
+    ...deps,
+    cache: sharedCache,
+    ...(sharedServicePolicyStore ? { servicePolicyStore: sharedServicePolicyStore } : {}),
+  };
   const inFlight = new Map<string, Promise<InFlightSettlementResult>>();
   for (const entry of entries) {
     entry.gate = createPaywallWithInFlight(entry.config, sharedDeps, inFlight);

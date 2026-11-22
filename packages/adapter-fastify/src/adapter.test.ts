@@ -337,3 +337,30 @@ describe("fastifyPaywall with a dynamic price", () => {
     }
   });
 });
+
+describe("fastifyPaywall with a service policy", () => {
+  it("sends a 429 denial with Retry-After", async () => {
+    const signer = await Ed25519Signer.generate("policy-fastify");
+    const gate = createPaywall(config, {
+      signer,
+      facilitator: createMockFacilitator(),
+      servicePolicy: { spendPerWindow: { limit: "0", windowSeconds: 60 } },
+      clock: () => 0,
+    });
+    const app = Fastify();
+    app.get("/quotes/latest", { preHandler: fastifyPaywall(gate) }, async () => ({ quote: 42 }));
+    await app.ready();
+    try {
+      const response = await app.inject({
+        method: "GET",
+        url: "/quotes/latest",
+        headers: { [PAYMENT_SIGNATURE_HEADER]: paymentHeader("policy-fastify-payment") },
+      });
+      expect(response.statusCode).toBe(429);
+      expect(response.headers["retry-after"]).toBe("60");
+      expect(response.json()).toEqual({ error: "service-policy:spend-exceeded" });
+    } finally {
+      await app.close();
+    }
+  });
+});

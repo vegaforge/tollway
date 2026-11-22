@@ -57,7 +57,7 @@ export function withPaywall(
       return jsonResponse(outcome.challenge, outcome.status, outcome.headers);
     }
 
-    return jsonResponse({ error: outcome.reason }, outcome.status);
+    return jsonResponse({ error: outcome.reason }, outcome.status, outcome.headers);
   };
 }
 
