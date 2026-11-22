@@ -37,6 +37,7 @@ export function expressPaywall(gate: Gate): RequestHandler {
           res.set(outcome.headers).status(outcome.status).json(outcome.challenge);
           return;
         }
+        if (outcome.headers) res.set(outcome.headers);
         res.status(outcome.status).json({ error: outcome.reason });
       })
       .catch(next);
