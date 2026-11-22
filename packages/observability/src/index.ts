@@ -220,7 +220,11 @@ export interface ObservabilityHub {
    * limits.
    */
   timeseries(query: TimeseriesQuery): TimeseriesResult;
-  /** Serialize matching metrics as JSON or CSV. Implementation tracked in #31. */
+  /**
+   * Serialize matching metrics as JSON or RFC 4180 CSV. CSV cells starting
+   * with `=`, `+`, `-`, or `@` are prefixed with a single quote to prevent
+   * spreadsheet formula injection.
+   */
   export(format: ExportFormat, query?: MetricsQuery): string;
 }
 
@@ -267,9 +271,16 @@ function stringifyBigintMap<K extends string>(
   return out;
 }
 
-/** RFC 4180 escaping: wrap in quotes, double-up embedded quotes. */
+const FORMULA_PREFIX = /^[=+\-@]/;
+
+/**
+ * RFC 4180 escaping with spreadsheet formula-injection neutralization: cells
+ * starting with `=`, `+`, `-`, or `@` are prefixed with a single quote before
+ * wrapping in double quotes and doubling embedded double quotes.
+ */
 function csvEscape(value: string): string {
-  return `"${value.replace(/"/g, '""')}"`;
+  const safe = FORMULA_PREFIX.test(value) ? `'${value}` : value;
+  return `"${safe.replace(/"/g, '""')}"`;
 }
 
 const CSV_COLUMNS = [
