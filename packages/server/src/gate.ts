@@ -161,6 +161,13 @@ export type PaywallDeps = {
    */
   servicePolicyStore?: ServicePolicyStore;
   /**
+   * Called when the service policy store fails to record or release a
+   * reservation. The payment's outcome is unchanged: a settled payment still
+   * returns its receipt, and a settlement error is still thrown. The payer's
+   * counters may be off until the window rolls over.
+   */
+  onServicePolicyError?: (error: Error, payer: string) => void;
+  /**
    * Called when the settlement cache fails after a payment has settled. The
    * same error is also set as `cacheError` on the outcome.
    */
@@ -427,6 +434,7 @@ type SettlementContext = {
   lockTtlMs: number;
   clock: () => number;
   servicePolicy?: { policy: ServicePolicy; store: ServicePolicyStore };
+  onServicePolicyError?: (error: Error, payer: string) => void;
 };
 
 /**
@@ -559,44 +567,104 @@ async function settleWithHandler<TPayment>(
     return toOutcome(await pending, offer, model, method, true);
   }
 
-  // Policy runs here: the payer is verified and no settlement lock has been
-  // taken, so a denial never reaches /settle. A shared payment that is
-  // already in flight waits above and is not counted again.
-  let reservation: ServicePolicyReservation | undefined;
-  if (context.servicePolicy) {
-    const decision = await context.servicePolicy.store.admit({
-      policy: context.servicePolicy.policy,
-      payer: verification.payer,
-      offer,
-      model,
-      now: context.clock(),
-    });
-    if (!decision.allowed) return servicePolicyRejection(decision);
-    reservation = decision.reservation;
-  }
-
-  const attempt = settleOnce(payment, offer, model, method, handler, verification, key, context);
+  // The in-flight slot is claimed before anything awaits, so a second copy
+  // of this payment always finds it above and shares this attempt's result,
+  // whether that is a receipt or a policy denial. Policy runs inside the
+  // attempt and is consulted once per payment.
+  const attempt = admitAndSettle(
+    payment,
+    offer,
+    model,
+    method,
+    handler,
+    verification,
+    key,
+    context,
+  );
   context.inFlight.set(key, attempt);
-  let result: SettlementResult;
   try {
-    result = await attempt;
-  } catch (error) {
-    if (reservation) await context.servicePolicy?.store.release(reservation);
-    throw error;
+    return toOutcome(await attempt, offer, model, method, false);
   } finally {
     context.inFlight.delete(key);
   }
+}
 
-  if (reservation && context.servicePolicy) {
-    // Spend is recorded only for a fresh settlement. A replay was already
-    // counted when it settled, and a failure frees the reservation.
-    if (result.ok && !result.replayed) {
-      await context.servicePolicy.store.commit(reservation);
-    } else {
-      await context.servicePolicy.store.release(reservation);
-    }
+/**
+ * Runs the service policy for a verified payer, then settles. The payer is
+ * verified and no settlement lock has been taken, so a denial never reaches
+ * /settle. Spend is recorded only for a fresh settlement: a replay was
+ * already counted when it settled, and a failure frees the reservation.
+ */
+async function admitAndSettle<TPayment>(
+  payment: TPayment,
+  offer: PaymentOffer,
+  model: SettlementModel,
+  method: string,
+  handler: Handler<TPayment>,
+  verification: { payer: string; nonce: string },
+  key: string,
+  context: SettlementContext,
+): Promise<SettlementResult> {
+  const servicePolicy = context.servicePolicy;
+  if (!servicePolicy) {
+    return settleOnce(payment, offer, model, method, handler, verification, key, context);
   }
-  return toOutcome(result, offer, model, method, false);
+
+  const decision = await servicePolicy.store.admit({
+    policy: servicePolicy.policy,
+    payer: verification.payer,
+    offer,
+    model,
+    now: context.clock(),
+  });
+  if (!decision.allowed) return { ok: false, outcome: servicePolicyRejection(decision) };
+  const reservation = decision.reservation;
+  if (!reservation) {
+    return settleOnce(payment, offer, model, method, handler, verification, key, context);
+  }
+
+  let result: SettlementResult;
+  try {
+    result = await settleOnce(payment, offer, model, method, handler, verification, key, context);
+  } catch (error) {
+    // The settlement error is what the caller needs; a release failure on
+    // top of it goes to the hook so it neither replaces nor hides it.
+    await reportPolicyStoreFailure(
+      () => servicePolicy.store.release(reservation),
+      reservation,
+      context,
+    );
+    throw error;
+  }
+
+  const settledNow = result.ok && !result.replayed;
+  // The payment has settled (or definitely has not), so a store failure here
+  // must not cost the payer the receipt. It goes to the hook instead.
+  await reportPolicyStoreFailure(
+    () =>
+      settledNow
+        ? servicePolicy.store.commit(reservation)
+        : servicePolicy.store.release(reservation),
+    reservation,
+    context,
+  );
+  return result;
+}
+
+/** Runs a policy store write and routes a failure to onServicePolicyError. */
+async function reportPolicyStoreFailure(
+  write: () => Promise<void>,
+  reservation: ServicePolicyReservation,
+  context: SettlementContext,
+): Promise<void> {
+  try {
+    await write();
+  } catch (failure) {
+    context.onServicePolicyError?.(
+      asError(failure, "service policy store write failed"),
+      reservation.payer,
+    );
+  }
 }
 
 /**
@@ -919,6 +987,7 @@ export function createPaywallWithInFlight(
     signer: deps.signer,
     cache: deps.cache,
     onCacheError: deps.onCacheError,
+    ...(deps.onServicePolicyError ? { onServicePolicyError: deps.onServicePolicyError } : {}),
     inFlight,
     lockTtlMs: deps.settlementLockTtlMs ?? DEFAULT_SETTLEMENT_LOCK_TTL_MS,
     clock,

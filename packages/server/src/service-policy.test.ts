@@ -59,6 +59,7 @@ type GateOptions = {
   clock?: () => number;
   store?: ServicePolicyStore;
   settle?: () => Promise<SettleResult>;
+  onServicePolicyError?: (error: Error, payer: string) => void;
 };
 
 /** A gate whose facilitator has one fixed payer and a controllable settle. */
@@ -84,6 +85,7 @@ function makeGate(policy: ServicePolicy, options: GateOptions = {}) {
     servicePolicy: policy,
     ...(options.clock ? { clock: options.clock } : {}),
     ...(options.store ? { servicePolicyStore: options.store } : {}),
+    ...(options.onServicePolicyError ? { onServicePolicyError: options.onServicePolicyError } : {}),
   });
   return { gate, settle };
 }
@@ -256,6 +258,92 @@ describe("service policy windows", () => {
       reason: SERVICE_POLICY_DENIALS.spendExceeded,
     });
     expect(settle).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe("service policy on the settlement path", () => {
+  it("settles and counts one payment once when the same payment arrives twice at once", async () => {
+    const store = createInMemoryServicePolicyStore();
+    const admit = vi.spyOn(store, "admit");
+    const { gate, settle } = makeGate(
+      { spendPerWindow: { limit: "100000", windowSeconds: 60 } },
+      { store },
+    );
+
+    const outcomes = await Promise.all([
+      gate(paidRequest("same-payment")),
+      gate(paidRequest("same-payment")),
+    ]);
+
+    expect(outcomes.map((outcome) => outcome.kind)).toEqual(["settled", "settled"]);
+    expect(settle).toHaveBeenCalledTimes(1);
+    expect(admit).toHaveBeenCalledTimes(1);
+  });
+
+  it("gives the second copy of a denied payment the same denial without admitting it again", async () => {
+    const store = createInMemoryServicePolicyStore();
+    const admit = vi.spyOn(store, "admit");
+    const { gate, settle } = makeGate({ allowPayers: ["GSOMEONE-ELSE"] }, { store });
+
+    const outcomes = await Promise.all([
+      gate(paidRequest("denied-payment")),
+      gate(paidRequest("denied-payment")),
+    ]);
+
+    for (const outcome of outcomes) {
+      expect(rejection(outcome).reason).toBe(SERVICE_POLICY_DENIALS.notAllowed);
+    }
+    expect(admit).toHaveBeenCalledTimes(1);
+    expect(settle).not.toHaveBeenCalled();
+  });
+
+  it("returns the receipt when recording spend fails after the payment settled", async () => {
+    const inner = createInMemoryServicePolicyStore();
+    const storeFailure = new Error("policy store unavailable");
+    const store: ServicePolicyStore = {
+      admit: (input) => inner.admit(input),
+      release: (reservation) => inner.release(reservation),
+      commit: async () => {
+        throw storeFailure;
+      },
+    };
+    const onServicePolicyError = vi.fn();
+    const { gate } = makeGate(
+      { requestsPerWindow: { limit: 5, windowSeconds: 60 } },
+      { store, onServicePolicyError },
+    );
+
+    const outcome = await gate(paidRequest("paid-then-store-fails"));
+
+    expect(outcome.kind).toBe("settled");
+    expect(onServicePolicyError).toHaveBeenCalledWith(storeFailure, "GPAYER");
+  });
+
+  it("keeps the settlement error when releasing the reservation also fails", async () => {
+    const inner = createInMemoryServicePolicyStore();
+    const settleFailure = new Error("facilitator unreachable");
+    const releaseFailure = new Error("policy store unavailable");
+    const store: ServicePolicyStore = {
+      admit: (input) => inner.admit(input),
+      commit: (reservation) => inner.commit(reservation),
+      release: async () => {
+        throw releaseFailure;
+      },
+    };
+    const onServicePolicyError = vi.fn();
+    const { gate } = makeGate(
+      { requestsPerWindow: { limit: 5, windowSeconds: 60 } },
+      {
+        store,
+        onServicePolicyError,
+        settle: async () => {
+          throw settleFailure;
+        },
+      },
+    );
+
+    await expect(gate(paidRequest("settle-throws"))).rejects.toBe(settleFailure);
+    expect(onServicePolicyError).toHaveBeenCalledWith(releaseFailure, "GPAYER");
   });
 });
 

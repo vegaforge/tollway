@@ -23,4 +23,13 @@ only one of them fits under. The default in-memory store keeps at most 10 000
 payers with least-recently-used eviction; `ServicePolicyStore` is the seam for
 a shared store across processes (#190). Rate limiting here happens after
 verification, so it does not protect the facilitator from a flood (#159).
+
+Two copies of one payment sent at once settle once and are admitted once: the
+policy runs inside the in-flight attempt, so the second copy shares the first
+one's receipt or denial. A store failure after the outcome is known does not
+change it; it goes to the new `PaywallDeps.onServicePolicyError` hook.
+
+For `mpp-charge` the payer is the `source` the credential names, which is not
+yet bound to the transaction's signer, so per-payer rules for MPP payers are
+best effort until that check lands.
 Closes #160.
