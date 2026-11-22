@@ -46,7 +46,7 @@ The placeholder a widget shows when its data is unavailable. Every unwired widge
 
 ## The data-layer seam
 
-Wired views (currently Agents and Channels) follow one pattern, and unwired views (Overview model mix, Services, Receipts, Anomalies, Exports) follow another.
+Wired views (currently Agents, Channels and Exports) follow one pattern, and unwired views (Overview model mix, Services, Receipts, Anomalies) follow another.
 
 ### Wired views: the `useXxx` / `fetchXxx` seam
 
@@ -85,7 +85,7 @@ A view that does not yet have a data hook renders an `EmptyState` directly insid
 | `/channels` | Open MPP channels | `useOpenChannels` -> `fetchOpenChannels` stub in `src/data/open-channels.ts` | Observability hub rollup over `channel.opened` / `channel.closed`, or a direct `ChannelManager.list` iteration |
 | `/receipts` | Signed receipt archive | `EmptyState` with `@vegaforge/tollway-core · SignedReceipt` as the named source | Receipt archive backed by the observability hub's receipt stream |
 | `/anomalies` | Anomaly feed | `EmptyState` with `anomaly.detected` as the named source | `anomaly.detected` event stream, with the rule that fired |
-| `/exports` | Exports and webhooks | Two `EmptyState`s, one per panel | `@vegaforge/tollway-observability` `export()` for JSON and CSV, and the `WebhookEvent` set for outgoing webhooks |
+| `/exports` | Exports and webhooks | `useMetricsExport` -> `fetchMetricsExport` stub in `src/data/metrics-export.ts` for Exports; `EmptyState` for Webhooks | `@vegaforge/tollway-observability` `export()` for JSON and CSV, and the `WebhookEvent` set for outgoing webhooks |
 
 The nav order in `apps/dashboard/src/components/shell/nav.ts` matches this table. Add new entries there when you add a route.
 
