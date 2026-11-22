@@ -632,3 +632,44 @@ describe("createClient shadow policy", () => {
     expect(record).toHaveBeenCalledTimes(1);
   });
 });
+
+/**
+ * A settler that keeps every settlement open until `release` is called, so a
+ * test decides how many calls are in flight at once.
+ */
+function heldSettler(outcome: SignedReceipt | Error = baselineReceipt) {
+  let open: () => void = () => {};
+  const held = new Promise<void>((resolve) => {
+    open = resolve;
+  });
+  const settle = vi.fn(async (): Promise<SignedReceipt> => {
+    await held;
+    if (outcome instanceof Error) throw outcome;
+    return outcome;
+  });
+  const settler: ClientSettler = { settle };
+  return { settler, settle, release: () => open() };
+}
+
+/** Lets every pay() call already started run up to its first pending await. */
+function inFlight(): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, 0));
+}
+
+// Regression lock for #210: an agent that fires the same request twice in
+// parallel pays once.
+describe("createClient concurrent payments", () => {
+  it("settles once when two concurrent calls ask for the same resource and offer", async () => {
+    const held = heldSettler();
+    const client = createClient({ network: "testnet", settler: held.settler });
+
+    const first = client.pay({ resource: OFFER.resource, offer: OFFER });
+    const second = client.pay({ resource: OFFER.resource, offer: { ...OFFER } });
+    await inFlight();
+    held.release();
+    const [a, b] = await Promise.all([first, second]);
+
+    expect(held.settle).toHaveBeenCalledTimes(1);
+    expect(b.receipt).toEqual(a.receipt);
+  });
+});
