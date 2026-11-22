@@ -11,6 +11,7 @@ import {
 import { useEffect, useMemo, useState } from "react";
 
 import { Panel } from "@/components/ui/panel";
+import { StreamStatusBadge } from "@/components/ui/stream-status-badge";
 import type { ReceiptRow } from "@/data/receipts";
 import { useReceipts } from "@/data/use-receipts";
 
@@ -66,7 +67,15 @@ export function ReceiptsView() {
   );
 
   return (
-    <Panel title="Receipts" description="Payer, payee, amount, model, and settlement reference">
+    <Panel
+      title="Receipts"
+      description="Payer, payee, amount, model, and settlement reference"
+      action={
+        state.status === "ready" && state.stream ? (
+          <StreamStatusBadge status={state.stream} />
+        ) : undefined
+      }
+    >
       {state.status === "loading" ? <ReceiptsTableSkeleton /> : null}
       {state.status === "error" ? <ReceiptsTableError error={state.error} /> : null}
       {state.status === "ready" ? (

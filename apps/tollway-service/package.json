@@ -1,0 +1,29 @@
+{
+  "name": "@vegaforge/tollway-service",
+  "version": "0.0.0",
+  "private": true,
+  "description": "Tollway observability service – event ingestion and SSE stream",
+  "license": "Apache-2.0",
+  "type": "module",
+  "scripts": {
+    "dev": "tsx watch src/index.ts",
+    "build": "tsc --noEmit",
+    "start": "tsx src/index.ts",
+    "test": "vitest run",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "@hono/node-server": "^1.14.4",
+    "@vegaforge/tollway-channels": "workspace:*",
+    "@vegaforge/tollway-core": "workspace:*",
+    "@vegaforge/tollway-observability": "workspace:*",
+    "hono": "^4.8.5",
+    "zod": "^4.6.7"
+  },
+  "devDependencies": {
+    "@types/node": "^22.20.5",
+    "tsx": "^4.19.4",
+    "typescript": "^5.9.3",
+    "vitest": "^4.1.12"
+  }
+}

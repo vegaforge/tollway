@@ -150,6 +150,40 @@ importers:
         specifier: ^4.1.12
         version: 4.1.12(@types/node@22.20.5)(jsdom@25.0.1)(vite@7.3.8(@types/node@22.20.5)(jiti@2.7.0)(lightningcss@1.33.0)(tsx@4.23.15)(yaml@2.9.1))
 
+  apps/tollway-service:
+    dependencies:
+      '@hono/node-server':
+        specifier: ^1.14.4
+        version: 1.19.19(hono@4.13.19)
+      '@vegaforge/tollway-channels':
+        specifier: workspace:*
+        version: link:../../packages/channels
+      '@vegaforge/tollway-core':
+        specifier: workspace:*
+        version: link:../../packages/core
+      '@vegaforge/tollway-observability':
+        specifier: workspace:*
+        version: link:../../packages/observability
+      hono:
+        specifier: ^4.8.5
+        version: 4.13.19
+      zod:
+        specifier: ^4.6.7
+        version: 4.6.7
+    devDependencies:
+      '@types/node':
+        specifier: ^22.20.5
+        version: 22.20.5
+      tsx:
+        specifier: ^4.19.4
+        version: 4.23.15
+      typescript:
+        specifier: ^5.9.3
+        version: 5.9.3
+      vitest:
+        specifier: ^4.1.12
+        version: 4.1.12(@types/node@22.20.5)(jsdom@25.0.1)(vite@7.3.8(@types/node@22.20.5)(jiti@2.7.0)(lightningcss@1.33.0)(tsx@4.23.15)(yaml@2.9.1))
+
   apps/web:
     dependencies:
       '@stellar/stellar-base':
@@ -1408,6 +1442,12 @@ packages:
 
   '@gerrit0/mini-shiki@3.23.0':
     resolution: {integrity: sha512-bEMORlG0cqdjVyCEuU0cDQbORWX+kYCeo0kV1lbxF5bt4r7SID2l9bqsxJEM0zndaxpOUT7riCyIVEuqq/Ynxg==}
+
+  '@hono/node-server@1.19.19':
+    resolution: {integrity: sha512-Fy9R7PACOzHU9LDpfnuzVyuVYevKQRcEG2mZhmfc+DRdmayEd3RVfa2XOt2IgGcPNgA77Yk63KBszepcMFK5Ng==}
+    engines: {node: '>=18.14.1'}
+    peerDependencies:
+      hono: ^4
 
   '@img/colour@1.1.0':
     resolution: {integrity: sha512-Td76q7j57o/tLVdgS746cYARfSyxk8iEfRxewL9h4OMzYhbW4TAcppl0mT4eyqXddh6L/jwoM75mo7ixa/pCeQ==}
@@ -5939,6 +5979,10 @@ snapshots:
       '@shikijs/themes': 3.23.0
       '@shikijs/types': 3.23.0
       '@shikijs/vscode-textmate': 10.1.0
+
+  '@hono/node-server@1.19.19(hono@4.13.19)':
+    dependencies:
+      hono: 4.13.19
 
   '@img/colour@1.1.0':
     optional: true
