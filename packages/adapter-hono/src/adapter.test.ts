@@ -241,3 +241,24 @@ describe("honoPaywall with a dynamic price", () => {
     expect(response.status).toBe(500);
   });
 });
+
+describe("honoPaywall with a service policy", () => {
+  it("sends a 429 denial with Retry-After", async () => {
+    const signer = await Ed25519Signer.generate("policy-hono");
+    const gate = createPaywall(config, {
+      signer,
+      facilitator: createMockFacilitator(),
+      servicePolicy: { spendPerWindow: { limit: "0", windowSeconds: 60 } },
+      clock: () => 0,
+    });
+    const app = new Hono();
+    app.get("/quotes/latest", honoPaywall(gate), (c) => c.json({ quote: 42 }));
+
+    const response = await app.request("/quotes/latest", {
+      headers: { [PAYMENT_SIGNATURE_HEADER]: paymentHeader("policy-hono-payment") },
+    });
+    expect(response.status).toBe(429);
+    expect(response.headers.get("retry-after")).toBe("60");
+    expect(await response.json()).toEqual({ error: "service-policy:spend-exceeded" });
+  });
+});

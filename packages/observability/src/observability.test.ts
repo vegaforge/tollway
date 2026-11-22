@@ -535,6 +535,52 @@ describe("observability hub: export", () => {
     expect(csv).toContain('"service-with-""quote"""');
   });
 
+  it("prefixes CSV cells starting with =, +, -, or @ with a single quote to prevent formula injection", () => {
+    const hub = createObservabilityHub({ sleep: noSleep });
+    hub.record(
+      metric({
+        payer: "=SUM(A1:A2)",
+        payee: "+cmd|'/C calc'!A0",
+        amount: "-2+3",
+        asset: "@SUM(1+1)",
+      }),
+    );
+    const csv = hub.export("csv");
+    const lines = csv.split("\r\n");
+    expect(lines).toHaveLength(2);
+    expect(lines[1]).toBe(
+      `"'=SUM(A1:A2)","'+cmd|'/C calc'!A0","x402","'-2+3","'@SUM(1+1)",42,"settled","2026-06-26T10:00:00.000Z"`,
+    );
+  });
+
+  it("prefixes CSV cells starting with a tab or a carriage return", () => {
+    // Spreadsheets strip a leading tab or CR and then evaluate what follows,
+    // so these two characters need the same neutralization as `=`.
+    const hub = createObservabilityHub({ sleep: noSleep });
+    hub.record(metric({ payer: "\t=SUM(A1:A2)", payee: "\r=SUM(A1:A2)" }));
+    const csv = hub.export("csv");
+    expect(csv).toContain(`"'\t=SUM(A1:A2)","'\r=SUM(A1:A2)"`);
+  });
+
+  it("preserves RFC 4180 quote doubling after adding the formula-injection prefix", () => {
+    const hub = createObservabilityHub({ sleep: noSleep });
+    hub.record(metric({ payee: '=HYPERLINK("https://evil.test","x")' }));
+    const csv = hub.export("csv");
+    expect(csv).toContain(`"'=HYPERLINK(""https://evil.test"",""x"")"`);
+  });
+
+  it("does not prefix ordinary CSV cells with a single quote", () => {
+    const hub = createObservabilityHub({ sleep: noSleep });
+    hub.record(
+      metric({ payer: "GAGENTAAA", payee: "GSERVICE-1", amount: "100", asset: "USDC:GA5Z" }),
+    );
+    const csv = hub.export("csv");
+    const lines = csv.split("\r\n");
+    expect(lines[1]).toBe(
+      `"GAGENTAAA","GSERVICE-1","x402","100","USDC:GA5Z",42,"settled","2026-06-26T10:00:00.000Z"`,
+    );
+  });
+
   it("applies the same query filter to export as to summarize", () => {
     const hub = createObservabilityHub({ sleep: noSleep });
     hub.record(metric({ model: "x402", amount: "100" }));

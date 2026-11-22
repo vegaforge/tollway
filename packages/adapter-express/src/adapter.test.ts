@@ -356,3 +356,33 @@ describe("expressPaywall with a dynamic price", () => {
     }
   });
 });
+
+describe("expressPaywall with a service policy", () => {
+  it("sends a 429 denial with Retry-After", async () => {
+    const signer = await Ed25519Signer.generate("policy-express");
+    const gate = createPaywall(config, {
+      signer,
+      facilitator: createMockFacilitator(),
+      servicePolicy: { spendPerWindow: { limit: "0", windowSeconds: 60 } },
+      clock: () => 0,
+    });
+    const app = express();
+    app.get("/quotes/latest", expressPaywall(gate), (_req, res) => {
+      res.json({ quote: 42 });
+    });
+    const server = app.listen(0);
+    await new Promise((resolve) => server.once("listening", resolve));
+    const address = server.address();
+    if (!address || typeof address === "string") throw new Error("expected a TCP address");
+    try {
+      const response = await fetch(`http://127.0.0.1:${address.port}/quotes/latest`, {
+        headers: { [PAYMENT_SIGNATURE_HEADER]: paymentHeader("policy-express-payment") },
+      });
+      expect(response.status).toBe(429);
+      expect(response.headers.get("retry-after")).toBe("60");
+      expect(await response.json()).toEqual({ error: "service-policy:spend-exceeded" });
+    } finally {
+      await new Promise((resolve) => server.close(resolve));
+    }
+  });
+});
