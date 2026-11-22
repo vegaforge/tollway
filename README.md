@@ -176,19 +176,39 @@ pnpm build
 pnpm test
 ```
 
-Run the x402 demo with no network, from challenge to a verified receipt:
+## Demo scenarios
+
+The demo runs five named scenarios. With no argument it defaults to the x402 scenario.
 
 ```bash
-MOCK_MODE=true pnpm --filter @vegaforge/tollway-demo start
+# Run offline in mock mode (no network, no keys needed):
+MOCK_MODE=true pnpm --filter @vegaforge/tollway-demo start               # x402 (default)
+MOCK_MODE=true pnpm --filter @vegaforge/tollway-demo start -- x402
+MOCK_MODE=true pnpm --filter @vegaforge/tollway-demo start -- mpp-charge
+MOCK_MODE=true pnpm --filter @vegaforge/tollway-demo start -- mpp-channel
+MOCK_MODE=true pnpm --filter @vegaforge/tollway-demo start -- high-frequency
+MOCK_MODE=true pnpm --filter @vegaforge/tollway-demo start -- all-models
 ```
 
-Without `MOCK_MODE`, the demo pays 0.001 testnet USDC through the OpenZeppelin Channels testnet facilitator and prints the settlement transaction hash. It needs two testnet accounts with a USDC trustline (the payer also needs testnet USDC from the [Circle faucet](https://faucet.circle.com/)) and an API key from [channels.openzeppelin.com/testnet/gen](https://channels.openzeppelin.com/testnet/gen). Use testnet keys only: the payer's secret key sits in an environment variable.
+| Scenario | What it shows |
+| --- | --- |
+| `x402` | One per-request payment producing a canonical receipt (the Phase 1 baseline). |
+| `mpp-charge` | Same route, model switched to MPP charge with `createMockMppChargeHandler`. Proves the Phase 1 exit: same route, config flag switches model. |
+| `mpp-channel` | Opens one channel, pays five requests as off-chain commitments, closes, reconciles. Each receipt has `model: "mpp-channel"` and a `channel-commitment` ref. |
+| `high-frequency` | Runs 500 sequential commitments through one channel (N configurable via `HF_N`), closes once, reconciles, and prints throughput and p50/p95 commit latency. |
+| `all-models` | Runs x402, mpp-charge, and mpp-channel in sequence and prints a summary table. CI runs this in mock mode on every commit. |
+
+The x402 scenario works in live mode with real testnet keys. MPP charge and channel scenarios require live facilitators that land in later issues (#100, #101, #173).
 
 ```bash
+# Live x402 demo:
 OZ_API_KEY=... \
 STELLAR_RECIPIENT=G... \
 STELLAR_SECRET_KEY=S... \
 pnpm --filter @vegaforge/tollway-demo start
+
+# High-frequency with 1000 commitments:
+MOCK_MODE=true HF_N=1000 pnpm --filter @vegaforge/tollway-demo start -- high-frequency
 ```
 
 If a setting is missing or invalid, the demo lists every problem and exits with code 1. `FACILITATOR_URL` overrides the facilitator. `STELLAR_NETWORK=mainnet` switches to mainnet and then also needs `STELLAR_RPC_URL`.
@@ -247,7 +267,7 @@ Fastify, Hono, and Next adapters expose `fastifyRouteTable`, `honoRouteTable`, a
 
 Next.js App Router services can either wrap a handler with `withPaywall`, or protect a route group in Next 16 `proxy.ts`:
 
-```ts
+```ts skip=uses a local paywall module that is project-specific, not a workspace package
 // proxy.ts
 import { paywallProxy } from "@vegaforge/tollway-adapter-next/proxy";
 import { gate } from "./src/paywall.js";

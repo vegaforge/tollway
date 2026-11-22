@@ -202,7 +202,7 @@ export interface ObservabilityHub {
    * first failure that bubbles up.
    */
   emit(event: TollwayEvent): Promise<DeliveryReport>;
-  /** Register a local handler invoked synchronously during {@link emit}. */
+  /** Register a local handler invoked synchronously during {@link ObservabilityHub.emit}. */
   on(event: WebhookEvent, handler: WebhookHandler): void;
   /** Register an HTTP webhook subscription after construction. */
   addWebhook(subscription: WebhookSubscription): void;

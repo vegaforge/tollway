@@ -30,6 +30,11 @@ export {
 } from "./errors.js";
 export { type CreateChannelManagerOptions, createChannelManager } from "./manager.js";
 export {
+  createMockMppChannelAdapter,
+  type MockMppChannelAdapter,
+  type MockMppChannelAdapterCalls,
+} from "./mock-adapter.js";
+export {
   createStellarMppChannelAdapter,
   type StellarMppChannelAdapterOptions,
 } from "./stellar-adapter.js";
