@@ -295,3 +295,25 @@ describe("withPaywall with a dynamic price", () => {
     expect(response.status).toBe(500);
   });
 });
+
+describe("withPaywall with a service policy", () => {
+  it("sends a 429 denial with Retry-After", async () => {
+    const signer = await Ed25519Signer.generate("policy-next");
+    const gate = createPaywall(config, {
+      signer,
+      facilitator: createMockFacilitator(),
+      servicePolicy: { spendPerWindow: { limit: "0", windowSeconds: 60 } },
+      clock: () => 0,
+    });
+    const handler = withPaywall(gate, async () => Response.json({ quote: 42 }));
+
+    const response = await handler(
+      new Request("http://example.test/quotes/latest", {
+        headers: { [PAYMENT_SIGNATURE_HEADER]: paymentHeader("policy-next-payment") },
+      }),
+    );
+    expect(response.status).toBe(429);
+    expect(response.headers.get("retry-after")).toBe("60");
+    expect(await response.json()).toEqual({ error: "service-policy:spend-exceeded" });
+  });
+});

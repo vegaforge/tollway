@@ -33,6 +33,15 @@ import {
   TOLLWAY_RECEIPT_HEADER,
 } from "./headers.js";
 import type { MppChargeHandler } from "./mpp-charge.js";
+import {
+  createInMemoryServicePolicyStore,
+  SERVICE_POLICY_DENIALS,
+  type ServicePolicy,
+  type ServicePolicyDecision,
+  type ServicePolicyReservation,
+  type ServicePolicyStore,
+  validateServicePolicy,
+} from "./service-policy.js";
 
 /**
  * The gating molecule. It sits between a request and the resource: with a
@@ -116,7 +125,14 @@ export type GateOutcome =
        */
       lockLost?: true;
     }
-  | { kind: "rejected"; status: number; reason: string };
+  | {
+      kind: "rejected";
+      status: number;
+      /** A stable reason code, or a human message when no code applies. */
+      reason: string;
+      /** Headers the adapter must send with the rejection, such as `Retry-After`. */
+      headers?: Record<string, string>;
+    };
 
 /** A payment gate for one paid resource, built by {@link createPaywall}. */
 export type Gate = (request: TollwayRequest) => Promise<GateOutcome>;
@@ -131,6 +147,19 @@ export type PaywallDeps = {
   mppChargeHandler?: MppChargeHandler;
   router?: ModelRouter;
   cache?: SettlementCache;
+  /**
+   * Optional per-payer rules evaluated after `/verify` and before the
+   * settlement lock. A denial is rejected without calling `/settle`. See
+   * `ServicePolicy` and docs/design.md, "Policy and budgets".
+   */
+  servicePolicy?: ServicePolicy;
+  /**
+   * Where the service policy keeps per-payer windows. Defaults to a
+   * per-gate in-memory store bounded to 10 000 payers, with least-recently-used
+   * eviction. Inject a shared store for multiple processes; the in-memory
+   * limits only hold within one process (#190).
+   */
+  servicePolicyStore?: ServicePolicyStore;
   /**
    * Called when the settlement cache fails after a payment has settled. The
    * same error is also set as `cacheError` on the outcome.
@@ -147,7 +176,7 @@ export type PaywallDeps = {
    * that implements locks.
    */
   settlementLockTtlMs?: number;
-  /** Clock for quote expiry; injected tests can avoid waiting. */
+  /** Clock for quote expiry and service policy windows; injected tests can avoid waiting. */
   clock?: () => number;
 };
 
@@ -396,6 +425,8 @@ type SettlementContext = {
   /** Settlements in progress in this process, by cache key. */
   inFlight: Map<string, Promise<SettlementResult>>;
   lockTtlMs: number;
+  clock: () => number;
+  servicePolicy?: { policy: ServicePolicy; store: ServicePolicyStore };
 };
 
 /**
@@ -415,6 +446,27 @@ const SETTLEMENT_IN_PROGRESS: RejectedOutcome = {
   status: 409,
   reason: "settlement in progress",
 };
+
+/**
+ * Turns a policy denial into a rejection. Both allowlist and denylist
+ * denials use the same code and status, so the answer does not reveal which
+ * list matched. Window limits carry `Retry-After` in whole seconds, rounded
+ * up so a client that waits that long is inside the next window.
+ */
+function servicePolicyRejection(
+  decision: Extract<ServicePolicyDecision, { allowed: false }>,
+): RejectedOutcome {
+  const retryAfter =
+    decision.retryAfterMs === undefined
+      ? undefined
+      : String(Math.max(1, Math.ceil(decision.retryAfterMs / 1000)));
+  return {
+    kind: "rejected",
+    status: decision.code === SERVICE_POLICY_DENIALS.notAllowed ? 403 : 429,
+    reason: decision.code,
+    ...(retryAfter === undefined ? {} : { headers: { "retry-after": retryAfter } }),
+  };
+}
 
 /** The fields a receipt must share with the offer it is returned for. */
 function offerBinding(offer: PaymentOffer, model: SettlementModel): string {
@@ -507,13 +559,44 @@ async function settleWithHandler<TPayment>(
     return toOutcome(await pending, offer, model, method, true);
   }
 
+  // Policy runs here: the payer is verified and no settlement lock has been
+  // taken, so a denial never reaches /settle. A shared payment that is
+  // already in flight waits above and is not counted again.
+  let reservation: ServicePolicyReservation | undefined;
+  if (context.servicePolicy) {
+    const decision = await context.servicePolicy.store.admit({
+      policy: context.servicePolicy.policy,
+      payer: verification.payer,
+      offer,
+      model,
+      now: context.clock(),
+    });
+    if (!decision.allowed) return servicePolicyRejection(decision);
+    reservation = decision.reservation;
+  }
+
   const attempt = settleOnce(payment, offer, model, method, handler, verification, key, context);
   context.inFlight.set(key, attempt);
+  let result: SettlementResult;
   try {
-    return toOutcome(await attempt, offer, model, method, false);
+    result = await attempt;
+  } catch (error) {
+    if (reservation) await context.servicePolicy?.store.release(reservation);
+    throw error;
   } finally {
     context.inFlight.delete(key);
   }
+
+  if (reservation && context.servicePolicy) {
+    // Spend is recorded only for a fresh settlement. A replay was already
+    // counted when it settled, and a failure frees the reservation.
+    if (result.ok && !result.replayed) {
+      await context.servicePolicy.store.commit(reservation);
+    } else {
+      await context.servicePolicy.store.release(reservation);
+    }
+  }
+  return toOutcome(result, offer, model, method, false);
 }
 
 /**
@@ -827,14 +910,21 @@ export function createPaywallWithInFlight(
 ): Gate {
   validateDynamicPriceConfig(config);
   assertCompleteLocking(deps.cache);
+  if (deps.servicePolicy) validateServicePolicy(deps.servicePolicy);
   const acceptedModels = config.models ?? ["x402"];
   const clock = deps.clock ?? Date.now;
+  const servicePolicyStore =
+    deps.servicePolicy && (deps.servicePolicyStore ?? createInMemoryServicePolicyStore());
   const context: SettlementContext = {
     signer: deps.signer,
     cache: deps.cache,
     onCacheError: deps.onCacheError,
     inFlight,
     lockTtlMs: deps.settlementLockTtlMs ?? DEFAULT_SETTLEMENT_LOCK_TTL_MS,
+    clock,
+    ...(deps.servicePolicy && servicePolicyStore
+      ? { servicePolicy: { policy: deps.servicePolicy, store: servicePolicyStore } }
+      : {}),
   };
 
   return async function gate(request): Promise<GateOutcome> {

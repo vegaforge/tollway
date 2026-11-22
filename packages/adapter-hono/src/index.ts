@@ -50,6 +50,7 @@ export function honoPaywall(gate: Gate): MiddlewareHandler {
       return c.json(outcome.challenge, outcome.status);
     }
 
+    if (outcome.headers) applyHeaders(c, outcome.headers);
     return c.json({ error: outcome.reason }, outcome.status as JsonStatus);
   };
 }
