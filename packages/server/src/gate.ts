@@ -33,6 +33,15 @@ import {
   TOLLWAY_RECEIPT_HEADER,
 } from "./headers.js";
 import type { MppChargeHandler } from "./mpp-charge.js";
+import {
+  createInMemoryServicePolicyStore,
+  SERVICE_POLICY_DENIALS,
+  type ServicePolicy,
+  type ServicePolicyDecision,
+  type ServicePolicyReservation,
+  type ServicePolicyStore,
+  validateServicePolicy,
+} from "./service-policy.js";
 
 /**
  * The gating molecule. It sits between a request and the resource: with a
@@ -116,7 +125,14 @@ export type GateOutcome =
        */
       lockLost?: true;
     }
-  | { kind: "rejected"; status: number; reason: string };
+  | {
+      kind: "rejected";
+      status: number;
+      /** A stable reason code, or a human message when no code applies. */
+      reason: string;
+      /** Headers the adapter must send with the rejection, such as `Retry-After`. */
+      headers?: Record<string, string>;
+    };
 
 /** A payment gate for one paid resource, built by {@link createPaywall}. */
 export type Gate = (request: TollwayRequest) => Promise<GateOutcome>;
@@ -131,6 +147,26 @@ export type PaywallDeps = {
   mppChargeHandler?: MppChargeHandler;
   router?: ModelRouter;
   cache?: SettlementCache;
+  /**
+   * Optional per-payer rules evaluated after `/verify` and before the
+   * settlement lock. A denial is rejected without calling `/settle`. See
+   * `ServicePolicy` and docs/design.md, "Policy and budgets".
+   */
+  servicePolicy?: ServicePolicy;
+  /**
+   * Where the service policy keeps per-payer windows. Defaults to a
+   * per-gate in-memory store bounded to 10 000 payers, with least-recently-used
+   * eviction. Inject a shared store for multiple processes; the in-memory
+   * limits only hold within one process (#190).
+   */
+  servicePolicyStore?: ServicePolicyStore;
+  /**
+   * Called when the service policy store fails to record or release a
+   * reservation. The payment's outcome is unchanged: a settled payment still
+   * returns its receipt, and a settlement error is still thrown. The payer's
+   * counters may be off until the window rolls over.
+   */
+  onServicePolicyError?: (error: Error, payer: string) => void;
   /**
    * Called when the settlement cache fails after a payment has settled. The
    * same error is also set as `cacheError` on the outcome.
@@ -147,7 +183,7 @@ export type PaywallDeps = {
    * that implements locks.
    */
   settlementLockTtlMs?: number;
-  /** Clock for quote expiry; injected tests can avoid waiting. */
+  /** Clock for quote expiry and service policy windows; injected tests can avoid waiting. */
   clock?: () => number;
 };
 
@@ -396,6 +432,9 @@ type SettlementContext = {
   /** Settlements in progress in this process, by cache key. */
   inFlight: Map<string, Promise<SettlementResult>>;
   lockTtlMs: number;
+  clock: () => number;
+  servicePolicy?: { policy: ServicePolicy; store: ServicePolicyStore };
+  onServicePolicyError?: (error: Error, payer: string) => void;
 };
 
 /**
@@ -415,6 +454,27 @@ const SETTLEMENT_IN_PROGRESS: RejectedOutcome = {
   status: 409,
   reason: "settlement in progress",
 };
+
+/**
+ * Turns a policy denial into a rejection. Both allowlist and denylist
+ * denials use the same code and status, so the answer does not reveal which
+ * list matched. Window limits carry `Retry-After` in whole seconds, rounded
+ * up so a client that waits that long is inside the next window.
+ */
+function servicePolicyRejection(
+  decision: Extract<ServicePolicyDecision, { allowed: false }>,
+): RejectedOutcome {
+  const retryAfter =
+    decision.retryAfterMs === undefined
+      ? undefined
+      : String(Math.max(1, Math.ceil(decision.retryAfterMs / 1000)));
+  return {
+    kind: "rejected",
+    status: decision.code === SERVICE_POLICY_DENIALS.notAllowed ? 403 : 429,
+    reason: decision.code,
+    ...(retryAfter === undefined ? {} : { headers: { "retry-after": retryAfter } }),
+  };
+}
 
 /** The fields a receipt must share with the offer it is returned for. */
 function offerBinding(offer: PaymentOffer, model: SettlementModel): string {
@@ -507,12 +567,103 @@ async function settleWithHandler<TPayment>(
     return toOutcome(await pending, offer, model, method, true);
   }
 
-  const attempt = settleOnce(payment, offer, model, method, handler, verification, key, context);
+  // The in-flight slot is claimed before anything awaits, so a second copy
+  // of this payment always finds it above and shares this attempt's result,
+  // whether that is a receipt or a policy denial. Policy runs inside the
+  // attempt and is consulted once per payment.
+  const attempt = admitAndSettle(
+    payment,
+    offer,
+    model,
+    method,
+    handler,
+    verification,
+    key,
+    context,
+  );
   context.inFlight.set(key, attempt);
   try {
     return toOutcome(await attempt, offer, model, method, false);
   } finally {
     context.inFlight.delete(key);
+  }
+}
+
+/**
+ * Runs the service policy for a verified payer, then settles. The payer is
+ * verified and no settlement lock has been taken, so a denial never reaches
+ * /settle. Spend is recorded only for a fresh settlement: a replay was
+ * already counted when it settled, and a failure frees the reservation.
+ */
+async function admitAndSettle<TPayment>(
+  payment: TPayment,
+  offer: PaymentOffer,
+  model: SettlementModel,
+  method: string,
+  handler: Handler<TPayment>,
+  verification: { payer: string; nonce: string },
+  key: string,
+  context: SettlementContext,
+): Promise<SettlementResult> {
+  const servicePolicy = context.servicePolicy;
+  if (!servicePolicy) {
+    return settleOnce(payment, offer, model, method, handler, verification, key, context);
+  }
+
+  const decision = await servicePolicy.store.admit({
+    policy: servicePolicy.policy,
+    payer: verification.payer,
+    offer,
+    model,
+    now: context.clock(),
+  });
+  if (!decision.allowed) return { ok: false, outcome: servicePolicyRejection(decision) };
+  const reservation = decision.reservation;
+  if (!reservation) {
+    return settleOnce(payment, offer, model, method, handler, verification, key, context);
+  }
+
+  let result: SettlementResult;
+  try {
+    result = await settleOnce(payment, offer, model, method, handler, verification, key, context);
+  } catch (error) {
+    // The settlement error is what the caller needs; a release failure on
+    // top of it goes to the hook so it neither replaces nor hides it.
+    await reportPolicyStoreFailure(
+      () => servicePolicy.store.release(reservation),
+      reservation,
+      context,
+    );
+    throw error;
+  }
+
+  const settledNow = result.ok && !result.replayed;
+  // The payment has settled (or definitely has not), so a store failure here
+  // must not cost the payer the receipt. It goes to the hook instead.
+  await reportPolicyStoreFailure(
+    () =>
+      settledNow
+        ? servicePolicy.store.commit(reservation)
+        : servicePolicy.store.release(reservation),
+    reservation,
+    context,
+  );
+  return result;
+}
+
+/** Runs a policy store write and routes a failure to onServicePolicyError. */
+async function reportPolicyStoreFailure(
+  write: () => Promise<void>,
+  reservation: ServicePolicyReservation,
+  context: SettlementContext,
+): Promise<void> {
+  try {
+    await write();
+  } catch (failure) {
+    context.onServicePolicyError?.(
+      asError(failure, "service policy store write failed"),
+      reservation.payer,
+    );
   }
 }
 
@@ -827,14 +978,22 @@ export function createPaywallWithInFlight(
 ): Gate {
   validateDynamicPriceConfig(config);
   assertCompleteLocking(deps.cache);
+  if (deps.servicePolicy) validateServicePolicy(deps.servicePolicy);
   const acceptedModels = config.models ?? ["x402"];
   const clock = deps.clock ?? Date.now;
+  const servicePolicyStore =
+    deps.servicePolicy && (deps.servicePolicyStore ?? createInMemoryServicePolicyStore());
   const context: SettlementContext = {
     signer: deps.signer,
     cache: deps.cache,
     onCacheError: deps.onCacheError,
+    ...(deps.onServicePolicyError ? { onServicePolicyError: deps.onServicePolicyError } : {}),
     inFlight,
     lockTtlMs: deps.settlementLockTtlMs ?? DEFAULT_SETTLEMENT_LOCK_TTL_MS,
+    clock,
+    ...(deps.servicePolicy && servicePolicyStore
+      ? { servicePolicy: { policy: deps.servicePolicy, store: servicePolicyStore } }
+      : {}),
   };
 
   return async function gate(request): Promise<GateOutcome> {
