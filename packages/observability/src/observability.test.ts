@@ -553,6 +553,15 @@ describe("observability hub: export", () => {
     );
   });
 
+  it("prefixes CSV cells starting with a tab or a carriage return", () => {
+    // Spreadsheets strip a leading tab or CR and then evaluate what follows,
+    // so these two characters need the same neutralization as `=`.
+    const hub = createObservabilityHub({ sleep: noSleep });
+    hub.record(metric({ payer: "\t=SUM(A1:A2)", payee: "\r=SUM(A1:A2)" }));
+    const csv = hub.export("csv");
+    expect(csv).toContain(`"'\t=SUM(A1:A2)","'\r=SUM(A1:A2)"`);
+  });
+
   it("preserves RFC 4180 quote doubling after adding the formula-injection prefix", () => {
     const hub = createObservabilityHub({ sleep: noSleep });
     hub.record(metric({ payee: '=HYPERLINK("https://evil.test","x")' }));

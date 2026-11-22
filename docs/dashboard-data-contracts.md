@@ -46,7 +46,7 @@ The placeholder a widget shows when its data is unavailable. Every unwired widge
 
 ## The data-layer seam
 
-Wired views (currently Agents and Channels) follow one pattern, and unwired views (Overview model mix, Services, Receipts, Anomalies, Exports) follow another.
+Wired views (currently Agents, Channels and Exports) follow one pattern, and unwired views (Overview model mix, Services, Receipts, Anomalies) follow another.
 
 ### Wired views: the `useXxx` / `fetchXxx` seam
 
