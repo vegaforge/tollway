@@ -39,6 +39,7 @@
   "devDependencies": {
     "@types/ioredis-mock": "^8.2.8",
     "@types/node": "^22.20.5",
+    "fast-check": "^3.23.0",
     "ioredis-mock": "^8.13.1",
     "tsup": "^8.5.1",
     "typescript": "^5.9.3",
