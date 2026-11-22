@@ -691,6 +691,9 @@ importers:
       '@stellar/mpp':
         specifier: 0.7.1
         version: 0.7.1(@stellar/stellar-sdk@16.4.1)(mppx@0.8.19)
+      '@stellar/stellar-sdk':
+        specifier: 16.4.1
+        version: 16.4.1
       '@vegaforge/tollway-core':
         specifier: workspace:*
         version: link:../core
