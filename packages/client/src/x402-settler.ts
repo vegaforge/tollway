@@ -104,24 +104,13 @@ export function createX402Settler(options: X402SettlerOptions): ClientSettler {
       }
       const paymentRequired = readPaymentRequired(challenge, resource);
 
-      const requirements = paymentRequired.accepts.find(
-        (option) => option.scheme === "exact" && option.network === network,
-      );
-      if (!requirements) {
-        throw new TollwayError(
-          "payment-failed",
-          `the 402 from ${resource} has no Stellar exact option for ${network}`,
-        );
-      }
-      assertMatchesOffer(requirements, offer, resource);
-
       // A client per settlement, so the spend cap belongs to this offer
       // alone and two concurrent settlements cannot see each other's cap.
       const client = x402Client.fromConfig({
         schemes: [{ network, client: scheme }],
         spendControls: {
           allowedAssets: [
-            { network, asset: requirements.asset, maxAmountPerPayment: offer.amount },
+            { network, asset: offer.asset, maxAmountPerPayment: offer.amount },
           ],
         },
       });
@@ -129,6 +118,8 @@ export function createX402Settler(options: X402SettlerOptions): ClientSettler {
       // Register a PaymentPolicy that filters the accepted options to those
       // whose payTo and asset pass the configured allowlists. This prevents a
       // multi-option challenge from steering the settler to a disallowed option.
+      // The policy runs on the full accepts list before any option is selected,
+      // so a challenge with a disallowed option first cannot slip through.
       if (options.offerChecks) {
         const { allowedPayees, allowedAssets } = options.offerChecks;
         client.registerPolicy((_x402Version, reqs) =>
@@ -139,6 +130,20 @@ export function createX402Settler(options: X402SettlerOptions): ClientSettler {
           }),
         );
       }
+
+      // Pick the Stellar exact option from the policy-filtered accepts list.
+      // createPaymentPayload internally filters by scheme and network; we find
+      // it here so we can run assertMatchesOffer before signing.
+      const requirements = paymentRequired.accepts.find(
+        (option) => option.scheme === "exact" && option.network === network,
+      );
+      if (!requirements) {
+        throw new TollwayError(
+          "payment-failed",
+          `the 402 from ${resource} has no Stellar exact option for ${network}`,
+        );
+      }
+      assertMatchesOffer(requirements, offer, resource);
       let payload: PaymentPayload;
       try {
         payload = await client.createPaymentPayload({

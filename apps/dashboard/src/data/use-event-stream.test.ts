@@ -11,6 +11,8 @@ import { act, renderHook, waitFor } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { useRef } from "react";
 import { createHandlerMap, useEventStream } from "./use-event-stream";
+import { useAnomalies } from "./use-anomalies";
+import { useOpenChannels } from "./use-open-channels";
 
 // ---------------------------------------------------------------------------
 // Fake EventSource
@@ -112,7 +114,6 @@ describe("useEventStream status", () => {
       return useEventStream({ handlersRef });
     });
     expect(result.current).toBe("connecting");
-
     await waitFor(() => expect(result.current).toBe("live"));
   });
 
@@ -145,9 +146,7 @@ describe("useEventStream status", () => {
 
 describe("useAnomalies", () => {
   it("prepends new anomaly events, newest first", async () => {
-    const { useAnomalies } = await import("./use-anomalies");
     const { result } = renderHook(() => useAnomalies());
-
     await waitFor(() => expect(result.current.status).toBe("ready"));
 
     act(() => {
@@ -179,7 +178,6 @@ describe("useAnomalies", () => {
   });
 
   it("deduplicates events with the same id", async () => {
-    const { useAnomalies } = await import("./use-anomalies");
     const { result } = renderHook(() => useAnomalies());
     await waitFor(() => expect(result.current.status).toBe("ready"));
 
@@ -203,7 +201,6 @@ describe("useAnomalies", () => {
   });
 
   it("filters by agentId when agentFilter is provided", async () => {
-    const { useAnomalies } = await import("./use-anomalies");
     const { result } = renderHook(() => useAnomalies("agent-1"));
     await waitFor(() => expect(result.current.status).toBe("ready"));
 
@@ -232,7 +229,6 @@ describe("useAnomalies", () => {
   });
 
   it("clears rows on a reset event", async () => {
-    const { useAnomalies } = await import("./use-anomalies");
     const { result } = renderHook(() => useAnomalies());
     await waitFor(() => expect(result.current.status).toBe("ready"));
 
@@ -268,7 +264,6 @@ describe("useAnomalies", () => {
 
 describe("useOpenChannels channel lifecycle events", () => {
   it("appends a new channel on channel.opened", async () => {
-    const { useOpenChannels } = await import("./use-open-channels");
     const { result } = renderHook(() => useOpenChannels());
     await waitFor(() => expect(result.current.status).toBe("ready"));
 
@@ -289,7 +284,6 @@ describe("useOpenChannels channel lifecycle events", () => {
   });
 
   it("does not duplicate a channel that is already in the list", async () => {
-    const { useOpenChannels } = await import("./use-open-channels");
     const { result } = renderHook(() => useOpenChannels());
     await waitFor(() => expect(result.current.status).toBe("ready"));
 
@@ -313,7 +307,6 @@ describe("useOpenChannels channel lifecycle events", () => {
   });
 
   it("sets status to closed on channel.closed", async () => {
-    const { useOpenChannels } = await import("./use-open-channels");
     const { result } = renderHook(() => useOpenChannels());
     await waitFor(() => expect(result.current.status).toBe("ready"));
 
@@ -341,7 +334,6 @@ describe("useOpenChannels channel lifecycle events", () => {
 
 describe("burst coalescing", () => {
   it("batches multiple events into a single render cycle", async () => {
-    const { useAnomalies } = await import("./use-anomalies");
     let renderCount = 0;
     const { result } = renderHook(() => {
       renderCount++;
@@ -369,8 +361,7 @@ describe("burst coalescing", () => {
       expect(result.current.rows).toHaveLength(10);
     });
 
-    // All 10 events should have been merged in fewer renders than events.
-    // With rAF stubbed to run synchronously, they all land in one flush.
+    // All 10 events land in one rAF flush, so renders ≪ events.
     expect(renderCount - baseRenders).toBeLessThan(10);
   });
 });
@@ -381,7 +372,6 @@ describe("burst coalescing", () => {
 
 describe("schema validation", () => {
   it("drops an anomaly.detected event that fails schema validation", async () => {
-    const { useAnomalies } = await import("./use-anomalies");
     const { result } = renderHook(() => useAnomalies());
     await waitFor(() => expect(result.current.status).toBe("ready"));
 
@@ -390,7 +380,6 @@ describe("schema validation", () => {
       FakeEventSource.latest().emit("anomaly.detected", { invalid: true });
     });
 
-    // No rows should appear.
     await waitFor(() => {
       if (result.current.status !== "ready") throw new Error("not ready");
       expect(result.current.rows).toHaveLength(0);
@@ -404,7 +393,6 @@ describe("schema validation", () => {
 
 describe("reconnect state in consuming hooks", () => {
   it("reflects reconnecting status when EventSource errors", async () => {
-    const { useAnomalies } = await import("./use-anomalies");
     const { result } = renderHook(() => useAnomalies());
     await waitFor(() => expect(result.current.status).toBe("ready"));
     await waitFor(() => expect(result.current.stream).toBe("live"));

@@ -227,4 +227,3 @@ export function registerSseHandler<T extends SseEventType>(
     );
   };
 }
-}

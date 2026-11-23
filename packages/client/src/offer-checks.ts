@@ -67,6 +67,13 @@ export type OfferChecks = {
    * not in this set is rejected.
    */
   allowedAssets?: string[];
+  /**
+   * Override the network that offers must declare. Defaults to the client's
+   * configured `network` when omitted — the network check always fires, but
+   * this field lets a caller override which network is required (useful when
+   * one client instance serves multiple network contexts).
+   */
+  requireNetwork?: StellarNetwork;
 };
 
 /**
@@ -98,7 +105,8 @@ const INTEGER_AMOUNT = /^[0-9]+$/;
  * @param offer          The offer from the 402 challenge.
  * @param requestResource The resource URL the client was called with.
  * @param clientNetwork  The network the client is configured for.
- * @param checks         Optional per-call checks.
+ * @param checks         Optional per-call checks. `requireNetwork` overrides
+ *                       `clientNetwork` for the network check when present.
  */
 export function runOfferChecks(
   offer: PaymentOffer,
@@ -107,7 +115,9 @@ export function runOfferChecks(
   checks?: OfferChecks,
 ): void {
   checkStructural(offer, requestResource);
-  checkNetwork(offer, clientNetwork);
+  // requireNetwork in offerChecks overrides the client-level network.
+  const requiredNetwork = checks?.requireNetwork ?? clientNetwork;
+  checkNetwork(offer, requiredNetwork);
   if (checks) {
     checkAllowedAssets(offer, checks);
     checkMaxAmount(offer, checks);

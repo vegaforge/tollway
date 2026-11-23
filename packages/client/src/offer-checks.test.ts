@@ -144,7 +144,7 @@ describe("structural check", () => {
 });
 
 // ---------------------------------------------------------------------------
-// runOfferChecks – network
+// runOfferChecks – network (including requireNetwork override)
 // ---------------------------------------------------------------------------
 
 describe("network check", () => {
@@ -177,6 +177,30 @@ describe("network check", () => {
     expect(() =>
       runOfferChecks({ ...BASE_OFFER, network: "mainnet" }, RESOURCE, "testnet"),
     ).toThrow(OfferRejectedError);
+  });
+
+  it("requireNetwork in offerChecks overrides the client-level network", () => {
+    // Client is testnet, offer is mainnet, but requireNetwork forces mainnet — should pass.
+    expect(() =>
+      runOfferChecks({ ...BASE_OFFER, network: "mainnet" }, RESOURCE, "testnet", {
+        requireNetwork: "mainnet",
+      }),
+    ).not.toThrow();
+  });
+
+  it("requireNetwork rejects when offer does not match the override", () => {
+    // Client is testnet, requireNetwork forces mainnet, offer is testnet — should fail.
+    const err = (() => {
+      try {
+        runOfferChecks({ ...BASE_OFFER, network: "testnet" }, RESOURCE, "testnet", {
+          requireNetwork: "mainnet",
+        });
+      } catch (e) {
+        return e;
+      }
+    })();
+    expect(err).toBeInstanceOf(OfferRejectedError);
+    expect((err as OfferRejectedError).checkName).toBe("network");
   });
 });
 

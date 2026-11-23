@@ -72,6 +72,7 @@ const client = createClient({
 | **maxAmount** | `offer.amount` ≤ the ceiling for `offer.asset`. **Fail-closed**: if `maxAmount` is configured and the offer's asset has no entry in the map, the offer is rejected. This is intentional — an operator who sets price limits has expressed intent about which assets are acceptable. |
 | **allowedPayees** | `offer.payTo` must be in the set. Use exact strings; glob patterns are not supported. |
 | **allowedAssets** | `offer.asset` must be in the set. |
+| **requireNetwork** | Override the network that offers must declare. Defaults to the client's configured `network`. Useful when one client instance serves multiple network contexts. |
 
 ### Recommended defaults
 
