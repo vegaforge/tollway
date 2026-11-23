@@ -1,0 +1,52 @@
+{
+  "name": "@vegaforge/tollway-service",
+  "version": "0.0.0",
+  "description": "Optional self-hosted Tollway shared service: a Hono HTTP API with typed configuration, API-key authentication, health and readiness endpoints, and a generated OpenAPI document.",
+  "license": "Apache-2.0",
+  "type": "module",
+  "main": "./dist/index.cjs",
+  "module": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "bin": {
+    "tollway-service": "./dist/bin.js"
+  },
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js",
+      "require": "./dist/index.cjs"
+    }
+  },
+  "files": [
+    "dist",
+    "README.md"
+  ],
+  "sideEffects": false,
+  "publishConfig": {
+    "access": "public"
+  },
+  "scripts": {
+    "build": "tsup",
+    "dev": "tsup --watch",
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "start": "node ./dist/bin.js"
+  },
+  "dependencies": {
+    "@hono/node-server": "^1.13.0",
+    "@vegaforge/tollway-channels": "workspace:*",
+    "@vegaforge/tollway-core": "workspace:*",
+    "@vegaforge/tollway-observability": "workspace:*",
+    "hono": "^4.12.23",
+    "zod": "^4.6.6"
+  },
+  "devDependencies": {
+    "tsup": "^8.0.0",
+    "typescript": "^5.6.0",
+    "vitest": "^2.1.0"
+  },
+  "engines": {
+    "node": ">=20"
+  }
+}
