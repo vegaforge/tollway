@@ -33,6 +33,8 @@ describe("runDemo in live mode", () => {
   const payerKeypair = Keypair.random();
   const realFetch = globalThis.fetch;
   let facilitatorCalls: Array<{ url: string; headers: Headers }>;
+  // What the stub answers on /supported: OpenZeppelin Channels' shape by default.
+  let supportedKinds: unknown[];
 
   // Signs nothing: returns a V2 payload with a fixed transaction, so no
   // Stellar RPC is needed.
@@ -44,20 +46,30 @@ describe("runDemo in live mode", () => {
 
   beforeEach(() => {
     facilitatorCalls = [];
+    supportedKinds = [
+      {
+        x402Version: 2,
+        scheme: "exact",
+        network: "stellar:testnet",
+        extra: { areFeesSponsored: true },
+      },
+    ];
     vi.stubGlobal("fetch", async (input: string | URL | Request, init?: RequestInit) => {
       const url = input instanceof Request ? input.url : input.toString();
       if (url.startsWith("http://127.0.0.1:")) {
         return realFetch(input, init);
       }
       facilitatorCalls.push({ url, headers: new Headers(init?.headers) });
-      const body = url.endsWith("/verify")
-        ? { isValid: true, payer: payerKeypair.publicKey() }
-        : {
-            success: true,
-            transaction: "a".repeat(64),
-            network: "stellar:testnet",
-            payer: payerKeypair.publicKey(),
-          };
+      const body = url.endsWith("/supported")
+        ? { kinds: supportedKinds, extensions: [], signers: {} }
+        : url.endsWith("/verify")
+          ? { isValid: true, payer: payerKeypair.publicKey() }
+          : {
+              success: true,
+              transaction: "a".repeat(64),
+              network: "stellar:testnet",
+              payer: payerKeypair.publicKey(),
+            };
       return new Response(JSON.stringify(body), {
         status: 200,
         headers: { "Content-Type": "application/json" },
@@ -108,6 +120,32 @@ describe("runDemo in live mode", () => {
     const result = await runDemo({ payer });
 
     expect(result.challenge.asset).toBe(USDC_TESTNET_ADDRESS);
+  });
+
+  it("checks the facilitator's capabilities before serving and reports the result", async () => {
+    stubLiveEnv();
+    const result = await runDemo({ payer });
+
+    expect(facilitatorCalls[0]?.url).toMatch(/\/supported$/);
+    expect(facilitatorCalls[0]?.headers.get("Authorization")).toBe("Bearer k");
+    expect(result.facilitatorCheck).toEqual({
+      status: "ok",
+      routes: { "GET /quotes/latest": { status: "valid" } },
+      mismatches: [],
+    });
+  });
+
+  it("refuses to start when the facilitator does not support the paywall", async () => {
+    stubLiveEnv();
+    supportedKinds = [{ x402Version: 2, scheme: "exact", network: "eip155:8453" }];
+
+    await expect(runDemo({ payer })).rejects.toMatchObject({
+      name: "FacilitatorCheckError",
+      code: "facilitator-unsupported",
+    });
+    expect(facilitatorCalls.map((call) => call.url)).toEqual([
+      expect.stringMatching(/\/supported$/),
+    ]);
   });
 
   it("reports every missing variable in live mode without calling the network", async () => {
