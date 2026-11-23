@@ -330,6 +330,8 @@ export function computeTimeseries(
     if (query.payer !== undefined && m.payer !== query.payer) continue;
     if (query.payee !== undefined && m.payee !== query.payee) continue;
     if (query.model !== undefined && m.model !== query.model) continue;
+    if (query.asset !== undefined && m.asset !== query.asset) continue;
+    if (query.outcome !== undefined && m.outcome !== query.outcome) continue;
 
     const atMs = parseIsoTimestamp(m.at);
     if (atMs === null) {
