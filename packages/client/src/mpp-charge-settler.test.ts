@@ -1,3 +1,4 @@
+import type * as ChargeClient from "@stellar/mpp/charge/client";
 import { Asset, Keypair, Networks } from "@stellar/stellar-sdk";
 import {
   buildReceipt,
@@ -28,9 +29,7 @@ const charge = vi.hoisted(() => ({
 }));
 
 vi.mock("@stellar/mpp/charge/client", async () => {
-  const actual = await vi.importActual<typeof import("@stellar/mpp/charge/client")>(
-    "@stellar/mpp/charge/client",
-  );
+  const actual = await vi.importActual<typeof ChargeClient>("@stellar/mpp/charge/client");
   type ChargeParameters = Parameters<typeof actual.stellar.charge>[0];
   type CreateCredentialInput = Parameters<
     ReturnType<typeof actual.stellar.charge>["createCredential"]

@@ -6,7 +6,7 @@
   "license": "Apache-2.0",
   "type": "module",
   "scripts": {
-    "start": "tsx src/main.ts",
+    "start": "node init && tsx src/main.ts",
     "test": "vitest run",
     "typecheck": "tsc --noEmit"
   },

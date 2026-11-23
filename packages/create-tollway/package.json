@@ -17,7 +17,7 @@
     "templates"
   ],
   "scripts": {
-    "build": "tsup && chmod +x dist/cli.js",
+    "build": "node init && tsup && chmod +x dist/cli.js",
     "test": "vitest run",
     "typecheck": "tsc --noEmit"
   },
