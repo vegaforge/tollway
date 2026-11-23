@@ -207,3 +207,90 @@ const trusted = result.receipt; // exactly what the signature covers
 The signature carries `keyId`, and `Ed25519Verifier` accepts a map of `keyId -> publicKey`. Rotation is therefore additive: when a new key is introduced, both the old and the new public key live in the verifier's map until every receipt signed by the old key has aged out of the window you care about (the settlement cache, the dispute window, the audit retention period). New receipts use the new `keyId`; old receipts still verify against the old key. An unknown `keyId` or a different `algorithm` returns false rather than throwing, so a verifier that does not have the key configured fails closed.
 
 The same property makes multi-signer deployments straightforward: every Tollway instance can have its own `keyId`, and every downstream service can trust the set of instance keys it expects to see.
+
+## Publishing keys
+
+Independent verifiers that do not share a codebase with the issuer need a way to fetch the trusted public keys. Tollway publishes them as a JWK Set (RFC 7517) with Ed25519 keys in `kty: "OKP", crv: "Ed25519"` form (RFC 8037), plus a Tollway-specific per-key `status` field:
+
+```json
+{
+  "keys": [
+    {
+      "kty": "OKP",
+      "crv": "Ed25519",
+      "x": "PUAXw-hDiVqStwqnTRt-vJyYLM8uxJaMwM1V8Sr0Zgw",
+      "kid": "tollway-2026-q2",
+      "alg": "EdDSA",
+      "use": "sig",
+      "status": { "state": "active" }
+    },
+    {
+      "kty": "OKP",
+      "crv": "Ed25519",
+      "x": "B1ffj5YQAtQr6ue3dFlc7wDlAbhG3E9bmgXflytbMvs",
+      "kid": "tollway-2026-q1",
+      "alg": "EdDSA",
+      "use": "sig",
+      "status": { "state": "retired", "retiredAt": "2026-07-01T00:00:00.000Z" }
+    }
+  ]
+}
+```
+
+`status.state` is one of:
+
+- `active` — the key is in use.
+- `retired` — a planned rotation. The key verifies receipts whose `issuedAt` is strictly before `retiredAt` and fails anything later. Keep a retired key in the document until every receipt signed by it has aged out of your audit window.
+- `revoked` — the key is compromised. Every receipt it ever signed fails verification, because a compromised signer can backdate `issuedAt` and there is no honest cutoff.
+
+### Serving the document
+
+`renderKeySetResponse(document, { maxAgeSeconds })` in `@vegaforge/tollway-server` returns a framework-agnostic `{ status, headers, body }` object the four adapters (Express, Fastify, Next, Hono) can forward. The recommended mount path is `/.well-known/tollway-receipt-keys.jwks`:
+
+```ts
+import { renderKeySetResponse } from "@vegaforge/tollway-server";
+
+const response = renderKeySetResponse(
+  { keys: [{ ...signer.publicJwk(), status: { state: "active" } }] },
+  { maxAgeSeconds: 300 },
+);
+// response.status === 200
+// response.headers["content-type"] === "application/jwk-set+json"
+// response.headers["cache-control"]  === "public, max-age=300"
+// response.body is the JSON a verifier parses
+```
+
+### Loading persisted keys
+
+`Ed25519Signer.fromPrivateKey(encodedKey, keyId?)` loads a 32-byte seed or a 48-byte PKCS#8 document (what `openssl genpkey -algorithm ed25519 -outform DER` produces). `Ed25519Signer.fromJwk(jwk, keyId?)` loads a private JWK (`{ kty: "OKP", crv: "Ed25519", d, x }`), which is what most managed-key services export. `signer.publicJwk()` returns the public half in the shape the key-set document expects.
+
+### Caching key-set verifier
+
+Downstream verifiers call `createKeySetVerifier({ url, fetch?, clock?, minCacheMs?, maxCacheMs?, unknownKidRefetchCooldownMs? })` to point at a service's key-set URL. It implements the plain `ReceiptVerifier` interface, caches the document under its `Cache-Control: max-age` (clamped between `minCacheMs` and `maxCacheMs`), and rate-limits refetches on an unknown `kid` so a forged stream of receipts cannot force one fetch per attempt. The verifier never follows a URL taken from a receipt itself, only the configured one, so a forged receipt cannot steer the verifier. A fetch failure keeps serving on the cached copy inside `maxCacheMs`; after that, verification fails closed.
+
+```ts
+import { createKeySetVerifier, verifyReceipt } from "@vegaforge/tollway-core";
+
+const verifier = createKeySetVerifier({
+  url: "https://api.example.com/.well-known/tollway-receipt-keys.jwks",
+  minCacheMs: 60_000,
+  maxCacheMs: 24 * 60 * 60 * 1_000,
+});
+
+const result = await verifyReceipt(incoming, verifier);
+```
+
+### Rotation and revocation procedures
+
+Rotation (planned):
+
+1. Generate a new key and publish it with `status: { state: "active" }` alongside the current one. Give it a few `max-age` windows for verifiers to pick it up.
+2. Switch the signer over to the new key.
+3. Mark the previous key `status: { state: "retired", retiredAt: <now> }`. It keeps verifying older receipts; new receipts are issued by the new key.
+4. Keep the retired entry in the document until every retired-key receipt has aged past your audit window.
+
+Revocation (incident):
+
+1. Mark the compromised key `status: { state: "revoked" }`. Every receipt it ever signed now fails verification, including past ones.
+2. Deploy a new key the same way as a planned rotation.
+3. Communicate the incident separately. Verifiers that cached the pre-revocation document pick up the revocation when `max-age` elapses; a pager-worthy incident should also call out the cache window explicitly.

@@ -159,12 +159,114 @@ export class Ed25519Signer implements ReceiptSigner {
     return new Ed25519Signer(keyId ?? bytesToBase64Url(publicKey), publicKey, privateKey);
   }
 
+  /**
+   * Loads a persisted Ed25519 private key from a JWK (RFC 7517 + RFC 8037):
+   * `{ kty: "OKP", crv: "Ed25519", d, x, ... }`. The `d` field holds the
+   * 32-byte seed base64url-encoded; `x` holds the public half.
+   *
+   * JWKs sit next to the key-set document format (#167) and most KMSes can
+   * export private keys as JWKs too, so this is the import path a service
+   * uses when its key material already travels as JWK rather than as
+   * PKCS#8.
+   *
+   * @throws TollwayError("invalid-signing-key", ...) when the JWK is
+   *   missing `d`, carries the wrong `kty` or `crv`, or when the material
+   *   is not a valid Ed25519 key. The message never contains the private
+   *   half.
+   */
+  static async fromJwk(jwk: Record<string, unknown>, keyId?: string): Promise<Ed25519Signer> {
+    if (jwk.kty !== "OKP") {
+      throw new TollwayError(
+        "invalid-signing-key",
+        `receipt signing JWK has kty ${String(jwk.kty)}, expected "OKP"`,
+      );
+    }
+    if (jwk.crv !== ED25519) {
+      throw new TollwayError(
+        "invalid-signing-key",
+        `receipt signing JWK has crv ${String(jwk.crv)}, expected "Ed25519"`,
+      );
+    }
+    if (typeof jwk.d !== "string" || jwk.d.length === 0) {
+      throw new TollwayError(
+        "invalid-signing-key",
+        "receipt signing JWK has no private half (`d` is missing)",
+      );
+    }
+    if (typeof jwk.x !== "string" || jwk.x.length === 0) {
+      throw new TollwayError(
+        "invalid-signing-key",
+        "receipt signing JWK has no public half (`x` is missing)",
+      );
+    }
+    let publicKey: Uint8Array;
+    let privateKey: CryptoKey;
+    try {
+      // Import once extractable so we can confirm the public half matches
+      // what the JWK declared; then import again non-extractable for
+      // signing, so the private material cannot be exported later.
+      const extractable = await crypto.subtle.importKey("jwk", jwk as JsonWebKey, ED25519, true, [
+        "sign",
+      ]);
+      const exported = await crypto.subtle.exportKey("jwk", extractable);
+      if (typeof exported.x !== "string") {
+        throw new TollwayError("invalid-signing-key", "receipt signing JWK has no public half");
+      }
+      publicKey = base64UrlToBytes(exported.x);
+      if (exported.x !== jwk.x) {
+        throw new TollwayError(
+          "invalid-signing-key",
+          "receipt signing JWK private half does not match its stated public half",
+        );
+      }
+      privateKey = await crypto.subtle.importKey("jwk", jwk as JsonWebKey, ED25519, false, [
+        "sign",
+      ]);
+    } catch (error) {
+      if (error instanceof TollwayError) throw error;
+      throw new TollwayError(
+        "invalid-signing-key",
+        "receipt signing JWK could not be imported as an Ed25519 private key",
+      );
+    }
+    return new Ed25519Signer(keyId ?? bytesToBase64Url(publicKey), publicKey, privateKey);
+  }
+
+  /**
+   * The signer's public half as a JWK (RFC 7517 + RFC 8037). The JWK
+   * carries `kid` and `alg` so it slots directly into a key-set document
+   * without further work. The private half never leaves the signer.
+   */
+  publicJwk(): PublicJwk {
+    return {
+      kty: "OKP",
+      crv: ED25519,
+      x: bytesToBase64Url(this.publicKey),
+      kid: this.keyId,
+      alg: "EdDSA",
+      use: "sig",
+    };
+  }
+
   async sign(message: Uint8Array): Promise<Uint8Array> {
     return new Uint8Array(
       await crypto.subtle.sign(ED25519, this.privateKey, message as BufferSource),
     );
   }
 }
+
+/**
+ * The public half of an Ed25519 key in JWK form. The `kid` and `alg`
+ * fields are what a key-set document needs on top of the raw material.
+ */
+export type PublicJwk = {
+  kty: "OKP";
+  crv: "Ed25519";
+  x: string;
+  kid: string;
+  alg: "EdDSA";
+  use: "sig";
+};
 
 /**
  * Verifies against a set of trusted public keys by keyId. An unknown key or a

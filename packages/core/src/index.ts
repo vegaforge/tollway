@@ -39,6 +39,16 @@ export {
 } from "./policy-trace.js";
 export { canonicalBytes, canonicalJson, type JsonValue } from "./receipt/canonical.js";
 export {
+  createKeySetVerifier,
+  type KeySetDocument,
+  type KeySetEntry,
+  type KeySetFetcher,
+  type KeySetVerifier,
+  type KeySetVerifierOptions,
+  keySetDocumentSchema,
+  keySetEntrySchema,
+} from "./receipt/key-set.js";
+export {
   type BuildReceiptInput,
   buildReceipt,
   type ReceiptVerification,
@@ -58,6 +68,7 @@ export {
 export {
   Ed25519Signer,
   Ed25519Verifier,
+  type PublicJwk,
   type ReceiptSigner,
   type ReceiptVerifier,
 } from "./receipt/signer.js";
