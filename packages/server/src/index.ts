@@ -44,16 +44,19 @@ export {
   type X402Terms,
 } from "./facilitator.js";
 export {
-  assertPaywallValid,
   createFacilitatorValidator,
   describeMismatches,
   type FacilitatorCapabilities,
+  FacilitatorCheckError,
+  type FacilitatorCheckReport,
+  type FacilitatorKind,
   type FacilitatorValidator,
   type FacilitatorValidatorOptions,
   type PaywallMismatch,
+  type PaywallTarget,
+  type PaywallValidation,
   parseFacilitatorCapabilities,
   type ValidationMode,
-  type ValidationResult,
   validatePaywall,
 } from "./facilitator-capabilities.js";
 export {

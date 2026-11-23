@@ -2,38 +2,47 @@
 date: 2026-11-23
 feature: Validate facilitator capabilities at startup
 scope: feat
-packages: [@vegaforge/tollway-server]
+packages: [@vegaforge/tollway-core, @vegaforge/tollway-server]
 scenario-impact: none
 ---
 
 # Facilitator capability validation
 
-`FacilitatorClient.supported()` now returns the full `/supported` capability
-set from `@x402/core` (`kinds`, `extensions`, `signers`), schema-checked at
-the boundary, instead of the lossy `{ models, assets }` shape it returned
-before. Callers can feed it into the new `createFacilitatorValidator(...)`
-or the lower-level `validatePaywall(...)` to check that every paywall's
-network, scheme, `x402Version`, `extra.areFeesSponsored` and address shape
-match what the facilitator advertises before the first paying agent hits
-the gate.
+A service can now ask its facilitator what it supports before serving, and
+refuse to start when a paywall does not match, instead of the first paying
+agent discovering the problem.
 
-Three operator modes are supported:
-- `fail` (default): `assertPaywallValid` throws `TollwayError("payment-failed", ...)`
-  with every mismatch named (route, field, expected, advertised) so a boot
-  script aborts.
-- `warn`: mismatches are reported through an `onWarn` callback while the
-  gate keeps serving.
-- `off`: the historic no-check behaviour.
+```ts
+const validator = createFacilitatorValidator(facilitator); // mode "fail"
+await validator.check({ "GET /quotes": quotesPaywall });
+```
 
-A one-minute TTL cache (configurable) in `createFacilitatorValidator`
-revalidates `/supported` after that window so a facilitator deploy that
-drops a network is noticed without a server restart. A facilitator that is
-unreachable in `warn` mode surfaces a synthetic mismatch rather than being
-treated as "supports everything".
+`check` reads `/supported` and compares every route's paywall with it: x402
+version 2, the `exact` scheme on the paywall's network or `stellar:*`, the
+paywall's own `extra.areFeesSponsored` against the facilitator's, a contract
+address as `asset` and a valid `payTo`.
 
-The old `SupportedResult` type and its `{ models, assets }` shape are
-removed. This is a breaking change on an exported interface, which the
-changeset covers as a minor bump — `supported()` was only called by
-internal tests before this issue.
+- `fail`, the default, throws a `FacilitatorCheckError`. Its `code` is
+  `facilitator-unsupported` with every mismatch named (route, field,
+  expected, advertised), or `facilitator-unavailable` when `/supported`
+  cannot be read.
+- `warn` passes the report to `onWarn` and resolves. An unavailable
+  facilitator is reported as `unavailable`, never as valid.
+- `off` skips the check.
 
-Closes #155.
+`/supported` is cached for one minute by default (`ttlMs`), and `refresh()`
+drops the cache. The demo's live mode runs the check before it serves and
+prints the result. x402 `/supported` does not advertise assets, so asset
+acceptance is still only confirmed by the first `/verify`; the deployment
+guide says so. The check covers x402 only, since MPP charge has no
+facilitator.
+
+Breaking change: `FacilitatorClient.supported()` now returns
+`FacilitatorCapabilities` (`kinds`, `extensions`, `signers`), parsed with a
+schema at the boundary, and `SupportedResult` is removed. Every external
+implementation of `FacilitatorClient` must change its `supported()`, not
+only callers. A malformed `/supported` body throws
+`facilitator-invalid-response`. `TollwayError` gained the three
+`facilitator-*` codes and an optional `cause`.
+
+Pull request: #325. Closes #155.

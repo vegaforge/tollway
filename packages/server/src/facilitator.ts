@@ -9,7 +9,7 @@ import {
   VerifyError,
   type VerifyResponse,
 } from "@x402/core/types";
-import { STELLAR_PUBNET_CAIP2, STELLAR_TESTNET_CAIP2 } from "@x402/stellar";
+import { STELLAR_PUBNET_CAIP2, STELLAR_TESTNET_CAIP2, STELLAR_WILDCARD_CAIP2 } from "@x402/stellar";
 import type { FacilitatorCapabilities } from "./facilitator-capabilities.js";
 import { parseFacilitatorCapabilities } from "./facilitator-capabilities.js";
 import { mockAccount, mockHex } from "./hash.js";
@@ -106,18 +106,17 @@ export function createMockFacilitator(): FacilitatorClient {
       return { settled: true, txHash: mockHex(`${nonce}:${offer.resource}`) };
     },
     async supported() {
-      // Issue #155: the mock exercises the same validation path the HTTP
-      // client does. A kind that advertises v2 `exact` on the Stellar
-      // wildcard network is the loosest compatible shape — every real
-      // paywall validates against it, and any paywall-level mismatch
-      // (bad asset format, wrong payTo) still surfaces because
-      // validatePaywall checks those fields locally.
+      // What OpenZeppelin Channels advertises: v2 `exact` on every Stellar
+      // network, with sponsored fees. The mock demo runs the same capability
+      // check as the live one against it, and asset and payTo mistakes still
+      // show up because validatePaywall checks those locally.
       return {
         kinds: [
           {
             x402Version: 2,
             scheme: STELLAR_EXACT_SCHEME,
-            network: "stellar:*",
+            network: STELLAR_WILDCARD_CAIP2,
+            extra: { areFeesSponsored: true },
           },
         ],
         extensions: [],
