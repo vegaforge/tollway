@@ -33,7 +33,7 @@
     "@stellar/mpp": "0.7.1",
     "@stellar/stellar-sdk": "16.4.1",
     "@vegaforge/tollway-core": "workspace:*",
-    "mppx": "0.8.19"
+    "mppx": "0.21.1"
   },
   "devDependencies": {
     "@types/node": "^22.20.5",
