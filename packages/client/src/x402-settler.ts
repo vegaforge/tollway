@@ -109,9 +109,7 @@ export function createX402Settler(options: X402SettlerOptions): ClientSettler {
       const client = x402Client.fromConfig({
         schemes: [{ network, client: scheme }],
         spendControls: {
-          allowedAssets: [
-            { network, asset: offer.asset, maxAmountPerPayment: offer.amount },
-          ],
+          allowedAssets: [{ network, asset: offer.asset, maxAmountPerPayment: offer.amount }],
         },
       });
 
@@ -131,10 +129,22 @@ export function createX402Settler(options: X402SettlerOptions): ClientSettler {
         );
       }
 
-      // Pick the Stellar exact option from the policy-filtered accepts list.
-      // createPaymentPayload internally filters by scheme and network; we find
-      // it here so we can run assertMatchesOffer before signing.
-      const requirements = paymentRequired.accepts.find(
+      // Apply the allowlist filter to the accepts list before selecting an option.
+      // This mirrors what the x402Client PaymentPolicy does internally, but we
+      // need it here too so assertMatchesOffer and createPaymentPayload both
+      // operate on the same filtered set.
+      let filteredAccepts = paymentRequired.accepts;
+      if (options.offerChecks) {
+        const { allowedPayees, allowedAssets } = options.offerChecks;
+        filteredAccepts = filteredAccepts.filter((req) => {
+          if (allowedPayees && !allowedPayees.includes(req.payTo)) return false;
+          if (allowedAssets && !allowedAssets.includes(req.asset)) return false;
+          return true;
+        });
+      }
+
+      // Pick the Stellar exact option from the filtered list.
+      const requirements = filteredAccepts.find(
         (option) => option.scheme === "exact" && option.network === network,
       );
       if (!requirements) {

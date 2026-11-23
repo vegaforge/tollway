@@ -408,9 +408,9 @@ describe("createClient: rejected offer never reaches settler or policy", () => {
       offerChecks: { allowedPayees: ["GDIFFERENT000000000000000000000000000000000000000000000000"] },
     });
 
-    await expect(
-      client.pay({ resource: RESOURCE, offer: BASE_OFFER }),
-    ).rejects.toBeInstanceOf(OfferRejectedError);
+    await expect(client.pay({ resource: RESOURCE, offer: BASE_OFFER })).rejects.toBeInstanceOf(
+      OfferRejectedError,
+    );
 
     expect(spy).not.toHaveBeenCalled();
     expect(settler.settle).not.toHaveBeenCalled();
@@ -427,9 +427,9 @@ describe("createClient: rejected offer never reaches settler or policy", () => {
     const events: Array<{ type: string }> = [];
     client.on((e) => events.push(e));
 
-    await expect(
-      client.pay({ resource: RESOURCE, offer: BASE_OFFER }),
-    ).rejects.toBeInstanceOf(OfferRejectedError);
+    await expect(client.pay({ resource: RESOURCE, offer: BASE_OFFER })).rejects.toBeInstanceOf(
+      OfferRejectedError,
+    );
 
     expect(events.some((e) => e.type === "skip")).toBe(true);
   });
@@ -461,8 +461,9 @@ describe("createX402Settler: PaymentPolicy filters multi-option challenges", () 
     const { Keypair } = await import("@stellar/stellar-sdk");
     const { createEd25519Signer } = await import("@x402/stellar");
     const { encodePaymentRequiredHeader } = await import("@x402/core/http");
-    const { createX402Settler, PAYMENT_REQUIRED_HEADER, TOLLWAY_RECEIPT_HEADER } =
-      await import("./x402-settler.js");
+    const { createX402Settler, PAYMENT_REQUIRED_HEADER, TOLLWAY_RECEIPT_HEADER } = await import(
+      "./x402-settler.js"
+    );
 
     const agent = Keypair.random();
     const allowedPayee = Keypair.random().publicKey();
@@ -516,9 +517,7 @@ describe("createX402Settler: PaymentPolicy filters multi-option challenges", () 
       // Parse what the settler actually signed.
       const { decodePaymentSignatureHeader } = await import("@x402/core/http");
       const decoded = decodePaymentSignatureHeader(
-        headers[PAYMENT_REQUIRED_HEADER.toLowerCase()] ??
-          headers["PAYMENT-SIGNATURE"] ??
-          "",
+        headers[PAYMENT_REQUIRED_HEADER.toLowerCase()] ?? headers["PAYMENT-SIGNATURE"] ?? "",
       );
       calledWithPayTo = decoded.accepted?.payTo ?? null;
       return new Response("ok", {
