@@ -63,6 +63,7 @@ async function runGate(gate: Gate, request: FastifyRequest, reply: FastifyReply)
     return;
   }
 
+  applyHeaders(reply, outcome.headers ?? {});
   await reply.status(outcome.status).send({ error: outcome.reason });
 }
 

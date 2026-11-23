@@ -90,3 +90,15 @@ export {
   type RouteTableEntry,
   type RouteTableMatch,
 } from "./route-table.js";
+export {
+  createInMemoryServicePolicyStore,
+  type InMemoryServicePolicyStoreOptions,
+  SERVICE_POLICY_DENIALS,
+  type ServicePolicy,
+  type ServicePolicyDecision,
+  type ServicePolicyDenialCode,
+  type ServicePolicyInput,
+  type ServicePolicyReservation,
+  type ServicePolicyStore,
+  validateServicePolicy,
+} from "./service-policy.js";

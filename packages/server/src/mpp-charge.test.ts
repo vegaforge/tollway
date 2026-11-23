@@ -5,6 +5,17 @@ import { StellarMppError } from "@stellar/mpp";
 import type * as ChargeServer from "@stellar/mpp/charge/server";
 import { Store } from "@stellar/mpp/charge/server";
 import {
+  Account,
+  Address,
+  authorizeEntry,
+  Keypair,
+  Networks,
+  nativeToScVal,
+  Operation,
+  TransactionBuilder,
+  xdr,
+} from "@stellar/stellar-sdk";
+import {
   Ed25519Signer,
   type MppChargePayment,
   type PaymentOffer,
@@ -14,13 +25,14 @@ import { Challenge, Credential, Errors } from "mppx";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { createInMemorySettlementCache } from "./cache.js";
 import { createMockFacilitator } from "./facilitator.js";
-import { createPaywall } from "./gate.js";
+import { createPaywall, type PaywallDeps } from "./gate.js";
 import {
   createMockMppChargeHandler,
   createMppChargeHandler,
   deriveMppChargeNonce,
   type MppChargeOptions,
 } from "./mpp-charge.js";
+import { createInMemoryServicePolicyStore } from "./service-policy.js";
 
 // The mppx server and the @stellar/mpp charge method are stubbed at the
 // module boundary: nothing here reaches a network. Credentials and
@@ -43,7 +55,11 @@ vi.mock("@stellar/mpp/charge/server", async (importOriginal) => {
 
 const SECRET = "test-mpp-secret-key-that-must-never-leak";
 const RECIPIENT = "GBZXN7PIRZGNMHGA7MUUUF4GWPY5AYPV6LY4UV2GL6VJGIQRXFDNMADI";
-const PAYER = "GAIH3ULLFQ4DGSECF2AR555KZ4KNDGEKN4AFI4SU2M7B43MGK3QJZNSR";
+const PAYER_KEY = Keypair.random();
+const PAYER = PAYER_KEY.publicKey();
+const OTHER_KEY = Keypair.random();
+/** The all-zeros placeholder source a sponsored (fee-payer) transaction uses. */
+const SPONSORED_SOURCE = "GAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAWHF";
 const USDC = "CBIELTK6YBZJU5UP2WWQEUCYKLPU6AUNZ2BQ4WWFEIE3USCIHMXQDAMA";
 const TX_HASH = "a".repeat(64);
 
@@ -67,8 +83,80 @@ function options(overrides: Partial<MppChargeOptions> = {}): MppChargeOptions {
   };
 }
 
+function transferArgs(from: string): xdr.ScVal[] {
+  return [
+    new Address(from).toScVal(),
+    new Address(RECIPIENT).toScVal(),
+    nativeToScVal(BigInt(offer.amount), { type: "i128" }),
+  ];
+}
+
+/**
+ * A pull-mode transfer `from` pays, built the way an agent builds one. With
+ * `signer` the envelope is signed (the payer is the transaction source); with
+ * `auth` the transfer carries that Soroban authorization entry instead.
+ */
+function transferXdr(options: {
+  from?: string;
+  source?: string;
+  signer?: Keypair;
+  auth?: xdr.SorobanAuthorizationEntry;
+}): string {
+  const from = options.from ?? PAYER;
+  const tx = new TransactionBuilder(new Account(options.source ?? from, "1"), {
+    fee: "100",
+    networkPassphrase: Networks.TESTNET,
+  })
+    .addOperation(
+      Operation.invokeContractFunction({
+        contract: USDC,
+        function: "transfer",
+        args: transferArgs(from),
+        ...(options.auth ? { auth: [options.auth] } : {}),
+      }),
+    )
+    .setTimeout(60)
+    .build();
+  if (options.signer) tx.sign(options.signer);
+  return tx.toXDR();
+}
+
+/** A Soroban address authorization for `from`'s transfer, signed by `signer`. */
+async function transferAuthorization(
+  from: string,
+  signer: Keypair,
+): Promise<xdr.SorobanAuthorizationEntry> {
+  const unsigned = new xdr.SorobanAuthorizationEntry({
+    credentials: xdr.SorobanCredentials.sorobanCredentialsAddress(
+      new xdr.SorobanAddressCredentials({
+        address: new Address(from).toScAddress(),
+        nonce: xdr.Int64.fromString("7"),
+        signatureExpirationLedger: 0,
+        signature: xdr.ScVal.scvVoid(),
+      }),
+    ),
+    rootInvocation: new xdr.SorobanAuthorizedInvocation({
+      function: xdr.SorobanAuthorizedFunction.sorobanAuthorizedFunctionTypeContractFn(
+        new xdr.InvokeContractArgs({
+          contractAddress: new Address(USDC).toScAddress(),
+          functionName: "transfer",
+          args: transferArgs(from),
+        }),
+      ),
+      subInvocations: [],
+    }),
+  });
+  return authorizeEntry(unsigned, signer, 1_000, Networks.TESTNET);
+}
+
 function credential(
-  overrides: { secretKey?: string; amount?: string; method?: string; source?: string | null } = {},
+  overrides: {
+    secretKey?: string;
+    amount?: string;
+    method?: string;
+    source?: string | null;
+    payload?: (challengeId: string) => Record<string, unknown>;
+  } = {},
 ): string {
   const challenge = Challenge.from({
     secretKey: overrides.secretKey ?? SECRET,
@@ -86,9 +174,12 @@ function credential(
     overrides.source === null
       ? undefined
       : (overrides.source ?? `did:pkh:stellar:testnet:${PAYER}`);
+  const payload = overrides.payload
+    ? overrides.payload(challenge.id)
+    : { type: "transaction", transaction: transferXdr({ signer: PAYER_KEY }) };
   return Credential.serialize({
     challenge,
-    payload: { type: "transaction", transaction: "AAAA" },
+    payload,
     ...(source ? { source } : {}),
   });
 }
@@ -194,6 +285,48 @@ describe("createMppChargeHandler", () => {
       expect(stub.mppx.verifyCredential).not.toHaveBeenCalled();
     });
 
+    it("accepts a sponsored transfer the source authorized with a Soroban auth entry", async () => {
+      const handler = createMppChargeHandler(options());
+      const auth = await transferAuthorization(PAYER, PAYER_KEY);
+      const payload = credential({
+        payload: () => ({
+          type: "transaction",
+          transaction: transferXdr({ source: SPONSORED_SOURCE, auth }),
+        }),
+      });
+
+      const result = await handler.verify({ payment: payment(payload), offer });
+      expect(result).toMatchObject({ valid: true, payer: PAYER });
+    });
+
+    it("rejects a sponsored transfer whose auth entry another key signed", async () => {
+      const handler = createMppChargeHandler(options());
+      const auth = await transferAuthorization(PAYER, OTHER_KEY);
+      const payload = credential({
+        payload: () => ({
+          type: "transaction",
+          transaction: transferXdr({ source: SPONSORED_SOURCE, auth }),
+        }),
+      });
+
+      const result = await handler.verify({ payment: payment(payload), offer });
+      expect(result).toEqual({ valid: false, reason: expect.stringMatching(/did not sign/) });
+    });
+
+    it("accepts a push-mode hash the source signed with the challenge id", async () => {
+      const handler = createMppChargeHandler(options());
+      const payload = credential({
+        payload: (challengeId) => ({
+          type: "signedHash",
+          hash: TX_HASH,
+          sourceSignature: PAYER_KEY.sign(Buffer.from(`${challengeId}:${TX_HASH}`)).toString("hex"),
+        }),
+      });
+
+      const result = await handler.verify({ payment: payment(payload), offer });
+      expect(result).toMatchObject({ valid: true, payer: PAYER });
+    });
+
     it.each([
       ["a malformed credential", () => "Payment not-base64-json", /malformed mpp credential/],
       [
@@ -208,6 +341,58 @@ describe("createMppChargeHandler", () => {
         "a source on another network",
         () => credential({ source: `did:pkh:stellar:pubnet:${PAYER}` }),
         /source is not a Stellar account/,
+      ],
+      [
+        "a transfer signed by someone other than the source",
+        () =>
+          credential({
+            payload: () => ({
+              type: "transaction",
+              transaction: transferXdr({ signer: OTHER_KEY }),
+            }),
+          }),
+        /source did not sign this payment/,
+      ],
+      [
+        "an unsigned transfer from the source",
+        () =>
+          credential({ payload: () => ({ type: "transaction", transaction: transferXdr({}) }) }),
+        /source did not sign this payment/,
+      ],
+      [
+        "a transfer from another account than the source",
+        () =>
+          credential({
+            payload: () => ({
+              type: "transaction",
+              transaction: transferXdr({ from: OTHER_KEY.publicKey(), signer: OTHER_KEY }),
+            }),
+          }),
+        /transfer is not from the credential source/,
+      ],
+      [
+        "a transaction that is not a Stellar transaction",
+        () => credential({ payload: () => ({ type: "transaction", transaction: "AAAA" }) }),
+        /not a valid Stellar transaction/,
+      ],
+      [
+        "an unsigned push-mode hash",
+        () => credential({ payload: () => ({ type: "hash", hash: TX_HASH }) }),
+        /does not prove its source/,
+      ],
+      [
+        "a push-mode hash signed by someone other than the source",
+        () =>
+          credential({
+            payload: (challengeId) => ({
+              type: "signedHash",
+              hash: TX_HASH,
+              sourceSignature: OTHER_KEY.sign(Buffer.from(`${challengeId}:${TX_HASH}`)).toString(
+                "hex",
+              ),
+            }),
+          }),
+        /source did not sign this payment/,
       ],
     ])("rejects %s", async (_name, build, reason) => {
       const handler = createMppChargeHandler(options());
@@ -334,7 +519,7 @@ describe("createMppChargeHandler", () => {
   });
 
   describe("through the gate", () => {
-    async function gate() {
+    async function gate(deps: Partial<PaywallDeps> = {}) {
       return createPaywall(
         {
           amount: offer.amount,
@@ -348,9 +533,33 @@ describe("createMppChargeHandler", () => {
           facilitator: createMockFacilitator(),
           mppChargeHandler: createMppChargeHandler(options()),
           cache: createInMemorySettlementCache(),
+          ...deps,
         },
       );
     }
+
+    it("refuses a credential that names an allowed payer it cannot sign for, before policy", async () => {
+      stub.mppx.verifyCredential.mockResolvedValue({ reference: TX_HASH });
+      const store = createInMemoryServicePolicyStore();
+      const admit = vi.spyOn(store, "admit");
+      const paywall = await gate({
+        servicePolicy: { allowPayers: [PAYER] },
+        servicePolicyStore: store,
+      });
+      const forged = credential({
+        payload: () => ({ type: "transaction", transaction: transferXdr({ signer: OTHER_KEY }) }),
+      });
+
+      const outcome = await paywall({
+        method: "GET",
+        url: "/quotes/latest",
+        headers: { authorization: forged },
+      });
+
+      expect(outcome).toMatchObject({ kind: "rejected", status: 402 });
+      expect(admit).not.toHaveBeenCalled();
+      expect(stub.mppx.verifyCredential).not.toHaveBeenCalled();
+    });
 
     it("settles once and produces an mpp-charge receipt with the tx hash", async () => {
       stub.mppx.verifyCredential.mockResolvedValue({ reference: TX_HASH });
