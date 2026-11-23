@@ -17,6 +17,7 @@ import {
   PolicyBlockedError,
   ReceiptVerificationError,
 } from "./index.js";
+import { createMemoryReceiptStore, type ReceiptStore } from "./receipt-store.js";
 
 const OFFER: PaymentOffer = {
   resource: "/quotes/latest",
@@ -356,6 +357,109 @@ describe("createClient policy decision events", () => {
 
     expect(evaluate).toHaveBeenCalledTimes(1);
     expect(check).not.toHaveBeenCalled();
+  });
+});
+
+describe("createClient receipt store", () => {
+  function storeWith(put: ReceiptStore["put"]): ReceiptStore {
+    return {
+      put,
+      get: async () => null,
+      query: async () => ({ items: [] }),
+    };
+  }
+
+  it("writes the verified receipt before pay() resolves", async () => {
+    let release: (() => void) | undefined;
+    const put = vi.fn(
+      () =>
+        new Promise<void>((resolve) => {
+          release = resolve;
+        }),
+    );
+    const client = createClient({
+      network: "testnet",
+      settler: mockSettler(),
+      verifier,
+      receiptStore: storeWith(put),
+    });
+
+    let resolved = false;
+    const paying = client.pay({ resource: OFFER.resource, offer: OFFER }).then((result) => {
+      resolved = true;
+      return result;
+    });
+
+    await vi.waitFor(() => expect(put).toHaveBeenCalledWith(baselineReceipt));
+    expect(resolved).toBe(false);
+
+    if (!release) throw new Error("put() was never called, so there is nothing to release");
+    release();
+    await expect(paying).resolves.toMatchObject({ receipt: baselineReceipt });
+  });
+
+  it("stores the receipt so the agent keeps it after pay() returns", async () => {
+    const store = createMemoryReceiptStore();
+    const client = createClient({
+      network: "testnet",
+      settler: mockSettler(),
+      receiptStore: store,
+    });
+
+    await client.pay({ resource: OFFER.resource, offer: OFFER });
+
+    await expect(store.get(baselineReceipt.receipt.id)).resolves.toEqual(baselineReceipt);
+  });
+
+  it("keeps the receipt when the store write fails, sets storeError and calls onStoreError", async () => {
+    const failure = new Error("disk full");
+    const onStoreError = vi.fn();
+    const client = createClient({
+      network: "testnet",
+      settler: mockSettler(),
+      receiptStore: storeWith(vi.fn().mockRejectedValue(failure)),
+      onStoreError,
+    });
+
+    const result = await client.pay({ resource: OFFER.resource, offer: OFFER });
+
+    expect(result.receipt).toEqual(baselineReceipt);
+    expect(result.storeError).toBe(failure);
+    expect(onStoreError).toHaveBeenCalledWith(failure, baselineReceipt);
+  });
+
+  it("still resolves with the receipt when onStoreError itself throws", async () => {
+    const client = createClient({
+      network: "testnet",
+      settler: mockSettler(),
+      receiptStore: storeWith(vi.fn().mockRejectedValue(new Error("disk full"))),
+      onStoreError: () => {
+        throw new Error("alert hook down");
+      },
+    });
+
+    await expect(client.pay({ resource: OFFER.resource, offer: OFFER })).resolves.toMatchObject({
+      receipt: baselineReceipt,
+    });
+  });
+
+  it("never stores a receipt that failed verification", async () => {
+    const tampered: SignedReceipt = {
+      ...baselineReceipt,
+      receipt: { ...baselineReceipt.receipt, amount: "99999999999" },
+    };
+    const put = vi.fn();
+    const client = createClient({
+      network: "testnet",
+      settler: mockSettler(tampered),
+      verifier,
+      receiptStore: storeWith(put),
+    });
+
+    await expect(client.pay({ resource: OFFER.resource, offer: OFFER })).rejects.toBeInstanceOf(
+      ReceiptVerificationError,
+    );
+    expect(put).not.toHaveBeenCalled();
   });
 });
 

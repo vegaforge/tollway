@@ -10,6 +10,9 @@
   },
   "type": "module",
   "sideEffects": false,
+  "engines": {
+    "node": ">=22.13.0"
+  },
   "main": "./dist/index.cjs",
   "module": "./dist/index.js",
   "types": "./dist/index.d.ts",
@@ -18,6 +21,11 @@
       "types": "./dist/index.d.ts",
       "import": "./dist/index.js",
       "require": "./dist/index.cjs"
+    },
+    "./sqlite": {
+      "types": "./dist/sqlite-store.d.ts",
+      "import": "./dist/sqlite-store.js",
+      "require": "./dist/sqlite-store.cjs"
     }
   },
   "files": [
@@ -37,6 +45,7 @@
   "devDependencies": {
     "@stellar/stellar-sdk": "16.4.1",
     "@types/node": "^22.20.5",
+    "fast-check": "^3.23.2",
     "tsup": "^8.5.1",
     "typescript": "^5.9.3",
     "vitest": "^4.1.12"
