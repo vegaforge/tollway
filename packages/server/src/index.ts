@@ -37,13 +37,37 @@ export {
   type SettleInput,
   type SettleResult,
   STELLAR_EXACT_SCHEME,
-  type SupportedResult,
   stellarCaip2,
   toPaymentRequirements,
   type VerifyInput,
   type VerifyResult,
   type X402Terms,
 } from "./facilitator.js";
+export {
+  createFacilitatorValidator,
+  describeMismatches,
+  type FacilitatorCapabilities,
+  FacilitatorCheckError,
+  type FacilitatorCheckReport,
+  type FacilitatorKind,
+  type FacilitatorValidator,
+  type FacilitatorValidatorOptions,
+  findMatchingKind,
+  type PaywallMismatch,
+  type PaywallTarget,
+  type PaywallValidation,
+  parseFacilitatorCapabilities,
+  type ValidationMode,
+  validatePaywall,
+} from "./facilitator-capabilities.js";
+export {
+  createFailoverFacilitator,
+  createMemoryPinStore,
+  type FailoverEvent,
+  type FailoverFacilitatorOptions,
+  type FailoverMember,
+  type SettlementPinStore,
+} from "./failover-facilitator.js";
 export {
   createPaywall,
   type DynamicPriceFunction,

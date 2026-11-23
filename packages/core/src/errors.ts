@@ -14,6 +14,10 @@ export type TollwayErrorCode =
   | "canonicalization-failed"
   | "budget-exceeded"
   | "payment-failed"
+  | "outcome-unknown"
+  | "facilitator-unsupported"
+  | "facilitator-unavailable"
+  | "facilitator-invalid-response"
   | "policy-blocked"
   | "receipt-verification-failed"
   | "channel-not-found"
@@ -32,8 +36,12 @@ export type TollwayErrorCode =
 export class TollwayError extends Error {
   readonly code: TollwayErrorCode;
 
-  constructor(code: TollwayErrorCode, message: string) {
-    super(message);
+  /**
+   * `options.cause` keeps the underlying error, for example the network
+   * error behind a failed facilitator call, so callers can classify it.
+   */
+  constructor(code: TollwayErrorCode, message: string, options?: { cause?: unknown }) {
+    super(message, options);
     this.name = "TollwayError";
     this.code = code;
   }
