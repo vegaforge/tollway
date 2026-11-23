@@ -77,7 +77,7 @@ export const receiptBodyV1Schema = z
  * - `offerHash`: base64url SHA-256 of the canonical bytes of the offer the
  *   payer accepted. Two offers that differ in `models`, `facilitatorUrl`
  *   or `mppSessionSupported` produce different hashes, so a receipt is
- *   bound to the exact offer the payer accepted - not just to the URL
+ *   bound to the exact offer the payer accepted, not only to the URL
  *   and price.
  * - `method`: the HTTP method of the paid request (uppercase, e.g.
  *   `GET`), or any non-empty identifier a non-HTTP gate uses. A receipt
@@ -123,9 +123,13 @@ export const receiptBodyV2Schema = z
  * commitment for MPP channels).
  *
  * A verifier that does not recognise the version returns invalid rather
- * than guessing the layout; the versioned union picks v1 or v2 up front.
+ * than guessing the layout. Discriminating on `version` picks v1 or v2 up
+ * front, so a bad v2 body reports the v2 issues only.
  */
-export const receiptBodySchema = z.union([receiptBodyV1Schema, receiptBodyV2Schema]);
+export const receiptBodySchema = z.discriminatedUnion("version", [
+  receiptBodyV1Schema,
+  receiptBodyV2Schema,
+]);
 
 /** A v1 receipt body; see {@link receiptBodyV1Schema}. */
 export type ReceiptBodyV1 = z.infer<typeof receiptBodyV1Schema>;
