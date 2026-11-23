@@ -119,33 +119,41 @@ export interface ChannelManager {
   shouldClose(channelId: string): Promise<boolean>;
   close(channelId: string): Promise<CloseResult>;
   /**
-   * Issue #176: decides from chain state what actually happened to a
-   * channel stuck in `closing` and moves it to the right terminal
-   * status. Idempotent: calling it twice reaches the same state. See
-   * `ResumeOutcome` for the shape of the answer.
+   * Finishes a close that a crash or an unknown outcome left in `closing`
+   * (#176), deciding from the chain what happened:
    *
-   * `resume` does not implement cross-process compare-and-set; two
-   * processes resuming the same channel can both submit a retry close
-   * on `no-close-on-chain` outcomes. The compare-and-set contract
-   * belongs to #175; until it lands, run `resume` from one process at
-   * a time.
+   * - no close on chain: the close is submitted again (`reclosed`);
+   * - closed with nothing left in the contract: the settlement is looked up
+   *   and recorded (`closed`), or `SettlementNotFoundError` is thrown and
+   *   the channel stays `closing`;
+   * - closed with funds left: a funder-started close or a dispute, handed to
+   *   recovery (#38) as `recovering`.
+   *
+   * A settlement that differs from the last commitment moves the channel to
+   * `settlement-mismatched` and throws `SettlementMismatchError`. A channel
+   * that is not `closing` is left alone (`no-change`).
+   *
+   * Calling it again after it finished changes nothing, and concurrent calls
+   * for one channel in one process share a single run, so at most one close
+   * is submitted. Two processes over a shared store can still both submit
+   * until the store offers compare-and-set (#175): run `resume` from one
+   * process at a time until then.
    */
   resume(channelId: string): Promise<ResumeOutcome>;
   /**
-   * Resumes every channel in `closing` and reports per-channel results.
-   * Does not stop at the first failure; each channel's outcome includes
-   * either the recovery decision or the error that prevented it.
+   * Resumes every channel in `closing` and reports each result, including
+   * the error for a channel that could not be resumed. One failure never
+   * stops the others.
    */
   resumeAll(): Promise<ResumeAllResult>;
   recover(channelId: string): Promise<RecoveryResult>;
 }
 
 /**
- * Issue #176: how `resume()` describes what it did. A `closed` outcome
- * reports the recovered settlement; `recovering` hands the channel to
- * the funder-initiated recovery path (#38); `reclosed` retried a close
- * that had not landed; `no-change` is a channel that was never in
- * `closing` to start with.
+ * What `resume` did (#176). `closed` recorded a settlement found on chain;
+ * `reclosed` submitted a close again because none had landed; `recovering`
+ * handed the channel to the recovery path (#38); `no-change` means the
+ * channel was not `closing`.
  */
 export type ResumeOutcome =
   | { kind: "closed"; channelId: string; settlementTxHash: string; returnedRemainder: string }

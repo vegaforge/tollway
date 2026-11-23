@@ -89,27 +89,31 @@ export interface MppChannelAdapter {
    * Submits the single on-chain settlement for the channel using the latest
    * cumulative commitment. Returns the settlement tx hash, the settled
    * amount, and the remainder returned to the funder.
+   *
+   * A failure before anything was submitted must be thrown as
+   * `CloseNotSubmittedError`; the manager then returns the channel to
+   * `open`. Any other error is read as "may have reached the chain", and
+   * the channel stays `closing` until `resume` asks the chain (#176).
    */
   closeChannel(input: CloseAdapterInput): Promise<CloseAdapterResult>;
   /**
-   * Issue #176: read-only chain query. Reports the current balance,
-   * the ledger at which `close` becomes effective (set once a
-   * close_start or settlement landed; absent otherwise), and the
-   * current ledger height. Never submits a transaction. Implementations
-   * read from `@stellar/mpp`'s `getChannelState` for Stellar.
+   * Reads the channel's state on chain (#176): its balance, the ledger its
+   * close is effective at, and the current ledger. Never submits a
+   * transaction. The Stellar adapter reads `getChannelState` from
+   * `@stellar/mpp`.
    */
   getChannelState(input: {
     channelId: string;
     network: StellarNetwork;
   }): Promise<ChannelChainState>;
   /**
-   * Issue #176: locates the on-chain settlement for a channel starting
-   * at a given ledger. Returns the settlement tx hash, the settled
-   * amount, and the remainder when one is found, or `null` when no
-   * settlement is yet on chain at or after `startLedger`. RPC providers
-   * keep event history for a limited window; implementations throw a
-   * `MissingEventHistoryError` (defined in `./errors.ts`) when the
-   * window has elapsed so a caller can surface an operational alert.
+   * Finds the settlement a close made at or after `startLedger` (#176): the
+   * transaction hash, the amount paid to the recipient and the remainder
+   * returned to the funder. Returns `null` only when the chain's history is
+   * visible back to `startLedger` and holds no settlement. When it is not
+   * (RPC providers keep events for a limited window), it throws
+   * `MissingEventHistoryError` instead, so a caller never mistakes
+   * "cannot see" for "did not happen". Never submits a transaction.
    */
   findChannelSettlement(input: {
     channelId: string;

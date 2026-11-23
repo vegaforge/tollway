@@ -2,8 +2,9 @@
  * The MPP channel lifecycle manager. See docs/design.md,
  * "The channel lifecycle manager".
  *
- * Scope of this release: `open`, `commit`, `shouldClose`, and `close`.
- * `recover` is tracked under #38 and remains a typed stub.
+ * Scope of this release: `open`, `commit`, `shouldClose`, `close`, and
+ * `resume` and `resumeAll` for closes a crash or an unknown outcome left in
+ * `closing` (#176). `recover` is tracked under #38 and remains a typed stub.
  */
 
 import { NotImplementedError } from "@vegaforge/tollway-core";
@@ -17,9 +18,11 @@ import {
   ChannelAlreadyClosedError,
   ChannelNotFoundError,
   ChannelNotOpenError,
+  CloseNotSubmittedError,
   CommitmentExceedsDepositError,
   InvalidAmountError,
   SettlementMismatchError,
+  SettlementNotFoundError,
 } from "./errors.js";
 import { type CommitmentStore, createMemoryCommitmentStore } from "./store.js";
 import type {
@@ -29,9 +32,20 @@ import type {
   CloseResult,
   Commitment,
   OpenChannelInput,
+  ResumeAllResult,
+  ResumeOutcome,
 } from "./types.js";
 
 const AMOUNT_RE = /^[0-9]+$/;
+
+function settledFields(
+  settlement: Pick<CloseAdapterResult, "settlementTxHash" | "returnedRemainder">,
+): { settlementTxHash: string; returnedRemainder: string } {
+  return {
+    settlementTxHash: settlement.settlementTxHash,
+    returnedRemainder: settlement.returnedRemainder,
+  };
+}
 
 function parseAmount(value: string, field: string): bigint {
   if (!AMOUNT_RE.test(value)) throw new InvalidAmountError(value, field);
@@ -58,7 +72,114 @@ export function createChannelManager(options: CreateChannelManagerOptions): Chan
     now = () => new Date().toISOString(),
   } = options;
 
-  return {
+  /** Resumes in progress in this process, by channel id. */
+  const resuming = new Map<string, Promise<ResumeOutcome>>();
+
+  /**
+   * Records the close attempt, then asks the adapter to close. The attempt
+   * is written first so a process that dies mid-close leaves `closing` with
+   * the ledger to search from. Only an adapter that says it submitted
+   * nothing (`CloseNotSubmittedError`) returns the channel to `open`; any
+   * other failure may have reached the chain, so the channel stays
+   * `closing` for `resume` instead of being closed a second time.
+   */
+  async function submitClose(channel: Channel, startedAtLedger: number): Promise<CloseResult> {
+    const stream = await store.listCommitments(channel.id);
+    const latest = stream.at(-1);
+    const cumulativeAmount = latest?.cumulativeAmount ?? "0";
+    const closeAttempt = {
+      attemptId: globalThis.crypto.randomUUID(),
+      startedAtLedger,
+      startedAt: now(),
+    };
+    await store.updateChannel(channel.id, { status: "closing", closeAttempt });
+
+    let settlement: CloseAdapterResult;
+    try {
+      settlement = await adapter.closeChannel({
+        channelId: channel.id,
+        network: channel.network,
+        cumulativeAmount,
+        commitment: latest?.commitment ?? "",
+        deposit: channel.deposit,
+      });
+    } catch (error) {
+      if (error instanceof CloseNotSubmittedError) {
+        await store.updateChannel(channel.id, { status: "open", closeAttempt: undefined });
+      }
+      throw error;
+    }
+    await settle(channel.id, cumulativeAmount, settlement);
+    return { channelId: channel.id, ...settledFields(settlement) };
+  }
+
+  /**
+   * Records a settlement the chain reported. One that does not match the
+   * last commitment is terminal: the chain and the commitment stream
+   * disagree, and the channel must never take another commit.
+   */
+  async function settle(
+    channelId: string,
+    cumulativeAmount: string,
+    settlement: Pick<
+      CloseAdapterResult,
+      "settlementTxHash" | "settledAmount" | "returnedRemainder"
+    >,
+  ): Promise<void> {
+    if (settlement.settledAmount !== cumulativeAmount) {
+      await store.updateChannel(channelId, {
+        status: "settlement-mismatched",
+        ...settledFields(settlement),
+        settlementMismatch: {
+          expectedAmount: cumulativeAmount,
+          observedAmount: settlement.settledAmount,
+        },
+      });
+      throw new SettlementMismatchError(channelId, cumulativeAmount, settlement.settledAmount);
+    }
+    await store.updateChannel(channelId, { status: "closed", ...settledFields(settlement) });
+  }
+
+  async function resumeOnce(channelId: string): Promise<ResumeOutcome> {
+    const current = await store.getChannel(channelId);
+    if (!current) throw new ChannelNotFoundError(channelId);
+    if (current.status !== "closing") {
+      return { kind: "no-change", channelId, status: current.status };
+    }
+    const chain = await adapter.getChannelState({ channelId, network: current.network });
+
+    if (chain.closeEffectiveAtLedger === undefined) {
+      // Nothing closed on chain: the earlier attempt never landed. Close
+      // again with the same commitment stream.
+      const closed = await submitClose(current, chain.currentLedger);
+      return { kind: "reclosed", ...closed };
+    }
+
+    if (parseAmount(chain.balance, "balance") > 0n) {
+      // Closing with funds still in the contract is a funder-started close
+      // or a dispute. That is the recovery path (#38), not a settlement.
+      await store.updateChannel(channelId, { status: "recovering" });
+      return {
+        kind: "recovering",
+        channelId,
+        closeEffectiveAtLedger: chain.closeEffectiveAtLedger,
+      };
+    }
+
+    // Closed and empty: find the settlement and record it.
+    const startLedger = current.closeAttempt?.startedAtLedger ?? chain.closeEffectiveAtLedger;
+    const found = await adapter.findChannelSettlement({
+      channelId,
+      network: current.network,
+      startLedger,
+    });
+    if (!found) throw new SettlementNotFoundError(channelId, startLedger);
+    const stream = await store.listCommitments(channelId);
+    await settle(channelId, stream.at(-1)?.cumulativeAmount ?? "0", found);
+    return { kind: "closed", channelId, ...settledFields(found) };
+  }
+
+  const manager: ChannelManager = {
     async open(input: OpenChannelInput): Promise<Channel> {
       const deposit = parseAmount(input.deposit, "deposit");
       if (deposit === 0n) throw new InvalidAmountError(input.deposit, "deposit");
@@ -198,177 +319,32 @@ export function createChannelManager(options: CreateChannelManagerOptions): Chan
       if (current.status !== "open") {
         throw new ChannelAlreadyClosedError(channelId, current.status);
       }
-
-      const stream = await store.listCommitments(channelId);
-      const latest = stream.at(-1);
-      const cumulativeAmount = latest?.cumulativeAmount ?? "0";
-      const commitmentBlob = latest?.commitment ?? "";
-
-      // Issue #176: persist a close attempt BEFORE the adapter call so a
-      // crash in the middle leaves the channel recoverable. The attempt
-      // records the ledger height we started at, which `resume` uses to
-      // scope its settlement lookup.
-      const startedState = await adapter.getChannelState({
-        channelId,
-        network: current.network,
-      });
-      const attempt = {
-        attemptId: `close-${startedState.currentLedger}-${Date.now()}`,
-        startedAtLedger: startedState.currentLedger,
-        startedAt: now(),
-      };
-      await store.updateChannel(channelId, { status: "closing", closeAttempt: attempt });
-
-      // Issue #176: a post-submit error (timeout, poll failure) is
-      // indeterminate: the close may have landed on chain. Propagate
-      // it with the channel still in `closing` and the attempt
-      // recorded, so `resume` can ask the chain what happened.
-      // Rolling back to `open` would let a second `close()` sign and
-      // submit a second time.
-      const settlement: CloseAdapterResult = await adapter.closeChannel({
-        channelId,
-        network: current.network,
-        cumulativeAmount,
-        commitment: commitmentBlob,
-        deposit: current.deposit,
-      });
-
-      // Issue #176: the adapter's settled amount must match the last
-      // commitment. A mismatch is a terminal state - the chain now
-      // disagrees with our commitment stream and reopening the channel
-      // would let the agent sign over that disagreement.
-      if (settlement.settledAmount !== cumulativeAmount) {
-        await store.updateChannel(channelId, {
-          status: "settlement-mismatched",
-          settlementTxHash: settlement.settlementTxHash,
-          returnedRemainder: settlement.returnedRemainder,
-          settlementMismatch: {
-            expectedAmount: cumulativeAmount,
-            observedAmount: settlement.settledAmount,
-          },
-        });
-        throw new SettlementMismatchError(channelId, cumulativeAmount, settlement.settledAmount);
-      }
-
-      await store.updateChannel(channelId, {
-        status: "closed",
-        settlementTxHash: settlement.settlementTxHash,
-        returnedRemainder: settlement.returnedRemainder,
-      });
-
-      return {
-        channelId,
-        settlementTxHash: settlement.settlementTxHash,
-        returnedRemainder: settlement.returnedRemainder,
-      };
+      // Read the chain height before anything is written: if this fails,
+      // nothing happened and the channel is still simply open.
+      const chain = await adapter.getChannelState({ channelId, network: current.network });
+      return submitClose(current, chain.currentLedger);
     },
 
-    async resume(channelId) {
-      const current = await store.getChannel(channelId);
-      if (!current) throw new ChannelNotFoundError(channelId);
-      if (current.status !== "closing") {
-        // Nothing to do; the channel is either still open (never
-        // started), already closed, in recovery, or mismatched.
-        return { kind: "no-change" as const, channelId, status: current.status };
-      }
-      const chain = await adapter.getChannelState({
-        channelId,
-        network: current.network,
-      });
-      // Case 1: close landed on chain already (closeEffectiveAtLedger is
-      // set). If the balance is zero, we have a clean settlement; look
-      // up the on-chain details and mark closed. If the balance is
-      // non-zero, this is a funder-initiated close/recovery path and
-      // belongs to #38.
-      if (chain.closeEffectiveAtLedger !== undefined) {
-        const balance = parseAmount(chain.balance, "balance");
-        if (balance === 0n) {
-          const startLedger = current.closeAttempt?.startedAtLedger ?? chain.closeEffectiveAtLedger;
-          const found = await adapter.findChannelSettlement({
-            channelId,
-            network: current.network,
-            startLedger,
-          });
-          if (!found) {
-            // The chain says close is effective but we cannot locate
-            // the settlement event. Leave the channel in closing and
-            // surface the state so the caller can escalate.
-            return { kind: "no-change" as const, channelId, status: current.status };
-          }
-          await store.updateChannel(channelId, {
-            status: "closed",
-            settlementTxHash: found.settlementTxHash,
-            returnedRemainder: found.returnedRemainder,
-          });
-          return {
-            kind: "closed" as const,
-            channelId,
-            settlementTxHash: found.settlementTxHash,
-            returnedRemainder: found.returnedRemainder,
-          };
-        }
-        // Non-zero balance with close effective: funder-initiated
-        // recovery territory (#38). Mark recovering and hand off.
-        await store.updateChannel(channelId, { status: "recovering" });
-        return {
-          kind: "recovering" as const,
-          channelId,
-          closeEffectiveAtLedger: chain.closeEffectiveAtLedger,
-        };
-      }
-      // Case 2: no close on chain. The previous attempt died before
-      // landing; retry the close under the existing commitment stream.
-      const stream = await store.listCommitments(channelId);
-      const latest = stream.at(-1);
-      const cumulativeAmount = latest?.cumulativeAmount ?? "0";
-      const commitmentBlob = latest?.commitment ?? "";
-      const attempt = {
-        attemptId: `resume-${chain.currentLedger}-${Date.now()}`,
-        startedAtLedger: chain.currentLedger,
-        startedAt: now(),
-      };
-      await store.updateChannel(channelId, { closeAttempt: attempt });
-      const settlement = await adapter.closeChannel({
-        channelId,
-        network: current.network,
-        cumulativeAmount,
-        commitment: commitmentBlob,
-        deposit: current.deposit,
-      });
-      if (settlement.settledAmount !== cumulativeAmount) {
-        await store.updateChannel(channelId, {
-          status: "settlement-mismatched",
-          settlementTxHash: settlement.settlementTxHash,
-          returnedRemainder: settlement.returnedRemainder,
-          settlementMismatch: {
-            expectedAmount: cumulativeAmount,
-            observedAmount: settlement.settledAmount,
-          },
-        });
-        throw new SettlementMismatchError(channelId, cumulativeAmount, settlement.settledAmount);
-      }
-      await store.updateChannel(channelId, {
-        status: "closed",
-        settlementTxHash: settlement.settlementTxHash,
-        returnedRemainder: settlement.returnedRemainder,
-      });
-      return {
-        kind: "reclosed" as const,
-        channelId,
-        settlementTxHash: settlement.settlementTxHash,
-        returnedRemainder: settlement.returnedRemainder,
-      };
+    resume(channelId: string): Promise<ResumeOutcome> {
+      // Two resumes of one channel in this process share one run, so at
+      // most one close is submitted. Across processes that needs the
+      // store's compare-and-set from #175.
+      const running = resuming.get(channelId);
+      if (running) return running;
+      const run = resumeOnce(channelId).finally(() => resuming.delete(channelId));
+      resuming.set(channelId, run);
+      return run;
     },
 
-    async resumeAll() {
-      const stuck = await store.listChannels({ status: "closing" });
+    async resumeAll(): Promise<ResumeAllResult> {
+      const stuck = await store.listChannelsByStatus("closing");
       const outcomes = await Promise.all(
-        stuck.map(async (channel) => {
+        stuck.map(async (channel): Promise<ResumeAllResult["outcomes"][number]> => {
           try {
-            return await this.resume(channel.id);
+            return await manager.resume(channel.id);
           } catch (rawError) {
             const error = rawError instanceof Error ? rawError : new Error(String(rawError));
-            return { kind: "error" as const, channelId: channel.id, error };
+            return { kind: "error", channelId: channel.id, error };
           }
         }),
       );
@@ -382,4 +358,5 @@ export function createChannelManager(options: CreateChannelManagerOptions): Chan
       );
     },
   };
+  return manager;
 }
