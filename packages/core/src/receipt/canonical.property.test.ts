@@ -19,16 +19,19 @@ type NestedJson =
   | NestedJson[]
   | { [key: string]: NestedJson | undefined };
 
-// `binary` strings cover every UTF-16 code unit: non-ASCII text, astral
-// characters and lone surrogates. fast-check's default unit is ASCII only.
-const textArb = fc.string({ unit: "binary", maxLength: 12 });
+// `grapheme` strings cover non-ASCII text and supplementary-plane characters
+// with well-formed surrogate pairs. The pre-#165 serialiser used the
+// `binary` unit, which also covered lone surrogates - RFC 8785 I-JSON forbids
+// those and the new canonicaliser rejects them, so dedicated unit tests cover
+// the rejection path separately.
+const textArb = fc.string({ unit: "grapheme", maxLength: 12 });
 
 // Keys where ordering and object semantics are easiest to get wrong: integer
 // keys (which JavaScript objects enumerate first), `__proto__`, non-ASCII, and
 // pairs whose UTF-16 order differs from code point order.
 const keyArb = fc.oneof(
-  fc.string({ unit: "binary", minLength: 1, maxLength: 8 }),
-  fc.constantFrom("__proto__", "0", "2", "10", "a", "B", "é", "\uffff", "😀", "\ud800"),
+  fc.string({ unit: "grapheme", minLength: 1, maxLength: 8 }),
+  fc.constantFrom("__proto__", "0", "2", "10", "a", "B", "é", "￿", "😀"),
 );
 
 // Finite doubles, including -0, fractions and both ends of the exponent

@@ -123,7 +123,13 @@ type ReceiptSignature = {
 
 ### Canonical bytes
 
-The signature covers a deterministic serialization of the receipt body: keys sorted at every nesting level, no whitespace, `undefined` properties dropped the same way `JSON.stringify` drops them. Two structurally equal values always produce the same bytes, which is what makes signatures reproducible across runtimes. See `packages/core/src/receipt/canonical.ts`.
+The signature covers a deterministic serialization of the receipt body that conforms to [RFC 8785](https://www.rfc-editor.org/rfc/rfc8785.html) (JSON Canonicalization Scheme, JCS). Keys are sorted at every nesting level by UTF-16 code units (section 3.2.3), numbers are formatted with the ECMAScript `ToString(Number)` algorithm (section 3.2.2.3), only control characters, `"` and `\` are escaped (section 3.2.2.2), and `undefined` properties on objects are dropped the same way `JSON.stringify` drops them. Two structurally equal values always produce the same bytes, which is what makes signatures reproducible across runtimes and across languages. See `packages/core/src/receipt/canonical.ts`.
+
+JCS requires I-JSON input ([RFC 7493](https://www.rfc-editor.org/rfc/rfc7493)): lone surrogates are forbidden, and inputs JSON cannot represent (`bigint`, functions, symbols, `undefined` inside an array) are not allowed. `canonicalJson` throws `TollwayError("canonicalization-failed", ...)` for any of these at `buildReceipt` time. Non-plain objects (a `Date`, a class instance, a `Map`) are rejected for the same reason: `JSON.stringify` would silently render them as `{}` and the signer would then sign something that did not round-trip.
+
+### Verifying in another language
+
+A verifier in Go, Rust, Python, or anywhere else can check its canonicalisation and its Ed25519 verification against the published test vectors at [`docs/receipt-vectors/canonical-and-ed25519.json`](receipt-vectors/canonical-and-ed25519.json). Each vector carries the input JSON, the expected canonical UTF-8 (both as text and as hex), and the Ed25519 signature produced by a published RFC 8032 section 7.1 TEST 2 private key. Ed25519 signatures are deterministic, so a conforming verifier reproduces every vector's signature byte for byte. The key is published and insecure on purpose: nothing in the vector file is a real signing secret. `packages/core/src/receipt/vectors.test.ts` is the regression lock that keeps the vectors and the implementation in step.
 
 ## Signing
 
