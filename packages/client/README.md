@@ -49,6 +49,16 @@ const { receipt, storeError } = await client.pay({
 receipt has been verified. When a store is configured, the store write is
 awaited before that happens.
 
+
+## Settlers
+
+Two settlers ship with the package, one per per-request model:
+
+- `createX402Settler({ signer, network })` pays x402 V2 routes with `@x402/stellar`.
+- `createMppChargeSettler({ secretKey | keypair, network, mode? })` pays MPP charge routes with `@stellar/mpp`. It refuses a challenge unless the amount, recipient, token contract and network match the approved offer, and nothing is signed until they do. In `pull` mode (the default) the service submits the transaction and pays the fee; in `push` mode the agent submits it, so its account also needs XLM. It never patches `globalThis.fetch`.
+
+Both read the Tollway receipt from the `TOLLWAY-RECEIPT` header.
+
 ## Receipt store
 
 ```ts

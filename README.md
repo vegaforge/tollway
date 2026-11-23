@@ -230,6 +230,33 @@ const client = createClient({
 const { receipt } = await client.pay({ resource: "https://api.example.com/quotes/latest", offer });
 ```
 
+Pay an MPP charge route the same way with `createMppChargeSettler`. It reads the `WWW-Authenticate: Payment` challenge, refuses it unless the amount, recipient, token contract and network all match the offer the policy approved, signs the SEP-41 transfer with `@stellar/mpp`, and returns the receipt from `TOLLWAY-RECEIPT`. When the service also sends MPP's `Payment-Receipt`, its transaction hash must match the receipt's. The secret goes only to `@stellar/mpp`, and `globalThis.fetch` is never patched.
+
+```ts
+import { createClient, createMppChargeSettler } from "@vegaforge/tollway-client";
+import { Ed25519Verifier } from "@vegaforge/tollway-core";
+
+const client = createClient({
+  network: "testnet",
+  settler: createMppChargeSettler({
+    secretKey: process.env.STELLAR_SECRET_KEY ?? "",
+    network: "testnet",
+    // "pull" (the default): the service submits the signed transaction and pays the fee.
+    // "push": the agent submits it, so the agent's account also needs XLM for the fee.
+    mode: "pull",
+  }),
+  verifier: new Ed25519Verifier({ "service-key": servicePublicKey }),
+});
+
+const { receipt } = await client.pay({
+  resource: "https://api.example.com/quotes/latest",
+  offer,
+  model: "mpp-charge",
+});
+```
+
+The offer's asset may be the token contract (`C...`), a classic `CODE:ISSUER` asset or `native`; the settler maps the last two to their Stellar Asset Contract on the offer's network.
+
 For services with several priced endpoints, compile them in one route table and attach one adapter middleware:
 
 ```ts
@@ -269,7 +296,7 @@ Implemented and tested:
 | `@vegaforge/tollway-core` | Canonical receipt (build, sign, verify) with a swappable Ed25519 signer, zod schemas, the policy engine (`createPolicyEngine`: budgets, per-service caps, rate limits, and anomaly stops, held in memory, with per-rule decision traces and a dry-run mode), and the default model router. |
 | `@vegaforge/tollway-server` | The payment gate (`createPaywall`) for x402 and MPP charge, an HTTP facilitator client built on `@x402/core` and `@x402/stellar`, a mock facilitator, an MPP charge handler built on `mppx` and `@stellar/mpp` (plus a mock), and in-memory (bounded) and Redis settlement caches. |
 | `@vegaforge/tollway-adapter-express`, `-fastify`, `-next`, `-hono` | All four adapters wrap the gate, each with its own tests. |
-| `@vegaforge/tollway-client` | Agent-side orchestration: policy check, routing, receipt verification, and events, plus `createX402Settler`, a `ClientSettler` that pays x402 V2 routes on Stellar with `@x402/stellar`. |
+| `@vegaforge/tollway-client` | Agent-side orchestration: policy check, routing, receipt verification, and events, plus `createX402Settler`, a `ClientSettler` that pays x402 V2 routes on Stellar with `@x402/stellar`, and `createMppChargeSettler`, which pays MPP charge routes with `@stellar/mpp`. |
 | `@vegaforge/tollway-channels` | Channel `open`, `commit`, `shouldClose`, and `close` against an injected `MppChannelAdapter`, and `createStellarMppChannelAdapter`, the adapter backed by `@stellar/mpp/channel`. |
 | `@vegaforge/tollway-reconcile` | The reconciler and drift detection, with unit and property tests. |
 | `@vegaforge/tollway-observability` | Metric recording, spend summaries, JSON and CSV export, and webhook delivery with retry and timeout. |

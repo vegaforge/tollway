@@ -20,23 +20,18 @@
  * offer: the one asset the 402 names, at most the approved amount.
  */
 
-import {
-  base64UrlToBytes,
-  type SignedReceipt,
-  type StellarNetwork,
-  signedReceiptSchema,
-  TollwayError,
-} from "@vegaforge/tollway-core";
+import { type SignedReceipt, type StellarNetwork, TollwayError } from "@vegaforge/tollway-core";
 import { x402Client } from "@x402/core/client";
 import { decodePaymentRequiredHeader, encodePaymentSignatureHeader } from "@x402/core/http";
 import type { PaymentPayload, PaymentRequired, PaymentRequirements } from "@x402/core/types";
 import type { ClientStellarSigner } from "@x402/stellar";
 import { ExactStellarScheme } from "@x402/stellar/exact/client";
 import type { ClientSettler, SettleRequest } from "./index.js";
+import { messageOf, readReceiptHeader } from "./receipt-header.js";
 
+export { TOLLWAY_RECEIPT_HEADER } from "./receipt-header.js";
 export const PAYMENT_REQUIRED_HEADER = "PAYMENT-REQUIRED";
 export const PAYMENT_SIGNATURE_HEADER = "PAYMENT-SIGNATURE";
-export const TOLLWAY_RECEIPT_HEADER = "TOLLWAY-RECEIPT";
 
 export type X402SettlerOptions = {
   /**
@@ -143,7 +138,7 @@ export function createX402Settler(options: X402SettlerOptions): ClientSettler {
           `${resource} answered the signed payment with ${paid.status}`,
         );
       }
-      return readReceipt(paid, resource);
+      return readReceiptHeader(paid, resource);
     },
   };
 }
@@ -201,36 +196,4 @@ function assertMatchesOffer(
       `the 402 from ${resource} charges asset ${requirements.asset}, not ${offer.asset}`,
     );
   }
-}
-
-function readReceipt(response: Response, resource: string): SignedReceipt {
-  const header = response.headers.get(TOLLWAY_RECEIPT_HEADER);
-  if (!header) {
-    throw new TollwayError(
-      "invalid-receipt",
-      `${resource} settled the payment but sent no ${TOLLWAY_RECEIPT_HEADER} header`,
-    );
-  }
-  let candidate: unknown;
-  try {
-    // Accepts standard base64 and base64url alike.
-    candidate = JSON.parse(new TextDecoder().decode(base64UrlToBytes(header)));
-  } catch (error) {
-    throw new TollwayError(
-      "invalid-receipt",
-      `the ${TOLLWAY_RECEIPT_HEADER} header from ${resource} is not base64 JSON: ${messageOf(error)}`,
-    );
-  }
-  const parsed = signedReceiptSchema.safeParse(candidate);
-  if (!parsed.success) {
-    throw new TollwayError(
-      "invalid-receipt",
-      `the ${TOLLWAY_RECEIPT_HEADER} header from ${resource} is not a Tollway receipt`,
-    );
-  }
-  return parsed.data;
-}
-
-function messageOf(error: unknown): string {
-  return error instanceof Error ? error.message : String(error);
 }
