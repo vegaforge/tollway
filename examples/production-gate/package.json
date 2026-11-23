@@ -1,0 +1,22 @@
+{
+  "name": "@vegaforge/tollway-example-production-gate",
+  "version": "0.0.0",
+  "private": true,
+  "description": "Sample production gate configuration: Redis settlement cache and locks, persisted receipt key, facilitator auth",
+  "license": "Apache-2.0",
+  "type": "module",
+  "scripts": {
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "@vegaforge/tollway-core": "workspace:*",
+    "@vegaforge/tollway-server": "workspace:*",
+    "@x402/stellar": "^2.31.0",
+    "ioredis": "^5.11.1",
+    "zod": "^4.6.7"
+  },
+  "devDependencies": {
+    "@types/node": "^22.20.5",
+    "typescript": "^5.9.3"
+  }
+}

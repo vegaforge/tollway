@@ -1,5 +1,5 @@
 import { TollwayError } from "./errors.js";
-import type { Policy } from "./policy.js";
+import { type PolicyInput, PolicyValidationError, parsePolicy } from "./policy-schema.js";
 
 /** A constraint the account owner can install through their wallet. */
 export type SmartAccountConstraint = {
@@ -47,9 +47,14 @@ function amount(value: string, field: string): bigint {
  * window. The returned invocations are descriptions, never signed transactions.
  */
 export function planSmartAccountPolicy(
-  policy: Policy,
+  input: PolicyInput,
   options: SmartAccountPlannerOptions,
 ): SmartAccountPlan {
+  // Validate the same way createPolicyEngine does, so a plan is never built
+  // from a policy the engine would refuse.
+  const parsed = parsePolicy(input);
+  if (!parsed.ok) throw new PolicyValidationError(parsed.issues);
+  const policy = parsed.policy;
   if (!Number.isSafeInteger(options.dailyPeriodLedgers) || options.dailyPeriodLedgers <= 0) {
     throw new TollwayError("invalid-policy", "dailyPeriodLedgers must be a positive integer");
   }
@@ -83,11 +88,20 @@ export function planSmartAccountPolicy(
   }
   if (
     policy.perService &&
-    Object.values(policy.perService).some((entry) => entry?.cap !== undefined)
+    Object.values(policy.perService).some(
+      (entry) =>
+        entry?.cap !== undefined || entry?.dailyCap !== undefined || entry?.window !== undefined,
+    )
   ) {
     residual.push({
       rule: "per-service",
       reason: "the account policy scopes token transfers, not payees",
+    });
+  }
+  if (policy.perResource && Object.keys(policy.perResource).length > 0) {
+    residual.push({
+      rule: "per-resource",
+      reason: "the account policy scopes token transfers, not the resource paid for",
     });
   }
   if (policy.rateLimit?.requestsPerMinute !== undefined) {

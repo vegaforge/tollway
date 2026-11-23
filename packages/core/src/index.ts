@@ -12,9 +12,21 @@ export {
   type AdaptiveAnomalyEvent,
   createPolicyEngine,
   type PaymentIntent,
-  type Policy,
   type PolicyEngine,
 } from "./policy.js";
+export {
+  formatPolicyIssues,
+  POLICY_SCHEMA_ID,
+  POLICY_VERSION,
+  type Policy,
+  type PolicyInput,
+  type PolicyIssue,
+  type PolicyParseResult,
+  PolicyValidationError,
+  parsePolicy,
+  policyJsonSchema,
+  policySchema,
+} from "./policy-schema.js";
 export {
   comparePolicyTraces,
   decisionFromTrace,
@@ -61,6 +73,7 @@ export {
   type ReceiptSigner,
   type ReceiptVerifier,
 } from "./receipt/signer.js";
+export { RollingSum, type RollingSumOptions } from "./rolling-sum.js";
 export {
   createDefaultRouter,
   type ModelRouter,

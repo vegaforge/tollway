@@ -30,8 +30,20 @@ describe.skipIf(!RUN)("createHttpFacilitator (integration)", () => {
 
   it("reads /supported from a live testnet facilitator", async () => {
     const supported = await facilitator.supported();
-    expect(Array.isArray(supported.models)).toBe(true);
-    expect(supported.models).toContain("x402");
+    // Issue #155: /supported now returns the full capability set from
+    // @x402/core (kinds, extensions, signers) rather than the lossy
+    // { models, assets } shape. A live Stellar testnet facilitator
+    // must advertise at least one v2 `exact` kind for stellar:testnet
+    // or the wildcard stellar:*.
+    expect(Array.isArray(supported.kinds)).toBe(true);
+    expect(
+      supported.kinds.some(
+        (kind) =>
+          kind.x402Version === 2 &&
+          kind.scheme === "exact" &&
+          (kind.network === "stellar:testnet" || kind.network === "stellar:*"),
+      ),
+    ).toBe(true);
   });
 
   // Verifying needs a real signed testnet transaction. Supply one (and the

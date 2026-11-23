@@ -14,6 +14,10 @@ export type TollwayErrorCode =
   | "canonicalization-failed"
   | "budget-exceeded"
   | "payment-failed"
+  | "outcome-unknown"
+  | "facilitator-unsupported"
+  | "facilitator-unavailable"
+  | "facilitator-invalid-response"
   | "policy-blocked"
   | "receipt-verification-failed"
   | "channel-not-found"
@@ -23,14 +27,21 @@ export type TollwayErrorCode =
   | "settlement-mismatch"
   | "invalid-metrics-query"
   | "invalid-metric"
-  | "metrics-query-too-large";
+  | "metrics-query-too-large"
+  | "invalid-receipt-query"
+  | "invalid-cursor"
+  | "corrupt-receipt";
 
 /** An error Tollway throws on purpose. Branch on `code`, which is stable across releases. */
 export class TollwayError extends Error {
   readonly code: TollwayErrorCode;
 
-  constructor(code: TollwayErrorCode, message: string) {
-    super(message);
+  /**
+   * `options.cause` keeps the underlying error, for example the network
+   * error behind a failed facilitator call, so callers can classify it.
+   */
+  constructor(code: TollwayErrorCode, message: string, options?: { cause?: unknown }) {
+    super(message, options);
     this.name = "TollwayError";
     this.code = code;
   }

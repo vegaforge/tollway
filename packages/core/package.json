@@ -18,10 +18,17 @@
       "types": "./dist/index.d.ts",
       "import": "./dist/index.js",
       "require": "./dist/index.cjs"
-    }
+    },
+    "./policy-loader": {
+      "types": "./dist/policy-loader.d.ts",
+      "import": "./dist/policy-loader.js",
+      "require": "./dist/policy-loader.cjs"
+    },
+    "./schema/policy.schema.json": "./schema/policy.schema.json"
   },
   "files": [
-    "dist"
+    "dist",
+    "schema"
   ],
   "scripts": {
     "build": "tsup",
@@ -35,7 +42,7 @@
   },
   "devDependencies": {
     "@types/node": "^22.20.5",
-    "fast-check": "^3.23.0",
+    "fast-check": "^4.10.3",
     "tsup": "^9.0.0",
     "typescript": "^5.9.3",
     "vitest": "^4.1.12"

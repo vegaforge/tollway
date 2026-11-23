@@ -34,6 +34,7 @@ import {
   TollwayError,
   verifyReceipt,
 } from "@vegaforge/tollway-core";
+import type { ReceiptStore } from "./receipt-store.js";
 
 /** Events the client emits so callers and observability can follow along. */
 export type ClientEvent =
@@ -113,6 +114,19 @@ export type TollwayClientOptions = {
   verifier?: ReceiptVerifier;
   /** Default facilitator URL when an offer does not name one. */
   facilitatorUrl?: string;
+  /**
+   * Optional receipt store. When provided, every verified receipt is written
+   * to it before `pay()` resolves, so the agent keeps the receipt for a
+   * payment that settled.
+   */
+  receiptStore?: ReceiptStore;
+  /**
+   * Called when the receipt store fails after a payment settled. The same
+   * error is set as `storeError` on the result and the receipt is still
+   * returned; the payment has happened, so a bookkeeping failure must not
+   * hide it. Mirrors the gate's `onCacheError`.
+   */
+  onStoreError?: (error: Error, receipt: SignedReceipt) => void;
 };
 
 export type PayRequest = {
@@ -127,6 +141,12 @@ export type PayRequest = {
 export type PayResult = {
   receipt: SignedReceipt;
   model: SettlementModel;
+  /**
+   * Set when the payment settled but the receipt store could not persist the
+   * receipt. The receipt itself is complete and valid; the store's history has
+   * a hole, so treat this as an operational alert.
+   */
+  storeError?: Error;
 };
 
 export interface TollwayClient {
@@ -268,6 +288,22 @@ export function createClient(options: TollwayClientOptions): TollwayClient {
         // so a field the signature does not cover cannot reach the caller.
         const receipt = await checkedReceipt(settled, options.verifier);
 
+        // The payment has settled, so a store failure must not cost the payer
+        // the receipt. The error goes on the result and to onStoreError.
+        let storeError: Error | undefined;
+        if (options.receiptStore) {
+          try {
+            await options.receiptStore.put(receipt);
+          } catch (rawStoreError) {
+            storeError = normalizeError(rawStoreError);
+            try {
+              options.onStoreError?.(storeError, receipt);
+            } catch {
+              // A throwing alert hook must not poison the pay() promise either.
+            }
+          }
+        }
+
         if (options.policy) {
           await options.policy.record(intent);
         }
@@ -276,7 +312,7 @@ export function createClient(options: TollwayClientOptions): TollwayClient {
         }
 
         emit({ type: "payment", resource: request.resource, model, receipt });
-        return { receipt, model };
+        return storeError ? { receipt, model, storeError } : { receipt, model };
       } catch (rawError) {
         const error = normalizeError(rawError);
         emit({ type: "error", resource: request.resource, error });
@@ -365,6 +401,22 @@ function normalizeError(value: unknown): Error {
   return new Error(typeof value === "string" ? value : JSON.stringify(value));
 }
 
+export {
+  createMemoryReceiptStore,
+  DEFAULT_RECEIPT_PAGE_SIZE,
+  MAX_RECEIPT_PAGE_SIZE,
+  type ModelSpendTotal,
+  type PayeeSpendTotal,
+  type ReceiptFilter,
+  type ReceiptHistory,
+  type ReceiptQueryPage,
+  type ReceiptQueryResult,
+  type ReceiptStore,
+  type SpendLedger,
+  type SpendLedgerQuery,
+  type SpendLedgerTotals,
+  type SpendTotal,
+} from "./receipt-store.js";
 export {
   createX402Settler,
   PAYMENT_REQUIRED_HEADER,
