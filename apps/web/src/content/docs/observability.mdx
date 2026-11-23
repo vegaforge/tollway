@@ -98,11 +98,11 @@ Every event carries a stable `id` assigned at emit time. Each request includes `
 
 ### Durable delivery
 
-Pass an `outbox` to `createObservabilityHub` to persist each delivery instead of POSTing inside `emit`. `createSqliteWebhookOutbox({ filename })` survives a restart; `createMemoryWebhookOutbox()` keeps rows in process for tests. Call `hub.startDispatcher()` to deliver with jittered exponential backoff under a lease, and `hub.stop()` to wait for in-flight attempts on shutdown.
+Pass an `outbox` to `createObservabilityHub` to persist each delivery instead of POSTing inside `emit`. `createSqliteWebhookOutbox({ filename })` survives a restart; `createMemoryWebhookOutbox()` keeps rows in process for tests. Call `hub.startDispatcher()` to deliver with jittered exponential backoff under a lease, and `hub.stop()` to wait for in-flight attempts on shutdown. With an outbox, `emit` never rejects: a row that cannot be written is listed in the report's `failures`.
 
-Delivery is **at-least-once**, and ordering is not guaranteed. Receivers dedupe on `Tollway-Event-Id`, and each attempt carries its own `Tollway-Delivery-Id`. A delivery that exhausts `maxAttempts` moves to a dead-letter state: list it with `outbox.listDeadLetters()` and re-enqueue it with `outbox.replay(deliveryId)`, which resets attempts and issues a fresh delivery id. Rows store the subscription id, never the secret, so the same subscriptions must be registered again after a restart.
+Delivery is **at-least-once**, and ordering is not guaranteed. Receivers dedupe on `Tollway-Event-Id`. `Tollway-Delivery-Id` names the delivery row: it is the same across retries of that row and new only when the row is enqueued or replayed. A delivery that exhausts `maxAttempts` (16 by default, retried over about 2 to 4 hours) moves to a dead-letter state: list it with `outbox.listDeadLetters()` and re-enqueue it once with `outbox.replay(deliveryId)`, which resets attempts and issues a fresh delivery id. Delivered rows are purged after `dispatcher.deliveredRetentionMs` (24 hours by default). Rows store the subscription id, never the secret, so the same subscriptions must be registered again after a restart.
 
-The full workflow, including the header format and a receiver example, is in [`docs/webhook-delivery.md`](https://github.com/vegaforge/tollway/blob/main/docs/webhook-delivery.md).
+The full workflow, including the header format, leases, retention and a receiver example, is in [`docs/webhook-delivery.md`](https://github.com/vegaforge/tollway/blob/dev/docs/webhook-delivery.md).
 
 ## Reference
 

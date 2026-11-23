@@ -2,7 +2,11 @@ import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { createWebhookDispatcher, type WebhookDispatcher } from "./dispatcher.js";
+import {
+  createWebhookDispatcher,
+  type WebhookDispatcher,
+  WebhookLeaseLostError,
+} from "./dispatcher.js";
 import type { TollwayEvent } from "./events.js";
 import type { WebhookSubscription } from "./index.js";
 import { createMemoryWebhookOutbox, createSqliteWebhookOutbox } from "./outbox.js";
@@ -43,7 +47,7 @@ function setup(input: {
     outbox,
     resolveSubscription: (id) => (id === subscription.id ? subscription : undefined),
     fetch: input.fetcher,
-    requestTimeoutMs: 0,
+    requestTimeoutMs: 5_000,
     batchSize: 20,
     leaseMs: 60_000,
     initialDelayMs: 1_000,
@@ -142,7 +146,8 @@ describe("webhook dispatcher", () => {
     const dead = await outbox.listDeadLetters();
     expect(dead).toHaveLength(1);
     expect(dead[0]?.lastError).toBe("upstream down");
-    expect(dead[0]?.attempts).toBe(1);
+    // Both POSTs count, the final one included.
+    expect(dead[0]?.attempts).toBe(2);
     expect(onDeliveryFailure).toHaveBeenCalledTimes(1);
     expect(onDeliveryFailure.mock.calls[0]?.[0]).toMatchObject({
       url: subscription.url,
@@ -181,7 +186,7 @@ describe("webhook dispatcher", () => {
       outbox,
       resolveSubscription: () => undefined,
       fetch: fetcher,
-      requestTimeoutMs: 0,
+      requestTimeoutMs: 5_000,
       now: () => Date.now() + 60_000,
     });
     await outbox.enqueue([{ subscriptionId: "gone", event }]);
@@ -208,7 +213,7 @@ describe("webhook dispatcher", () => {
         outbox,
         resolveSubscription: () => subscription,
         fetch: fetcher,
-        requestTimeoutMs: 0,
+        requestTimeoutMs: 5_000,
         now: () => Date.now() + 60_000,
         random: () => 0,
       });
@@ -222,33 +227,153 @@ describe("webhook dispatcher", () => {
     expect(new Set(seen).size).toBe(5);
   });
 
-  it("leaves the row claimable when stop finds work in flight", async () => {
-    let release: (response: Response) => void = () => {};
-    const fetcher = vi.fn().mockImplementation(
-      () =>
-        new Promise<Response>((resolve) => {
-          release = resolve;
-        }),
-    );
-    const { outbox } = setup({ fetcher });
-    const stopping = createWebhookDispatcher({
+  it("aborts an open request before stop releases its lease", async () => {
+    // The fetch never settles on its own, so only the abort can end it.
+    const signals: AbortSignal[] = [];
+    const fetcher = vi.fn().mockImplementation((_url: RequestInfo | URL, init?: RequestInit) => {
+      if (init?.signal) signals.push(init.signal);
+      return new Promise<Response>(() => {});
+    });
+    const outbox = createMemoryWebhookOutbox();
+    const dispatcher = createWebhookDispatcher({
       outbox,
       resolveSubscription: () => subscription,
       fetch: fetcher,
-      requestTimeoutMs: 0,
+      requestTimeoutMs: 5_000,
       now: () => Date.now() + 60_000,
       stopTimeoutMs: 0,
     });
     await outbox.enqueue([{ subscriptionId: "sub-1", event }]);
 
-    const pass = stopping.drainOnce();
+    const pass = dispatcher.drainOnce();
     await vi.waitFor(() => expect(fetcher).toHaveBeenCalledTimes(1));
-    await stopping.stop();
+    await dispatcher.stop();
 
+    // By the time stop resolves, the request was aborted and the pass ended.
+    expect(signals[0]?.aborted).toBe(true);
+    await expect(pass).resolves.toBe(1);
+    // The row is back, with no attempt counted for the aborted request.
+    const [row] = await outbox.claim(10, 1_000, Date.now() + 120_000);
+    expect(row?.attempts).toBe(0);
+  });
+
+  it("aborts even when the fetch implementation ignores its signal", async () => {
+    const fetcher = vi.fn().mockImplementation(() => new Promise<Response>(() => {}));
+    const outbox = createMemoryWebhookOutbox();
+    const dispatcher = createWebhookDispatcher({
+      outbox,
+      resolveSubscription: () => subscription,
+      fetch: fetcher,
+      requestTimeoutMs: 5_000,
+      now: () => Date.now() + 60_000,
+      stopTimeoutMs: 0,
+    });
+    await outbox.enqueue([{ subscriptionId: "sub-1", event }]);
+
+    const pass = dispatcher.drainOnce();
+    await vi.waitFor(() => expect(fetcher).toHaveBeenCalledTimes(1));
+    await dispatcher.stop();
+
+    await expect(pass).resolves.toBe(1);
     expect(await outbox.claim(10, 1_000, Date.now() + 120_000)).toHaveLength(1);
+  });
 
-    release(okResponse());
-    await pass;
+  it("never lets a dispatcher whose lease expired overwrite another's delivery", async () => {
+    // A claims the row and its POST hangs. A's lease expires, B reclaims the
+    // row and delivers it. A's POST then fails on its last attempt: A must
+    // not dead-letter the row, or a replay would send it a second time.
+    const start = Date.now();
+    let failA: (error: Error) => void = () => {};
+    const fetchA = vi.fn().mockImplementation(
+      () =>
+        new Promise<Response>((_resolve, reject) => {
+          failA = reject;
+        }),
+    );
+    const fetchB = vi.fn().mockResolvedValue(okResponse());
+    const onErrorA = vi.fn();
+    const onDeliveryFailureA = vi.fn();
+    const outbox = createMemoryWebhookOutbox();
+    const a = createWebhookDispatcher({
+      outbox,
+      resolveSubscription: () => subscription,
+      fetch: fetchA,
+      requestTimeoutMs: 1_000,
+      leaseMs: 2_000,
+      maxAttempts: 1,
+      now: () => start,
+      onError: onErrorA,
+      onDeliveryFailure: onDeliveryFailureA,
+    });
+    const b = createWebhookDispatcher({
+      outbox,
+      resolveSubscription: () => subscription,
+      fetch: fetchB,
+      requestTimeoutMs: 1_000,
+      leaseMs: 2_000,
+      now: () => start + 2_001,
+    });
+    await outbox.enqueue([{ subscriptionId: "sub-1", event }]);
+
+    const passA = a.drainOnce();
+    await vi.waitFor(() => expect(fetchA).toHaveBeenCalledTimes(1));
+    expect(await b.drainOnce()).toBe(1);
+    failA(new Error("connection reset"));
+    await passA;
+
+    expect(await outbox.listDeadLetters()).toHaveLength(0);
+    expect(onDeliveryFailureA).not.toHaveBeenCalled();
+    expect(onErrorA).toHaveBeenCalledTimes(1);
+    const lost = onErrorA.mock.calls[0]?.[0];
+    expect(lost).toBeInstanceOf(WebhookLeaseLostError);
+    expect(lost).toMatchObject({ result: "dead-letter" });
+  });
+
+  it.each([
+    ["no request timeout", { requestTimeoutMs: 0 }],
+    ["a request timeout as long as the lease", { requestTimeoutMs: 30_000, leaseMs: 30_000 }],
+    ["a request timeout longer than the lease", { requestTimeoutMs: 60_000, leaseMs: 30_000 }],
+  ])("refuses %s, which could let a lease expire mid-request", (_name, timing) => {
+    expect(() =>
+      createWebhookDispatcher({
+        outbox: createMemoryWebhookOutbox(),
+        resolveSubscription: () => subscription,
+        fetch: vi.fn(),
+        ...timing,
+      }),
+    ).toThrow(RangeError);
+  });
+
+  it("purges delivered rows once they pass the retention window", async () => {
+    let now = Date.now() + 60_000;
+    const fetcher = vi.fn().mockResolvedValue(okResponse());
+    const outbox = createMemoryWebhookOutbox();
+    const purge = vi.spyOn(outbox, "purgeDelivered");
+    const dispatcher = createWebhookDispatcher({
+      outbox,
+      resolveSubscription: () => subscription,
+      fetch: fetcher,
+      requestTimeoutMs: 5_000,
+      deliveredRetentionMs: 10_000,
+      purgeIntervalMs: 1_000,
+      now: () => now,
+    });
+    await outbox.enqueue([{ subscriptionId: "sub-1", event }]);
+
+    await dispatcher.drainOnce();
+    expect(purge).toHaveBeenLastCalledWith(now - 10_000);
+    expect(await purge.mock.results[0]?.value).toBe(0);
+
+    // Within the purge interval, no second purge runs.
+    now += 500;
+    await dispatcher.drainOnce();
+    expect(purge).toHaveBeenCalledTimes(1);
+
+    // Past the retention window, the delivered row is removed.
+    now += 10_000;
+    await dispatcher.drainOnce();
+    expect(purge).toHaveBeenCalledTimes(2);
+    expect(await purge.mock.results[1]?.value).toBe(1);
   });
 
   it("reports a claim failure through onError instead of crashing", async () => {
@@ -259,7 +384,7 @@ describe("webhook dispatcher", () => {
       outbox,
       resolveSubscription: () => subscription,
       fetch: vi.fn(),
-      requestTimeoutMs: 0,
+      requestTimeoutMs: 5_000,
       intervalMs: 0,
       onError,
     });
@@ -288,7 +413,7 @@ describe("webhook dispatcher: sqlite restart", () => {
         outbox: after,
         resolveSubscription: () => subscription,
         fetch: fetcher,
-        requestTimeoutMs: 0,
+        requestTimeoutMs: 5_000,
         now: () => Date.now() + 60_000,
       });
       try {

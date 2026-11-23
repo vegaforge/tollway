@@ -733,3 +733,68 @@ describe("observability hub: durable webhook outbox", () => {
     ).resolves.toEqual({ valid: true });
   });
 });
+
+describe("observability hub: outbox failure handling", () => {
+  it("reports an outbox write failure in the report instead of rejecting", async () => {
+    const outbox = createMemoryWebhookOutbox();
+    vi.spyOn(outbox, "enqueue").mockRejectedValue(new Error("database is locked"));
+    const onDeliveryFailure = vi.fn();
+    const hub = createObservabilityHub({
+      sleep: noSleep,
+      outbox,
+      onDeliveryFailure,
+      webhooks: [
+        { id: "sub-a", url: "https://a.test/hook" },
+        { id: "sub-b", url: "https://b.test/hook" },
+      ],
+    });
+
+    const report = await hub.emit(makeEvent("receipt.created"));
+
+    expect(report.webhooksDispatched).toBe(0);
+    expect(report.failures.map((failure) => failure.target)).toEqual([
+      { kind: "webhook", url: "https://a.test/hook" },
+      { kind: "webhook", url: "https://b.test/hook" },
+    ]);
+    expect(report.failures[0]?.error.message).toBe("database is locked");
+    expect(report.failures[0]?.attempts).toBe(0);
+    expect(onDeliveryFailure).toHaveBeenCalledTimes(2);
+  });
+
+  it("does not give the outbox the inline retry policy", async () => {
+    // retry is sized for retries inside one emit call. With it inherited, a
+    // receiver that is down for one attempt would dead-letter at once.
+    const outbox = createMemoryWebhookOutbox();
+    const fetcher = vi.fn().mockRejectedValue(new Error("connection refused"));
+    const hub = createObservabilityHub({
+      sleep: noSleep,
+      fetch: fetcher,
+      outbox,
+      retry: { maxAttempts: 1 },
+      webhooks: [{ id: "sub-a", url: "https://a.test/hook" }],
+    });
+
+    await hub.emit(makeEvent("receipt.created"));
+    hub.startDispatcher();
+    await vi.waitFor(() => expect(fetcher).toHaveBeenCalledTimes(1));
+    await hub.stop();
+
+    expect(await outbox.listDeadLetters()).toHaveLength(0);
+  });
+
+  it("refuses an outbox without a request timeout", () => {
+    expect(() =>
+      createObservabilityHub({ outbox: createMemoryWebhookOutbox(), requestTimeoutMs: 0 }),
+    ).toThrow(/requestTimeoutMs/);
+  });
+
+  it("refuses an empty webhook secret, at construction and when added later", () => {
+    expect(() =>
+      createObservabilityHub({ webhooks: [{ url: "https://a.test/hook", secret: "" }] }),
+    ).toThrow(/must not be empty/);
+    const hub = createObservabilityHub();
+    expect(() => hub.addWebhook({ url: "https://a.test/hook", secret: "" })).toThrow(
+      /must not be empty/,
+    );
+  });
+});

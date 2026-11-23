@@ -18,8 +18,10 @@ export const webhookEvents = [
 export type WebhookEvent = (typeof webhookEvents)[number];
 
 /**
- * Headers every outbox delivery carries. Receivers dedupe on the event id and
- * can use the delivery id to tell attempts apart in their own logs.
+ * Headers every outbox delivery carries. Receivers dedupe on the event id.
+ * The delivery id names the delivery row: it is the same across retries of
+ * one row and new on enqueue and replay, which helps match a request to a
+ * row in delivery logs.
  */
 export const WEBHOOK_EVENT_ID_HEADER = "Tollway-Event-Id";
 export const WEBHOOK_DELIVERY_ID_HEADER = "Tollway-Delivery-Id";

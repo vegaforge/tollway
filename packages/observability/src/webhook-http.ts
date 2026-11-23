@@ -41,13 +41,24 @@ export async function buildWebhookRequest(input: {
   if (input.deliveryId) {
     headers[WEBHOOK_DELIVERY_ID_HEADER] = input.deliveryId;
   }
-  if (input.subscription.secret) {
+  if (input.subscription.secret !== undefined) {
+    // An empty secret would make every receiver accept an HMAC anyone can
+    // compute. The hub refuses one at registration; this catches a
+    // dispatcher built directly.
+    assertWebhookSecret(input.subscription.secret);
     headers[WEBHOOK_SIGNATURE_HEADER] = await signWebhookPayload({
       secret: input.subscription.secret,
       payload: body,
     });
   }
   return { body, headers };
+}
+
+/** Throws when a subscription secret is set but empty. */
+export function assertWebhookSecret(secret: string | undefined): void {
+  if (secret !== undefined && secret.length === 0) {
+    throw new TypeError("a webhook secret must not be empty; omit it to send unsigned");
+  }
 }
 
 /**
@@ -59,30 +70,69 @@ export async function postWebhook(input: {
   url: string;
   request: WebhookRequest;
   timeoutMs: number;
+  /**
+   * Aborts the request from outside, for example when a dispatcher stops.
+   * The call rejects as soon as it fires, even with a `fetch` that ignores
+   * its signal.
+   */
+  signal?: AbortSignal;
 }): Promise<void> {
-  const controller = typeof AbortController !== "undefined" ? new AbortController() : null;
+  if (input.signal?.aborted) {
+    throw new Error(`webhook ${input.url} was aborted before it was sent`);
+  }
+  const controller = new AbortController();
+  let timedOut = false;
   const timer =
-    controller && input.timeoutMs > 0
+    input.timeoutMs > 0
       ? setTimeout(() => {
+          timedOut = true;
           controller.abort();
         }, input.timeoutMs)
       : null;
+  const forwardAbort = () => controller.abort();
+  input.signal?.addEventListener("abort", forwardAbort, { once: true });
+
+  // Settles when the request is aborted, so neither the timeout nor a
+  // dispatcher stop depends on the fetch implementation honouring its signal.
+  const aborted = new Promise<never>((_, reject) => {
+    controller.signal.addEventListener(
+      "abort",
+      () => {
+        reject(
+          timedOut
+            ? new Error(`webhook ${input.url} timed out after ${input.timeoutMs}ms`)
+            : new Error(`webhook ${input.url} was aborted`),
+        );
+      },
+      { once: true },
+    );
+  });
+  // `aborted` only rejects while the race below is still waiting on it: once
+  // the request settles, the timer is cleared and the outside signal is
+  // detached, so nothing can abort the controller and leave an unhandled
+  // rejection.
 
   let response: Response;
   try {
-    response = await input.fetcher(input.url, {
-      method: "POST",
-      headers: input.request.headers,
-      body: input.request.body,
-      signal: controller?.signal,
-    });
+    response = await Promise.race([
+      input.fetcher(input.url, {
+        method: "POST",
+        headers: input.request.headers,
+        body: input.request.body,
+        signal: controller.signal,
+      }),
+      aborted,
+    ]);
   } catch (cause) {
-    if (controller?.signal.aborted) {
-      throw new Error(`webhook ${input.url} timed out after ${input.timeoutMs}ms`);
+    if (controller.signal.aborted) {
+      throw timedOut
+        ? new Error(`webhook ${input.url} timed out after ${input.timeoutMs}ms`)
+        : new Error(`webhook ${input.url} was aborted`);
     }
     throw cause;
   } finally {
     if (timer) clearTimeout(timer);
+    input.signal?.removeEventListener("abort", forwardAbort);
   }
 
   if (!response.ok) {

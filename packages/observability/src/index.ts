@@ -18,13 +18,14 @@ import {
   type TimeseriesQuery,
   type TimeseriesResult,
 } from "./timeseries.js";
-import { buildWebhookRequest, postWebhook } from "./webhook-http.js";
+import { assertWebhookSecret, buildWebhookRequest, postWebhook } from "./webhook-http.js";
 
 export {
   createWebhookDispatcher,
   type WebhookDispatcher,
   type WebhookDispatcherOptions,
   type WebhookDispatcherTuning,
+  WebhookLeaseLostError,
 } from "./dispatcher.js";
 export {
   isWebhookEvent,
@@ -43,6 +44,7 @@ export {
   type SqliteWebhookOutboxOptions,
   type WebhookDelivery,
   type WebhookDeliveryStatus,
+  type WebhookLease,
   type WebhookOutbox,
 } from "./outbox.js";
 export {
@@ -149,7 +151,7 @@ export type WebhookSubscription = {
   /**
    * When set, every attempt carries a `Tollway-Signature` header over the
    * exact body sent. The secret stays in memory and is never written to an
-   * outbox row.
+   * outbox row. An empty string is refused: omit the field to send unsigned.
    */
   secret?: string;
 };
@@ -221,10 +223,16 @@ export type ObservabilityHubOptions = {
    * When set, `emit` persists one delivery row per matching webhook instead
    * of POSTing inline, and deliveries need a dispatcher
    * ({@link ObservabilityHub.startDispatcher}). Local handlers keep the
-   * inline behaviour either way.
+   * inline behaviour either way. With an outbox, `requestTimeoutMs` must be
+   * at least 1 and shorter than the dispatcher's `leaseMs`.
    */
   outbox?: WebhookOutbox;
-  /** Outbox dispatcher settings; ignored without an `outbox`. */
+  /**
+   * Outbox dispatcher settings; ignored without an `outbox`. The outbox does
+   * not inherit `retry`: that policy is sized for retries inside one `emit`
+   * call, and the dispatcher's defaults are sized for an outage (see
+   * {@link WebhookDispatcherTuning}).
+   */
   dispatcher?: Partial<WebhookDispatcherTuning>;
 };
 
@@ -236,8 +244,11 @@ export interface ObservabilityHub {
    * Resolves with a {@link DeliveryReport} describing which targets succeeded
    * and which exhausted their retry budget; the promise itself does not
    * reject so callers can record full delivery telemetry rather than the
-   * first failure that bubbles up. The hub assigns the event id when the
-   * input does not carry one.
+   * first failure that bubbles up. With an outbox, a webhook delivery that
+   * could not be written to it (for example `database is locked` after the
+   * SQLite busy timeout) is listed in `failures` with `attempts: 0` instead
+   * of rejecting. The hub assigns the event id when the input does not carry
+   * one.
    */
   emit(event: TollwayEventInput): Promise<DeliveryReport>;
   /** Register a local handler invoked synchronously during {@link emit}. */
@@ -443,6 +454,7 @@ export function createObservabilityHub(options: ObservabilityHubOptions = {}): O
 
   if (options.webhooks) {
     for (const sub of options.webhooks) {
+      assertWebhookSecret(sub.secret);
       subscriptions.push({ ...sub, events: sub.events ? [...sub.events] : undefined });
     }
   }
@@ -472,9 +484,6 @@ export function createObservabilityHub(options: ObservabilityHubOptions = {}): O
           subscriptions.find((sub) => subscriptionKey(sub) === subscriptionId),
         fetch: fetcher,
         requestTimeoutMs,
-        maxAttempts: options.dispatcher?.maxAttempts ?? retry.maxAttempts,
-        initialDelayMs: options.dispatcher?.initialDelayMs ?? retry.initialDelayMs,
-        backoffFactor: options.dispatcher?.backoffFactor ?? retry.backoffFactor,
         onDeliveryFailure: (failure) => {
           onDeliveryFailure?.({
             // A row whose subscription is gone has no URL left; name it by
@@ -551,6 +560,7 @@ export function createObservabilityHub(options: ObservabilityHubOptions = {}): O
       }
     },
     addWebhook(subscription) {
+      assertWebhookSecret(subscription.secret);
       subscriptions.push({
         ...subscription,
         events: subscription.events ? [...subscription.events] : undefined,
@@ -599,7 +609,30 @@ export function createObservabilityHub(options: ObservabilityHubOptions = {}): O
           subscriptionId: subscriptionKey(sub),
           event,
         }));
-        await outbox.enqueue(deliveries);
+        try {
+          await outbox.enqueue(deliveries);
+        } catch (cause) {
+          // The rows were not written, so nothing will deliver them. Report
+          // each one instead of rejecting: emit never rejects, and a caller
+          // that does not await it would otherwise crash the process.
+          const error = normalizeError(cause);
+          for (const sub of matchingSubs) {
+            const failure: DeliveryFailure = {
+              target: { kind: "webhook", url: sub.url },
+              event,
+              error,
+              attempts: 0,
+            };
+            failures.push(failure);
+            onDeliveryFailure?.(failure);
+          }
+          return {
+            event,
+            handlersDispatched: matchingHandlers.length,
+            webhooksDispatched: 0,
+            failures,
+          };
+        }
         return {
           event,
           handlersDispatched: matchingHandlers.length,
