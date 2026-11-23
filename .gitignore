@@ -13,6 +13,10 @@ coverage/
 playwright-report/
 test-results/
 
+# Mutation testing (Stryker temp and reports)
+.stryker-tmp/
+reports/mutation/
+
 # Environment. Every .env variant stays local; only the example is shared.
 .env*
 !.env.example

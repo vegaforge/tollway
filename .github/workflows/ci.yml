@@ -1,11 +1,13 @@
-name: CI
-
+# CI
+#
 # Gate jobs run in parallel. The quality job aggregates them, and it is the
 # only check branch protection needs to require, so jobs can be added or
 # renamed here without touching the protection settings.
 #
 # Actions are pinned to a full commit SHA with the release tag in a comment.
 # Dependabot (github-actions ecosystem) updates both together.
+
+name: CI
 
 on:
   push:
@@ -129,6 +131,105 @@ jobs:
       # turbo would split each package's vitest run, not the suite.
       - name: Test
         run: pnpm test
+
+  mutation-incremental:
+    name: mutation (incremental, core and server)
+    if: github.event_name == 'pull_request' && (contains(github.event.pull_request.changed_files, 'x') || true)
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Check changed paths
+        id: paths
+        env:
+          BASE: ${{ github.event.pull_request.base.sha }}
+        run: |
+          # Only packages/core and packages/server trigger the incremental run.
+          if git fetch --no-tags --depth=1 origin "$BASE" 2>/dev/null \
+             && ! git diff --quiet "$BASE" HEAD -- packages/core packages/server; then
+            echo "changed=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "changed=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - uses: pnpm/action-setup@ea17c68df8912ef543352723c149a84f56e3d413 # v6.1.0
+        if: steps.paths.outputs.changed == 'true'
+
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        if: steps.paths.outputs.changed == 'true'
+        with:
+          node-version-file: .nvmrc
+          cache: pnpm
+
+      - name: Install
+        if: steps.paths.outputs.changed == 'true'
+        run: pnpm install --frozen-lockfile
+
+      # Incremental mode reuses the previous report. The cache key is per base
+      # branch so PR runs against dev do not restore a stale main baseline.
+      - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        if: steps.paths.outputs.changed == 'true'
+        with:
+          path: reports/stryker-incremental.json
+          key: stryker-incremental-${{ github.base_ref }}-${{ github.run_id }}
+          restore-keys: |
+            stryker-incremental-${{ github.base_ref }}-
+
+      - name: Mutation test (incremental)
+        if: steps.paths.outputs.changed == 'true'
+        run: pnpm mutation:incremental
+
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        if: steps.paths.outputs.changed == 'true' && always()
+        with:
+          name: stryker-incremental-report
+          path: |
+            reports/mutation
+          retention-days: 7
+
+      - name: Report
+        if: steps.paths.outputs.changed == 'false'
+        run: echo "No packages/core or packages/server changes; incremental mutation run not needed."
+
+  mutation-full:
+    name: mutation (full, scheduled)
+    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - uses: pnpm/action-setup@ea17c68df8912ef543352723c149a84f56e3d413 # v6.1.0
+
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version-file: .nvmrc
+          cache: pnpm
+
+      - name: Install
+        run: pnpm install --frozen-lockfile
+
+      # The break thresholds only ratchet upwards (AGENTS.md Directive 4). A
+      # full run that falls below them fails here with surviving mutants in the log.
+      - name: Mutation test (full)
+        run: pnpm mutation
+
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        if: always()
+        with:
+          name: stryker-full-report
+          path: |
+            reports/mutation
+          retention-days: 14
 
   adapter-next-matrix:
     name: Next adapter (Next ${{ matrix.major }})
@@ -282,11 +383,12 @@ jobs:
     name: quality
     runs-on: ubuntu-latest
     timeout-minutes: 5
-    needs: [branch-flow, checks, tests, adapter-next-matrix, build, e2e]
+    needs: [branch-flow, checks, tests, adapter-next-matrix, build, e2e, mutation-incremental]
     if: always()
     steps:
       # Anything other than success fails this job, including a cancelled or
       # skipped gate, so a gate that did not run can never count as a pass.
+      # mutation-full runs only on schedule or manual dispatch and is not a PR gate.
       - name: Every gate passed
         if: contains(needs.*.result, 'failure') || contains(needs.*.result, 'cancelled') || contains(needs.*.result, 'skipped')
         run: |
@@ -297,7 +399,8 @@ jobs:
           echo "  Next adapter matrix: ${{ needs.adapter-next-matrix.result }}"
           echo "  build:  ${{ needs.build.result }}"
           echo "  e2e:    ${{ needs.e2e.result }}"
+          echo "  mutation (incremental): ${{ needs.mutation-incremental.result }}"
           exit 1
 
       - name: Report
-        run: echo "branch flow, checks, tests, Next adapter matrix, build and dashboard e2e all succeeded."
+        run: echo "branch flow, checks, tests, Next adapter matrix, build, dashboard e2e and incremental mutation all succeeded."

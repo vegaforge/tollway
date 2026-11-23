@@ -4,5 +4,7 @@
   // Vitest and @vitejs/plugin-react resolve as a peer: pnpm overrides do not
   // reach auto-installed peers, and vite <= 7.3.6 has open security
   // advisories. Nothing imports it directly.
-  "ignoreDependencies": ["vite"]
+  "ignoreDependencies": ["vite", "@stryker-mutator/core", "@stryker-mutator/vitest-runner"],
+  // Stryker configs are loaded by the Stryker CLI, not imported.
+  "ignore": ["packages/*/stryker.config.mjs", "reports/**", ".stryker-tmp/**"]
 }
