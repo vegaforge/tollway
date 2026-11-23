@@ -10,13 +10,15 @@ import {
   type SignedReceipt,
   signedReceiptSchema,
 } from "./schema.js";
-import type { ReceiptSigner, ReceiptVerifier } from "./signer.js";
+import type { ReceiptSigner, ReceiptVerifier, SignatureCheck, SignatureInput } from "./signer.js";
 
 /**
  * Input to {@link buildReceipt}. The function returns a v2 receipt when the
- * caller supplies `offerHash` and `method`, and a v1 receipt otherwise;
- * `version` is set by the function, so callers do not provide it. `id` and
- * `issuedAt` default to a fresh UUID and the current time.
+ * caller supplies `offerHash` and `method`, and a v1 receipt when it supplies
+ * neither. Supplying only one of the two throws, so a v2 field is never
+ * dropped silently. `version` is set by the function, so callers do not
+ * provide it. `id` and `issuedAt` default to a fresh UUID and the current
+ * time.
  */
 export type BuildReceiptInput =
   | (Omit<ReceiptBodyV1, "version" | "id" | "issuedAt"> & {
@@ -50,6 +52,21 @@ function isV2Input(input: BuildReceiptInput): input is Omit<
  * `expiresAt` is strictly after `issuedAt`.
  */
 export function buildReceipt(input: BuildReceiptInput): ReceiptBody {
+  const fields = input as Record<string, unknown>;
+  if (
+    !isV2Input(input) &&
+    (fields.offerHash !== undefined ||
+      fields.method !== undefined ||
+      fields.expiresAt !== undefined)
+  ) {
+    const present = ["offerHash", "method", "expiresAt"].filter(
+      (field) => fields[field] !== undefined,
+    );
+    throw new TollwayError(
+      "invalid-receipt",
+      `a v2 receipt needs both offerHash and method; got only ${present.join(", ")}`,
+    );
+  }
   const id = input.id ?? crypto.randomUUID();
   const issuedAt = input.issuedAt ?? new Date().toISOString();
   const common = {
@@ -179,6 +196,23 @@ export async function verifyReceipt(
     return { valid: false, reason: parsed.error.issues.map(formatIssue).join("; ") };
   }
   const { receipt, signature } = parsed.data;
+  let signatureBytes: Uint8Array;
+  try {
+    signatureBytes = base64UrlToBytes(signature.value);
+  } catch {
+    return { valid: false, reason: "signature.value is not base64url" };
+  }
+  const check = await checkSignature(verifier, {
+    message: canonicalBytes(receipt as JsonValue),
+    signature: signatureBytes,
+    keyId: signature.keyId,
+    algorithm: signature.algorithm,
+  });
+  if (!check.valid) {
+    return check;
+  }
+  // Expiry is checked after the signature, so "receipt expired" is only ever
+  // said about a receipt the trusted key really signed.
   if (receipt.version === 2 && receipt.expiresAt !== undefined) {
     const expires = Date.parse(receipt.expiresAt);
     const now = options.now ?? Date.now();
@@ -186,16 +220,30 @@ export async function verifyReceipt(
       return { valid: false, reason: "receipt expired" };
     }
   }
-  const matches = await verifier.verify({
-    message: canonicalBytes(receipt as JsonValue),
-    signature: base64UrlToBytes(signature.value),
-    keyId: signature.keyId,
-    algorithm: signature.algorithm,
-  });
-  if (!matches) {
-    return { valid: false, reason: "signature does not verify against any trusted key" };
-  }
   return { valid: true, receipt: parsed.data };
+}
+
+/**
+ * Asks the verifier about one signature, with a reason when it can give one.
+ * `verifyReceipt` takes `unknown` from the wire and must never throw, so a
+ * verifier that throws (a bug, or a key set it cannot reach) is reported as
+ * an invalid receipt with the error's message.
+ */
+async function checkSignature(
+  verifier: ReceiptVerifier,
+  input: SignatureInput,
+): Promise<SignatureCheck> {
+  try {
+    if (verifier.check) {
+      return await verifier.check(input);
+    }
+    return (await verifier.verify(input))
+      ? { valid: true }
+      : { valid: false, reason: "signature does not verify against any trusted key" };
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    return { valid: false, reason: `the verifier failed: ${message}` };
+  }
 }
 
 function formatIssue(issue: { path: PropertyKey[]; message: string }): string {

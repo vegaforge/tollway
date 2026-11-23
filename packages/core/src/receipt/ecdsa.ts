@@ -14,17 +14,26 @@
 
 import { base64UrlToBytes, bytesToBase64Url } from "../encoding.js";
 import { TollwayError } from "../errors.js";
-import type { ReceiptSigner, ReceiptVerifier } from "./signer.js";
+import {
+  ES256_ALGORITHM,
+  importP256PublicKey,
+  P256_HALF_N,
+  P256_IMPORT,
+  P256_N,
+  P256_SCALAR_BYTES,
+  P256_SIGNATURE_BYTES,
+  readScalar,
+  verifyEs256,
+  writeScalar,
+} from "./algorithms.js";
+import type { ReceiptSigner, ReceiptVerifier, SignatureInput } from "./signer.js";
 
-/** JOSE name for ECDSA P-256 with SHA-256. Used in every verifier check. */
-export const ECDSA_P256_ALG = "ES256";
+/** JOSE name for ECDSA P-256 with SHA-256; see `algorithms.ts`. */
+export const ECDSA_P256_ALG = ES256_ALGORITHM;
 
-/** The P-256 group order n (hex; from SEC2 / NIST FIPS 186-4). */
-const P256_N_HEX = "ffffffff00000000ffffffffffffffffbce6faada7179e84f3b9cac2fc632551";
-
-const P256_N = BigInt(`0x${P256_N_HEX}`);
-const P256_HALF_N = P256_N >> 1n;
-const P256_SCALAR_BYTES = 32;
+function encodingError(message: string): TollwayError {
+  return new TollwayError("invalid-signature-encoding", message);
+}
 
 /**
  * Converts an IEEE P1363 `r || s` signature (the shape WebCrypto emits
@@ -32,10 +41,9 @@ const P256_SCALAR_BYTES = 32;
  * directly; the helper exists mostly for symmetry with the DER helpers.
  */
 export function p1363ToBase64Url(signature: Uint8Array): string {
-  if (signature.length !== P256_SCALAR_BYTES * 2) {
-    throw new TollwayError(
-      "invalid-signing-key",
-      `P1363 ECDSA P-256 signature must be ${P256_SCALAR_BYTES * 2} bytes, got ${signature.length}`,
+  if (signature.length !== P256_SIGNATURE_BYTES) {
+    throw encodingError(
+      `P1363 ECDSA P-256 signature must be ${P256_SIGNATURE_BYTES} bytes, got ${signature.length}`,
     );
   }
   return bytesToBase64Url(signature);
@@ -43,72 +51,103 @@ export function p1363ToBase64Url(signature: Uint8Array): string {
 
 /**
  * Converts an ASN.1 DER ECDSA signature into IEEE P1363 `r || s`. The
- * parser is strict:
- *   - the outer tag is 0x30 and the length matches the remaining bytes;
- *   - each INTEGER is 0x02-tagged, non-negative (no 0x80 high bit after
- *     the leading-zero strip), and is not encoded with non-minimal
- *     leading zeros;
- *   - neither r nor s exceeds the P-256 scalar size (32 bytes).
- * Trailing bytes after the second INTEGER fail parsing. Rejecting all
- * of these keeps a malleable or hand-crafted signature from being
- * accepted alongside its canonical form.
+ * parser is strict, because a KMS-backed signer relies on it to refuse
+ * anything that is not exactly one canonical DER signature:
+ *   - the outer tag is 0x30 and its length covers the rest of the input,
+ *     with no trailing bytes;
+ *   - every length is in DER's minimal form: short form below 128, and a
+ *     long form only for 128 or more, without a leading zero byte;
+ *   - each INTEGER is 0x02-tagged, non-empty, non-negative, and has no
+ *     non-minimal leading zero;
+ *   - r and s are each in the range 1 to n - 1, where n is the P-256 order.
+ * Every failure throws `invalid-signature-encoding`. The result may still
+ * have a high `s`; {@link EcdsaP256Signer.sign} normalises its own output,
+ * and a KMS signer should apply {@link normaliseLowS} before publishing.
  */
 export function derToP1363(der: Uint8Array): Uint8Array {
   let cursor = 0;
   if (der[cursor] !== 0x30) {
-    throw new TollwayError("invalid-signing-key", "DER ECDSA signature: expected SEQUENCE (0x30)");
+    throw encodingError("DER ECDSA signature: expected SEQUENCE (0x30)");
   }
   cursor += 1;
   const sequenceLength = readDerLength(der, cursor);
   cursor += sequenceLength.consumed;
   if (cursor + sequenceLength.value !== der.length) {
-    throw new TollwayError(
-      "invalid-signing-key",
-      "DER ECDSA signature: trailing bytes after SEQUENCE",
-    );
+    throw encodingError("DER ECDSA signature: SEQUENCE length does not match the input");
   }
   const r = readDerInteger(der, cursor);
   cursor += r.consumed;
   const s = readDerInteger(der, cursor);
   cursor += s.consumed;
   if (cursor !== der.length) {
-    throw new TollwayError(
-      "invalid-signing-key",
-      "DER ECDSA signature: trailing bytes after INTEGERs",
-    );
+    throw encodingError("DER ECDSA signature: trailing bytes after INTEGERs");
   }
-  if (r.bytes.length > P256_SCALAR_BYTES || s.bytes.length > P256_SCALAR_BYTES) {
-    throw new TollwayError(
-      "invalid-signing-key",
-      "DER ECDSA signature: r or s longer than the P-256 scalar size",
-    );
+  for (const [name, scalar] of [
+    ["r", r.bytes],
+    ["s", s.bytes],
+  ] as const) {
+    if (scalar.length > P256_SCALAR_BYTES) {
+      throw encodingError(`DER ECDSA signature: ${name} is longer than the P-256 scalar size`);
+    }
+    const value = readScalar(scalar);
+    if (value === 0n) {
+      throw encodingError(`DER ECDSA signature: ${name} is zero`);
+    }
+    if (value >= P256_N) {
+      throw encodingError(`DER ECDSA signature: ${name} is not below the P-256 order`);
+    }
   }
-  const out = new Uint8Array(P256_SCALAR_BYTES * 2);
+  const out = new Uint8Array(P256_SIGNATURE_BYTES);
   out.set(r.bytes, P256_SCALAR_BYTES - r.bytes.length);
-  out.set(s.bytes, P256_SCALAR_BYTES * 2 - s.bytes.length);
+  out.set(s.bytes, P256_SIGNATURE_BYTES - s.bytes.length);
+  return out;
+}
+
+/**
+ * Returns a P1363 signature with `s` moved into the low half (`n - s` when
+ * `s > n / 2`). Both encodings verify, and Tollway's verifiers only accept
+ * the low one, so a signer that gets its signature from a KMS runs it
+ * through this after {@link derToP1363}.
+ */
+export function normaliseLowS(signature: Uint8Array): Uint8Array {
+  if (signature.length !== P256_SIGNATURE_BYTES) {
+    throw encodingError(
+      `P1363 ECDSA P-256 signature must be ${P256_SIGNATURE_BYTES} bytes, got ${signature.length}`,
+    );
+  }
+  const s = readScalar(signature.subarray(P256_SCALAR_BYTES));
+  if (s <= P256_HALF_N) return signature;
+  const out = new Uint8Array(signature);
+  writeScalar(P256_N - s, out, P256_SCALAR_BYTES);
   return out;
 }
 
 function readDerLength(buffer: Uint8Array, offset: number): { value: number; consumed: number } {
-  if (offset >= buffer.length) {
-    throw new TollwayError("invalid-signing-key", "DER: unexpected end of buffer at length");
-  }
   const first = buffer[offset];
   if (first === undefined) {
-    throw new TollwayError("invalid-signing-key", "DER: unexpected end of buffer at length");
+    throw encodingError("DER: unexpected end of input at a length");
   }
   if (first < 0x80) return { value: first, consumed: 1 };
   const numBytes = first & 0x7f;
-  if (numBytes === 0 || numBytes > 4) {
-    throw new TollwayError("invalid-signing-key", "DER: invalid length encoding");
+  // An ECDSA P-256 signature is at most 72 bytes, so two length bytes are
+  // already more than any valid input needs; 0x80 itself is the indefinite
+  // form, which DER forbids.
+  if (numBytes === 0 || numBytes > 2) {
+    throw encodingError("DER: invalid length encoding");
   }
   let value = 0;
   for (let i = 0; i < numBytes; i += 1) {
     const byte = buffer[offset + 1 + i];
     if (byte === undefined) {
-      throw new TollwayError("invalid-signing-key", "DER: truncated length");
+      throw encodingError("DER: truncated length");
+    }
+    if (i === 0 && byte === 0) {
+      throw encodingError("DER: non-minimal length (leading zero byte)");
     }
     value = (value << 8) | byte;
+  }
+  if (value < 0x80) {
+    throw encodingError("DER: non-minimal length (long form for a value below 128)");
   }
   return { value, consumed: 1 + numBytes };
 }
@@ -118,57 +157,28 @@ function readDerInteger(
   offset: number,
 ): { bytes: Uint8Array; consumed: number } {
   if (buffer[offset] !== 0x02) {
-    throw new TollwayError("invalid-signing-key", "DER: expected INTEGER (0x02)");
+    throw encodingError("DER: expected INTEGER (0x02)");
   }
   const length = readDerLength(buffer, offset + 1);
   const start = offset + 1 + length.consumed;
   const end = start + length.value;
   if (end > buffer.length) {
-    throw new TollwayError("invalid-signing-key", "DER: INTEGER length exceeds buffer");
+    throw encodingError("DER: INTEGER length exceeds the input");
   }
   const raw = buffer.subarray(start, end);
   if (raw.length === 0) {
-    throw new TollwayError("invalid-signing-key", "DER INTEGER: empty content");
+    throw encodingError("DER INTEGER: empty content");
   }
-  // Non-minimal encodings: a leading 0x00 is only allowed to keep the
-  // integer positive when the next byte has the high bit set.
+  // A leading 0x00 is only allowed to keep the integer positive when the
+  // next byte has the high bit set.
   if (raw.length > 1 && raw[0] === 0x00 && (raw[1] ?? 0) < 0x80) {
-    throw new TollwayError("invalid-signing-key", "DER INTEGER: non-minimal leading zero");
+    throw encodingError("DER INTEGER: non-minimal leading zero");
   }
   if ((raw[0] ?? 0) >= 0x80) {
-    throw new TollwayError(
-      "invalid-signing-key",
-      "DER INTEGER: negative value (high bit set) is not a valid ECDSA scalar",
-    );
+    throw encodingError("DER INTEGER: negative value (high bit set) is not a valid ECDSA scalar");
   }
-  // Strip the leading zero when it was there only to keep the integer
-  // non-negative.
   const bytes = raw[0] === 0x00 ? raw.subarray(1) : raw;
   return { bytes, consumed: 1 + length.consumed + length.value };
-}
-
-/**
- * Reads an unsigned big-endian integer from a slice of a P1363 signature
- * as a bigint. Used to pick up `s` and check for the high-S malleability
- * window.
- */
-function readScalar(buffer: Uint8Array): bigint {
-  let value = 0n;
-  for (const byte of buffer) {
-    value = (value << 8n) | BigInt(byte);
-  }
-  return value;
-}
-
-/**
- * True when `s > n/2`. The P1363 signature is the concatenation of two
- * 32-byte scalars `r || s`. ECDSA's malleability means both `s` and
- * `n - s` verify against the same key; we reject the upper half so each
- * receipt has one valid signature encoding.
- */
-function isHighS(signature: Uint8Array): boolean {
-  const s = readScalar(signature.subarray(P256_SCALAR_BYTES));
-  return s > P256_HALF_N;
 }
 
 /**
@@ -201,9 +211,12 @@ export class EcdsaP256Signer implements ReceiptSigner {
     this.publicJwkBytes = publicJwkBytes;
   }
 
-  /** Generates a P-256 keypair. */
+  /**
+   * Generates a P-256 keypair. The private key is not extractable; the
+   * public key always is, which is all `publicJwk()` needs.
+   */
   static async generate(keyId?: string): Promise<EcdsaP256Signer> {
-    const pair = (await crypto.subtle.generateKey({ name: "ECDSA", namedCurve: "P-256" }, true, [
+    const pair = (await crypto.subtle.generateKey(P256_IMPORT, false, [
       "sign",
       "verify",
     ])) as CryptoKeyPair;
@@ -214,8 +227,67 @@ export class EcdsaP256Signer implements ReceiptSigner {
         "generated P-256 keypair has no public coordinates",
       );
     }
-    const id = keyId ?? bytesToBase64Url(await rawFromJwk(jwk));
+    const id = keyId ?? bytesToBase64Url(uncompressedPoint(jwk.x, jwk.y));
     return new EcdsaP256Signer(id, pair.privateKey, { x: jwk.x, y: jwk.y });
+  }
+
+  /**
+   * Loads a persisted P-256 private key from a PKCS#8 DER document, the
+   * form `crypto.subtle.exportKey("pkcs8", ...)`, `openssl pkcs8 -topk8
+   * -outform DER` and most KMS exports produce. `encodedKey` is the DER as
+   * bytes or as base64url without padding. The key is imported extractable
+   * once to read its public half, then again without extraction for
+   * signing.
+   *
+   * @throws TollwayError with code `invalid-signing-key` when the input is
+   * not a P-256 private key. The message never contains the key.
+   */
+  static async fromPkcs8(
+    encodedKey: Uint8Array | string,
+    keyId?: string,
+  ): Promise<EcdsaP256Signer> {
+    let der: Uint8Array;
+    if (typeof encodedKey === "string") {
+      const text = encodedKey.trim();
+      if (!/^[A-Za-z0-9_-]+$/.test(text)) {
+        throw new TollwayError(
+          "invalid-signing-key",
+          "receipt signing key must be base64url (A-Z, a-z, 0-9, - and _, no padding)",
+        );
+      }
+      der = base64UrlToBytes(text);
+    } else {
+      der = encodedKey;
+    }
+    let privateKey: CryptoKey;
+    let x: string;
+    let y: string;
+    try {
+      const extractable = await crypto.subtle.importKey(
+        "pkcs8",
+        der as BufferSource,
+        P256_IMPORT,
+        true,
+        ["sign"],
+      );
+      const jwk = await crypto.subtle.exportKey("jwk", extractable);
+      if (typeof jwk.x !== "string" || typeof jwk.y !== "string") {
+        throw new TollwayError("invalid-signing-key", "receipt signing key has no public half");
+      }
+      x = jwk.x;
+      y = jwk.y;
+      privateKey = await crypto.subtle.importKey("pkcs8", der as BufferSource, P256_IMPORT, false, [
+        "sign",
+      ]);
+    } catch (error) {
+      if (error instanceof TollwayError) throw error;
+      throw new TollwayError(
+        "invalid-signing-key",
+        "receipt signing key could not be imported as a P-256 PKCS#8 private key",
+      );
+    }
+    const id = keyId ?? bytesToBase64Url(uncompressedPoint(x, y));
+    return new EcdsaP256Signer(id, privateKey, { x, y });
   }
 
   /**
@@ -253,7 +325,7 @@ export class EcdsaP256Signer implements ReceiptSigner {
       const extractable = await crypto.subtle.importKey(
         "jwk",
         jwk as JsonWebKey,
-        { name: "ECDSA", namedCurve: "P-256" },
+        P256_IMPORT,
         true,
         ["sign"],
       );
@@ -264,13 +336,9 @@ export class EcdsaP256Signer implements ReceiptSigner {
           "receipt signing JWK private half does not match its declared public half",
         );
       }
-      privateKey = await crypto.subtle.importKey(
-        "jwk",
-        jwk as JsonWebKey,
-        { name: "ECDSA", namedCurve: "P-256" },
-        false,
-        ["sign"],
-      );
+      privateKey = await crypto.subtle.importKey("jwk", jwk as JsonWebKey, P256_IMPORT, false, [
+        "sign",
+      ]);
     } catch (error) {
       if (error instanceof TollwayError) throw error;
       throw new TollwayError(
@@ -278,7 +346,7 @@ export class EcdsaP256Signer implements ReceiptSigner {
         "receipt signing JWK could not be imported as a P-256 private key",
       );
     }
-    const id = keyId ?? bytesToBase64Url(await rawFromJwk(jwk as JsonWebKey));
+    const id = keyId ?? bytesToBase64Url(uncompressedPoint(jwk.x, jwk.y));
     return new EcdsaP256Signer(id, privateKey, { x: jwk.x, y: jwk.y });
   }
 
@@ -299,9 +367,8 @@ export class EcdsaP256Signer implements ReceiptSigner {
   }
 
   /**
-   * Signs a message and returns the IEEE P1363 `r || s` encoding, with
-   * `s` normalised into the low half so the resulting signature is not
-   * subject to the ECDSA malleability window.
+   * Signs a message and returns the IEEE P1363 `r || s` encoding, with `s`
+   * in the low half, so each receipt has one valid signature encoding.
    */
   async sign(message: Uint8Array): Promise<Uint8Array> {
     const raw = new Uint8Array(
@@ -311,40 +378,18 @@ export class EcdsaP256Signer implements ReceiptSigner {
         message as BufferSource,
       ),
     );
-    if (raw.length !== P256_SCALAR_BYTES * 2) {
-      throw new TollwayError(
-        "invalid-signing-key",
-        `WebCrypto returned ${raw.length}-byte ECDSA signature, expected ${P256_SCALAR_BYTES * 2}`,
-      );
-    }
-    const s = readScalar(raw.subarray(P256_SCALAR_BYTES));
-    if (s <= P256_HALF_N) return raw;
-    // Normalise s to n - s so the verifier always sees the canonical
-    // encoding; we then reject high-S at verify as a double-check.
-    const normalisedS = P256_N - s;
-    const out = new Uint8Array(raw);
-    writeScalar(normalisedS, out, P256_SCALAR_BYTES);
-    return out;
+    return normaliseLowS(raw);
   }
 }
 
-function writeScalar(value: bigint, buffer: Uint8Array, offset: number): void {
-  let cursor = value;
-  for (let i = P256_SCALAR_BYTES - 1; i >= 0; i -= 1) {
-    buffer[offset + i] = Number(cursor & 0xffn);
-    cursor >>= 8n;
-  }
-}
-
-async function rawFromJwk(jwk: JsonWebKey): Promise<Uint8Array> {
-  // Derive a stable id by concatenating x and y; WebCrypto does not
-  // expose a "raw" export for an EC public key via JWK, so we build the
-  // 65-byte uncompressed form ourselves (0x04 || x || y).
-  if (typeof jwk.x !== "string" || typeof jwk.y !== "string") {
-    throw new TollwayError("invalid-signing-key", "P-256 JWK is missing x or y");
-  }
-  const xb = base64UrlToBytes(jwk.x);
-  const yb = base64UrlToBytes(jwk.y);
+/**
+ * The 65-byte uncompressed point `0x04 || x || y`, used as the default key
+ * id. WebCrypto cannot export an EC public key as raw bytes from a JWK, so
+ * it is assembled from the coordinates.
+ */
+function uncompressedPoint(x: string, y: string): Uint8Array {
+  const xb = base64UrlToBytes(x);
+  const yb = base64UrlToBytes(y);
   const out = new Uint8Array(1 + xb.length + yb.length);
   out[0] = 0x04;
   out.set(xb, 1);
@@ -353,9 +398,9 @@ async function rawFromJwk(jwk: JsonWebKey): Promise<Uint8Array> {
 }
 
 /**
- * Verifies a single trusted P-256 public key. Rejects any non-ES256
- * algorithm, rejects high-S signatures (defense against malleability),
- * and never promotes an unknown key id to success.
+ * Verifies against trusted P-256 public keys by keyId. Any algorithm other
+ * than ES256, an unknown key id, a high-S signature or a malformed trusted
+ * key returns false; it never throws.
  */
 export class EcdsaP256Verifier implements ReceiptVerifier {
   private readonly keys = new Map<string, { x: string; y: string }>();
@@ -370,34 +415,17 @@ export class EcdsaP256Verifier implements ReceiptVerifier {
     return new EcdsaP256Verifier({ [signer.keyId]: signer.publicJwkBytes });
   }
 
-  async verify(input: {
-    message: Uint8Array;
-    signature: Uint8Array;
-    keyId: string;
-    algorithm: string;
-  }): Promise<boolean> {
+  async verify(input: SignatureInput): Promise<boolean> {
     if (input.algorithm !== ECDSA_P256_ALG) return false;
-    const jwkBytes = this.keys.get(input.keyId);
-    if (!jwkBytes) return false;
-    if (input.signature.length !== P256_SCALAR_BYTES * 2) return false;
-    if (isHighS(input.signature)) return false;
-    const key = await crypto.subtle.importKey(
-      "jwk",
-      {
-        kty: "EC",
-        crv: "P-256",
-        x: jwkBytes.x,
-        y: jwkBytes.y,
-      },
-      { name: "ECDSA", namedCurve: "P-256" },
-      false,
-      ["verify"],
-    );
-    return crypto.subtle.verify(
-      { name: "ECDSA", hash: "SHA-256" },
-      key,
-      input.signature as BufferSource,
-      input.message as BufferSource,
-    );
+    const coordinates = this.keys.get(input.keyId);
+    if (!coordinates) return false;
+    let key: CryptoKey;
+    try {
+      key = await importP256PublicKey(coordinates.x, coordinates.y);
+    } catch {
+      // A malformed trusted key must not make verification throw.
+      return false;
+    }
+    return verifyEs256(key, input.signature, input.message);
   }
 }

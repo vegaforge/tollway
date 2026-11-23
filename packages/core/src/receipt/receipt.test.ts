@@ -8,6 +8,7 @@ import {
   signReceipt,
   verifyReceipt,
 } from "./receipt.js";
+import { receiptBodySchema } from "./schema.js";
 import { Ed25519Signer, Ed25519Verifier } from "./signer.js";
 
 const x402Input: BuildReceiptInput = {
@@ -273,5 +274,89 @@ describe("receipt v2 (Issue #166)", () => {
     };
     const result = await verifyReceipt(tampered, verifier);
     expect(result.valid).toBe(false);
+  });
+});
+
+describe("review fixes for receipt v2 and verification", () => {
+  it("refuses offerHash without method, or method without offerHash, instead of dropping it", () => {
+    expect(() =>
+      buildReceipt({ ...x402Input, offerHash: "A".repeat(43) } as unknown as BuildReceiptInput),
+    ).toThrow(/needs both offerHash and method; got only offerHash/);
+    expect(() =>
+      buildReceipt({ ...x402Input, method: "GET" } as unknown as BuildReceiptInput),
+    ).toThrow(/got only method/);
+  });
+
+  it("reports only v2 issues for a bad v2 body", () => {
+    const result = receiptBodySchema.safeParse({
+      ...buildReceipt({ ...x402Input, offerHash: "h", method: "GET" }),
+      method: "",
+    });
+    expect(result.success).toBe(false);
+    if (result.success) return;
+    expect(result.error.issues.map((issue) => issue.path.join("."))).toEqual(["method"]);
+  });
+
+  it("returns a reason, not a throw, for a signature that is not base64url", async () => {
+    const signer = await Ed25519Signer.generate("k");
+    const signed = await signReceipt(buildReceipt(x402Input), signer);
+    const result = await verifyReceipt(
+      { ...signed, signature: { ...signed.signature, value: "%%%" } },
+      Ed25519Verifier.forSigner(signer),
+    );
+    expect(result).toEqual({ valid: false, reason: "signature.value is not base64url" });
+  });
+
+  it("returns a reason, not a throw, when the verifier throws", async () => {
+    const signer = await Ed25519Signer.generate("k");
+    const signed = await signReceipt(buildReceipt(x402Input), signer);
+    const throwing = {
+      async verify(): Promise<boolean> {
+        throw new Error("key store offline");
+      },
+    };
+    expect(await verifyReceipt(signed, throwing)).toEqual({
+      valid: false,
+      reason: "the verifier failed: key store offline",
+    });
+  });
+
+  it("checks the signature before expiry, so a forged expired receipt is reported as forged", async () => {
+    const signer = await Ed25519Signer.generate("k");
+    const signed = await signReceipt(
+      buildReceipt({
+        ...x402Input,
+        issuedAt: "2026-01-01T00:00:00.000Z",
+        offerHash: "h",
+        method: "GET",
+        expiresAt: "2026-01-02T00:00:00.000Z",
+      }),
+      signer,
+    );
+    const later = Date.parse("2026-02-01T00:00:00.000Z");
+    const verifier = Ed25519Verifier.forSigner(signer);
+    expect(await verifyReceipt(signed, verifier, { now: later })).toEqual({
+      valid: false,
+      reason: "receipt expired",
+    });
+    const forged = { ...signed, receipt: { ...signed.receipt, amount: "1" } };
+    expect(await verifyReceipt(forged, verifier, { now: later })).toEqual({
+      valid: false,
+      reason: "signature does not verify against any trusted key",
+    });
+  });
+
+  it("treats EdDSA as the JOSE name for Ed25519, and a malformed trusted key as no match", async () => {
+    const signer = await Ed25519Signer.generate("k");
+    const message = new Uint8Array([1, 2, 3]);
+    const signature = await signer.sign(message);
+    const verifier = Ed25519Verifier.forSigner(signer);
+    expect(await verifier.verify({ message, signature, keyId: "k", algorithm: "EdDSA" })).toBe(
+      true,
+    );
+    const broken = new Ed25519Verifier({ k: new Uint8Array(5) });
+    expect(await broken.verify({ message, signature, keyId: "k", algorithm: "Ed25519" })).toBe(
+      false,
+    );
   });
 });

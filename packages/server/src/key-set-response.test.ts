@@ -66,6 +66,29 @@ describe("renderKeySetResponse", () => {
           } as unknown as Parameters<typeof renderKeySetResponse>[0]["keys"][number],
         ],
       }),
-    ).toThrow();
+    ).toThrow(expect.objectContaining({ code: "invalid-key-set" }));
+  });
+
+  it("rejects a document with a duplicate kid", async () => {
+    const a = await Ed25519Signer.generate("same");
+    const b = await Ed25519Signer.generate("same");
+    expect(() =>
+      renderKeySetResponse({
+        keys: [
+          { ...a.publicJwk(), status: { state: "active" as const } },
+          { ...b.publicJwk(), status: { state: "active" as const } },
+        ],
+      }),
+    ).toThrow(/duplicate kid same/);
+  });
+
+  it.each([-1, 1.5, Number.NaN])("rejects maxAgeSeconds %s", async (maxAgeSeconds) => {
+    const signer = await Ed25519Signer.generate("key-a");
+    expect(() =>
+      renderKeySetResponse(
+        { keys: [{ ...signer.publicJwk(), status: { state: "active" as const } }] },
+        { maxAgeSeconds },
+      ),
+    ).toThrow(expect.objectContaining({ code: "invalid-key-set" }));
   });
 });

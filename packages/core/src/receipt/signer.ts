@@ -1,5 +1,12 @@
 import { base64UrlToBytes, bytesToBase64Url } from "../encoding.js";
 import { TollwayError } from "../errors.js";
+import {
+  canonicalAlgorithm,
+  ED25519_ALGORITHM,
+  EDDSA_ALGORITHM,
+  importEd25519PublicKey,
+  verifyEd25519,
+} from "./algorithms.js";
 
 /**
  * Signing sits behind an interface so the key can live wherever a deployment
@@ -13,21 +20,34 @@ export interface ReceiptSigner {
   sign(message: Uint8Array): Promise<Uint8Array>;
 }
 
+/** What a verifier is asked to check: the signed bytes and the signature block. */
+export type SignatureInput = {
+  message: Uint8Array;
+  signature: Uint8Array;
+  keyId: string;
+  algorithm: string;
+};
+
+/**
+ * The outcome of {@link ReceiptVerifier.check}: valid, or invalid with a
+ * reason a caller can show, such as "key k1 is revoked".
+ */
+export type SignatureCheck = { valid: true } | { valid: false; reason: string };
+
 /**
  * Checks a receipt signature against keys the caller trusts. Implementations
- * return false, rather than throw, for an unknown key or algorithm, so
- * {@link verifyReceipt} reports every failure the same way.
+ * return false, rather than throw, for an unknown key or algorithm.
+ *
+ * A verifier that can say why a signature fails also implements `check`.
+ * {@link verifyReceipt} prefers it, so a revoked key, a retired key and a
+ * forged signature come back with different reasons.
  */
 export interface ReceiptVerifier {
-  verify(input: {
-    message: Uint8Array;
-    signature: Uint8Array;
-    keyId: string;
-    algorithm: string;
-  }): Promise<boolean>;
+  verify(input: SignatureInput): Promise<boolean>;
+  check?(input: SignatureInput): Promise<SignatureCheck>;
 }
 
-const ED25519 = "Ed25519";
+const ED25519 = ED25519_ALGORITHM;
 
 /** An Ed25519 private key is a 32-byte seed. */
 const ED25519_SEED_BYTES = 32;
@@ -243,7 +263,7 @@ export class Ed25519Signer implements ReceiptSigner {
       crv: ED25519,
       x: bytesToBase64Url(this.publicKey),
       kid: this.keyId,
-      alg: "EdDSA",
+      alg: EDDSA_ALGORITHM,
       use: "sig",
     };
   }
@@ -269,8 +289,9 @@ export type PublicJwk = {
 };
 
 /**
- * Verifies against a set of trusted public keys by keyId. An unknown key or a
- * different algorithm returns false rather than throwing.
+ * Verifies against a set of trusted public keys by keyId. An unknown key, a
+ * different algorithm or a malformed trusted key returns false rather than
+ * throwing. `Ed25519` and its JOSE name `EdDSA` are the same algorithm.
  */
 export class Ed25519Verifier implements ReceiptVerifier {
   private readonly keys = new Map<string, Uint8Array>();
@@ -285,27 +306,22 @@ export class Ed25519Verifier implements ReceiptVerifier {
     return new Ed25519Verifier({ [signer.keyId]: signer.publicKey });
   }
 
-  async verify(input: {
-    message: Uint8Array;
-    signature: Uint8Array;
-    keyId: string;
-    algorithm: string;
-  }): Promise<boolean> {
-    if (input.algorithm !== ED25519) {
+  async verify(input: SignatureInput): Promise<boolean> {
+    if (canonicalAlgorithm(input.algorithm) !== EDDSA_ALGORITHM) {
       return false;
     }
     const raw = this.keys.get(input.keyId);
     if (!raw) {
       return false;
     }
-    const key = await crypto.subtle.importKey("raw", raw as BufferSource, ED25519, false, [
-      "verify",
-    ]);
-    return crypto.subtle.verify(
-      ED25519,
-      key,
-      input.signature as BufferSource,
-      input.message as BufferSource,
-    );
+    let key: CryptoKey;
+    try {
+      key = await importEd25519PublicKey(raw);
+    } catch {
+      // A malformed trusted key is a configuration problem, but a verifier
+      // must not throw on a receipt, so the receipt simply does not verify.
+      return false;
+    }
+    return verifyEd25519(key, input.signature, input.message);
   }
 }

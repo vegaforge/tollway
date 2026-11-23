@@ -55,6 +55,7 @@ export {
   ECDSA_P256_ALG,
   EcdsaP256Signer,
   EcdsaP256Verifier,
+  normaliseLowS,
   type P256PublicJwk,
   p1363ToBase64Url,
 } from "./receipt/ecdsa.js";
@@ -69,6 +70,7 @@ export {
   keySetDocumentSchema,
   keySetEntrySchema,
   p256KeyEntrySchema,
+  parseKeySetDocument,
   RECEIPT_ALGORITHMS,
   type ReceiptAlgorithm,
 } from "./receipt/key-set.js";
@@ -101,6 +103,8 @@ export {
   type PublicJwk,
   type ReceiptSigner,
   type ReceiptVerifier,
+  type SignatureCheck,
+  type SignatureInput,
 } from "./receipt/signer.js";
 export { RollingSum, type RollingSumOptions } from "./rolling-sum.js";
 export {

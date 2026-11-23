@@ -3,52 +3,47 @@
  *
  * A service publishes a key-set document at a well-known URL so an
  * independent verifier knows which public keys sign that service's
- * receipts. The document format is a JWK Set (RFC 7517) carrying Ed25519
- * public keys in `kty: "OKP", crv: "Ed25519"` form (RFC 8037), extended
- * with a Tollway-specific `status` on each key so operators can mark a
- * key `active`, `retired` (with `retiredAt`) or `revoked`.
+ * receipts. The document is a JWK Set (RFC 7517). Ed25519 keys use the
+ * `kty: "OKP", crv: "Ed25519"` form (RFC 8037) and P-256 keys the
+ * `kty: "EC", crv: "P-256"` form (#169). Each key carries a Tollway
+ * `status`: `active`, `retired` (with `retiredAt`) or `revoked`.
  *
- * {@link createKeySetVerifier} is a {@link ReceiptVerifier} that fetches
- * and caches the document, honours `Cache-Control: max-age` within a
- * configurable floor / ceiling, rate-limits refetches on unknown `kid`,
- * and fails closed when the document is unreachable without a cached
- * copy. It runs anywhere `fetch` and WebCrypto do: Node 22+, edge
- * runtimes, and the browser.
+ * {@link createKeySetVerifier} is a {@link ReceiptVerifier} that fetches and
+ * caches the document, honours `Cache-Control: max-age` between a floor and
+ * a ceiling, rate-limits refetches, and fails closed once its copy is too
+ * old. It runs anywhere `fetch` and WebCrypto do: Node 22+, edge runtimes
+ * and the browser.
  */
 
 import { z } from "zod";
 import { base64UrlToBytes } from "../encoding.js";
 import { TollwayError } from "../errors.js";
-import type { ReceiptVerifier } from "./signer.js";
+import {
+  canonicalAlgorithm,
+  ED25519_PUBLIC_KEY_BYTES,
+  EDDSA_ALGORITHM,
+  ES256_ALGORITHM,
+  importEd25519PublicKey,
+  importP256PublicKey,
+  isReceiptAlgorithm,
+  P256_SCALAR_BYTES,
+  verifyEd25519,
+  verifyEs256,
+} from "./algorithms.js";
+import type { ReceiptVerifier, SignatureCheck, SignatureInput } from "./signer.js";
 
-const ED25519 = "Ed25519";
-const EDDSA_ALG = "EdDSA";
-const ECDSA_P256_ALG = "ES256";
-/**
- * The receipt-signature algorithm identifiers the key-set verifier
- * accepts. `Ed25519` is the pre-#167 v1 value and is kept so receipts
- * signed before the key-set work still verify; `EdDSA` is the RFC 8037
- * JOSE name used in the JWK and in a receipt signed by a key-set-aware
- * signer; `ES256` is JOSE for ECDSA P-256 over SHA-256.
- */
-export const RECEIPT_ALGORITHMS = [ED25519, EDDSA_ALG, ECDSA_P256_ALG] as const;
-export type ReceiptAlgorithm = (typeof RECEIPT_ALGORITHMS)[number];
+export { RECEIPT_ALGORITHMS, type ReceiptAlgorithm } from "./algorithms.js";
 
-/** Collapses `Ed25519` and `EdDSA` into a single canonical name for comparison. */
-function canonicalAlg(input: string): string {
-  return input === ED25519 ? EDDSA_ALG : input;
-}
+const BASE64URL = /^[A-Za-z0-9_-]+$/;
 
-/** P-256 group order (hex) and n/2, used for the high-S malleability check. */
-const P256_N = BigInt("0xffffffff00000000ffffffffffffffffbce6faada7179e84f3b9cac2fc632551");
-const P256_HALF_N = P256_N >> 1n;
-
-function isHighS(signature: Uint8Array): boolean {
-  let s = 0n;
-  for (const byte of signature.subarray(32)) {
-    s = (s << 8n) | BigInt(byte);
-  }
-  return s > P256_HALF_N;
+/** A base64url string that decodes to exactly `bytes` bytes. */
+function base64UrlOfLength(bytes: number) {
+  return z
+    .string()
+    .regex(BASE64URL, "expected base64url without padding")
+    .refine((value) => base64UrlToBytes(value).length === bytes, {
+      message: `expected ${bytes} bytes`,
+    });
 }
 
 const statusSchema = z
@@ -68,10 +63,10 @@ const statusSchema = z
 /** An Ed25519 key entry in a key-set document, following RFC 8037. */
 export const ed25519KeyEntrySchema = z.strictObject({
   kty: z.literal("OKP"),
-  crv: z.literal(ED25519),
-  x: z.string().min(1),
+  crv: z.literal("Ed25519"),
+  x: base64UrlOfLength(ED25519_PUBLIC_KEY_BYTES),
   kid: z.string().min(1),
-  alg: z.literal(EDDSA_ALG),
+  alg: z.literal(EDDSA_ALGORITHM),
   use: z.literal("sig").optional(),
   status: statusSchema,
 });
@@ -79,25 +74,23 @@ export const ed25519KeyEntrySchema = z.strictObject({
 /**
  * A P-256 (`ES256`) key entry in a key-set document (Issue #169). The
  * algorithm is bound to the key record: a receipt whose
- * `signature.algorithm` disagrees with `alg` is rejected, so an attacker
- * cannot have an Ed25519 key record interpret an ES256 signature or the
- * other way round.
+ * `signature.algorithm` disagrees with `alg` is rejected, so an Ed25519
+ * record never checks an ES256 signature, or the other way round.
  */
 export const p256KeyEntrySchema = z.strictObject({
   kty: z.literal("EC"),
   crv: z.literal("P-256"),
-  x: z.string().min(1),
-  y: z.string().min(1),
+  x: base64UrlOfLength(P256_SCALAR_BYTES),
+  y: base64UrlOfLength(P256_SCALAR_BYTES),
   kid: z.string().min(1),
-  alg: z.literal(ECDSA_P256_ALG),
+  alg: z.literal(ES256_ALGORITHM),
   use: z.literal("sig").optional(),
   status: statusSchema,
 });
 
 /**
  * One key in a key-set document. Discriminated on `kty`; each variant
- * binds a specific algorithm. A verifier decides what to do with the
- * status (`active`, `retired` with a cutoff, `revoked`).
+ * binds one algorithm. The verifier decides what the status means.
  */
 export const keySetEntrySchema = z.discriminatedUnion("kty", [
   ed25519KeyEntrySchema,
@@ -108,22 +101,53 @@ export const keySetEntrySchema = z.discriminatedUnion("kty", [
 export type KeySetEntry = z.infer<typeof keySetEntrySchema>;
 
 /**
- * A key-set document. `keys` is the JWK Set; `issuedAt` and `expiresAt`
- * are optional document-level fields a server emits when it wants
- * explicit staleness independent of Cache-Control.
+ * A key-set document. `keys` is the JWK Set, and every `kid` in it is
+ * unique: two entries with one `kid` would leave it to the parser which
+ * key, and which status, applies. `expiresAt`, when set, caps how long a
+ * verifier caches the document, whatever `Cache-Control` says.
  */
-export const keySetDocumentSchema = z.strictObject({
-  keys: z.array(keySetEntrySchema),
-  issuedAt: z.iso.datetime().optional(),
-  expiresAt: z.iso.datetime().optional(),
-});
+export const keySetDocumentSchema = z
+  .strictObject({
+    keys: z.array(keySetEntrySchema),
+    issuedAt: z.iso.datetime().optional(),
+    expiresAt: z.iso.datetime().optional(),
+  })
+  .superRefine((document, ctx) => {
+    const seen = new Set<string>();
+    document.keys.forEach((entry, index) => {
+      if (seen.has(entry.kid)) {
+        ctx.addIssue({
+          code: "custom",
+          path: ["keys", index, "kid"],
+          message: `duplicate kid ${entry.kid}`,
+        });
+      }
+      seen.add(entry.kid);
+    });
+  });
 
-/** A receipt-signing key-set; see {@link keySetDocumentSchema}. */
+/** A receipt-signing key set; see {@link keySetDocumentSchema}. */
 export type KeySetDocument = z.infer<typeof keySetDocumentSchema>;
 
 /**
- * The `fetch` surface the verifier uses. Exactly the Fetch API shape,
- * typed narrowly so a test can pass a `vi.fn()` without `any`.
+ * Parses a key-set document, throwing `invalid-key-set` with every issue
+ * and its path. Both the verifier and the server's response helper use it,
+ * so a document is checked the same way on each side.
+ */
+export function parseKeySetDocument(input: unknown): KeySetDocument {
+  const result = keySetDocumentSchema.safeParse(input);
+  if (!result.success) {
+    const issues = result.error.issues
+      .map((issue) => `${issue.path.join(".") || "(root)"}: ${issue.message}`)
+      .join("; ");
+    throw new TollwayError("invalid-key-set", `key-set document is invalid: ${issues}`);
+  }
+  return result.data;
+}
+
+/**
+ * The `fetch` surface the verifier uses. A subset of the Fetch API, typed
+ * narrowly so a test can pass a stub.
  */
 export type KeySetFetcher = (
   url: string,
@@ -132,15 +156,15 @@ export type KeySetFetcher = (
 /** Options for {@link createKeySetVerifier}. */
 export type KeySetVerifierOptions = {
   /**
-   * URL of the key-set document. Mutually exclusive with `document`.
-   * Only this URL is fetched; the verifier never follows a URL taken
-   * from a receipt, so a forged receipt cannot steer the verifier.
+   * URL of the key-set document. Set exactly one of `url` and `document`.
+   * Only this URL is ever fetched; the verifier never follows a URL taken
+   * from a receipt, so a forged receipt cannot steer it.
    */
   url?: string;
   /**
-   * In-process document. Useful in tests and in deployments that load
-   * the key set at boot and never refetch. Mutually exclusive with
-   * `url`.
+   * An in-process document, for tests and for deployments that load the key
+   * set at boot. It is parsed when the verifier is created and never
+   * refetched. Set exactly one of `url` and `document`.
    */
   document?: KeySetDocument;
   /** `fetch` implementation. Defaults to the global `fetch`. */
@@ -148,284 +172,377 @@ export type KeySetVerifierOptions = {
   /** Injectable clock, in ms. Defaults to `Date.now`. */
   clock?: () => number;
   /**
-   * Minimum time a cached document is held before a Cache-Control
-   * `max-age` can force a refetch. Defaults to 10 seconds. The floor
-   * guards against a misconfigured server returning `max-age=0`.
+   * Shortest time a fetched document is cached, whatever `max-age` says.
+   * Guards against a server that sends `max-age=0`. Defaults to 10 seconds.
    */
   minCacheMs?: number;
   /**
-   * Maximum time a cached document is held before a refetch is forced,
-   * whatever Cache-Control says. Defaults to 24 hours.
+   * Longest time a fetched document is cached, whatever `max-age` says.
+   * Defaults to 1 hour.
    */
   maxCacheMs?: number;
   /**
-   * Shortest interval between unknown-kid refetches. A verifier calls
-   * refetch when a receipt names a `kid` the cached document does not
-   * know; this interval rate-limits those calls so a forged receipt
-   * cannot force one fetch per attempt. Defaults to 60 seconds.
+   * How long a document is cached when the response has no `max-age`,
+   * clamped between `minCacheMs` and `maxCacheMs`. Defaults to 5 minutes.
+   */
+  defaultCacheMs?: number;
+  /**
+   * How long an expired document may still be used while refetching it
+   * fails. Defaults to 0: once the cached copy expires and the URL cannot be
+   * read, every receipt fails with "key set unavailable". A revocation
+   * reaches this verifier at most one cache lifetime plus `staleIfErrorMs`
+   * after it is published.
+   */
+  staleIfErrorMs?: number;
+  /**
+   * After a failed fetch, the verifier does not fetch again for this long,
+   * so a key-set URL that is down is not hit once per receipt. Defaults to
+   * 30 seconds.
+   */
+  failureBackoffMs?: number;
+  /**
+   * Shortest interval between refetches caused by a receipt naming a `kid`
+   * the cached document does not have. Stops a stream of forged receipts
+   * from forcing one fetch each. Defaults to 60 seconds.
    */
   unknownKidRefetchCooldownMs?: number;
 };
 
-type CachedDocument = {
-  document: KeySetDocument;
-  fetchedAt: number;
-  expiresAt: number;
-  byKid: Map<string, KeySetEntry>;
-};
-
 const MIN_CACHE_MS_DEFAULT = 10_000;
-const MAX_CACHE_MS_DEFAULT = 24 * 60 * 60 * 1_000;
+const MAX_CACHE_MS_DEFAULT = 60 * 60 * 1_000;
+const DEFAULT_CACHE_MS_DEFAULT = 5 * 60 * 1_000;
+const STALE_IF_ERROR_MS_DEFAULT = 0;
+const FAILURE_BACKOFF_MS_DEFAULT = 30_000;
 const UNKNOWN_KID_COOLDOWN_MS_DEFAULT = 60_000;
 
 /**
- * The receiver's view of a key-set verifier, layered on top of the plain
- * {@link ReceiptVerifier} interface with a `refresh()` call that drops
- * the cached document.
+ * A {@link ReceiptVerifier} over a key set. `check` gives the reason a
+ * receipt fails (for example "key k1 is revoked"), and `verifyReceipt` uses
+ * it. `verify` is the boolean form.
  */
 export interface KeySetVerifier extends ReceiptVerifier {
-  /** Drops the cached document; the next verify refetches. */
+  check(input: SignatureInput): Promise<SignatureCheck>;
+  /**
+   * Fetches the document now, ignoring the cache lifetime and the
+   * cooldowns. On success the new document replaces the cached one; on
+   * failure it throws `key-set-unavailable` and keeps the cached copy. For a
+   * verifier built from a `document`, it does nothing.
+   */
   refresh(): Promise<void>;
 }
 
+/** A key from the document, imported once and kept with its entry. */
+type PreparedKey = { entry: KeySetEntry; key: CryptoKey };
+
+type PreparedDocument = {
+  keys: Map<string, PreparedKey>;
+  /** When this copy stops being fresh, in clock ms. */
+  expiresAt: number;
+};
+
+function nonNegative(name: string, value: number | undefined, fallback: number): number {
+  const resolved = value ?? fallback;
+  if (!Number.isFinite(resolved) || resolved < 0) {
+    throw new TollwayError("invalid-key-set", `${name} must be a non-negative number of ms`);
+  }
+  return resolved;
+}
+
 /**
- * Parses a Cache-Control header for `max-age` in seconds. Returns
- * undefined when the header is absent or unparseable. Matching is
- * case-insensitive per RFC 9111.
+ * Parses a Cache-Control header for `max-age`, in ms. Returns undefined
+ * when the header or the directive is absent. Matching is case-insensitive
+ * (RFC 9111).
  */
 function parseMaxAgeMs(header: string | null): number | undefined {
   if (!header) return undefined;
   const match = header.match(/(?:^|,)\s*max-age\s*=\s*(\d+)/i);
   if (!match) return undefined;
-  const seconds = Number(match[1]);
-  if (!Number.isFinite(seconds) || seconds < 0) return undefined;
-  return seconds * 1_000;
+  return Number(match[1]) * 1_000;
 }
 
-function indexByKid(document: KeySetDocument): Map<string, KeySetEntry> {
-  const map = new Map<string, KeySetEntry>();
+/**
+ * Imports every key in a parsed document. A key WebCrypto refuses (a P-256
+ * point that is not on the curve, for example) makes the whole document
+ * invalid: a verifier should not trust half of a key set.
+ */
+async function prepare(document: KeySetDocument, expiresAt: number): Promise<PreparedDocument> {
+  const keys = new Map<string, PreparedKey>();
   for (const entry of document.keys) {
-    map.set(entry.kid, entry);
+    let key: CryptoKey;
+    try {
+      key =
+        entry.kty === "OKP"
+          ? await importEd25519PublicKey(base64UrlToBytes(entry.x))
+          : await importP256PublicKey(entry.x, entry.y);
+    } catch (error) {
+      throw new TollwayError(
+        "invalid-key-set",
+        `key-set document is invalid: key ${entry.kid} could not be imported`,
+        { cause: error },
+      );
+    }
+    keys.set(entry.kid, { entry, key });
   }
-  return map;
+  return { keys, expiresAt };
+}
+
+/**
+ * Reads `issuedAt` from the canonical receipt bytes the signature covers.
+ * Returns undefined when the bytes are not a JSON object with an ISO 8601
+ * `issuedAt`.
+ */
+function readIssuedAt(message: Uint8Array): number | undefined {
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(new TextDecoder("utf-8", { fatal: true }).decode(message));
+  } catch {
+    return undefined;
+  }
+  if (typeof parsed !== "object" || parsed === null || !("issuedAt" in parsed)) return undefined;
+  const issuedAt = parsed.issuedAt;
+  if (typeof issuedAt !== "string") return undefined;
+  const ms = Date.parse(issuedAt);
+  return Number.isFinite(ms) ? ms : undefined;
+}
+
+function errorMessage(error: unknown): string {
+  return error instanceof Error ? error.message : String(error);
 }
 
 /**
  * Builds a {@link KeySetVerifier} from a `url` or an in-process `document`.
- * One of the two must be set. The verifier caches the document under a
- * `Cache-Control` `max-age` (clamped between `minCacheMs` and
- * `maxCacheMs`), rate-limits unknown-kid refetches, and fails closed if
- * the document is unreachable and no fresh-enough cached copy exists.
+ * Throws `invalid-key-set` when the options are inconsistent or the
+ * `document` is invalid. Verification itself never throws: an unreachable
+ * key set, an unknown key, a revoked key and a bad signature all come back
+ * as an invalid check with a reason.
  */
 export function createKeySetVerifier(options: KeySetVerifierOptions): KeySetVerifier {
   if ((options.url == null) === (options.document == null)) {
     throw new TollwayError(
-      "invalid-signing-key",
+      "invalid-key-set",
       "createKeySetVerifier needs exactly one of `url` or `document`",
     );
   }
   const clock = options.clock ?? Date.now;
-  const minCacheMs = options.minCacheMs ?? MIN_CACHE_MS_DEFAULT;
-  const maxCacheMs = options.maxCacheMs ?? MAX_CACHE_MS_DEFAULT;
-  const unknownKidCooldownMs =
-    options.unknownKidRefetchCooldownMs ?? UNKNOWN_KID_COOLDOWN_MS_DEFAULT;
+  const minCacheMs = nonNegative("minCacheMs", options.minCacheMs, MIN_CACHE_MS_DEFAULT);
+  const maxCacheMs = nonNegative("maxCacheMs", options.maxCacheMs, MAX_CACHE_MS_DEFAULT);
+  if (maxCacheMs < minCacheMs) {
+    throw new TollwayError("invalid-key-set", "maxCacheMs must not be below minCacheMs");
+  }
+  const defaultCacheMs = nonNegative(
+    "defaultCacheMs",
+    options.defaultCacheMs,
+    DEFAULT_CACHE_MS_DEFAULT,
+  );
+  const staleIfErrorMs = nonNegative(
+    "staleIfErrorMs",
+    options.staleIfErrorMs,
+    STALE_IF_ERROR_MS_DEFAULT,
+  );
+  const failureBackoffMs = nonNegative(
+    "failureBackoffMs",
+    options.failureBackoffMs,
+    FAILURE_BACKOFF_MS_DEFAULT,
+  );
+  const unknownKidCooldownMs = nonNegative(
+    "unknownKidRefetchCooldownMs",
+    options.unknownKidRefetchCooldownMs,
+    UNKNOWN_KID_COOLDOWN_MS_DEFAULT,
+  );
+  const url = options.url;
   const fetchFn =
     options.fetch ?? (typeof fetch === "function" ? (fetch as KeySetFetcher) : undefined);
-
-  let cached: CachedDocument | undefined =
-    options.document !== undefined
-      ? {
-          document: options.document,
-          fetchedAt: clock(),
-          expiresAt: clock() + maxCacheMs,
-          byKid: indexByKid(options.document),
-        }
-      : undefined;
-  let lastUnknownKidFetchAt = Number.NEGATIVE_INFINITY;
-  let pendingFetch: Promise<void> | undefined;
-
-  async function performFetch(): Promise<void> {
-    if (!options.url || !fetchFn) {
-      throw new TollwayError(
-        "payment-failed",
-        "key-set verifier has no `url` or no `fetch` to refetch with",
-      );
-    }
-    const response = await fetchFn(options.url);
-    if (response.status < 200 || response.status >= 300) {
-      throw new TollwayError(
-        "payment-failed",
-        `key-set document HTTP ${response.status} from ${options.url}`,
-      );
-    }
-    const body = await response.text();
-    let parsed: unknown;
-    try {
-      parsed = JSON.parse(body);
-    } catch {
-      throw new TollwayError("payment-failed", "key-set document is not valid JSON");
-    }
-    const result = keySetDocumentSchema.safeParse(parsed);
-    if (!result.success) {
-      throw new TollwayError(
-        "payment-failed",
-        `key-set document failed schema check: ${result.error.message}`,
-      );
-    }
-    const now = clock();
-    const maxAge = parseMaxAgeMs(response.headers.get("cache-control"));
-    const ttl =
-      maxAge === undefined ? maxCacheMs : Math.min(Math.max(maxAge, minCacheMs), maxCacheMs);
-    cached = {
-      document: result.data,
-      fetchedAt: now,
-      expiresAt: now + ttl,
-      byKid: indexByKid(result.data),
-    };
+  if (url !== undefined && fetchFn === undefined) {
+    throw new TollwayError("invalid-key-set", "no `fetch` is available to read the key set");
   }
 
-  async function ensureFresh(forceIfStale: boolean): Promise<void> {
-    const now = clock();
-    if (cached && !forceIfStale) return;
-    if (cached && forceIfStale && cached.expiresAt > now) return;
-    if (!options.url) {
-      // In-process document; we never refetch and the cache has no TTL
-      // beyond maxCacheMs (treated as never-expiring for `document`).
-      return;
+  // A static document is parsed now, so a bad one fails at startup, and
+  // imported once. It never expires and is never refetched.
+  const staticDocument: Promise<PreparedDocument> | undefined =
+    options.document === undefined
+      ? undefined
+      : prepare(parseKeySetDocument(options.document), Number.POSITIVE_INFINITY);
+  // A rejected import is reported by every check() as its reason. This
+  // handler only stops it counting as an unhandled rejection before the
+  // first check awaits it.
+  staticDocument?.then(undefined, () => "reported by check");
+
+  let cached: PreparedDocument | undefined;
+  let pendingFetch: Promise<PreparedDocument> | undefined;
+  let lastFailure: { at: number; error: unknown } | undefined;
+  let lastUnknownKidFetchAt = Number.NEGATIVE_INFINITY;
+
+  async function fetchDocument(): Promise<PreparedDocument> {
+    if (url === undefined || fetchFn === undefined) {
+      throw new TollwayError("invalid-key-set", "this key-set verifier has no URL to fetch");
     }
-    if (pendingFetch) {
-      await pendingFetch;
-      return;
-    }
-    pendingFetch = performFetch().finally(() => {
-      pendingFetch = undefined;
-    });
+    let response: Awaited<ReturnType<KeySetFetcher>>;
     try {
-      await pendingFetch;
+      response = await fetchFn(url);
     } catch (error) {
-      // Fail closed only when there is no cached copy to fall back on.
-      // A fetch failure with a fresh cached copy keeps serving on the
-      // cached keys (that is the point of a cache).
-      if (!cached) throw error;
-      // Cached copy is stale but we could not refresh — keep using it
-      // until maxCacheMs elapses.
-      if (cached.expiresAt <= now - maxCacheMs) throw error;
+      throw new TollwayError(
+        "key-set-unavailable",
+        `key set fetch failed: ${errorMessage(error)}`,
+        {
+          cause: error,
+        },
+      );
     }
+    if (response.status < 200 || response.status >= 300) {
+      throw new TollwayError("key-set-unavailable", `key set answered HTTP ${response.status}`);
+    }
+    let body: unknown;
+    try {
+      body = JSON.parse(await response.text());
+    } catch (error) {
+      throw new TollwayError("invalid-key-set", "key-set document is not valid JSON", {
+        cause: error,
+      });
+    }
+    const document = parseKeySetDocument(body);
+    const now = clock();
+    const maxAge = parseMaxAgeMs(response.headers.get("cache-control"));
+    const ttl = Math.min(Math.max(maxAge ?? defaultCacheMs, minCacheMs), maxCacheMs);
+    let expiresAt = now + ttl;
+    if (document.expiresAt !== undefined) {
+      expiresAt = Math.min(expiresAt, Date.parse(document.expiresAt));
+    }
+    return prepare(document, expiresAt);
   }
 
   /**
-   * Called when a receipt names a `kid` the cached document does not know.
-   * A single refetch per `unknownKidCooldownMs` window keeps a forged
-   * stream of receipts from hammering the key-set URL.
+   * Fetches once, sharing the request with concurrent callers. Records a
+   * failure for the backoff, and replaces the cache on success.
    */
-  async function maybeRefetchForUnknownKid(now: number): Promise<void> {
-    if (!options.url) return;
-    if (now - lastUnknownKidFetchAt < unknownKidCooldownMs) return;
-    lastUnknownKidFetchAt = now;
-    try {
-      await performFetch();
-    } catch {
-      // Keep serving on the previously cached document.
-    }
+  function refetch(): Promise<PreparedDocument> {
+    if (pendingFetch) return pendingFetch;
+    pendingFetch = fetchDocument()
+      .then((document) => {
+        cached = document;
+        lastFailure = undefined;
+        return document;
+      })
+      .catch((error: unknown) => {
+        lastFailure = { at: clock(), error };
+        throw error;
+      })
+      .finally(() => {
+        pendingFetch = undefined;
+      });
+    return pendingFetch;
   }
 
-  async function verify(input: {
-    message: Uint8Array;
-    signature: Uint8Array;
-    keyId: string;
-    algorithm: string;
-  }): Promise<boolean> {
-    if (!(RECEIPT_ALGORITHMS as readonly string[]).includes(input.algorithm)) return false;
-    await ensureFresh(cached ? cached.expiresAt <= clock() : true);
-    if (!cached) return false;
-    let entry = cached.byKid.get(input.keyId);
-    if (!entry) {
-      await maybeRefetchForUnknownKid(clock());
-      entry = cached.byKid.get(input.keyId);
-      if (!entry) return false;
+  /**
+   * The document to check against, or the reason there is none. A fresh
+   * cached copy is used as is. An expired one triggers a refetch unless the
+   * last fetch failed within `failureBackoffMs`; when the refetch fails, the
+   * expired copy is still used for `staleIfErrorMs` after it expired, and
+   * after that the verifier fails closed.
+   */
+  async function currentDocument(): Promise<PreparedDocument | { unavailable: string }> {
+    if (staticDocument) {
+      try {
+        return await staticDocument;
+      } catch (error) {
+        return { unavailable: errorMessage(error) };
+      }
     }
-    // Algorithm must be bound to the key record (Issue #169). A receipt
-    // whose `signature.algorithm` disagrees with the entry's `alg` is
-    // rejected, so an Ed25519 record never verifies an ES256 signature
-    // and the other way round. `Ed25519` (pre-#167 receipt spelling) and
-    // `EdDSA` (JWK/JOSE spelling) are treated as the same algorithm.
-    if (canonicalAlg(entry.alg) !== canonicalAlg(input.algorithm)) return false;
+    const now = clock();
+    if (cached && now < cached.expiresAt) return cached;
+    let failure: unknown = lastFailure?.error;
+    const backingOff = lastFailure !== undefined && now - lastFailure.at < failureBackoffMs;
+    if (!backingOff) {
+      try {
+        return await refetch();
+      } catch (error) {
+        failure = error;
+      }
+    }
+    if (cached && clock() < cached.expiresAt + staleIfErrorMs) return cached;
+    return { unavailable: errorMessage(failure) };
+  }
+
+  /**
+   * Refetches for a `kid` the cached document does not know, at most once
+   * per `unknownKidRefetchCooldownMs` and never during a failure backoff.
+   * Returns the document to look in afterwards.
+   */
+  async function refetchForUnknownKid(document: PreparedDocument): Promise<PreparedDocument> {
+    if (staticDocument) return document;
+    const now = clock();
+    if (now - lastUnknownKidFetchAt < unknownKidCooldownMs) return document;
+    if (lastFailure !== undefined && now - lastFailure.at < failureBackoffMs) return document;
+    lastUnknownKidFetchAt = now;
+    // On failure the kid stays unknown and the receipt fails with that
+    // reason; `refetch` has already recorded the failure for the backoff.
+    return refetch().then(
+      (fresh) => fresh,
+      () => document,
+    );
+  }
+
+  async function check(input: SignatureInput): Promise<SignatureCheck> {
+    if (!isReceiptAlgorithm(input.algorithm)) {
+      return { valid: false, reason: `algorithm ${input.algorithm} is not supported` };
+    }
+    const current = await currentDocument();
+    if ("unavailable" in current) {
+      return { valid: false, reason: `key set unavailable: ${current.unavailable}` };
+    }
+    let prepared = current.keys.get(input.keyId);
+    if (!prepared) {
+      prepared = (await refetchForUnknownKid(current)).keys.get(input.keyId);
+      if (!prepared) return { valid: false, reason: `unknown key ${input.keyId}` };
+    }
+    const { entry, key } = prepared;
+    // The key record decides the algorithm (Issue #169). `Ed25519` on a
+    // receipt and `EdDSA` on a record are the same algorithm.
+    if (canonicalAlgorithm(entry.alg) !== canonicalAlgorithm(input.algorithm)) {
+      return {
+        valid: false,
+        reason: `key ${entry.kid} is bound to ${entry.alg}, not ${input.algorithm}`,
+      };
+    }
     if (entry.status.state === "revoked") {
-      // Revoked means reject every receipt the key ever signed. A
-      // compromised signer can backdate `issuedAt`, so there is no
-      // honest cutoff.
-      return false;
+      // A compromised signer can backdate `issuedAt`, so a revoked key fails
+      // every receipt it ever signed.
+      return { valid: false, reason: `key ${entry.kid} is revoked` };
     }
     if (entry.status.state === "retired") {
-      // Retired is a planned rotation. A retired key verifies receipts
-      // whose body says they were issued strictly before `retiredAt`,
-      // and fails anything later. We scan the canonical bytes for the
-      // `issuedAt` field so the signature-level check does not depend
-      // on a second full parse.
+      // A planned rotation: receipts issued strictly before `retiredAt`
+      // still verify, later ones do not.
       const retiredMs = Date.parse(entry.status.retiredAt);
       const issuedMs = readIssuedAt(input.message);
-      if (issuedMs === undefined) return false;
-      if (issuedMs >= retiredMs) return false;
+      if (issuedMs === undefined) {
+        return { valid: false, reason: `key ${entry.kid} is retired and issuedAt is unreadable` };
+      }
+      if (issuedMs >= retiredMs) {
+        return {
+          valid: false,
+          reason: `key ${entry.kid} was retired at ${entry.status.retiredAt}, before this receipt was issued`,
+        };
+      }
     }
-    if (entry.kty === "OKP") {
-      const raw = base64UrlToBytes(entry.x);
-      const key = await crypto.subtle.importKey("raw", raw as BufferSource, ED25519, false, [
-        "verify",
-      ]);
-      return crypto.subtle.verify(
-        ED25519,
-        key,
-        input.signature as BufferSource,
-        input.message as BufferSource,
-      );
-    }
-    // P-256: reject the length check and high-S up front so a malleated
-    // signature cannot verify alongside its canonical form.
-    if (input.signature.length !== 64) return false;
-    if (isHighS(input.signature)) return false;
-    const key = await crypto.subtle.importKey(
-      "jwk",
-      {
-        kty: "EC",
-        crv: "P-256",
-        x: entry.x,
-        y: entry.y,
-      },
-      { name: "ECDSA", namedCurve: "P-256" },
-      false,
-      ["verify"],
-    );
-    return crypto.subtle.verify(
-      { name: "ECDSA", hash: "SHA-256" },
-      key,
-      input.signature as BufferSource,
-      input.message as BufferSource,
-    );
+    const matches =
+      entry.kty === "OKP"
+        ? await verifyEd25519(key, input.signature, input.message)
+        : await verifyEs256(key, input.signature, input.message);
+    return matches ? { valid: true } : { valid: false, reason: "signature does not verify" };
   }
 
   return {
-    verify,
+    check,
+    async verify(input) {
+      return (await check(input)).valid;
+    },
     async refresh() {
-      cached = undefined;
-      lastUnknownKidFetchAt = Number.NEGATIVE_INFINITY;
-      await ensureFresh(true);
+      if (staticDocument) return;
+      try {
+        await refetch();
+      } catch (error) {
+        if (error instanceof TollwayError) throw error;
+        throw new TollwayError("key-set-unavailable", errorMessage(error), { cause: error });
+      }
     },
   };
-}
-
-/**
- * Reads the `issuedAt` timestamp out of canonical-receipt bytes without
- * fully decoding the JSON. The canonical form guarantees keys are sorted
- * and strings are RFC 8259 JSON strings, so a simple string search for
- * `"issuedAt":"...Z"` is unambiguous for v1 receipts. Returns the ms
- * timestamp on success, undefined otherwise. The key-set verifier uses
- * this only for the `retired` cutoff; the signature check does not
- * depend on it.
- */
-function readIssuedAt(message: Uint8Array): number | undefined {
-  const text = new TextDecoder("utf-8", { fatal: false }).decode(message);
-  const match = text.match(/"issuedAt":"([^"]+)"/);
-  if (!match) return undefined;
-  const parsed = Date.parse(match[1] ?? "");
-  return Number.isFinite(parsed) ? parsed : undefined;
 }

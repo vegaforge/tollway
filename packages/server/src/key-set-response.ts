@@ -1,7 +1,7 @@
 /**
  * Framework-agnostic helper that renders a key-set document as an HTTP
  * response (Issue #167). Every adapter (Express, Fastify, Next, Hono)
- * mounts this at a well-known path - the recommended location is
+ * mounts this at a well-known path. The recommended location is
  * `/.well-known/tollway-receipt-keys.jwks`, but any URL works as long
  * as the verifier is pointed at it.
  *
@@ -10,15 +10,16 @@
  * `application/jwk-set+json` and a `Cache-Control` the verifier honours.
  */
 
-import { type KeySetDocument, keySetDocumentSchema } from "@vegaforge/tollway-core";
+import { type KeySetDocument, parseKeySetDocument, TollwayError } from "@vegaforge/tollway-core";
 
 const DEFAULT_MAX_AGE_SECONDS = 300;
 
 export type KeySetResponseOptions = {
   /**
-   * Seconds the response is cached. A verifier clamps between its
-   * `minCacheMs` and `maxCacheMs`, so a conservative value here is
-   * fine. Defaults to 300 (five minutes).
+   * Seconds the response is cached, a non-negative integer. A verifier
+   * clamps it between its `minCacheMs` and `maxCacheMs`. This is the
+   * longest a verifier may take to see a revocation, so keep it short.
+   * Defaults to 300 (five minutes).
    */
   maxAgeSeconds?: number;
 };
@@ -36,14 +37,23 @@ export type KeySetResponse = {
  * Validates and serialises a key-set document for serving over HTTP.
  * Parsing at this boundary matters: an adapter that calls this passes
  * through its JSON body unchanged, so a document with a malformed entry
- * cannot reach a verifier that trusts the shape.
+ * or a duplicate `kid` cannot reach a verifier.
+ *
+ * @throws TollwayError `invalid-key-set` for an invalid document or
+ * `maxAgeSeconds`.
  */
 export function renderKeySetResponse(
   document: KeySetDocument,
   options: KeySetResponseOptions = {},
 ): KeySetResponse {
-  const parsed = keySetDocumentSchema.parse(document);
+  const parsed = parseKeySetDocument(document);
   const maxAge = options.maxAgeSeconds ?? DEFAULT_MAX_AGE_SECONDS;
+  if (!Number.isSafeInteger(maxAge) || maxAge < 0) {
+    throw new TollwayError(
+      "invalid-key-set",
+      `maxAgeSeconds must be a non-negative integer, got ${String(maxAge)}`,
+    );
+  }
   return {
     status: 200,
     headers: {
