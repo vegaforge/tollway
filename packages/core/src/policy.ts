@@ -47,7 +47,7 @@ export type Policy = {
       dailyCap?: string;
       /**
        * Sliding-window ceiling, e.g. 5 USDC per hour. Accuracy is
-       * bounded by the accumulator's bucket granularity — see
+       * bounded by the accumulator's bucket granularity. See
        * `RollingSum` and the docs for the ~1-bucket over-count.
        */
       window?: { windowSeconds: number; cap: string };
@@ -56,8 +56,9 @@ export type Policy = {
   /**
    * Caps per resource. `match` picks between `exact` (default) and
    * `prefix`; the resource identity is the exact string the receipt
-   * carries. No regex or glob is evaluated from config. If more than
-   * one prefix entry matches, the longest (most specific) key wins.
+   * carries, query string included. No regex or glob is evaluated from
+   * config. Every entry that matches a resource applies and is charged,
+   * so a narrower entry can tighten a broader one but never lift it.
    */
   perResource?: Record<
     string,
@@ -224,44 +225,98 @@ function resourceKey(resource: string, asset: string): string {
   return `${resource}:${asset}`;
 }
 
+type ResourceEntry = NonNullable<Policy["perResource"]>[string];
+
+/** One `perResource` entry that applies to a resource, with the key it is stored under. */
+type ResourceMatch = { key: string; entry: ResourceEntry };
+
 /**
- * Issue #192: find the `perResource` entry that governs an intent.
- * Exact entries win over prefix entries; among prefix entries the
- * longest matching key wins (most specific). Returns the matched key
- * alongside the entry so the trace can name which rule fired.
+ * Every `perResource` entry that applies to a resource: the entry keyed by
+ * the exact resource string, then every `prefix` entry whose key the
+ * resource starts with, most specific first.
+ *
+ * All of them apply. Picking only the most specific entry would let a
+ * narrow entry with a high cap lift a broader, stricter one, so spend under
+ * `/api/quotes/` could exceed a cap the operator put on `/api/`. A cap must
+ * never fail open.
+ *
+ * Matching is a plain string comparison: the resource identity includes any
+ * query string, and the prefix `/api` also matches `/apix`.
  */
-function matchResourceEntry(
+function matchResourceEntries(
   perResource: NonNullable<Policy["perResource"]>,
   resource: string,
-): { key: string; entry: NonNullable<Policy["perResource"]>[string] } | undefined {
-  const exact = perResource[resource];
-  if (exact && (exact.match ?? "exact") === "exact") {
-    return { key: resource, entry: exact };
-  }
-  // Explicit "prefix" (or no mode) entries that are exact-string equal
-  // also match: treat equality as the trivial prefix case.
+): ResourceMatch[] {
+  const matches: ResourceMatch[] = [];
+  // Object.hasOwn, so a resource named "constructor" does not match a
+  // member of Object.prototype.
+  const exact = Object.hasOwn(perResource, resource) ? perResource[resource] : undefined;
   if (exact) {
-    return { key: resource, entry: exact };
+    matches.push({ key: resource, entry: exact });
   }
-  let best: { key: string; entry: NonNullable<Policy["perResource"]>[string] } | undefined;
+  const prefixes: ResourceMatch[] = [];
   for (const [key, entry] of Object.entries(perResource)) {
-    if (entry?.match !== "prefix") continue;
-    if (!resource.startsWith(key)) continue;
-    if (!best || key.length > best.key.length) {
-      best = { key, entry };
+    if (key === resource || entry?.match !== "prefix") continue;
+    if (resource.startsWith(key)) {
+      prefixes.push({ key, entry });
     }
   }
-  return best;
+  prefixes.sort((a, b) => b.key.length - a.key.length);
+  return [...matches, ...prefixes];
 }
 
+/**
+ * A rolling window length from the policy. It must be a whole number of
+ * seconds, at least 1: the trace carries it as an integer, and the
+ * accumulator needs a bucket of at least a millisecond.
+ */
 function parseWindowSeconds(value: number, label: string): number {
-  if (!Number.isFinite(value) || value <= 0) {
+  if (!Number.isSafeInteger(value) || value < 1) {
     throw new TollwayError(
       "invalid-policy",
-      `${label}.windowSeconds must be a positive number of seconds, got ${value}`,
+      `${label}.windowSeconds must be a whole number of seconds, at least 1, got ${value}`,
     );
   }
   return value;
+}
+
+/** The caps a `perService` or `perResource` entry can set. */
+type CapEntry = {
+  cap?: string;
+  dailyCap?: string;
+  window?: { windowSeconds: number; cap: string };
+};
+
+function validateCapEntry(entry: CapEntry | undefined, label: string): void {
+  if (entry === undefined) return;
+  if (entry.cap != null) parseAmount(entry.cap);
+  if (entry.dailyCap != null) parseAmount(entry.dailyCap);
+  if (entry.window != null) {
+    parseWindowSeconds(entry.window.windowSeconds, `${label}.window`);
+    parseAmount(entry.window.cap);
+  }
+}
+
+/**
+ * Checks the issue #192 caps when the engine is created, so a malformed
+ * value is refused at startup. Found later, it would surface inside
+ * `record()`, after a payment had already settled.
+ */
+function validateCaps(policy: Policy): void {
+  for (const [payee, entry] of Object.entries(policy.perService ?? {})) {
+    validateCapEntry(entry, `perService["${payee}"]`);
+  }
+  for (const [key, entry] of Object.entries(policy.perResource ?? {})) {
+    const label = `perResource["${key}"]`;
+    const match = entry?.match;
+    if (match !== undefined && match !== "exact" && match !== "prefix") {
+      throw new TollwayError(
+        "invalid-policy",
+        `${label}.match must be "exact" or "prefix", got ${String(match)}`,
+      );
+    }
+    validateCapEntry(entry, label);
+  }
 }
 
 const FIXED_SCALE = 1_000_000n;
@@ -550,7 +605,7 @@ const perServiceWindow: RuleEvaluator = ({ policy, intent, amount, now, state })
       detail: "policy sets no per-service rolling window cap",
     };
   }
-  const windowSeconds = parseWindowSeconds(config.windowSeconds, "perService.window");
+  const windowSeconds = config.windowSeconds;
   const key = serviceKey(intent.payee, intent.asset);
   const accumulator = state.serviceWindowSpend.get(key);
   const current = accumulator ? accumulator.sum(now) : 0n;
@@ -566,12 +621,83 @@ const perServiceWindow: RuleEvaluator = ({ policy, intent, amount, now, state })
   );
 };
 
+/** One `perResource` rule evaluated against one matching entry. */
+function perResourceEntryCeiling(
+  id: "per-resource" | "per-resource-daily" | "per-resource-window",
+  { key, entry }: ResourceMatch,
+  { intent, amount, now, state }: RuleInput,
+): PolicyTraceEntry {
+  const rKey = resourceKey(key, intent.asset);
+  switch (id) {
+    case "per-resource":
+      return spendCeiling(
+        "per-resource",
+        "per-resource cap",
+        `for ${key}`,
+        entry.cap,
+        true,
+        state.resourceSpend.get(rKey) ?? 0n,
+        amount,
+        LIFETIME,
+      );
+    case "per-resource-daily":
+      return spendCeiling(
+        "per-resource-daily",
+        "per-resource daily cap",
+        `for ${key}`,
+        entry.dailyCap,
+        true,
+        state.resourceDailySpend.get(rKey) ?? 0n,
+        amount,
+        { kind: "utc-day", day: state.day },
+      );
+    case "per-resource-window": {
+      const windowConfig = entry.window;
+      if (windowConfig == null) {
+        return {
+          id,
+          rule: "per-resource-window",
+          configured: true,
+          outcome: "not-applicable",
+          limit: null,
+          current: null,
+          projected: null,
+          window: null,
+          detail: `perResource entry for ${key} sets no rolling window`,
+        };
+      }
+      const accumulator = state.resourceWindowSpend.get(rKey);
+      return spendCeiling(
+        "per-resource-window",
+        `per-resource ${windowConfig.windowSeconds}s rolling cap`,
+        `for ${key}`,
+        windowConfig.cap,
+        true,
+        accumulator ? accumulator.sum(now) : 0n,
+        amount,
+        { kind: "sliding", seconds: windowConfig.windowSeconds },
+      );
+    }
+  }
+}
+
+/** How far a passing entry's projected spend sits below its limit. */
+function headroom(entry: PolicyTraceEntry): bigint {
+  return BigInt(entry.limit ?? "0") - BigInt(entry.projected ?? "0");
+}
+
+/**
+ * Evaluates one `perResource` rule against every entry that matches the
+ * resource. The trace holds one entry per rule, so it reports the first
+ * entry that fails, otherwise the passing entry with the least headroom,
+ * which is the one that will refuse first.
+ */
 function perResourceCeiling(
   id: "per-resource" | "per-resource-daily" | "per-resource-window",
   name: string,
-  { policy, intent, amount, now, state }: RuleInput,
+  input: RuleInput,
 ): PolicyTraceEntry {
-  const perResource = policy.perResource;
+  const perResource = input.policy.perResource;
   const configured = perResource !== undefined && Object.keys(perResource).length > 0;
   if (!configured) {
     return {
@@ -586,77 +712,30 @@ function perResourceCeiling(
       detail: `policy sets no ${name}`,
     };
   }
-  const matched = matchResourceEntry(perResource, intent.resource);
-  if (!matched) {
-    return {
-      id,
-      rule: ruleOf(id),
-      configured: true,
-      outcome: "not-applicable",
-      limit: null,
-      current: null,
-      projected: null,
-      window: null,
-      detail: `no perResource entry matches resource ${intent.resource}`,
-    };
-  }
-  const rKey = resourceKey(matched.key, intent.asset);
-  switch (id) {
-    case "per-resource":
-      return spendCeiling(
-        "per-resource",
-        "per-resource cap",
-        `for ${matched.key}`,
-        matched.entry.cap,
-        true,
-        state.resourceSpend.get(rKey) ?? 0n,
-        amount,
-        LIFETIME,
-      );
-    case "per-resource-daily":
-      return spendCeiling(
-        "per-resource-daily",
-        "per-resource daily cap",
-        `for ${matched.key}`,
-        matched.entry.dailyCap,
-        true,
-        state.resourceDailySpend.get(rKey) ?? 0n,
-        amount,
-        { kind: "utc-day", day: state.day },
-      );
-    case "per-resource-window": {
-      const windowConfig = matched.entry.window;
-      if (windowConfig == null) {
-        return {
-          id,
-          rule: "per-resource-window",
-          configured: true,
-          outcome: "not-applicable",
-          limit: null,
-          current: null,
-          projected: null,
-          window: null,
-          detail: `perResource entry for ${matched.key} sets no rolling window`,
-        };
-      }
-      const windowSeconds = parseWindowSeconds(
-        windowConfig.windowSeconds,
-        `perResource["${matched.key}"].window`,
-      );
-      const accumulator = state.resourceWindowSpend.get(rKey);
-      const current = accumulator ? accumulator.sum(now) : 0n;
-      return spendCeiling(
-        "per-resource-window",
-        `per-resource ${windowSeconds}s rolling cap`,
-        `for ${matched.key}`,
-        windowConfig.cap,
-        true,
-        current,
-        amount,
-        { kind: "sliding", seconds: windowSeconds },
-      );
-    }
-  }
+  const evaluated = matchResourceEntries(perResource, input.intent.resource).map((match) =>
+    perResourceEntryCeiling(id, match, input),
+  );
+  const failing = evaluated.find((entry) => entry.outcome === "fail");
+  if (failing) return failing;
+  const passing = evaluated.filter((entry) => entry.outcome === "pass");
+  const tightest = passing.reduce<PolicyTraceEntry | undefined>(
+    (best, entry) => (best === undefined || headroom(entry) < headroom(best) ? entry : best),
+    undefined,
+  );
+  if (tightest) return tightest;
+  const [first] = evaluated;
+  if (first) return first;
+  return {
+    id,
+    rule: ruleOf(id),
+    configured: true,
+    outcome: "not-applicable",
+    limit: null,
+    current: null,
+    projected: null,
+    window: null,
+    detail: `no perResource entry matches resource ${input.intent.resource}`,
+  };
 }
 
 const perResource: RuleEvaluator = (input) =>
@@ -822,7 +901,9 @@ const RULES: readonly RuleEvaluator[] = [
  * constraints, rate limits, and anomaly stops. All state is held in memory;
  * see docs/design.md, "Policy and budgets".
  *
- * Throws `invalid-policy` when `policy.mode` is not a known mode.
+ * Throws `invalid-policy` when `policy.mode` is not a known mode, or when a
+ * `perService` or `perResource` entry has a malformed window or `match`.
+ * Throws `invalid-amount` when one of their caps is not a base-unit integer.
  */
 export function createPolicyEngine(
   policy: Policy,
@@ -833,6 +914,7 @@ export function createPolicyEngine(
 ): PolicyEngine {
   const clock = opts?.clock ?? Date.now;
   const mode = resolveMode(policy);
+  validateCaps(policy);
   const state: EngineState = {
     day: utcDate(clock),
     dailySpend: new Map(),
@@ -905,7 +987,7 @@ export function createPolicyEngine(
     }
     const serviceWindow = policy.perService?.[intent.payee]?.window;
     if (serviceWindow != null) {
-      const windowSeconds = parseWindowSeconds(serviceWindow.windowSeconds, "perService.window");
+      const windowSeconds = serviceWindow.windowSeconds;
       let accumulator = state.serviceWindowSpend.get(svcKey);
       if (!accumulator) {
         accumulator = new RollingSum({ windowMs: windowSeconds * 1_000 });
@@ -914,28 +996,24 @@ export function createPolicyEngine(
       accumulator.add(now, amount);
     }
 
-    // Issue #192: record into the per-resource caps when they apply to
-    // the intent. The same longest-prefix rule that governs evaluation
-    // decides which entry is charged.
-    const resourceMatch = policy.perResource
-      ? matchResourceEntry(policy.perResource, intent.resource)
-      : undefined;
-    if (resourceMatch) {
-      const rKey = resourceKey(resourceMatch.key, intent.asset);
-      if (resourceMatch.entry.cap != null) {
+    // Issue #192: charge every perResource entry that matches, the same
+    // set the evaluators check, so spend under a narrow prefix also counts
+    // toward every broader entry above it.
+    const resourceMatches = policy.perResource
+      ? matchResourceEntries(policy.perResource, intent.resource)
+      : [];
+    for (const { key, entry } of resourceMatches) {
+      const rKey = resourceKey(key, intent.asset);
+      if (entry.cap != null) {
         state.resourceSpend.set(rKey, (state.resourceSpend.get(rKey) ?? 0n) + amount);
       }
-      if (resourceMatch.entry.dailyCap != null) {
+      if (entry.dailyCap != null) {
         state.resourceDailySpend.set(rKey, (state.resourceDailySpend.get(rKey) ?? 0n) + amount);
       }
-      if (resourceMatch.entry.window != null) {
-        const windowSeconds = parseWindowSeconds(
-          resourceMatch.entry.window.windowSeconds,
-          `perResource["${resourceMatch.key}"].window`,
-        );
+      if (entry.window != null) {
         let accumulator = state.resourceWindowSpend.get(rKey);
         if (!accumulator) {
-          accumulator = new RollingSum({ windowMs: windowSeconds * 1_000 });
+          accumulator = new RollingSum({ windowMs: entry.window.windowSeconds * 1_000 });
           state.resourceWindowSpend.set(rKey, accumulator);
         }
         accumulator.add(now, amount);

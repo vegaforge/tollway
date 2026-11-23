@@ -18,9 +18,16 @@ The policy engine gained two new ceilings on top of the lifetime
 
 A new `perResource` section mirrors the same three kinds (`cap`,
 `dailyCap`, `window`) but keys off the resource identifier the receipt
-carries. Entries default to exact matches; setting `match: "prefix"` lets
-one entry cover a family of routes, with the longest matching key winning
-when several prefixes apply.
+carries, query string included. Entries default to exact matches; setting
+`match: "prefix"` lets one entry cover a family of routes. Every entry that
+matches a resource applies and is charged, so a narrower entry can tighten
+a broader one but never lift its cap.
+
+`createPolicyEngine` now refuses a policy whose `windowSeconds` is not a
+whole number of seconds of at least 1, whose cap is not a base-unit integer
+string, or whose `match` is not `exact` or `prefix`. The smart-account plan
+reports the new caps as residual, since an account spending limit cannot
+express them.
 
 Window accounting is backed by a shared `RollingSum` accumulator with
 bucketed, bounded-memory storage: at most `ceil(windowMs / bucketMs) + 1`
@@ -35,4 +42,4 @@ trace shows the full picture: `per-service-daily`, `per-service-window`,
 reported with their limit, current, and projected values. The decision
 still blocks on the first failure in evaluation order.
 
-Closes #192.
+Pull request: #325. Closes #192.

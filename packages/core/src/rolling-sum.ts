@@ -11,6 +11,12 @@
  * it fails closed. The error is documented in code comments and in
  * `apps/web/src/content/docs/policy.mdx`.
  *
+ * Samples may arrive out of order, and a clock that steps backward only
+ * over-counts. A clock that jumps forward and then returns is the one case
+ * that under-counts, because the forward call prunes buckets for good; the
+ * engine's daily reset has the same limit. Feed it a clock that does not
+ * jump forward.
+ *
  * Exported from `@vegaforge/tollway-core` so the budgeting work in #198
  * can reuse the same primitive instead of re-implementing it.
  */

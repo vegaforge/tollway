@@ -112,4 +112,44 @@ describe("RollingSum", () => {
       { numRuns: 200, seed: 192 },
     );
   });
+
+  it("never under-counts when samples arrive out of order", () => {
+    // Clocks on different hosts, or a clock stepped back by NTP, deliver
+    // timestamps out of order. Querying at the latest time seen must still
+    // count every sample inside the window.
+    fc.assert(
+      fc.property(
+        fc.array(
+          fc.record({
+            ts: fc.integer({ min: 0, max: 6 * 60 * 60 * 1_000 }),
+            amount: fc.bigInt({ min: 1n, max: 1_000_000n }),
+          }),
+          { minLength: 1, maxLength: 200 },
+        ),
+        (samples) => {
+          const windowMs = 60 * 60 * 1_000;
+          const rolling = new RollingSum({ windowMs, bucketMs: 60 * 1_000 });
+          for (const sample of samples) {
+            rolling.add(sample.ts, sample.amount);
+          }
+          const nowMs = Math.max(...samples.map((sample) => sample.ts));
+          let trueSum = 0n;
+          for (const sample of samples) {
+            if (sample.ts > nowMs - windowMs) trueSum += sample.amount;
+          }
+          expect(rolling.sum(nowMs) >= trueSum).toBe(true);
+        },
+      ),
+      { numRuns: 200, seed: 1921 },
+    );
+  });
+
+  it("keeps counting later samples when the clock steps backward", () => {
+    // A backward step over-counts: buckets stamped in the "future" stay in
+    // the sum, so a cap built on it refuses rather than allows.
+    const rolling = new RollingSum({ windowMs: 60_000, bucketMs: 1_000 });
+    rolling.add(100_000, 70n);
+    expect(rolling.sum(50_000)).toBe(70n);
+    expect(rolling.prune(50_000)).toBe(false);
+  });
 });
