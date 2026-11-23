@@ -5,6 +5,15 @@
  * Default: http://localhost:3200 for local development.
  */
 
+/**
+ * Returns true when the minimum required service credentials are present.
+ * Both `SERVICE_URL` and `SERVICE_API_KEY` must be set; `SERVICE_URL` alone
+ * is not enough because every request to the service needs the API key.
+ */
+export function isServiceConfigured(): boolean {
+  return Boolean(process.env.SERVICE_URL) && Boolean(process.env.SERVICE_API_KEY);
+}
+
 export function serviceBaseUrl(): string {
   return (process.env.SERVICE_URL ?? "http://localhost:3200").replace(/\/$/, "");
 }

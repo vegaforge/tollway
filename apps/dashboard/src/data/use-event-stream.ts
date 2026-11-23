@@ -16,7 +16,16 @@
  *   - `connecting` – EventSource not yet OPEN.
  *   - `live`       – OPEN, receiving events.
  *   - `reconnecting` – CLOSED after an error; EventSource is retrying.
- *   - `paused`     – The browser or user paused the stream (e.g. page hidden).
+ *   - `paused`     – The browser or user paused the stream, or the service
+ *                    is not configured. When `paused`, the hook never opens
+ *                    an EventSource, so no request is ever made to the proxy.
+ *
+ * Service not configured
+ *   When the proxy has no upstream service configured it immediately sends an
+ *   `unconfigured` SSE event and closes the connection. The hook treats this
+ *   as a terminal signal: it closes the EventSource, marks the stream
+ *   `"paused"`, and does not reopen it. No error is logged and no live-update
+ *   badge appears on the page.
  *
  * Burst coalescing
  *   Incoming events are queued and flushed into handlers in a single
@@ -35,9 +44,9 @@
  *   with a different set of `types` gets its own EventSource.
  */
 
-import { parseSseEvent, type SseEvent, type SseEventType } from "@/lib/event-schemas";
 import type { MutableRefObject } from "react";
 import { useCallback, useEffect, useRef, useState } from "react";
+import { parseSseEvent, type SseEvent, type SseEventType } from "@/lib/event-schemas";
 
 export type StreamStatus = "connecting" | "live" | "reconnecting" | "paused";
 
@@ -78,15 +87,12 @@ export type UseEventStreamOptions = {
 const DEFAULT_MAX_QUEUE = 500;
 
 export function useEventStream(options: UseEventStreamOptions): StreamStatus {
-  const {
-    handlersRef,
-    types,
-    onReset,
-    enabled = true,
-    maxQueueSize = DEFAULT_MAX_QUEUE,
-  } = options;
+  const { handlersRef, types, onReset, enabled = true, maxQueueSize = DEFAULT_MAX_QUEUE } = options;
 
   const [status, setStatus] = useState<StreamStatus>("connecting");
+  // Set to true permanently after receiving an `unconfigured` event so the
+  // hook never reopens the EventSource for this component lifecycle.
+  const unconfiguredRef = useRef(false);
   // Queue for coalescing bursts.
   const queueRef = useRef<SseEvent[]>([]);
   const flushScheduledRef = useRef(false);
@@ -127,7 +133,9 @@ export function useEventStream(options: UseEventStreamOptions): StreamStatus {
   const typesKey = types ? [...types].sort().join(",") : "";
 
   useEffect(() => {
-    if (!enabled) {
+    // Never reopen the stream once the proxy told us the service is not
+    // configured. The paused status set below persists for this component.
+    if (!enabled || unconfiguredRef.current) {
       setStatus("paused");
       return;
     }
@@ -168,8 +176,17 @@ export function useEventStream(options: UseEventStreamOptions): StreamStatus {
       scheduleFlush();
     }
 
+    // Terminal signal: the proxy has no upstream service. Close immediately
+    // and mark unconfigured so this effect never runs again.
+    function handleUnconfigured() {
+      unconfiguredRef.current = true;
+      es.close();
+      setStatus("paused");
+    }
+
     es.addEventListener("open", handleOpen);
     es.addEventListener("error", handleError);
+    es.addEventListener("unconfigured", handleUnconfigured as EventListener);
 
     // Register listeners for every known event type.
     const typedListeners = new Map<string, (e: MessageEvent) => void>();
@@ -190,6 +207,7 @@ export function useEventStream(options: UseEventStreamOptions): StreamStatus {
     return () => {
       es.removeEventListener("open", handleOpen);
       es.removeEventListener("error", handleError);
+      es.removeEventListener("unconfigured", handleUnconfigured as EventListener);
       for (const [t, listener] of typedListeners) {
         es.removeEventListener(t, listener as EventListener);
       }

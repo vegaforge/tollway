@@ -14,23 +14,44 @@
  * The `?types=` query parameter is forwarded to the service so the buffer is
  * filtered upstream; this reduces bytes over both hops.
  *
+ * When `SERVICE_API_KEY` or `SERVICE_URL` is not set, the proxy returns a
+ * valid SSE response that immediately sends an `unconfigured` event and
+ * closes. The client hook treats this as a terminal "paused" state and does
+ * not reopen the stream, so a deployment without a service configured logs
+ * nothing and shows no live-update badge.
+ *
  * See docs/dashboard-data-contracts.md, "SSE proxy".
  */
 
 import { NextResponse } from "next/server";
 import { authorizeRequest } from "@/lib/authorize";
-import { serviceStreamUrl } from "@/lib/service-url";
+import { isServiceConfigured, serviceStreamUrl } from "@/lib/service-url";
 
 export const dynamic = "force-dynamic";
+
+/** SSE body that immediately signals the client to stop retrying. */
+function unconfiguredStream(): Response {
+  const body = "event: unconfigured\ndata: {}\n\n";
+  return new Response(body, {
+    status: 200,
+    headers: {
+      "content-type": "text/event-stream",
+      "cache-control": "no-cache, no-transform",
+      connection: "keep-alive",
+      "x-accel-buffering": "no",
+    },
+  });
+}
 
 export async function GET(request: Request): Promise<NextResponse | Response> {
   const auth = await authorizeRequest(request, "viewer");
   if (!auth.ok) return auth.response;
 
-  const apiKey = process.env.SERVICE_API_KEY;
-  if (!apiKey) {
-    return NextResponse.json({ error: "Service is not configured" }, { status: 503 });
+  if (!isServiceConfigured()) {
+    return unconfiguredStream();
   }
+
+  const apiKey = process.env.SERVICE_API_KEY as string;
 
   // Forward the type filter, if any.
   const { searchParams } = new URL(request.url);

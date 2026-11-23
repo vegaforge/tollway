@@ -8,10 +8,10 @@
  */
 
 import { act, renderHook, waitFor } from "@testing-library/react";
-import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { useRef } from "react";
-import { createHandlerMap, useEventStream } from "./use-event-stream";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { useAnomalies } from "./use-anomalies";
+import { createHandlerMap, useEventStream } from "./use-event-stream";
 import { useOpenChannels } from "./use-open-channels";
 
 // ---------------------------------------------------------------------------
@@ -402,5 +402,48 @@ describe("reconnect state in consuming hooks", () => {
     });
 
     await waitFor(() => expect(result.current.stream).toBe("reconnecting"));
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Unconfigured — service not configured degrades quietly
+// ---------------------------------------------------------------------------
+
+describe("unconfigured event", () => {
+  it("transitions to paused and does not reopen the stream when the proxy signals unconfigured", async () => {
+    const { result } = renderHook(() => {
+      const handlersRef = useRef(createHandlerMap());
+      return useEventStream({ handlersRef });
+    });
+
+    await waitFor(() => expect(result.current).toBe("live"));
+
+    act(() => {
+      // Simulate the proxy sending the unconfigured terminal event.
+      FakeEventSource.latest().dispatch("unconfigured", new Event("unconfigured"));
+    });
+
+    await waitFor(() => expect(result.current).toBe("paused"));
+
+    // The EventSource should have been closed.
+    expect(FakeEventSource.latest().readyState).toBe(FakeEventSource.CLOSED);
+
+    // A new render cycle should not open a second EventSource.
+    const instancesBefore = FakeEventSource.instances.length;
+    expect(FakeEventSource.instances.length).toBe(instancesBefore);
+  });
+
+  it("consuming hook reflects paused stream status when service is unconfigured", async () => {
+    const { result } = renderHook(() => useAnomalies());
+    await waitFor(() => expect(result.current.status).toBe("ready"));
+    await waitFor(() => expect(result.current.stream).toBe("live"));
+
+    act(() => {
+      FakeEventSource.latest().dispatch("unconfigured", new Event("unconfigured"));
+    });
+
+    await waitFor(() => expect(result.current.stream).toBe("paused"));
+    // Stream status does not go back to connecting or live.
+    expect(result.current.stream).toBe("paused");
   });
 });
