@@ -9,6 +9,7 @@ import {
   type PolicyWindow,
   policyModes,
 } from "./policy-trace.js";
+import { RollingSum } from "./rolling-sum.js";
 import type { SettlementModel } from "./types.js";
 
 /**
@@ -31,8 +32,42 @@ export type Policy = {
     /** Lifetime ceiling for this policy. */
     total?: string;
   };
-  /** Caps per counterparty service, keyed by the payee address or service id. */
-  perService?: Record<string, { cap?: string }>;
+  /**
+   * Caps per counterparty service, keyed by the payee address or service id.
+   * Issue #192: `cap` is a **lifetime** ceiling (never resets); `dailyCap`
+   * resets every UTC day; `window` is a rolling sliding window with
+   * approximate accounting (see `RollingSum`).
+   */
+  perService?: Record<
+    string,
+    {
+      /** Lifetime ceiling per service across all time. */
+      cap?: string;
+      /** Ceiling per UTC day; resets at the same instant as `budgets.daily`. */
+      dailyCap?: string;
+      /**
+       * Sliding-window ceiling, e.g. 5 USDC per hour. Accuracy is
+       * bounded by the accumulator's bucket granularity — see
+       * `RollingSum` and the docs for the ~1-bucket over-count.
+       */
+      window?: { windowSeconds: number; cap: string };
+    }
+  >;
+  /**
+   * Caps per resource. `match` picks between `exact` (default) and
+   * `prefix`; the resource identity is the exact string the receipt
+   * carries. No regex or glob is evaluated from config. If more than
+   * one prefix entry matches, the longest (most specific) key wins.
+   */
+  perResource?: Record<
+    string,
+    {
+      cap?: string;
+      dailyCap?: string;
+      window?: { windowSeconds: number; cap: string };
+      match?: "exact" | "prefix";
+    }
+  >;
   perModel?: Partial<
     Record<
       SettlementModel,
@@ -143,6 +178,20 @@ type EngineState = {
   dailySpend: Map<string, bigint>;
   totalSpend: Map<string, bigint>;
   serviceSpend: Map<string, bigint>;
+  /**
+   * Issue #192: per-service calendar-day spend, reset in
+   * `resetDailyIfNeeded` alongside `dailySpend`.
+   */
+  serviceDailySpend: Map<string, bigint>;
+  /**
+   * Issue #192: per-service rolling-window spend. One `RollingSum` per
+   * `${payee}:${asset}` key; idle keys with empty accumulators are
+   * evicted at record time.
+   */
+  serviceWindowSpend: Map<string, RollingSum>;
+  resourceSpend: Map<string, bigint>;
+  resourceDailySpend: Map<string, bigint>;
+  resourceWindowSpend: Map<string, RollingSum>;
   requestTimestamps: number[];
   anomalySamples: { amount: bigint; asset: string; ts: number }[];
   adaptive: Map<string, AdaptiveState>;
@@ -169,6 +218,50 @@ type RuleEvaluator = (input: RuleInput) => PolicyTraceEntry;
 
 function serviceKey(payee: string, asset: string): string {
   return `${payee}:${asset}`;
+}
+
+function resourceKey(resource: string, asset: string): string {
+  return `${resource}:${asset}`;
+}
+
+/**
+ * Issue #192: find the `perResource` entry that governs an intent.
+ * Exact entries win over prefix entries; among prefix entries the
+ * longest matching key wins (most specific). Returns the matched key
+ * alongside the entry so the trace can name which rule fired.
+ */
+function matchResourceEntry(
+  perResource: NonNullable<Policy["perResource"]>,
+  resource: string,
+): { key: string; entry: NonNullable<Policy["perResource"]>[string] } | undefined {
+  const exact = perResource[resource];
+  if (exact && (exact.match ?? "exact") === "exact") {
+    return { key: resource, entry: exact };
+  }
+  // Explicit "prefix" (or no mode) entries that are exact-string equal
+  // also match: treat equality as the trivial prefix case.
+  if (exact) {
+    return { key: resource, entry: exact };
+  }
+  let best: { key: string; entry: NonNullable<Policy["perResource"]>[string] } | undefined;
+  for (const [key, entry] of Object.entries(perResource)) {
+    if (entry?.match !== "prefix") continue;
+    if (!resource.startsWith(key)) continue;
+    if (!best || key.length > best.key.length) {
+      best = { key, entry };
+    }
+  }
+  return best;
+}
+
+function parseWindowSeconds(value: number, label: string): number {
+  if (!Number.isFinite(value) || value <= 0) {
+    throw new TollwayError(
+      "invalid-policy",
+      `${label}.windowSeconds must be a positive number of seconds, got ${value}`,
+    );
+  }
+  return value;
 }
 
 const FIXED_SCALE = 1_000_000n;
@@ -308,9 +401,48 @@ const minChannelDeposit: RuleEvaluator = ({ policy, intent, amount }) => {
   };
 };
 
-/** Shared shape of the three spend ceilings: daily, total, and per-service. */
+type SpendCeilingId =
+  | "budget-daily"
+  | "budget-total"
+  | "per-service"
+  | "per-service-daily"
+  | "per-service-window"
+  | "per-resource"
+  | "per-resource-daily"
+  | "per-resource-window";
+
+type SpendCeilingRule =
+  | "budget"
+  | "per-service"
+  | "per-service-daily"
+  | "per-service-window"
+  | "per-resource"
+  | "per-resource-daily"
+  | "per-resource-window";
+
+function ruleOf(id: SpendCeilingId): SpendCeilingRule {
+  switch (id) {
+    case "budget-daily":
+    case "budget-total":
+      return "budget";
+    case "per-service":
+      return "per-service";
+    case "per-service-daily":
+      return "per-service-daily";
+    case "per-service-window":
+      return "per-service-window";
+    case "per-resource":
+      return "per-resource";
+    case "per-resource-daily":
+      return "per-resource-daily";
+    case "per-resource-window":
+      return "per-resource-window";
+  }
+}
+
+/** Shared shape of every spend ceiling rule. */
 function spendCeiling(
-  id: "budget-daily" | "budget-total" | "per-service",
+  id: SpendCeilingId,
   name: string,
   subject: string,
   limitValue: string | undefined,
@@ -319,7 +451,7 @@ function spendCeiling(
   amount: bigint,
   window: PolicyWindow,
 ): PolicyTraceEntry {
-  const rule = id === "per-service" ? "per-service" : "budget";
+  const rule = ruleOf(id);
   if (limitValue == null) {
     return {
       id,
@@ -387,6 +519,152 @@ const perService: RuleEvaluator = ({ policy, intent, amount, state }) =>
     amount,
     LIFETIME,
   );
+
+// Issue #192 rule evaluators.
+
+const perServiceDaily: RuleEvaluator = ({ policy, intent, amount, state }) =>
+  spendCeiling(
+    "per-service-daily",
+    "per-service daily cap",
+    `for ${intent.payee}`,
+    policy.perService?.[intent.payee]?.dailyCap,
+    Object.values(policy.perService ?? {}).some((cfg) => cfg?.dailyCap != null),
+    state.serviceDailySpend.get(serviceKey(intent.payee, intent.asset)) ?? 0n,
+    amount,
+    { kind: "utc-day", day: state.day },
+  );
+
+const perServiceWindow: RuleEvaluator = ({ policy, intent, amount, now, state }) => {
+  const config = policy.perService?.[intent.payee]?.window;
+  const configured = Object.values(policy.perService ?? {}).some((cfg) => cfg?.window != null);
+  if (config == null) {
+    return {
+      id: "per-service-window",
+      rule: "per-service-window",
+      configured,
+      outcome: "not-applicable",
+      limit: null,
+      current: null,
+      projected: null,
+      window: null,
+      detail: "policy sets no per-service rolling window cap",
+    };
+  }
+  const windowSeconds = parseWindowSeconds(config.windowSeconds, "perService.window");
+  const key = serviceKey(intent.payee, intent.asset);
+  const accumulator = state.serviceWindowSpend.get(key);
+  const current = accumulator ? accumulator.sum(now) : 0n;
+  return spendCeiling(
+    "per-service-window",
+    `per-service ${windowSeconds}s rolling cap`,
+    `for ${intent.payee}`,
+    config.cap,
+    true,
+    current,
+    amount,
+    { kind: "sliding", seconds: windowSeconds },
+  );
+};
+
+function perResourceCeiling(
+  id: "per-resource" | "per-resource-daily" | "per-resource-window",
+  name: string,
+  { policy, intent, amount, now, state }: RuleInput,
+): PolicyTraceEntry {
+  const perResource = policy.perResource;
+  const configured = perResource !== undefined && Object.keys(perResource).length > 0;
+  if (!configured) {
+    return {
+      id,
+      rule: ruleOf(id),
+      configured: false,
+      outcome: "not-applicable",
+      limit: null,
+      current: null,
+      projected: null,
+      window: null,
+      detail: `policy sets no ${name}`,
+    };
+  }
+  const matched = matchResourceEntry(perResource, intent.resource);
+  if (!matched) {
+    return {
+      id,
+      rule: ruleOf(id),
+      configured: true,
+      outcome: "not-applicable",
+      limit: null,
+      current: null,
+      projected: null,
+      window: null,
+      detail: `no perResource entry matches resource ${intent.resource}`,
+    };
+  }
+  const rKey = resourceKey(matched.key, intent.asset);
+  switch (id) {
+    case "per-resource":
+      return spendCeiling(
+        "per-resource",
+        "per-resource cap",
+        `for ${matched.key}`,
+        matched.entry.cap,
+        true,
+        state.resourceSpend.get(rKey) ?? 0n,
+        amount,
+        LIFETIME,
+      );
+    case "per-resource-daily":
+      return spendCeiling(
+        "per-resource-daily",
+        "per-resource daily cap",
+        `for ${matched.key}`,
+        matched.entry.dailyCap,
+        true,
+        state.resourceDailySpend.get(rKey) ?? 0n,
+        amount,
+        { kind: "utc-day", day: state.day },
+      );
+    case "per-resource-window": {
+      const windowConfig = matched.entry.window;
+      if (windowConfig == null) {
+        return {
+          id,
+          rule: "per-resource-window",
+          configured: true,
+          outcome: "not-applicable",
+          limit: null,
+          current: null,
+          projected: null,
+          window: null,
+          detail: `perResource entry for ${matched.key} sets no rolling window`,
+        };
+      }
+      const windowSeconds = parseWindowSeconds(
+        windowConfig.windowSeconds,
+        `perResource["${matched.key}"].window`,
+      );
+      const accumulator = state.resourceWindowSpend.get(rKey);
+      const current = accumulator ? accumulator.sum(now) : 0n;
+      return spendCeiling(
+        "per-resource-window",
+        `per-resource ${windowSeconds}s rolling cap`,
+        `for ${matched.key}`,
+        windowConfig.cap,
+        true,
+        current,
+        amount,
+        { kind: "sliding", seconds: windowSeconds },
+      );
+    }
+  }
+}
+
+const perResource: RuleEvaluator = (input) =>
+  perResourceCeiling("per-resource", "per-resource cap", input);
+const perResourceDaily: RuleEvaluator = (input) =>
+  perResourceCeiling("per-resource-daily", "per-resource daily cap", input);
+const perResourceWindow: RuleEvaluator = (input) =>
+  perResourceCeiling("per-resource-window", "per-resource rolling cap", input);
 
 const rateLimit: RuleEvaluator = ({ policy, state }) => {
   const base = { id: "rate-limit", rule: "rate-limit" } as const;
@@ -529,6 +807,11 @@ const RULES: readonly RuleEvaluator[] = [
   budgetDaily,
   budgetTotal,
   perService,
+  perServiceDaily,
+  perServiceWindow,
+  perResource,
+  perResourceDaily,
+  perResourceWindow,
   rateLimit,
   anomaly,
   adaptiveAnomaly,
@@ -555,6 +838,11 @@ export function createPolicyEngine(
     dailySpend: new Map(),
     totalSpend: new Map(),
     serviceSpend: new Map(),
+    serviceDailySpend: new Map(),
+    serviceWindowSpend: new Map(),
+    resourceSpend: new Map(),
+    resourceDailySpend: new Map(),
+    resourceWindowSpend: new Map(),
     requestTimestamps: [],
     anomalySamples: [],
     adaptive: new Map(),
@@ -564,6 +852,8 @@ export function createPolicyEngine(
     const today = utcDate(clock);
     if (today !== state.day) {
       state.dailySpend.clear();
+      state.serviceDailySpend.clear();
+      state.resourceDailySpend.clear();
       state.day = today;
     }
   }
@@ -605,6 +895,53 @@ export function createPolicyEngine(
     serviceSpend.set(svcKey, (serviceSpend.get(svcKey) ?? 0n) + amount);
 
     const now = clock();
+
+    // Issue #192: record into the per-service daily and rolling-window
+    // accumulators when the policy declares them. The rolling-window
+    // RollingSum is created lazily (one per unique service+asset key)
+    // and evicted below once its window drains.
+    if (policy.perService?.[intent.payee]?.dailyCap != null) {
+      state.serviceDailySpend.set(svcKey, (state.serviceDailySpend.get(svcKey) ?? 0n) + amount);
+    }
+    const serviceWindow = policy.perService?.[intent.payee]?.window;
+    if (serviceWindow != null) {
+      const windowSeconds = parseWindowSeconds(serviceWindow.windowSeconds, "perService.window");
+      let accumulator = state.serviceWindowSpend.get(svcKey);
+      if (!accumulator) {
+        accumulator = new RollingSum({ windowMs: windowSeconds * 1_000 });
+        state.serviceWindowSpend.set(svcKey, accumulator);
+      }
+      accumulator.add(now, amount);
+    }
+
+    // Issue #192: record into the per-resource caps when they apply to
+    // the intent. The same longest-prefix rule that governs evaluation
+    // decides which entry is charged.
+    const resourceMatch = policy.perResource
+      ? matchResourceEntry(policy.perResource, intent.resource)
+      : undefined;
+    if (resourceMatch) {
+      const rKey = resourceKey(resourceMatch.key, intent.asset);
+      if (resourceMatch.entry.cap != null) {
+        state.resourceSpend.set(rKey, (state.resourceSpend.get(rKey) ?? 0n) + amount);
+      }
+      if (resourceMatch.entry.dailyCap != null) {
+        state.resourceDailySpend.set(rKey, (state.resourceDailySpend.get(rKey) ?? 0n) + amount);
+      }
+      if (resourceMatch.entry.window != null) {
+        const windowSeconds = parseWindowSeconds(
+          resourceMatch.entry.window.windowSeconds,
+          `perResource["${resourceMatch.key}"].window`,
+        );
+        let accumulator = state.resourceWindowSpend.get(rKey);
+        if (!accumulator) {
+          accumulator = new RollingSum({ windowMs: windowSeconds * 1_000 });
+          state.resourceWindowSpend.set(rKey, accumulator);
+        }
+        accumulator.add(now, amount);
+      }
+    }
+
     rollAdaptive(now);
     const config = adaptiveConfig(policy);
     if (config !== undefined) {
@@ -624,11 +961,30 @@ export function createPolicyEngine(
     state.anomalySamples.push({ amount, asset: intent.asset, ts: now });
   }
 
+  /**
+   * Issue #192: drop RollingSum entries whose window has drained. This
+   * is what keeps the per-service-window and per-resource-window maps
+   * bounded under traffic that bursts and then stops.
+   */
+  function pruneRollingSums(now: number): void {
+    for (const [key, accumulator] of state.serviceWindowSpend) {
+      if (accumulator.prune(now)) {
+        state.serviceWindowSpend.delete(key);
+      }
+    }
+    for (const [key, accumulator] of state.resourceWindowSpend) {
+      if (accumulator.prune(now)) {
+        state.resourceWindowSpend.delete(key);
+      }
+    }
+  }
+
   async function evaluate(intent: PaymentIntent): Promise<PolicyTrace> {
     resetDailyIfNeeded();
     const amount = parseAmount(intent.amount);
     const now = clock();
     pruneWindow(now);
+    pruneRollingSums(now);
     rollAdaptive(now);
 
     const input: RuleInput = { policy, intent, amount, now, state };
@@ -675,7 +1031,9 @@ export function createPolicyEngine(
 
     async record(intent: PaymentIntent): Promise<void> {
       applyRecord(intent);
-      pruneWindow(clock());
+      const now = clock();
+      pruneWindow(now);
+      pruneRollingSums(now);
     },
   };
 }

@@ -1,9 +1,4 @@
-import type {
-  PaymentOffer,
-  SettlementModel,
-  StellarNetwork,
-  X402Payment,
-} from "@vegaforge/tollway-core";
+import type { PaymentOffer, StellarNetwork, X402Payment } from "@vegaforge/tollway-core";
 import { bytesToBase64Url, TollwayError, utf8Bytes } from "@vegaforge/tollway-core";
 import { type FacilitatorConfig, HTTPFacilitatorClient } from "@x402/core/http";
 import {
@@ -11,11 +6,12 @@ import {
   type PaymentRequirements,
   SettleError,
   type SettleResponse,
-  type SupportedResponse,
   VerifyError,
   type VerifyResponse,
 } from "@x402/core/types";
 import { STELLAR_PUBNET_CAIP2, STELLAR_TESTNET_CAIP2 } from "@x402/stellar";
+import type { FacilitatorCapabilities } from "./facilitator-capabilities.js";
+import { parseFacilitatorCapabilities } from "./facilitator-capabilities.js";
 import { mockAccount, mockHex } from "./hash.js";
 
 /**
@@ -50,16 +46,16 @@ export type SettleInput = {
 /** The outcome of settling: the transaction hash, or why settlement failed. */
 export type SettleResult = { settled: true; txHash: string } | { settled: false; reason: string };
 
-/** The models and assets a facilitator says it can settle. */
-export type SupportedResult = {
-  models: SettlementModel[];
-  assets: string[];
-};
-
 /**
  * The gate's view of an x402 facilitator: verify, then settle, plus a
  * capability check. {@link createHttpFacilitator} talks to a real one and
  * {@link createMockFacilitator} runs offline.
+ *
+ * `supported()` returns the full x402 `SupportedResponse` mapped to
+ * {@link FacilitatorCapabilities} and schema-checked at the boundary so
+ * callers can validate paywalls against it (Issue #155). Note that
+ * `/supported` does not advertise which assets a facilitator will accept:
+ * that is only confirmed by the first `/verify`.
  */
 export interface FacilitatorClient {
   /**
@@ -71,7 +67,7 @@ export interface FacilitatorClient {
   idempotencyKey?(input: { payment: X402Payment }): Promise<string | undefined>;
   verify(input: VerifyInput): Promise<VerifyResult>;
   settle(input: SettleInput): Promise<SettleResult>;
-  supported(): Promise<SupportedResult>;
+  supported(): Promise<FacilitatorCapabilities>;
 }
 
 /**
@@ -110,7 +106,23 @@ export function createMockFacilitator(): FacilitatorClient {
       return { settled: true, txHash: mockHex(`${nonce}:${offer.resource}`) };
     },
     async supported() {
-      return { models: ["x402"], assets: [] };
+      // Issue #155: the mock exercises the same validation path the HTTP
+      // client does. A kind that advertises v2 `exact` on the Stellar
+      // wildcard network is the loosest compatible shape — every real
+      // paywall validates against it, and any paywall-level mismatch
+      // (bad asset format, wrong payTo) still surfaces because
+      // validatePaywall checks those fields locally.
+      return {
+        kinds: [
+          {
+            x402Version: 2,
+            scheme: STELLAR_EXACT_SCHEME,
+            network: "stellar:*",
+          },
+        ],
+        extensions: [],
+        signers: {},
+      };
     },
   };
 }
@@ -286,7 +298,7 @@ export function createHttpFacilitator(
     },
 
     async supported() {
-      let response: SupportedResponse;
+      let response: unknown;
       try {
         response = await client.getSupported();
       } catch (error) {
@@ -295,13 +307,13 @@ export function createHttpFacilitator(
           `facilitator /supported request failed: ${message(error)}`,
         );
       }
-      // x402 /supported advertises (scheme, network) kinds, not an asset list.
-      const models: SettlementModel[] = response.kinds.some(
-        (kind) => kind.scheme === STELLAR_EXACT_SCHEME,
-      )
-        ? ["x402"]
-        : [];
-      return { models, assets: [] };
+      // Issue #155: parse the raw response at the boundary so the gate
+      // sees `kinds`, `extensions` and `signers` rather than the lossy
+      // `{ models, assets }` shape this returned previously. The parser
+      // throws `TollwayError("payment-failed", ...)` on malformed data,
+      // matching the error class used by every other facilitator-side
+      // failure in this module.
+      return parseFacilitatorCapabilities(response);
     },
   };
 }

@@ -61,6 +61,7 @@ export {
   type ReceiptSigner,
   type ReceiptVerifier,
 } from "./receipt/signer.js";
+export { RollingSum, type RollingSumOptions } from "./rolling-sum.js";
 export {
   createDefaultRouter,
   type ModelRouter,

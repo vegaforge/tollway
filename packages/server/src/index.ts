@@ -37,13 +37,25 @@ export {
   type SettleInput,
   type SettleResult,
   STELLAR_EXACT_SCHEME,
-  type SupportedResult,
   stellarCaip2,
   toPaymentRequirements,
   type VerifyInput,
   type VerifyResult,
   type X402Terms,
 } from "./facilitator.js";
+export {
+  assertPaywallValid,
+  createFacilitatorValidator,
+  describeMismatches,
+  type FacilitatorCapabilities,
+  type FacilitatorValidator,
+  type FacilitatorValidatorOptions,
+  type PaywallMismatch,
+  parseFacilitatorCapabilities,
+  type ValidationMode,
+  type ValidationResult,
+  validatePaywall,
+} from "./facilitator-capabilities.js";
 export {
   createPaywall,
   type DynamicPriceFunction,
