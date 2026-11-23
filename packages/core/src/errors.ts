@@ -15,6 +15,7 @@ export type TollwayErrorCode =
   | "budget-exceeded"
   | "payment-failed"
   | "policy-blocked"
+  | "offer-rejected"
   | "receipt-verification-failed"
   | "channel-not-found"
   | "channel-not-open"

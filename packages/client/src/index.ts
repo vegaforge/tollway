@@ -34,6 +34,7 @@ import {
   TollwayError,
   verifyReceipt,
 } from "@vegaforge/tollway-core";
+import { type OfferChecks, OfferRejectedError, runOfferChecks } from "./offer-checks.js";
 
 /** Events the client emits so callers and observability can follow along. */
 export type ClientEvent =
@@ -102,6 +103,13 @@ export type TollwayClientOptions = {
   logger?: { warn(message: string): void };
   /** Optional router. When omitted, defaults to x402 unless `model` is on the request. */
   router?: ModelRouter;
+  /**
+   * Per-offer sanity checks that run before policy and before the settler.
+   * Checks include price ceilings per asset, payee and asset allowlists, and
+   * the always-on network and structural checks. See offer-checks.ts for
+   * details and the fail-closed behaviour of maxAmount.
+   */
+  offerChecks?: OfferChecks;
   /**
    * Optional verifier. When provided, the returned receipt is checked
    * against the verifier's trusted public keys before `pay()` resolves;
@@ -223,6 +231,26 @@ export function createClient(options: TollwayClientOptions): TollwayClient {
           asset: request.offer.asset,
           model,
         };
+
+        // Offer sanity checks run first — before policy and before the settler
+        // — so a malicious or misconfigured offer never reaches a signer.
+        try {
+          runOfferChecks(
+            request.offer,
+            request.resource,
+            options.network,
+            options.offerChecks,
+          );
+        } catch (checkError) {
+          if (checkError instanceof OfferRejectedError) {
+            emit({
+              type: "skip",
+              resource: request.resource,
+              reason: `${checkError.checkName}: ${checkError.message}`,
+            });
+          }
+          throw checkError;
+        }
 
         let activeTrace: PolicyTrace | undefined;
         if (options.policy) {
@@ -372,3 +400,5 @@ export {
   TOLLWAY_RECEIPT_HEADER,
   type X402SettlerOptions,
 } from "./x402-settler.js";
+
+export { type OfferChecks, OfferRejectedError } from "./offer-checks.js";

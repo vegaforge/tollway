@@ -32,6 +32,7 @@ import { decodePaymentRequiredHeader, encodePaymentSignatureHeader } from "@x402
 import type { PaymentPayload, PaymentRequired, PaymentRequirements } from "@x402/core/types";
 import type { ClientStellarSigner } from "@x402/stellar";
 import { ExactStellarScheme } from "@x402/stellar/exact/client";
+import type { OfferChecks } from "./offer-checks.js";
 import type { ClientSettler, SettleRequest } from "./index.js";
 
 export const PAYMENT_REQUIRED_HEADER = "PAYMENT-REQUIRED";
@@ -52,6 +53,16 @@ export type X402SettlerOptions = {
   rpcUrl?: string;
   /** HTTP method for the paid request. Defaults to GET. */
   method?: string;
+  /**
+   * Optional offer checks. When provided, a PaymentPolicy is registered on
+   * the x402Client that filters the multi-option `accepts` array in the 402
+   * challenge down to options whose `payTo` and `asset` pass the allowlists.
+   * This is a second layer of defence: the orchestrator check in
+   * createClient.pay() already runs before the settler is called; the
+   * PaymentPolicy stops a disallowed option from being selected if the
+   * challenge has been constructed with both allowed and disallowed options.
+   */
+  offerChecks?: OfferChecks;
 };
 
 const CAIP2: Record<StellarNetwork, "stellar:testnet" | "stellar:pubnet"> = {
@@ -114,6 +125,20 @@ export function createX402Settler(options: X402SettlerOptions): ClientSettler {
           ],
         },
       });
+
+      // Register a PaymentPolicy that filters the accepted options to those
+      // whose payTo and asset pass the configured allowlists. This prevents a
+      // multi-option challenge from steering the settler to a disallowed option.
+      if (options.offerChecks) {
+        const { allowedPayees, allowedAssets } = options.offerChecks;
+        client.registerPolicy((_x402Version, reqs) =>
+          reqs.filter((req) => {
+            if (allowedPayees && !allowedPayees.includes(req.payTo)) return false;
+            if (allowedAssets && !allowedAssets.includes(req.asset)) return false;
+            return true;
+          }),
+        );
+      }
       let payload: PaymentPayload;
       try {
         payload = await client.createPaymentPayload({
