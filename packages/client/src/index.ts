@@ -337,25 +337,29 @@ async function checkedReceipt(
   settled: SignedReceipt,
   verifier: ReceiptVerifier | undefined,
 ): Promise<SignedReceipt> {
+  const parsed = signedReceiptSchema.parse(settled);
   if (verifier) {
-    const result = await verifyReceipt(settled, verifier);
+    const result = await verifyReceipt(parsed, verifier);
     if (!result.valid) {
       throw new ReceiptVerificationError(result.reason);
     }
-    return result.receipt;
   }
-  return signedReceiptSchema.parse(settled);
+  return parsed;
 }
 
 async function decideModel(
   router: ModelRouter | undefined,
   request: PayRequest,
 ): Promise<SettlementModel> {
-  if (request.model) return request.model;
-  if (router) return router.route(request.offer);
+  if (request.model) {
+    return request.model;
+  }
+  if (router) {
+    return router.route(request.offer);
+  }
   return "x402";
 }
 
-function normalizeError(raw: unknown): Error {
-  return raw instanceof Error ? raw : new Error(String(raw));
+function normalizeError(error: unknown): Error {
+  return error instanceof Error ? error : new Error(String(error));
 }

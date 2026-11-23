@@ -323,25 +323,23 @@ const TRANSPORT_ERROR_CODES = new Set([
 ]);
 
 function isTransportFailure(error: unknown): boolean {
-  if (error instanceof TypeError) return true;
+  if (error instanceof StellarMppError) return false;
   const code = (error as { code?: unknown } | null)?.code;
   return typeof code === "string" && TRANSPORT_ERROR_CODES.has(code);
+}
+
+function rejectionMessage(error: unknown): string {
+  if (error instanceof Errors.PaymentError) return error.message;
+  return errorMessage(error);
 }
 
 function errorMessage(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
 }
 
-function rejectionMessage(error: unknown): string {
-  if (error instanceof Errors.PaymentError || error instanceof StellarMppError) {
-    return error.message;
-  }
-  return errorMessage(error);
-}
-
 /**
- * A stable nonce for one credential. The payload is unique per signed
- * transfer, so hashing it gives each payment its own key.
+ * A stable, unique nonce for an MPP credential: the SHA-256 of the raw
+ * payload, base64url-encoded, so one credential settles at most once.
  */
 async function deriveMppChargeNonce(payload: string): Promise<string> {
   const digest = await crypto.subtle.digest("SHA-256", utf8Bytes(payload));
