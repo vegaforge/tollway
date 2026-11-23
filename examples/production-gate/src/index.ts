@@ -112,8 +112,9 @@ export async function createProductionGate(
 ): Promise<ProductionGate> {
   const signer = await Ed25519Signer.fromPrivateKey(env.RECEIPT_SIGNING_KEY, env.RECEIPT_KEY_ID);
 
-  // maxRetriesPerRequest bounds a stalled Redis call; the gate treats a cache
-  // failure as an alert, never as a settlement failure.
+  // maxRetriesPerRequest limits retries of a failed Redis command. A cache
+  // failure before settlement fails the request; one after settlement
+  // returns the receipt with cacheError set.
   const redis = new Redis(env.REDIS_URL, { maxRetriesPerRequest: 3 });
   const client: RedisLikeClient = redis;
   const cache = createRedisSettlementCache({

@@ -79,7 +79,7 @@ A Redis failure before settlement fails the request and nothing is charged: a ca
 
 ## Receipt signing keys
 
-A receipt is signed by a `ReceiptSigner`; the agent verifies it against a public key it trusts. `Ed25519Signer` is the built-in implementation (WebCrypto Ed25519, on Node and edge runtimes).
+A receipt is signed by a `ReceiptSigner`; the agent verifies it against a public key it trusts. `Ed25519Signer` is the built-in implementation (WebCrypto Ed25519, on Node and edge runtimes). To keep the key in an HSM or KMS, implement `ReceiptSigner` yourself.
 
 ### One stable key per deployment
 
@@ -185,7 +185,7 @@ The gate returns a `GateOutcome`; it does not emit metrics itself yet. Feed the 
 | `402` rate | normal challenge traffic | It is the honest "not paid yet" answer; a jump means agents are failing to pay or reusing spent nonces. |
 | Redis latency and errors | your Redis metrics | A pre-settlement failure refuses the request; a post-settlement one becomes `cacheError`. |
 
-The observability hub can roll spend, latency and failures up, including per-asset summaries with outcome counts, but the gate does not feed it yet: that is [#106](https://github.com/vegaforge/tollway/issues/106). A Prometheus `/metrics` exporter with documented names is [#218](https://github.com/vegaforge/tollway/issues/218). The optional [shared service](/docs/service) serves summaries and time series over HTTP once something posts metrics to it.
+The observability hub can roll spend, latency and failures up, including per-asset time series, but the gate does not feed it yet: that is [#106](https://github.com/vegaforge/tollway/issues/106). A Prometheus `/metrics` exporter with documented names is [#218](https://github.com/vegaforge/tollway/issues/218).
 
 Webhook deliveries from the observability hub are retried but not signed, and their queue is in memory: signing is [#104](https://github.com/vegaforge/tollway/issues/104), a durable outbox is [#220](https://github.com/vegaforge/tollway/issues/220).
 
