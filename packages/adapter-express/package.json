@@ -41,7 +41,7 @@
     "@vegaforge/tollway-core": "workspace:*",
     "@x402/core": "^2.31.0",
     "express": "^5.3.0",
-    "tsup": "^8.5.1",
+    "tsup": "^9.0.0",
     "typescript": "^5.9.3",
     "vitest": "^4.1.12"
   },

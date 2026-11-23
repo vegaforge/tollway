@@ -5,6 +5,7 @@ describe("smart-account policy mapping", () => {
   it("plans token-scoped daily limits and reports residual rules", () => {
     const plan = planSmartAccountPolicy(
       {
+        policyVersion: 1,
         budgets: { daily: "1000", total: "5000" },
         perService: { SERVICE: { cap: "100" } },
         anomaly: { maxSpendPerMinute: "500" },
@@ -29,9 +30,23 @@ describe("smart-account policy mapping", () => {
     ]);
   });
 
+  it("reports the issue #192 caps as residual", () => {
+    // A per-service daily or window cap, or any perResource cap, cannot be
+    // expressed as an account spending limit, so the plan must say so
+    // rather than imply the account enforces it.
+    const plan = planSmartAccountPolicy(
+      {
+        perService: { SERVICE: { dailyCap: "100", window: { windowSeconds: 3600, cap: "50" } } },
+        perResource: { "/api/": { match: "prefix", cap: "100" } },
+      },
+      { tokenContracts: { USDC: "CUSDC" }, dailyPeriodLedgers: 17_280 },
+    );
+    expect(plan.residual.map((entry) => entry.rule)).toEqual(["per-service", "per-resource"]);
+  });
+
   it("checks weaker, equal, stronger, and missing limits", async () => {
     const plan = planSmartAccountPolicy(
-      { budgets: { daily: "100" } },
+      { policyVersion: 1, budgets: { daily: "100" } },
       { tokenContracts: { A: "CA", B: "CB", C: "CC", D: "CD" }, dailyPeriodLedgers: 10 },
     );
     const result = await checkSmartAccountPolicy(plan, {

@@ -17,6 +17,7 @@ import {
   PolicyBlockedError,
   ReceiptVerificationError,
 } from "./index.js";
+import { createMemoryReceiptStore, type ReceiptStore } from "./receipt-store.js";
 
 const OFFER: PaymentOffer = {
   resource: "/quotes/latest",
@@ -292,7 +293,7 @@ describe("createClient returns only signed receipt fields", () => {
     const padded = {
       ...baselineReceipt,
       receipt: { ...baselineReceipt.receipt, refunded: "true" },
-    } as SignedReceipt;
+    } as unknown as SignedReceipt;
     const client = createClient({ network: "testnet", settler: mockSettler(padded), verifier });
     await expect(client.pay({ resource: OFFER.resource, offer: OFFER })).rejects.toBeInstanceOf(
       ReceiptVerificationError,
@@ -328,6 +329,306 @@ describe("createClient policy decision events", () => {
       projected: "10000",
     });
     // The decision comes first, the payment after it.
-    expect(events.map((e) => e.type).slice(0, 2)).toEqual(["policy:decision", "payment"]);
+    expect(events.map((e) => e.type)).toEqual(["policy:decision", "payment"]);
+  });
+
+  it("emits a blocking trace that names the same rule as the error", async () => {
+    const policy = createPolicyEngine({ budgets: { daily: "5000" } });
+    const events: ClientEvent[] = [];
+    const client = createClient({ network: "testnet", settler: mockSettler(), policy });
+    client.on((event) => events.push(event));
+
+    await expect(client.pay({ resource: OFFER.resource, offer: OFFER })).rejects.toMatchObject({
+      rule: "budget",
+    });
+    const decision = events.find((e) => e.type === "policy:decision");
+    if (decision?.type !== "policy:decision") throw new Error("no policy:decision event");
+    expect(decision.trace).toMatchObject({ allowed: false, blockedBy: "budget-daily" });
+  });
+
+  it("does not evaluate twice: one evaluate call per payment, no check call", async () => {
+    const inner = createPolicyEngine({});
+    const evaluate = vi.fn(inner.evaluate);
+    const check = vi.fn(inner.check);
+    const policy = { mode: inner.mode, evaluate, check, record: inner.record };
+    const client = createClient({ network: "testnet", settler: mockSettler(), policy });
+
+    await client.pay({ resource: OFFER.resource, offer: OFFER });
+
+    expect(evaluate).toHaveBeenCalledTimes(1);
+    expect(check).not.toHaveBeenCalled();
+  });
+});
+
+describe("createClient receipt store", () => {
+  function storeWith(put: ReceiptStore["put"]): ReceiptStore {
+    return {
+      put,
+      get: async () => null,
+      query: async () => ({ items: [] }),
+    };
+  }
+
+  it("writes the verified receipt before pay() resolves", async () => {
+    let release: (() => void) | undefined;
+    const put = vi.fn(
+      () =>
+        new Promise<void>((resolve) => {
+          release = resolve;
+        }),
+    );
+    const client = createClient({
+      network: "testnet",
+      settler: mockSettler(),
+      verifier,
+      receiptStore: storeWith(put),
+    });
+
+    let resolved = false;
+    const paying = client.pay({ resource: OFFER.resource, offer: OFFER }).then((result) => {
+      resolved = true;
+      return result;
+    });
+
+    await vi.waitFor(() => expect(put).toHaveBeenCalledWith(baselineReceipt));
+    expect(resolved).toBe(false);
+
+    if (!release) throw new Error("put() was never called, so there is nothing to release");
+    release();
+    await expect(paying).resolves.toMatchObject({ receipt: baselineReceipt });
+  });
+
+  it("stores the receipt so the agent keeps it after pay() returns", async () => {
+    const store = createMemoryReceiptStore();
+    const client = createClient({
+      network: "testnet",
+      settler: mockSettler(),
+      receiptStore: store,
+    });
+
+    await client.pay({ resource: OFFER.resource, offer: OFFER });
+
+    await expect(store.get(baselineReceipt.receipt.id)).resolves.toEqual(baselineReceipt);
+  });
+
+  it("keeps the receipt when the store write fails, sets storeError and calls onStoreError", async () => {
+    const failure = new Error("disk full");
+    const onStoreError = vi.fn();
+    const client = createClient({
+      network: "testnet",
+      settler: mockSettler(),
+      receiptStore: storeWith(vi.fn().mockRejectedValue(failure)),
+      onStoreError,
+    });
+
+    const result = await client.pay({ resource: OFFER.resource, offer: OFFER });
+
+    expect(result.receipt).toEqual(baselineReceipt);
+    expect(result.storeError).toBe(failure);
+    expect(onStoreError).toHaveBeenCalledWith(failure, baselineReceipt);
+  });
+
+  it("still resolves with the receipt when onStoreError itself throws", async () => {
+    const client = createClient({
+      network: "testnet",
+      settler: mockSettler(),
+      receiptStore: storeWith(vi.fn().mockRejectedValue(new Error("disk full"))),
+      onStoreError: () => {
+        throw new Error("alert hook down");
+      },
+    });
+
+    await expect(client.pay({ resource: OFFER.resource, offer: OFFER })).resolves.toMatchObject({
+      receipt: baselineReceipt,
+    });
+  });
+
+  it("never stores a receipt that failed verification", async () => {
+    const tampered: SignedReceipt = {
+      ...baselineReceipt,
+      receipt: { ...baselineReceipt.receipt, amount: "99999999999" },
+    };
+    const put = vi.fn();
+    const client = createClient({
+      network: "testnet",
+      settler: mockSettler(tampered),
+      verifier,
+      receiptStore: storeWith(put),
+    });
+
+    await expect(client.pay({ resource: OFFER.resource, offer: OFFER })).rejects.toBeInstanceOf(
+      ReceiptVerificationError,
+    );
+    expect(put).not.toHaveBeenCalled();
+  });
+});
+
+describe("createClient dry-run", () => {
+  it("lets a would-be block through, marks it in the trace, and still records spend", async () => {
+    const policy = createPolicyEngine({ mode: "dry-run", budgets: { daily: "5000" } });
+    const settler = mockSettler();
+    const events: ClientEvent[] = [];
+    const client = createClient({
+      network: "testnet",
+      settler,
+      policy,
+      logger: { warn: () => undefined },
+    });
+    client.on((event) => events.push(event));
+
+    await client.pay({ resource: OFFER.resource, offer: OFFER });
+    await client.pay({ resource: OFFER.resource, offer: OFFER });
+
+    expect(settler.settle).toHaveBeenCalledTimes(2);
+    expect(events.some((e) => e.type === "skip")).toBe(false);
+    const traces = events.flatMap((e) => (e.type === "policy:decision" ? [e.trace] : []));
+    expect(traces.map((t) => [t.allowed, t.wouldBlock, t.blockedBy])).toEqual([
+      [true, true, "budget-daily"],
+      [true, true, "budget-daily"],
+    ]);
+    // The second evaluation saw the first payment: spend was recorded.
+    expect(traces[1]?.entries.find((e) => e.id === "budget-daily")).toMatchObject({
+      current: "10000",
+      projected: "20000",
+    });
+    const next = await policy.evaluate({
+      payee: OFFER.payTo,
+      resource: OFFER.resource,
+      amount: "1",
+      asset: OFFER.asset,
+      model: "x402",
+    });
+    expect(next.entries.find((e) => e.id === "budget-daily")?.current).toBe("20000");
+  });
+
+  it("logs a warning at construction when the policy is in dry-run", () => {
+    const warn = vi.fn();
+    createClient({
+      network: "testnet",
+      settler: mockSettler(),
+      policy: createPolicyEngine({ mode: "dry-run" }),
+      logger: { warn },
+    });
+    expect(warn).toHaveBeenCalledTimes(1);
+    expect(warn.mock.calls[0]?.[0]).toMatch(/dry-run/);
+  });
+
+  it("does not warn for an enforcing policy, which is the default", () => {
+    const warn = vi.fn();
+    createClient({
+      network: "testnet",
+      settler: mockSettler(),
+      policy: createPolicyEngine({}),
+      logger: { warn },
+    });
+    expect(warn).not.toHaveBeenCalled();
+  });
+});
+
+describe("createClient shadow policy", () => {
+  it("emits the differences between the active and candidate policy without blocking", async () => {
+    const policy = createPolicyEngine({ budgets: { daily: "100000" } });
+    const shadow = createPolicyEngine({ budgets: { daily: "15000" } });
+    const settler = mockSettler();
+    const events: ClientEvent[] = [];
+    const client = createClient({ network: "testnet", settler, policy, shadow });
+    client.on((event) => events.push(event));
+
+    await client.pay({ resource: OFFER.resource, offer: OFFER });
+    await client.pay({ resource: OFFER.resource, offer: OFFER });
+
+    // The candidate would have blocked the second payment; it went through.
+    expect(settler.settle).toHaveBeenCalledTimes(2);
+    const comparisons = events.flatMap((e) => (e.type === "policy:shadow" ? [e.comparison] : []));
+    expect(comparisons).toEqual([
+      { sameDecision: true, activeWouldBlock: false, candidateWouldBlock: false, differences: [] },
+      {
+        sameDecision: false,
+        activeWouldBlock: false,
+        candidateWouldBlock: true,
+        differences: [{ id: "budget-daily", active: "pass", candidate: "fail" }],
+      },
+    ]);
+  });
+
+  it("records settled spend on the shadow so its budgets stay real", async () => {
+    const shadow = createPolicyEngine({ budgets: { daily: "1000000" } });
+    const client = createClient({ network: "testnet", settler: mockSettler(), shadow });
+
+    await client.pay({ resource: OFFER.resource, offer: OFFER });
+
+    const trace = await shadow.evaluate({
+      payee: OFFER.payTo,
+      resource: OFFER.resource,
+      amount: "1",
+      asset: OFFER.asset,
+      model: "x402",
+    });
+    expect(trace.entries.find((e) => e.id === "budget-daily")?.current).toBe("10000");
+  });
+
+  it("compares with no policy when there is no active one", async () => {
+    const shadow = createPolicyEngine({ budgets: { daily: "5000" } });
+    const events: ClientEvent[] = [];
+    const client = createClient({ network: "testnet", settler: mockSettler(), shadow });
+    client.on((event) => events.push(event));
+
+    await client.pay({ resource: OFFER.resource, offer: OFFER });
+
+    expect(events.some((e) => e.type === "policy:decision")).toBe(false);
+    const shadowEvent = events.find((e) => e.type === "policy:shadow");
+    if (shadowEvent?.type !== "policy:shadow") throw new Error("no policy:shadow event");
+    expect(shadowEvent.comparison.differences).toEqual([
+      { id: "budget-daily", active: "not-applicable", candidate: "fail" },
+    ]);
+    expect(events.at(-1)?.type).toBe("payment");
+  });
+
+  it("still emits the comparison when the active policy blocks", async () => {
+    const policy = createPolicyEngine({ budgets: { daily: "5000" } });
+    const shadow = createPolicyEngine({ budgets: { daily: "50000" } });
+    const events: ClientEvent[] = [];
+    const client = createClient({ network: "testnet", settler: mockSettler(), policy, shadow });
+    client.on((event) => events.push(event));
+
+    await expect(client.pay({ resource: OFFER.resource, offer: OFFER })).rejects.toBeInstanceOf(
+      PolicyBlockedError,
+    );
+    const shadowEvent = events.find((e) => e.type === "policy:shadow");
+    expect(shadowEvent).toMatchObject({
+      comparison: { activeWouldBlock: true, candidateWouldBlock: false },
+    });
+  });
+
+  it("reports a failing candidate as policy:shadow-error and pays anyway", async () => {
+    const shadow = createPolicyEngine({ budgets: { daily: "100000" } });
+    vi.spyOn(shadow, "evaluate").mockRejectedValue(
+      new TollwayError("invalid-amount", "invalid amount: not-a-number"),
+    );
+    const settler = mockSettler();
+    const events: ClientEvent[] = [];
+    const client = createClient({ network: "testnet", settler, shadow });
+    client.on((event) => events.push(event));
+
+    await expect(client.pay({ resource: OFFER.resource, offer: OFFER })).resolves.toMatchObject({
+      model: "x402",
+    });
+    const shadowError = events.find((e) => e.type === "policy:shadow-error");
+    expect(shadowError).toMatchObject({ error: { code: "invalid-amount" } });
+    expect(settler.settle).toHaveBeenCalledTimes(1);
+  });
+
+  it("skips shadow evaluation entirely when nobody is listening", async () => {
+    const inner = createPolicyEngine({ budgets: { daily: "1000000" } });
+    const evaluate = vi.fn(inner.evaluate);
+    const record = vi.fn(inner.record);
+    const shadow = { mode: inner.mode, evaluate, check: inner.check, record };
+    const client = createClient({ network: "testnet", settler: mockSettler(), shadow });
+
+    await client.pay({ resource: OFFER.resource, offer: OFFER });
+
+    expect(evaluate).not.toHaveBeenCalled();
+    // Spend is still recorded, so the shadow is accurate once someone listens.
+    expect(record).toHaveBeenCalledTimes(1);
   });
 });
