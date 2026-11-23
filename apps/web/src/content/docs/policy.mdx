@@ -9,6 +9,7 @@ Policy is data, not code: a small declarative schema the policy engine enforces 
 
 ```ts
 type Policy = {
+  $schema?: string; // optional; lets an editor find the JSON Schema, ignored by the engine
   policyVersion: 1; // required; 0 (unversioned) is migrated on parse
   mode?: "enforce" | "dry-run"; // default "enforce"
   budgets?: {
@@ -84,7 +85,19 @@ try {
 
 ### Editor autocompletion
 
-The schema is published as JSON Schema at [`packages/core/schema/policy.schema.json`](https://github.com/vegaforge/tollway/blob/dev/packages/core/schema/policy.schema.json) and importable as `@vegaforge/tollway-core/schema/policy.schema.json`. Point your editor at it to validate a policy file while you write it. The file is generated from `policySchema`; the test suite fails when it is stale.
+The schema is published as JSON Schema, with a description on every field, so an editor can validate a policy file and explain each field while you write it. The file is generated from `policySchema`, and the test suite fails when it is stale.
+
+There are two ways to point an editor at it. The first is a `$schema` line in the policy file, which the engine accepts and ignores:
+
+```json
+{
+  "$schema": "https://raw.githubusercontent.com/vegaforge/tollway/dev/packages/core/schema/policy.schema.json",
+  "policyVersion": 1,
+  "budgets": { "daily": "1000000000" }
+}
+```
+
+The second works offline and matches the version you installed: point the editor at the copy inside the package, `node_modules/@vegaforge/tollway-core/schema/policy.schema.json`. In VS Code, add it under `json.schemas` in your settings, with `fileMatch` set to your policy file's name. Code can also import it as `@vegaforge/tollway-core/schema/policy.schema.json`.
 
 ## What each field does
 
@@ -100,12 +113,13 @@ The schema is published as JSON Schema at [`packages/core/schema/policy.schema.j
 
 Every entry that matches a resource applies, and every one of them is charged when a payment is recorded. A narrower entry can tighten a broader one but never lift it: with `/api/` capped at 150 and `/api/quotes/` at 10000, total spend under `/api/` still stops at 150.
 
-Rolling-window accounting is approximate on purpose: a shared `RollingSum` accumulator bucketises time (default `windowMs / 60`), so memory per key is bounded to at most `ceil(windowMs / bucketMs) + 1` entries regardless of traffic. The accumulator may over-count by at most one bucket's worth of spend at the window edge and never under-counts, so a cap on top of it fails closed. Idle keys are evicted once their window drains. `windowSeconds` must be a whole number of seconds, at least 1, and every cap must be a base-unit integer string. `createPolicyEngine` refuses a policy that breaks either rule.
+Rolling-window accounting is approximate on purpose: a shared `RollingSum` accumulator bucketises time (default `windowMs / 60`), so memory per key is bounded to at most `ceil(windowMs / bucketMs) + 1` entries regardless of traffic. The accumulator may over-count by at most one bucket's worth of spend at the window edge and never under-counts, so a cap on top of it fails closed. Idle keys are evicted once their window drains. `windowSeconds` must be a whole number of seconds, at least 1, and every cap must be a base-unit integer string. `createPolicyEngine` refuses a policy that breaks either rule with a `PolicyValidationError` naming the field, for example `perService.GPAYEE.window.windowSeconds`.
 
 Examples of each cap kind:
 
 ```ts
 const policy: Policy = {
+  policyVersion: 1,
   perService: {
     // Lifetime: never more than 50 USDC to this payee, ever.
     GPAYEE: { cap: "500000000" },

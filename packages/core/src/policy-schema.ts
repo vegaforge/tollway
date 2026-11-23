@@ -19,7 +19,7 @@ export const POLICY_VERSION = 1;
 
 /** Where the committed JSON Schema lives, for editors and generated clients. */
 export const POLICY_SCHEMA_ID =
-  "https://github.com/vegaforge/tollway/blob/dev/packages/core/schema/policy.schema.json";
+  "https://raw.githubusercontent.com/vegaforge/tollway/dev/packages/core/schema/policy.schema.json";
 
 const integerString = z
   .string()
@@ -33,16 +33,90 @@ const rationalSchema = z.strictObject({
   denominator: positiveIntegerString,
 });
 
+/**
+ * A rolling window cap. `windowSeconds` is a whole number of seconds, at
+ * least 1: the trace carries it as an integer, and the accumulator needs a
+ * bucket of at least a millisecond. `z.number().int()` also limits it to
+ * safe integers.
+ */
+const windowCapSchema = z.strictObject({
+  windowSeconds: z
+    .number()
+    .int()
+    .min(1)
+    .meta({ description: "Length of the sliding window, in whole seconds (at least 1)." }),
+  cap: integerString.meta({ description: "Most spend allowed inside any one window." }),
+});
+
+/**
+ * The caps a `perService` or `perResource` entry can set. Both share this
+ * shape so the two stay in step.
+ */
+const capFields = {
+  /** Lifetime ceiling: it never resets. */
+  cap: integerString.meta({ description: "Lifetime ceiling. It never resets." }).optional(),
+  /** Ceiling per UTC day, reset at the same instant as `budgets.daily`. */
+  dailyCap: integerString
+    .meta({ description: "Ceiling per UTC day, reset at the same instant as budgets.daily." })
+    .optional(),
+  /**
+   * Sliding-window ceiling, for example 5 USDC per hour. Accounting is
+   * approximate to one accumulator bucket; see `RollingSum`.
+   */
+  window: windowCapSchema
+    .meta({
+      description:
+        "Sliding-window ceiling, for example 5 USDC per hour. May over-count by one accumulator bucket, never under-count.",
+    })
+    .optional(),
+};
+
+const perServiceEntrySchema = z.strictObject(capFields);
+
+const perResourceEntrySchema = z.strictObject({
+  ...capFields,
+  /**
+   * `exact` (the default) matches the resource string as the receipt
+   * carries it, query string included. `prefix` matches every resource that
+   * starts with the key, character by character. No regex or glob.
+   */
+  match: z
+    .enum(["exact", "prefix"])
+    .meta({
+      description:
+        "exact (the default) matches the resource string, query string included. prefix matches every resource starting with the key, character by character.",
+    })
+    .optional(),
+});
+
 const adaptiveAnomalySchema = z
   .strictObject({
     kind: z.literal("ewma"),
-    smoothing: rationalSchema,
-    sensitivity: rationalSchema,
+    /** Weight of the newest minute in the baseline, at most one. */
+    smoothing: rationalSchema.meta({
+      description: "Weight of the newest minute in the baseline, a rational no greater than one.",
+    }),
+    /** How many deviations above the baseline a minute may reach. */
+    sensitivity: rationalSchema.meta({
+      description: "How many deviations above the baseline a minute's spend may reach.",
+    }),
     /** Number of completed minute buckets before this rule can block. */
-    warmupPeriods: z.number().int().positive(),
-    scope: z.enum(["asset", "asset-payee"]).optional(),
+    warmupPeriods: z
+      .number()
+      .int()
+      .positive()
+      .meta({ description: "Completed minute buckets before this rule can block." }),
+    /** Whether one baseline covers an asset, or each asset and payee pair. */
+    scope: z
+      .enum(["asset", "asset-payee"])
+      .meta({ description: "One baseline per asset (the default), or per asset and payee." })
+      .optional(),
     /** Maximum increase allowed when a completed bucket trains the baseline. */
-    maxBaselineGrowthPerMinute: integerString.optional(),
+    maxBaselineGrowthPerMinute: integerString
+      .meta({
+        description: "Largest increase allowed when a completed bucket trains the baseline.",
+      })
+      .optional(),
   })
   .superRefine((value, ctx) => {
     if (BigInt(value.smoothing.numerator) > BigInt(value.smoothing.denominator)) {
@@ -55,33 +129,95 @@ const adaptiveAnomalySchema = z
   });
 
 const perModelSchema = z.strictObject({
-  enabled: z.boolean().optional(),
-  minChannelDeposit: integerString.optional(),
+  /** Allows or refuses this settlement model outright. */
+  enabled: z.boolean().meta({ description: "Allows or refuses this settlement model." }).optional(),
+  /** Channel mode only makes sense above a minimum deposit. */
+  minChannelDeposit: integerString
+    .meta({ description: "Smallest channel deposit allowed. Channel mode only." })
+    .optional(),
 });
 
-/** The versioned policy file. Parse external input with {@link parsePolicy}. */
+/**
+ * The versioned policy file. Parse external input with {@link parsePolicy}.
+ * All amounts are integer strings in the asset's smallest unit, the same as
+ * receipts.
+ */
 export const policySchema = z.strictObject({
-  policyVersion: z.literal(POLICY_VERSION),
-  mode: z.enum(policyModes).optional(),
-  budgets: z
-    .strictObject({
-      daily: integerString.optional(),
-      total: integerString.optional(),
+  /**
+   * The JSON Schema an editor should validate this file against. Allowed so a
+   * policy file can name {@link POLICY_SCHEMA_ID}; the engine ignores it.
+   */
+  $schema: z
+    .string()
+    .meta({ description: "The JSON Schema an editor validates this file against. Ignored." })
+    .optional(),
+  /** The format version. Unversioned documents are migrated by {@link parsePolicy}. */
+  policyVersion: z
+    .literal(POLICY_VERSION)
+    .meta({ description: "The policy format version. Unversioned documents are version 0." }),
+  /**
+   * `enforce` (the default) blocks a payment when a rule fails. `dry-run`
+   * allows it and only marks the would-be block in the trace. Spend is
+   * recorded the same way in both modes, so budgets stay real.
+   */
+  mode: z
+    .enum(policyModes)
+    .meta({
+      description:
+        "enforce (the default) blocks a payment when a rule fails. dry-run allows it and marks the would-be block in the trace.",
     })
     .optional(),
-  perService: z
-    .record(z.string().min(1), z.strictObject({ cap: integerString.optional() }))
+  budgets: z
+    .strictObject({
+      /** Spend ceiling per UTC day. */
+      daily: integerString.meta({ description: "Spend ceiling per UTC day." }).optional(),
+      /** Lifetime ceiling for this policy. */
+      total: integerString.meta({ description: "Lifetime ceiling for this policy." }).optional(),
+    })
     .optional(),
-  perModel: z.partialRecord(z.enum(settlementModels), perModelSchema).optional(),
+  /** Caps per counterparty service, keyed by the payee address or service id. */
+  perService: z
+    .record(z.string().min(1), perServiceEntrySchema)
+    .meta({ description: "Caps per counterparty service, keyed by payee address or service id." })
+    .optional(),
+  /**
+   * Caps per resource, keyed by the resource string or a prefix of it. Every
+   * entry that matches a resource applies and is charged, so a narrower
+   * entry can tighten a broader one but never lift it.
+   */
+  perResource: z
+    .record(z.string().min(1), perResourceEntrySchema)
+    .meta({
+      description:
+        "Caps per resource. Every matching entry applies and is charged, so a narrower entry can tighten a broader one but never lift it.",
+    })
+    .optional(),
+  /** Rules per settlement model. */
+  perModel: z
+    .partialRecord(z.enum(settlementModels), perModelSchema)
+    .meta({ description: "Rules per settlement model." })
+    .optional(),
   rateLimit: z
     .strictObject({
-      requestsPerMinute: z.number().int().nonnegative().optional(),
+      /** Most payments allowed in any sliding minute. */
+      requestsPerMinute: z
+        .number()
+        .int()
+        .nonnegative()
+        .meta({ description: "Most payments allowed in any sliding minute." })
+        .optional(),
     })
     .optional(),
   anomaly: z
     .strictObject({
-      maxSpendPerMinute: integerString.optional(),
-      adaptive: adaptiveAnomalySchema.optional(),
+      /** Trips the anomaly stop when spend in any minute exceeds this. */
+      maxSpendPerMinute: integerString
+        .meta({ description: "Trips the anomaly stop when spend in any minute exceeds this." })
+        .optional(),
+      /** An explainable EWMA detector over committed per-minute spend. */
+      adaptive: adaptiveAnomalySchema
+        .meta({ description: "An explainable EWMA detector over committed per-minute spend." })
+        .optional(),
     })
     .optional(),
 });

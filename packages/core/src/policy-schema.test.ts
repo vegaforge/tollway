@@ -4,6 +4,8 @@ import { fileURLToPath } from "node:url";
 import { describe, expect, it } from "vitest";
 import { createPolicyEngine } from "./policy.js";
 import {
+  formatPolicyIssues,
+  POLICY_SCHEMA_ID,
   POLICY_VERSION,
   PolicyValidationError,
   parsePolicy,
@@ -47,6 +49,32 @@ describe("policySchema", () => {
     });
     expect(result.ok).toBe(true);
     if (result.ok) expect(policySchema.parse(result.policy)).toEqual(result.policy);
+  });
+
+  it("accepts every issue #192 cap kind", () => {
+    const result = parsePolicy({
+      policyVersion: POLICY_VERSION,
+      perService: {
+        GSERVICE: { cap: "1000", dailyCap: "500", window: { windowSeconds: 3600, cap: "100" } },
+      },
+      perResource: {
+        "/api/": {
+          match: "prefix",
+          cap: "900",
+          dailyCap: "400",
+          window: { windowSeconds: 60, cap: "50" },
+        },
+        "/api/quotes": { match: "exact", cap: "10" },
+        "/health": { dailyCap: "1" },
+      },
+    });
+    if (!result.ok) throw new Error(formatPolicyIssues(result.issues));
+    expect(() => createPolicyEngine(result.policy)).not.toThrow();
+  });
+
+  it("accepts a $schema line so editors can find the JSON Schema", () => {
+    const result = parsePolicy({ $schema: POLICY_SCHEMA_ID, policyVersion: POLICY_VERSION });
+    expect(result.ok).toBe(true);
   });
 
   it.each([
