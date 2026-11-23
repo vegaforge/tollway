@@ -328,7 +328,54 @@ export function createInMemoryServicePolicyStore(
       };
       return { allowed: true, reservation };
     },
-    async commit() {},
-    async release() {},
+
+    async commit(reservation) {
+      const state = payers.get(reservation.payer);
+      if (!state) return;
+      moveToEnd(reservation.payer, state);
+
+      if (
+        reservation.requestWindowStart !== undefined &&
+        state.requests.start === reservation.requestWindowStart
+      ) {
+        if (state.requests.pending > 0) state.requests.pending -= 1;
+        state.requests.used += 1;
+      }
+
+      const window = state.spend.get(reservation.asset);
+      if (
+        window &&
+        reservation.spendWindowStart !== undefined &&
+        window.start === reservation.spendWindowStart &&
+        window.pending >= reservation.amount
+      ) {
+        window.pending -= reservation.amount;
+        window.used += reservation.amount;
+      }
+    },
+
+    async release(reservation) {
+      const state = payers.get(reservation.payer);
+      if (!state) return;
+      moveToEnd(reservation.payer, state);
+
+      if (
+        reservation.requestWindowStart !== undefined &&
+        state.requests.start === reservation.requestWindowStart &&
+        state.requests.pending > 0
+      ) {
+        state.requests.pending -= 1;
+      }
+
+      const window = state.spend.get(reservation.asset);
+      if (
+        window &&
+        reservation.spendWindowStart !== undefined &&
+        window.start === reservation.spendWindowStart &&
+        window.pending >= reservation.amount
+      ) {
+        window.pending -= reservation.amount;
+      }
+    },
   };
 }

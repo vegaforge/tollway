@@ -7,5 +7,4 @@ export default defineConfig({
   sourcemap: true,
   clean: true,
   external: ["fastify"],
-  // Explicitly documented as a peer; keep fastify out of the bundle.
 });
