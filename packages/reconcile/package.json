@@ -34,7 +34,7 @@
   },
   "devDependencies": {
     "fast-check": "^4.10.3",
-    "tsup": "^8.5.1",
+    "tsup": "^9.0.0",
     "typescript": "^5.9.3",
     "vitest": "^4.1.12"
   },
