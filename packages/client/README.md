@@ -61,6 +61,12 @@ The settler classifies each failure, and `pay()` acts on the class:
 | The payment may have landed (a 5xx after the signed request, a dropped connection, or a 409 without `Retry-After`). | Never retries. Rejects with `AmbiguousSettlementError` (code `outcome-unknown`). |
 | Anything else. | Rejects at once. |
 
+Two consequences are deliberate. A 429 from the service's own rate limit is
+"anything else": `pay()` rejects at once and leaves waiting to the caller. A
+5xx the service returns before settling, such as a failure to price the
+request, still reads as ambiguous, because the client cannot tell it from a
+failure after settling. Both err toward never paying twice.
+
 Signing again after an ambiguous outcome is how a payer gets charged twice:
 the first transaction may already be on chain, and only the answer was lost.
 Reconcile against the chain or the receipt store before paying again.
