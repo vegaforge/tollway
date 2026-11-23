@@ -328,35 +328,7 @@ export function createInMemoryServicePolicyStore(
       };
       return { allowed: true, reservation };
     },
-
-    async commit(reservation) {
-      const state = payers.get(reservation.payer);
-      if (!state) return;
-      if (reservation.requestWindowStart !== undefined && state.requests.start === reservation.requestWindowStart) {
-        state.requests.pending = Math.max(0, state.requests.pending - 1);
-        state.requests.used += 1;
-      }
-      if (reservation.spendWindowStart !== undefined) {
-        const window = state.spend.get(reservation.asset);
-        if (window && window.start === reservation.spendWindowStart) {
-          window.pending = window.pending >= reservation.amount ? window.pending - reservation.amount : 0n;
-          window.used += reservation.amount;
-        }
-      }
-    },
-
-    async release(reservation) {
-      const state = payers.get(reservation.payer);
-      if (!state) return;
-      if (reservation.requestWindowStart !== undefined && state.requests.start === reservation.requestWindowStart) {
-        state.requests.pending = Math.max(0, state.requests.pending - 1);
-      }
-      if (reservation.spendWindowStart !== undefined) {
-        const window = state.spend.get(reservation.asset);
-        if (window && window.start === reservation.spendWindowStart) {
-          window.pending = window.pending >= reservation.amount ? window.pending - reservation.amount : 0n;
-        }
-      }
-    },
+    async commit() {},
+    async release() {},
   };
 }

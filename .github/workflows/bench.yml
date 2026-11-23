@@ -21,6 +21,7 @@ on:
       - "packages/core/**"
       - "packages/adapter-*/**"
       - "packages/bench/**"
+      - "packages/service/**"
       - "scripts/bench-compare.sh"
       - ".github/workflows/bench.yml"
 
@@ -69,13 +70,16 @@ jobs:
             head/pnpm-lock.yaml
             base/pnpm-lock.yaml
 
+      # The base checkout is the pre-change tree and its lockfile does not
+      # contain packages/service, so the base install must not be frozen
+      # against the head's manifest set. The head install stays frozen.
       - name: Install (head)
         working-directory: head
         run: pnpm install --frozen-lockfile
 
       - name: Install (base)
         working-directory: base
-        run: pnpm install --frozen-lockfile
+        run: pnpm install --no-frozen-lockfile
 
       # Builds both trees, runs the head's suite against each build for up to
       # three rounds, and appends the comparison table to the job summary.
