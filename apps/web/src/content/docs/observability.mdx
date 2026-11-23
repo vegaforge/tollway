@@ -92,7 +92,17 @@ There is no SQL store in `@vegaforge/tollway-observability` yet; it is tracked i
 
 ## Exports and webhooks
 
-`hub.export("json" | "csv", query?)` serializes the matching metrics. `hub.on(event, handler)` and `hub.addWebhook({ url, events? })` subscribe to webhook events, which `hub.emit(event)` delivers with retries and reports in a `DeliveryReport`.
+`hub.export("json" | "csv", query?)` serializes the matching metrics. `hub.on(event, handler)` and `hub.addWebhook({ url, events?, secret? })` subscribe to webhook events, which `hub.emit(event)` delivers with retries and reports in a `DeliveryReport`.
+
+Every event carries a stable `id` assigned at emit time. Each request includes `Tollway-Event-Id`, and a subscription with a `secret` also gets a `Tollway-Signature` header that covers the exact body. Export `verifyWebhookSignature` from the package to check it on the receiving side, rejecting forged bodies and replayed timestamps.
+
+### Durable delivery
+
+Pass an `outbox` to `createObservabilityHub` to persist each delivery instead of POSTing inside `emit`. `createSqliteWebhookOutbox({ filename })` survives a restart; `createMemoryWebhookOutbox()` keeps rows in process for tests. Call `hub.startDispatcher()` to deliver with jittered exponential backoff under a lease, and `hub.stop()` to wait for in-flight attempts on shutdown.
+
+Delivery is **at-least-once**, and ordering is not guaranteed. Receivers dedupe on `Tollway-Event-Id`, and each attempt carries its own `Tollway-Delivery-Id`. A delivery that exhausts `maxAttempts` moves to a dead-letter state: list it with `outbox.listDeadLetters()` and re-enqueue it with `outbox.replay(deliveryId)`, which resets attempts and issues a fresh delivery id. Rows store the subscription id, never the secret, so the same subscriptions must be registered again after a restart.
+
+The full workflow, including the header format and a receiver example, is in [`docs/webhook-delivery.md`](https://github.com/vegaforge/tollway/blob/main/docs/webhook-delivery.md).
 
 ## Reference
 
