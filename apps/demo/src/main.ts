@@ -1,3 +1,4 @@
+import { FacilitatorCheckError } from "@vegaforge/tollway-server";
 import { DemoConfigError } from "./config.js";
 import { runDemo } from "./demo.js";
 
@@ -6,6 +7,10 @@ async function main(): Promise<void> {
 
   console.log(`Tollway x402 demo (${result.mock ? "MOCK_MODE" : "live facilitator"})`);
   console.log("");
+  if (result.facilitatorCheck?.status === "ok") {
+    console.log("0. Facilitator supports the paywall (checked against /supported)");
+    console.log("   /supported does not list assets; the asset is confirmed at /verify");
+  }
   console.log(`1. Agent requests ${result.challenge.resource}`);
   console.log(
     `   Service answers 402, asking ${result.challenge.amount} ${result.challenge.asset}`,
@@ -36,6 +41,10 @@ main().catch((error: unknown) => {
     for (const problem of error.problems) {
       console.error(`  - ${problem}`);
     }
+  } else if (error instanceof FacilitatorCheckError) {
+    // The facilitator cannot settle this paywall as configured: name each
+    // mismatch instead of printing a stack trace.
+    console.error(`The facilitator check failed before serving: ${error.message}`);
   } else {
     console.error("Demo failed:", error);
   }

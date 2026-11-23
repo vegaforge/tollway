@@ -294,7 +294,7 @@ describe("createClient returns only signed receipt fields", () => {
     const padded = {
       ...baselineReceipt,
       receipt: { ...baselineReceipt.receipt, refunded: "true" },
-    } as SignedReceipt;
+    } as unknown as SignedReceipt;
     const client = createClient({ network: "testnet", settler: mockSettler(padded), verifier });
     await expect(client.pay({ resource: OFFER.resource, offer: OFFER })).rejects.toBeInstanceOf(
       ReceiptVerificationError,
@@ -602,7 +602,10 @@ describe("createClient shadow policy", () => {
   });
 
   it("reports a failing candidate as policy:shadow-error and pays anyway", async () => {
-    const shadow = createPolicyEngine({ budgets: { daily: "not-a-number" } });
+    const shadow = createPolicyEngine({ budgets: { daily: "100000" } });
+    vi.spyOn(shadow, "evaluate").mockRejectedValue(
+      new TollwayError("invalid-amount", "invalid amount: not-a-number"),
+    );
     const settler = mockSettler();
     const events: ClientEvent[] = [];
     const client = createClient({ network: "testnet", settler, shadow });

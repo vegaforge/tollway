@@ -1,0 +1,279 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://raw.githubusercontent.com/vegaforge/tollway/dev/packages/core/schema/policy.schema.json",
+  "title": "Tollway policy",
+  "description": "A Tollway policy document. Amounts are integer strings in the asset's smallest unit.",
+  "type": "object",
+  "properties": {
+    "$schema": {
+      "type": "string",
+      "description": "The JSON Schema an editor validates this file against. Ignored."
+    },
+    "policyVersion": {
+      "type": "number",
+      "const": 1,
+      "description": "The policy format version. Unversioned documents are version 0."
+    },
+    "mode": {
+      "type": "string",
+      "enum": ["enforce", "dry-run"],
+      "description": "enforce (the default) blocks a payment when a rule fails. dry-run allows it and marks the would-be block in the trace."
+    },
+    "budgets": {
+      "type": "object",
+      "properties": {
+        "daily": {
+          "type": "string",
+          "pattern": "^[0-9]+$",
+          "description": "Spend ceiling per UTC day."
+        },
+        "total": {
+          "type": "string",
+          "pattern": "^[0-9]+$",
+          "description": "Lifetime ceiling for this policy."
+        }
+      },
+      "additionalProperties": false
+    },
+    "perService": {
+      "type": "object",
+      "propertyNames": {
+        "type": "string",
+        "minLength": 1
+      },
+      "additionalProperties": {
+        "type": "object",
+        "properties": {
+          "cap": {
+            "type": "string",
+            "pattern": "^[0-9]+$",
+            "description": "Lifetime ceiling. It never resets."
+          },
+          "dailyCap": {
+            "type": "string",
+            "pattern": "^[0-9]+$",
+            "description": "Ceiling per UTC day, reset at the same instant as budgets.daily."
+          },
+          "window": {
+            "type": "object",
+            "properties": {
+              "windowSeconds": {
+                "type": "integer",
+                "minimum": 1,
+                "maximum": 9007199254740991,
+                "description": "Length of the sliding window, in whole seconds (at least 1)."
+              },
+              "cap": {
+                "type": "string",
+                "pattern": "^[0-9]+$",
+                "description": "Most spend allowed inside any one window."
+              }
+            },
+            "required": ["windowSeconds", "cap"],
+            "additionalProperties": false,
+            "description": "Sliding-window ceiling, for example 5 USDC per hour. May over-count by one accumulator bucket, never under-count."
+          }
+        },
+        "additionalProperties": false
+      },
+      "description": "Caps per counterparty service, keyed by payee address or service id."
+    },
+    "perResource": {
+      "type": "object",
+      "propertyNames": {
+        "type": "string",
+        "minLength": 1
+      },
+      "additionalProperties": {
+        "type": "object",
+        "properties": {
+          "cap": {
+            "type": "string",
+            "pattern": "^[0-9]+$",
+            "description": "Lifetime ceiling. It never resets."
+          },
+          "dailyCap": {
+            "type": "string",
+            "pattern": "^[0-9]+$",
+            "description": "Ceiling per UTC day, reset at the same instant as budgets.daily."
+          },
+          "window": {
+            "type": "object",
+            "properties": {
+              "windowSeconds": {
+                "type": "integer",
+                "minimum": 1,
+                "maximum": 9007199254740991,
+                "description": "Length of the sliding window, in whole seconds (at least 1)."
+              },
+              "cap": {
+                "type": "string",
+                "pattern": "^[0-9]+$",
+                "description": "Most spend allowed inside any one window."
+              }
+            },
+            "required": ["windowSeconds", "cap"],
+            "additionalProperties": false,
+            "description": "Sliding-window ceiling, for example 5 USDC per hour. May over-count by one accumulator bucket, never under-count."
+          },
+          "match": {
+            "type": "string",
+            "enum": ["exact", "prefix"],
+            "description": "exact (the default) matches the resource string, query string included. prefix matches every resource starting with the key, character by character."
+          }
+        },
+        "additionalProperties": false
+      },
+      "description": "Caps per resource. Every matching entry applies and is charged, so a narrower entry can tighten a broader one but never lift it."
+    },
+    "perModel": {
+      "type": "object",
+      "propertyNames": {
+        "type": "string",
+        "enum": ["x402", "mpp-charge", "mpp-channel"]
+      },
+      "additionalProperties": {
+        "type": "object",
+        "properties": {
+          "enabled": {
+            "type": "boolean",
+            "description": "Allows or refuses this settlement model."
+          },
+          "minChannelDeposit": {
+            "type": "string",
+            "pattern": "^[0-9]+$",
+            "description": "Smallest channel deposit allowed. Channel mode only."
+          }
+        },
+        "additionalProperties": false
+      },
+      "description": "Rules per settlement model."
+    },
+    "rateLimit": {
+      "type": "object",
+      "properties": {
+        "requestsPerMinute": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 9007199254740991,
+          "description": "Most counted events in any sliding minute. Shorthand for one 60 second window; do not combine with windows."
+        },
+        "windows": {
+          "minItems": 1,
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "windowSeconds": {
+                "type": "integer",
+                "minimum": 1,
+                "maximum": 9007199254740991,
+                "description": "Length of the sliding window, in whole seconds (at least 1)."
+              },
+              "limit": {
+                "type": "integer",
+                "minimum": 0,
+                "maximum": 9007199254740991,
+                "description": "Most counted events allowed inside any one window."
+              }
+            },
+            "required": ["windowSeconds", "limit"],
+            "additionalProperties": false
+          },
+          "description": "One or more sliding windows, all applied together, for example 60 per minute and 1000 per hour."
+        },
+        "count": {
+          "type": "string",
+          "enum": ["settlements", "attempts"],
+          "description": "settlements (the default) counts settled payments. attempts counts every payment the client sends, including failed ones."
+        },
+        "scope": {
+          "type": "string",
+          "enum": ["global", "per-counterparty"],
+          "description": "global (the default) shares one count across every payee. per-counterparty keeps a count per payee address."
+        },
+        "perCounterpartyKeyLimit": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 9007199254740991,
+          "description": "Most payees tracked at once under per-counterparty scope (default 1024). When all are active, a new payee is refused until one goes idle."
+        }
+      },
+      "additionalProperties": false,
+      "description": "Agent-side rate limit: what is counted, over which sliding windows, and per which scope."
+    },
+    "anomaly": {
+      "type": "object",
+      "properties": {
+        "maxSpendPerMinute": {
+          "type": "string",
+          "pattern": "^[0-9]+$",
+          "description": "Trips the anomaly stop when spend in any minute exceeds this."
+        },
+        "adaptive": {
+          "type": "object",
+          "properties": {
+            "kind": {
+              "type": "string",
+              "const": "ewma"
+            },
+            "smoothing": {
+              "type": "object",
+              "properties": {
+                "numerator": {
+                  "type": "string",
+                  "pattern": "^[1-9][0-9]*$"
+                },
+                "denominator": {
+                  "type": "string",
+                  "pattern": "^[1-9][0-9]*$"
+                }
+              },
+              "required": ["numerator", "denominator"],
+              "additionalProperties": false,
+              "description": "Weight of the newest minute in the baseline, a rational no greater than one."
+            },
+            "sensitivity": {
+              "type": "object",
+              "properties": {
+                "numerator": {
+                  "type": "string",
+                  "pattern": "^[1-9][0-9]*$"
+                },
+                "denominator": {
+                  "type": "string",
+                  "pattern": "^[1-9][0-9]*$"
+                }
+              },
+              "required": ["numerator", "denominator"],
+              "additionalProperties": false,
+              "description": "How many deviations above the baseline a minute's spend may reach."
+            },
+            "warmupPeriods": {
+              "type": "integer",
+              "exclusiveMinimum": 0,
+              "maximum": 9007199254740991,
+              "description": "Completed minute buckets before this rule can block."
+            },
+            "scope": {
+              "type": "string",
+              "enum": ["asset", "asset-payee"],
+              "description": "One baseline per asset (the default), or per asset and payee."
+            },
+            "maxBaselineGrowthPerMinute": {
+              "type": "string",
+              "pattern": "^[0-9]+$",
+              "description": "Largest increase allowed when a completed bucket trains the baseline."
+            }
+          },
+          "required": ["kind", "smoothing", "sensitivity", "warmupPeriods"],
+          "additionalProperties": false,
+          "description": "An explainable EWMA detector over committed per-minute spend."
+        }
+      },
+      "additionalProperties": false
+    }
+  },
+  "required": ["policyVersion"],
+  "additionalProperties": false
+}

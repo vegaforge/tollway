@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { TollwayError } from "./errors.js";
-import { createPolicyEngine, type PaymentIntent, type Policy } from "./policy.js";
+import { createPolicyEngine, type PaymentIntent, type Policy, type PolicyInput } from "./policy.js";
+import { PolicyValidationError } from "./policy-schema.js";
 import {
   comparePolicyTraces,
   decisionFromTrace,
@@ -31,7 +32,7 @@ function entry(trace: PolicyTrace, id: PolicyRuleId): PolicyTraceEntry {
   return found;
 }
 
-function engine(policy: Policy) {
+function engine(policy: PolicyInput) {
   return createPolicyEngine(policy, { clock: () => NOW });
 }
 
@@ -138,7 +139,10 @@ describe("per-model-disabled trace", () => {
 });
 
 describe("min-channel-deposit trace", () => {
-  const policy: Policy = { perModel: { "mpp-channel": { minChannelDeposit: "200" } } };
+  const policy: Policy = {
+    policyVersion: 1,
+    perModel: { "mpp-channel": { minChannelDeposit: "200" } },
+  };
 
   it("passes a deposit at the minimum", async () => {
     const trace = await engine(policy).evaluate(intent({ model: "mpp-channel", amount: "200" }));
@@ -296,7 +300,7 @@ describe("rate-limit trace", () => {
     const trace = await e.evaluate(intent());
     expect(entry(trace, "rate-limit")).toMatchObject({
       outcome: "fail",
-      detail: "rate limit exceeded: 1 requests in the last 60 seconds (limit 1)",
+      detail: "global rate limit exceeded: 1 settled payments in the last 60 seconds, limit 1",
     });
   });
 
@@ -305,10 +309,8 @@ describe("rate-limit trace", () => {
     expect(entry(trace, "rate-limit")).toMatchObject({ configured: false });
   });
 
-  it("refuses a fractional limit instead of rounding it", async () => {
-    await expect(
-      engine({ rateLimit: { requestsPerMinute: 2.5 } }).evaluate(intent()),
-    ).rejects.toMatchObject({ code: "invalid-policy" });
+  it("refuses a fractional limit at construction instead of rounding it", () => {
+    expect(() => engine({ rateLimit: { requestsPerMinute: 2.5 } })).toThrow(PolicyValidationError);
   });
 });
 
@@ -353,6 +355,11 @@ describe("evaluation after an earlier failure", () => {
       ["budget-daily", "fail"],
       ["budget-total", "pass"],
       ["per-service", "fail"],
+      ["per-service-daily", "not-applicable"],
+      ["per-service-window", "not-applicable"],
+      ["per-resource", "not-applicable"],
+      ["per-resource-daily", "not-applicable"],
+      ["per-resource-window", "not-applicable"],
       ["rate-limit", "pass"],
       ["anomaly", "pass"],
       ["anomaly-adaptive", "not-applicable"],
@@ -406,9 +413,17 @@ describe("dry-run mode", () => {
   });
 
   it("refuses an unknown mode from untyped input instead of guessing", () => {
-    const fromJson: Policy = JSON.parse('{"mode":"dryrun"}');
+    const fromJson: Policy = JSON.parse('{"policyVersion":1,"mode":"dryrun"}');
     expect(() => engine(fromJson)).toThrow(TollwayError);
-    expect(() => engine(fromJson)).toThrow(/unknown policy mode/);
+    expect(() => engine(fromJson)).toThrow(PolicyValidationError);
+    try {
+      engine(fromJson);
+      expect.fail("should have thrown");
+    } catch (error) {
+      expect((error as PolicyValidationError).issues).toEqual([
+        { path: ["mode"], message: expect.any(String) },
+      ]);
+    }
   });
 });
 
@@ -480,6 +495,7 @@ describe("check agrees with the trace (property)", () => {
 
   function randomPolicy(): Policy {
     return {
+      policyVersion: 1,
       budgets: { daily: maybe(amount), total: maybe(amount) },
       perService: { [pick(payees)]: { cap: maybe(amount) } },
       perModel: {

@@ -148,6 +148,25 @@ const facilitator = createHttpFacilitator(url, {
 
 Use a separate key per environment, keep it in the secret manager, and rotate it by deploying the new value; the callback is read per request, so no restart dance is needed beyond the deploy itself.
 
+### Checking capabilities at startup
+
+Run the capability check before the service starts serving. It reads the facilitator's `/supported` and compares every paywall with it: x402 version 2, the `exact` scheme on the paywall's network (or `stellar:*`), the paywall's `extra.areFeesSponsored` against the facilitator's, a contract-address `asset` and a valid `payTo`.
+
+```ts
+import { createFacilitatorValidator } from "@vegaforge/tollway-server";
+
+const validator = createFacilitatorValidator(facilitator, { mode: "fail" });
+await validator.check({ "GET /quotes": quotesPaywall, "GET /report": reportPaywall });
+```
+
+- `fail`, the default, throws a `FacilitatorCheckError` that names the route, the field, the expected and the advertised value of every mismatch. Its `code` is `facilitator-unsupported`, or `facilitator-unavailable` when `/supported` cannot be read; an unreachable facilitator is never treated as supporting everything.
+- `warn` passes the report to `onWarn` and lets the service start. Use it while a facilitator deploy is rolling out.
+- `off` skips the check.
+
+The result is cached for `ttlMs` (one minute by default). Call `check` again on a timer, or `refresh()` first, to notice a facilitator deploy that drops a network without restarting. The demo's live mode runs this check before it serves.
+
+x402 `/supported` does not advertise assets. It lists versions, schemes and networks, not tokens, so the check cannot tell you whether the facilitator accepts your asset. That is only confirmed by the first `/verify`. The check covers x402 only: MPP charge settles without a facilitator.
+
 ### Timeouts
 
 - `maxTimeoutSeconds` is how long an x402 authorization stays valid. It defaults to 60 in both `createHttpFacilitator` and `PaywallConfig`, and the same value must go into the challenge, so set it in both places (the sample reads one environment value for both).

@@ -729,14 +729,17 @@ importers:
         specifier: ^2.31.0
         version: 2.31.0
       '@x402/extensions':
-        specifier: ^2.31.0
-        version: 2.32.0(mppx@0.8.19)(typescript@5.9.3)
+        specifier: ~2.31.0
+        version: 2.31.0(mppx@0.8.19)(typescript@5.9.3)
       '@x402/stellar':
         specifier: ^2.31.0
         version: 2.31.0
       mppx:
         specifier: 0.8.19
         version: 0.8.19(express@5.3.0)(hono@4.13.19)(typescript@5.9.3)(viem@2.58.1)
+      zod:
+        specifier: ^4.6.7
+        version: 4.6.7
     devDependencies:
       '@types/ioredis-mock':
         specifier: ^8.2.8
@@ -2846,11 +2849,8 @@ packages:
   '@x402/core@2.31.0':
     resolution: {integrity: sha512-7ToCOwHfftfFEERW5Mp6Fc5U1+JrtCLTkbQnEVsBl13IutltP9lWIBYi/J+zy8vQWaLUmACq8A2qywzdt/RRIQ==}
 
-  '@x402/core@2.32.0':
-    resolution: {integrity: sha512-HyS8vbaR3XP79EIATKGMt8eL0Ql46yrfVDrtv1Inmlx4qJl4NU61cJmTh/pSGOCJIeb7ETNhWR/GQ4XsWZcQIA==}
-
-  '@x402/extensions@2.32.0':
-    resolution: {integrity: sha512-bvhqNqCjmULkjCpjM1fJvDfoL8tzp1IFcMTXN7QJTwqM22ucNe8B4UefKeQOCpjJ3tuIEbp8k9A0fR0CiYtjrQ==}
+  '@x402/extensions@2.31.0':
+    resolution: {integrity: sha512-hFq11UtXNWPirZSZjZuWFHvjetYvFQmkQSZcNEMaQYxOz70ZLNFmIdXfG2J/B8YGE2nS2d223Hz9Lnkrxw+Sqw==}
 
   '@x402/stellar@2.31.0':
     resolution: {integrity: sha512-UCohyXXxTdcvnhU2YrELCMj0WATzgLwAZk2gAe3ewDA5pp0m1M+ndw/bJoHFvJ9vs/5WpKUOukKwwzhLxC5Pcg==}
@@ -7158,16 +7158,12 @@ snapshots:
     dependencies:
       zod: 4.6.7
 
-  '@x402/core@2.32.0':
-    dependencies:
-      zod: 4.6.7
-
-  '@x402/extensions@2.32.0(mppx@0.8.19)(typescript@5.9.3)':
+  '@x402/extensions@2.31.0(mppx@0.8.19)(typescript@5.9.3)':
     dependencies:
       '@noble/curves': 1.9.7
       '@scure/base': 1.2.6
       '@signinwithethereum/siwe': 4.2.1(viem@2.58.1)
-      '@x402/core': 2.32.0
+      '@x402/core': 2.31.0
       ajv: 8.20.0
       jose: 5.10.0
       tweetnacl: 1.0.3

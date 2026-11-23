@@ -1,0 +1,5 @@
+---
+"@vegaforge/tollway-core": minor
+---
+
+Rolling-window and per-resource spending caps (#192). The `Policy` schema gained `perService[payee].dailyCap`, `perService[payee].window = { windowSeconds, cap }`, and a new `perResource` section with the same three kinds (`cap`, `dailyCap`, `window`) plus an optional `match: "exact" | "prefix"`; every matching entry applies and is charged. `createPolicyEngine` validates these caps when it is created. Windowed caps are backed by a new exported `RollingSum` accumulator with bucketed, bounded-memory storage: at most `ceil(windowMs / bucketMs) + 1` buckets per key, over-counts by at most one bucket's worth of spend at the window edge, never under-counts so caps fail closed. The `policyRuleIds` and `policyRuleNames` enums gained `per-service-daily`, `per-service-window`, `per-resource`, `per-resource-daily`, and `per-resource-window`; existing traces that didn't declare these rules still parse, and the engine reports them as `not-applicable` when the policy doesn't configure them.
