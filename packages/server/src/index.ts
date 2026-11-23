@@ -96,6 +96,11 @@ export {
   TOLLWAY_RECEIPT_HEADER,
 } from "./headers.js";
 export {
+  type KeySetResponse,
+  type KeySetResponseOptions,
+  renderKeySetResponse,
+} from "./key-set-response.js";
+export {
   createMockMppChargeHandler,
   createMppChargeHandler,
   deriveMppChargeNonce,

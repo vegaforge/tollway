@@ -51,16 +51,46 @@ export {
 } from "./policy-trace.js";
 export { canonicalBytes, canonicalJson, type JsonValue } from "./receipt/canonical.js";
 export {
+  derToP1363,
+  ECDSA_P256_ALG,
+  EcdsaP256Signer,
+  EcdsaP256Verifier,
+  normaliseLowS,
+  type P256PublicJwk,
+  p1363ToBase64Url,
+} from "./receipt/ecdsa.js";
+export {
+  createKeySetVerifier,
+  ed25519KeyEntrySchema,
+  type KeySetDocument,
+  type KeySetEntry,
+  type KeySetFetcher,
+  type KeySetVerifier,
+  type KeySetVerifierOptions,
+  keySetDocumentSchema,
+  keySetEntrySchema,
+  p256KeyEntrySchema,
+  parseKeySetDocument,
+  RECEIPT_ALGORITHMS,
+  type ReceiptAlgorithm,
+} from "./receipt/key-set.js";
+export {
   type BuildReceiptInput,
   buildReceipt,
+  hashOffer,
   type ReceiptVerification,
   signReceipt,
+  type VerifyReceiptOptions,
   verifyReceipt,
 } from "./receipt/receipt.js";
 export {
   type ReceiptBody,
+  type ReceiptBodyV1,
+  type ReceiptBodyV2,
   type ReceiptSignature,
   receiptBodySchema,
+  receiptBodyV1Schema,
+  receiptBodyV2Schema,
   receiptSignatureSchema,
   type SettlementRef,
   type SignedReceipt,
@@ -70,8 +100,11 @@ export {
 export {
   Ed25519Signer,
   Ed25519Verifier,
+  type PublicJwk,
   type ReceiptSigner,
   type ReceiptVerifier,
+  type SignatureCheck,
+  type SignatureInput,
 } from "./receipt/signer.js";
 export { RollingSum, type RollingSumOptions } from "./rolling-sum.js";
 export {
