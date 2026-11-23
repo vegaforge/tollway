@@ -83,11 +83,20 @@ export function planSmartAccountPolicy(
   }
   if (
     policy.perService &&
-    Object.values(policy.perService).some((entry) => entry?.cap !== undefined)
+    Object.values(policy.perService).some(
+      (entry) =>
+        entry?.cap !== undefined || entry?.dailyCap !== undefined || entry?.window !== undefined,
+    )
   ) {
     residual.push({
       rule: "per-service",
       reason: "the account policy scopes token transfers, not payees",
+    });
+  }
+  if (policy.perResource && Object.keys(policy.perResource).length > 0) {
+    residual.push({
+      rule: "per-resource",
+      reason: "the account policy scopes token transfers, not the resource paid for",
     });
   }
   if (policy.rateLimit?.requestsPerMinute !== undefined) {
