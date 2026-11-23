@@ -67,7 +67,15 @@ export function ReceiptsView() {
   );
 
   return (
-    <Panel title="Receipts" description="Payer, payee, amount, model, and settlement reference" action={state.status === "ready" && state.stream ? <StreamStatusBadge status={state.stream} /> : undefined}>
+    <Panel
+      title="Receipts"
+      description="Payer, payee, amount, model, and settlement reference"
+      action={
+        state.status === "ready" && state.stream ? (
+          <StreamStatusBadge status={state.stream} />
+        ) : undefined
+      }
+    >
       {state.status === "loading" ? <ReceiptsTableSkeleton /> : null}
       {state.status === "error" ? <ReceiptsTableError error={state.error} /> : null}
       {state.status === "ready" ? (

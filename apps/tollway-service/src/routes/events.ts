@@ -25,14 +25,11 @@
  *   "Stream ordering and resume".
  */
 
-import { streamSSE } from "hono/streaming";
 import { Hono } from "hono";
+import { streamSSE } from "hono/streaming";
 import { requireApiKey } from "../auth.js";
 import { sharedEventBuffer } from "../event-buffer.js";
-import {
-  filterableEventTypes,
-  type SseEventType,
-} from "../event-schemas.js";
+import { filterableEventTypes, type SseEventType } from "../event-schemas.js";
 
 const HEARTBEAT_INTERVAL_MS = 15_000;
 

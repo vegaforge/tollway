@@ -1,15 +1,15 @@
 "use client";
 
-import { type SignedReceipt } from "@vegaforge/tollway-core";
+import type { SignedReceipt } from "@vegaforge/tollway-core";
 import { useCallback, useEffect, useRef, useState } from "react";
 
 import type { ReceiptCreatedData } from "@/lib/event-schemas";
 import { fetchReceipts, type ReceiptRow } from "./receipts";
 import {
+  createHandlerMap,
   registerSseHandler,
   type StreamStatus,
   useEventStream,
-  createHandlerMap,
 } from "./use-event-stream";
 
 /** Maximum receipts kept in the live feed to prevent unbounded growth. */

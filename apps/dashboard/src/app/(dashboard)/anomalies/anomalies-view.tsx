@@ -1,9 +1,8 @@
 "use client";
 
 import Link from "next/link";
-
-import { StreamStatusBadge } from "@/components/ui/stream-status-badge";
 import { Panel } from "@/components/ui/panel";
+import { StreamStatusBadge } from "@/components/ui/stream-status-badge";
 import { type AnomalyRow, useAnomalies } from "@/data/use-anomalies";
 
 function formatAt(at: string): string {
@@ -38,9 +37,7 @@ export function AnomaliesView({ agentFilter }: { agentFilter: string | null }) {
             No anomaly events yet. They will appear here live as they fire.
           </p>
         ) : null}
-        {state.status === "ready" && rows.length > 0 ? (
-          <AnomaliesTable rows={rows} />
-        ) : null}
+        {state.status === "ready" && rows.length > 0 ? <AnomaliesTable rows={rows} /> : null}
       </Panel>
     </>
   );

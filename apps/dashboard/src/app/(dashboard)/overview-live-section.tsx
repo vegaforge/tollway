@@ -11,12 +11,9 @@ import { useOverviewStats } from "@/data/use-overview-stats";
 export function OverviewLiveSection() {
   const state = useOverviewStats();
 
-  const settled =
-    state.status === "ready" ? String(state.stats.settledCount) : "—";
-  const openChannels =
-    state.status === "ready" ? String(state.stats.openChannels) : "—";
-  const anomalies =
-    state.status === "ready" ? String(state.stats.anomalyCount) : "—";
+  const settled = state.status === "ready" ? String(state.stats.settledCount) : "—";
+  const openChannels = state.status === "ready" ? String(state.stats.openChannels) : "—";
+  const anomalies = state.status === "ready" ? String(state.stats.anomalyCount) : "—";
 
   return (
     <section className="mb-6">
@@ -25,16 +22,8 @@ export function OverviewLiveSection() {
         {state.stream ? <StreamStatusBadge status={state.stream} /> : null}
       </div>
       <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-3">
-        <StatCard
-          label="Payments settled"
-          value={settled}
-          hint="Cumulative since service start"
-        />
-        <StatCard
-          label="Open channels"
-          value={openChannels}
-          hint="MPP channels currently open"
-        />
+        <StatCard label="Payments settled" value={settled} hint="Cumulative since service start" />
+        <StatCard label="Open channels" value={openChannels} hint="MPP channels currently open" />
         <StatCard
           label="Anomalies detected"
           value={anomalies}

@@ -45,13 +45,16 @@ function parseSse(text: string): Array<{ event: string; data: string; id: string
 
     switch (field) {
       case "event":
-        (current ??= { event: "", data: "", id: null }).event = value;
+        if (current === null) current = { event: "", data: "", id: null };
+        current.event = value;
         break;
       case "data":
-        (current ??= { event: "", data: "", id: null }).data += value;
+        if (current === null) current = { event: "", data: "", id: null };
+        current.data += value;
         break;
       case "id":
-        (current ??= { event: "", data: "", id: null }).id = value;
+        if (current === null) current = { event: "", data: "", id: null };
+        current.id = value;
         break;
     }
   }

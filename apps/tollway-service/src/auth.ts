@@ -25,11 +25,11 @@ function configuredKey(): string {
 
 /** Hono middleware that requires a valid API key with at least `scope`. */
 export function requireApiKey(scope: Scope) {
-  return async (c: Context, next: () => Promise<void>): Promise<Response | void> => {
+  return async (c: Context, next: () => Promise<void>): Promise<Response | undefined> => {
     let expected: string;
     try {
       expected = configuredKey();
-    } catch (err) {
+    } catch (_err) {
       return c.json({ error: "Service is misconfigured" }, 500);
     }
 
@@ -64,9 +64,9 @@ function timingSafeEqual(a: string, b: string): boolean {
   const bb = enc.encode(b);
   if (ab.byteLength !== bb.byteLength) {
     // Compare anyway to consume similar time, then return false.
-    let diff = 0;
+    let _diff = 0;
     const dummy = new Uint8Array(bb.byteLength);
-    for (let i = 0; i < dummy.length; i++) diff |= (ab[i] ?? 0) ^ (dummy[i] ?? 0);
+    for (let i = 0; i < dummy.length; i++) _diff |= (ab[i] ?? 0) ^ (dummy[i] ?? 0);
     return false;
   }
   let diff = 0;

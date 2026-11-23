@@ -115,7 +115,11 @@ export function ChannelsView({
         title="Open channels"
         description="Sorted by drawdown. Nearing-close rows are highlighted."
         className="mt-6"
-        action={state.status === "ready" && state.stream ? <StreamStatusBadge status={state.stream} /> : undefined}
+        action={
+          state.status === "ready" && state.stream ? (
+            <StreamStatusBadge status={state.stream} />
+          ) : undefined
+        }
       >
         {state.status === "loading" ? <ChannelsTableSkeleton /> : null}
         {state.status === "error" ? <ChannelsTableError error={state.error} /> : null}
