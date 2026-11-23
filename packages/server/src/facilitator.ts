@@ -181,6 +181,13 @@ export function toPaymentRequirements(
 export type HttpFacilitatorOptions = X402Terms & {
   /** Per-call auth headers, for facilitators that gate /verify and /settle. */
   createAuthHeaders?: FacilitatorConfig["createAuthHeaders"];
+  /**
+   * Transport deadline for each request, in milliseconds. The abort signal it
+   * produces closes the connection, which the gate's own deadline cannot do.
+   * Defaults to the `@x402/core` client's 90 s; keep it at or below
+   * `PaywallDeps.facilitatorTimeoutMs` so the transport aborts first.
+   */
+  timeoutMs?: number;
 };
 
 /**
@@ -199,6 +206,7 @@ export function createHttpFacilitator(
   const client = new HTTPFacilitatorClient({
     url: baseUrl,
     createAuthHeaders: options.createAuthHeaders,
+    timeoutMs: options.timeoutMs,
   });
   const terms: X402Terms = {
     maxTimeoutSeconds: options.maxTimeoutSeconds,

@@ -183,6 +183,14 @@ export type PaywallDeps = {
    * that implements locks.
    */
   settlementLockTtlMs?: number;
+  /**
+   * Deadline for each facilitator call, in milliseconds. Defaults to 15 000.
+   * A `/verify` that misses it is rejected with 503 and nothing is settled. A
+   * `/settle` that misses it is answered with 503 and keeps its settlement
+   * lock until its TTL, because the payment may still land; the payment is
+   * never settled a second time in that window. See docs/failure-modes.md.
+   */
+  facilitatorTimeoutMs?: number;
   /** Clock for quote expiry and service policy windows; injected tests can avoid waiting. */
   clock?: () => number;
 };
@@ -420,7 +428,17 @@ type SettlementResult =
       cacheError?: Error;
       lockLost?: true;
     }
-  | { ok: false; outcome: RejectedOutcome };
+  | {
+      ok: false;
+      outcome: RejectedOutcome;
+      /**
+       * The `/settle` call outlived its deadline and may still land. The
+       * outcome is a retriable 503, and `whenSettled` resolves once the
+       * abandoned call has answered, so its in-flight slot can be freed.
+       */
+      abandoned?: true;
+      whenSettled?: Promise<void>;
+    };
 
 /** Shared internally by gates created from one route table. */
 export type InFlightSettlementResult = SettlementResult;
@@ -435,6 +453,7 @@ type SettlementContext = {
   clock: () => number;
   servicePolicy?: { policy: ServicePolicy; store: ServicePolicyStore };
   onServicePolicyError?: (error: Error, payer: string) => void;
+  facilitatorTimeoutMs: number;
 };
 
 /**
@@ -442,6 +461,9 @@ type SettlementContext = {
  * releases it. Matches the default cache TTL.
  */
 const DEFAULT_SETTLEMENT_LOCK_TTL_MS = 30_000;
+
+/** Deadline for one facilitator call when the caller sets none. */
+const DEFAULT_FACILITATOR_TIMEOUT_MS = 15_000;
 
 const OFFER_MISMATCH: RejectedOutcome = {
   kind: "rejected",
@@ -454,6 +476,74 @@ const SETTLEMENT_IN_PROGRESS: RejectedOutcome = {
   status: 409,
   reason: "settlement in progress",
 };
+
+/** A facilitator call that outlived the gate's deadline. */
+class FacilitatorDeadlineError extends Error {
+  constructor(
+    readonly operation: "verify" | "settle",
+    readonly timeoutMs: number,
+  ) {
+    super(`facilitator ${operation} did not answer within ${timeoutMs}ms`);
+    this.name = "FacilitatorDeadlineError";
+  }
+}
+
+/**
+ * Waits for `work` at most `timeoutMs`, then rejects with a
+ * FacilitatorDeadlineError. The timer does not keep the process alive. When
+ * the deadline wins, the abandoned call's late answer goes to `onLate` and
+ * its rejection is handled here, so a deadline never leaves an unhandled
+ * rejection behind.
+ */
+function withDeadline<T>(
+  work: Promise<T>,
+  operation: "verify" | "settle",
+  timeoutMs: number,
+  onLate?: (result: T) => void,
+): Promise<T> {
+  return new Promise<T>((resolve, reject) => {
+    const timer = setTimeout(() => {
+      work.then(
+        (result) => onLate?.(result),
+        () => {
+          // The deadline already answered this request. A late failure has
+          // nothing left to change.
+        },
+      );
+      reject(new FacilitatorDeadlineError(operation, timeoutMs));
+    }, timeoutMs);
+    if (typeof timer === "object" && timer !== null && "unref" in timer) {
+      timer.unref();
+    }
+    work.then(
+      (result) => {
+        clearTimeout(timer);
+        resolve(result);
+      },
+      (error: unknown) => {
+        clearTimeout(timer);
+        reject(error);
+      },
+    );
+  });
+}
+
+/**
+ * The 503 for a `/settle` that outlived its deadline. The payment may have
+ * settled, so the answer tells the agent to retry rather than pay again, and
+ * carries the lock TTL as `Retry-After`.
+ */
+function settlementDeadlineOutcome(
+  error: FacilitatorDeadlineError,
+  lockTtlMs: number,
+): RejectedOutcome {
+  return {
+    kind: "rejected",
+    status: 503,
+    reason: `settlement-unknown: facilitator /settle did not answer within ${error.timeoutMs}ms, so the payment may have settled`,
+    headers: { "retry-after": String(Math.max(1, Math.ceil(lockTtlMs / 1000))) },
+  };
+}
 
 /**
  * Turns a policy denial into a rejection. Both allowlist and denylist
@@ -541,7 +631,27 @@ async function settleWithHandler<TPayment>(
     return replayOnly();
   }
 
-  const verification = await handler.verify({ payment, offer });
+  let verification:
+    | { valid: true; payer: string; nonce: string }
+    | { valid: false; reason: string };
+  try {
+    verification = await withDeadline(
+      handler.verify({ payment, offer }),
+      "verify",
+      context.facilitatorTimeoutMs,
+    );
+  } catch (error) {
+    // Nothing has settled yet, so a retry is always safe here.
+    if (error instanceof FacilitatorDeadlineError) {
+      return {
+        kind: "rejected",
+        status: 503,
+        reason: `facilitator-timeout: /verify did not answer within ${error.timeoutMs}ms`,
+        headers: { "retry-after": "1" },
+      };
+    }
+    throw error;
+  }
   if (!verification.valid) {
     return { kind: "rejected", status: 402, reason: verification.reason };
   }
@@ -582,10 +692,33 @@ async function settleWithHandler<TPayment>(
     context,
   );
   context.inFlight.set(key, attempt);
+  let abandoned = false;
   try {
-    return toOutcome(await attempt, offer, model, method, false);
+    const result = await attempt;
+    if (!result.ok && result.abandoned) {
+      abandoned = true;
+      // The settlement may still land, so the slot stays taken until the
+      // abandoned call answers, or until the lock TTL bounds how long the
+      // payment can stay ambiguous. Either way a retry in that window gets
+      // the same 503 instead of starting a second settlement.
+      const clear = (): void => {
+        if (context.inFlight.get(key) === attempt) {
+          context.inFlight.delete(key);
+        }
+      };
+      if (result.whenSettled) {
+        void result.whenSettled.then(clear, clear);
+      }
+      const bound = setTimeout(clear, context.lockTtlMs);
+      if (typeof bound === "object" && bound !== null && "unref" in bound) {
+        bound.unref();
+      }
+    }
+    return toOutcome(result, offer, model, method, false);
   } finally {
-    context.inFlight.delete(key);
+    if (!abandoned) {
+      context.inFlight.delete(key);
+    }
   }
 }
 
@@ -760,6 +893,12 @@ async function settleOnce<TPayment>(
   }
   keeper.stop();
 
+  if (!result.ok && result.abandoned) {
+    // The payment may still land, so the lock stays until its TTL. Releasing
+    // it here would let a retry settle the same payment a second time.
+    return result;
+  }
+
   let released: boolean;
   try {
     released = await release();
@@ -874,29 +1013,47 @@ async function settleAndRecord<TPayment>(
   key: string,
   context: SettlementContext,
 ): Promise<SettlementResult> {
-  const settlement = await handler.settle({
-    payment,
-    offer,
-    payer: verification.payer,
-    nonce: verification.nonce,
+  // Resolves once an abandoned call has answered and been recorded. The gate
+  // holds the in-flight slot until then so no retry starts a second /settle.
+  let resolveSettled: (() => void) | undefined;
+  const whenSettled = new Promise<void>((resolve) => {
+    resolveSettled = resolve;
   });
+
+  let settlement: { settled: true; txHash: string } | { settled: false; reason: string };
+  try {
+    settlement = await withDeadline(
+      handler.settle({
+        payment,
+        offer,
+        payer: verification.payer,
+        nonce: verification.nonce,
+      }),
+      "settle",
+      context.facilitatorTimeoutMs,
+      (late) => {
+        void recordLateSettlement(late, offer, model, method, verification, key, context).finally(
+          () => resolveSettled?.(),
+        );
+      },
+    );
+  } catch (error) {
+    if (error instanceof FacilitatorDeadlineError) {
+      return {
+        ok: false,
+        abandoned: true,
+        whenSettled,
+        outcome: settlementDeadlineOutcome(error, context.lockTtlMs),
+      };
+    }
+    throw error;
+  }
+
   if (!settlement.settled) {
     return { ok: false, outcome: { kind: "rejected", status: 502, reason: settlement.reason } };
   }
 
-  const receipt = await signReceipt(
-    buildReceipt({
-      payer: verification.payer,
-      payee: offer.payTo,
-      amount: offer.amount,
-      asset: offer.asset,
-      resource: offer.resource,
-      model,
-      settlement: { kind: "transaction", txHash: settlement.txHash },
-      network: offer.network,
-    }),
-    context.signer,
-  );
+  const receipt = await receiptFor(settlement.txHash, offer, model, verification, context.signer);
 
   if (!context.cache) {
     return { ok: true, receipt, method, replayed: false };
@@ -912,6 +1069,55 @@ async function settleAndRecord<TPayment>(
     return { ok: true, receipt, method, replayed: false, cacheError };
   }
   return { ok: true, receipt, method, replayed: false };
+}
+
+/** Signs the receipt for a completed settlement. */
+async function receiptFor(
+  txHash: string,
+  offer: PaymentOffer,
+  model: SettlementModel,
+  verification: { payer: string },
+  signer: ReceiptSigner,
+): Promise<SignedReceipt> {
+  return signReceipt(
+    buildReceipt({
+      payer: verification.payer,
+      payee: offer.payTo,
+      amount: offer.amount,
+      asset: offer.asset,
+      resource: offer.resource,
+      model,
+      settlement: { kind: "transaction", txHash },
+      network: offer.network,
+    }),
+    signer,
+  );
+}
+
+/**
+ * A `/settle` that missed its deadline can still answer later. If it reports a
+ * settlement, its receipt is written to the cache so a retry after the lock
+ * expires replays it instead of settling the payment again. Failures are
+ * reported, never thrown: the request that timed out has already answered.
+ */
+async function recordLateSettlement(
+  late: { settled: true; txHash: string } | { settled: false; reason: string },
+  offer: PaymentOffer,
+  model: SettlementModel,
+  method: string,
+  verification: { payer: string },
+  key: string,
+  context: SettlementContext,
+): Promise<void> {
+  if (!late.settled || !context.cache) {
+    return;
+  }
+  try {
+    const receipt = await receiptFor(late.txHash, offer, model, verification, context.signer);
+    await context.cache.set(key, { receipt, method });
+  } catch (error) {
+    context.onCacheError?.(asError(error, "late settlement cache write failed"), key);
+  }
 }
 
 const BODY_HEADERS = new Set(["content-type", "content-length", "content-encoding"]);
@@ -979,6 +1185,10 @@ export function createPaywallWithInFlight(
   validateDynamicPriceConfig(config);
   assertCompleteLocking(deps.cache);
   if (deps.servicePolicy) validateServicePolicy(deps.servicePolicy);
+  const facilitatorTimeoutMs = deps.facilitatorTimeoutMs ?? DEFAULT_FACILITATOR_TIMEOUT_MS;
+  if (!Number.isSafeInteger(facilitatorTimeoutMs) || facilitatorTimeoutMs <= 0) {
+    throw new TypeError("facilitatorTimeoutMs must be a positive integer number of milliseconds");
+  }
   const acceptedModels = config.models ?? ["x402"];
   const clock = deps.clock ?? Date.now;
   const servicePolicyStore =
@@ -990,6 +1200,7 @@ export function createPaywallWithInFlight(
     ...(deps.onServicePolicyError ? { onServicePolicyError: deps.onServicePolicyError } : {}),
     inFlight,
     lockTtlMs: deps.settlementLockTtlMs ?? DEFAULT_SETTLEMENT_LOCK_TTL_MS,
+    facilitatorTimeoutMs,
     clock,
     ...(deps.servicePolicy && servicePolicyStore
       ? { servicePolicy: { policy: deps.servicePolicy, store: servicePolicyStore } }
