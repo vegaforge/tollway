@@ -41,8 +41,9 @@ const PAYEES = [
 const RESOURCE = "https://api.example.com/data";
 
 function randomOffer(rand: () => number): PaymentOffer {
-  const asset = ASSETS[Math.floor(rand() * ASSETS.length)] ?? ASSETS[0]!;
-  const payee = PAYEES[Math.floor(rand() * PAYEES.length)] ?? PAYEES[0]!;
+  const asset = ASSETS[Math.floor(rand() * ASSETS.length)] ?? ASSETS[0];
+  const payee = PAYEES[Math.floor(rand() * PAYEES.length)] ?? PAYEES[0];
+  if (!asset || !payee) throw new Error("ASSETS/PAYEES must be non-empty");
   // Amounts 1–1_000_000_000 to keep them non-zero and representable.
   const amount = String(Math.max(1, Math.floor(rand() * 1_000_000_000)));
   return {

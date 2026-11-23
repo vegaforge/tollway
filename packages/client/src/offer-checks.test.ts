@@ -16,7 +16,7 @@ import {
   TollwayError,
 } from "@vegaforge/tollway-core";
 import { beforeAll, describe, expect, it, vi } from "vitest";
-import { createClient, type ClientSettler } from "./index.js";
+import { type ClientSettler, createClient } from "./index.js";
 import { OfferRejectedError, runOfferChecks } from "./offer-checks.js";
 
 // ---------------------------------------------------------------------------
@@ -38,7 +38,7 @@ const BASE_OFFER: PaymentOffer = {
 };
 
 let receipt: SignedReceipt;
-let mockSettler: ClientSettler;
+let _mockSettler: ClientSettler;
 
 beforeAll(async () => {
   const signer = await Ed25519Signer.generate("key");
@@ -55,7 +55,7 @@ beforeAll(async () => {
     }),
     signer,
   );
-  mockSettler = { settle: vi.fn().mockResolvedValue(receipt) };
+  _mockSettler = { settle: vi.fn().mockResolvedValue(receipt) };
 });
 
 // ---------------------------------------------------------------------------
@@ -68,27 +68,27 @@ describe("structural check", () => {
   });
 
   it("rejects an offer with an empty payTo", () => {
-    expect(() =>
-      runOfferChecks({ ...BASE_OFFER, payTo: "" }, RESOURCE, "testnet"),
-    ).toThrow(OfferRejectedError);
+    expect(() => runOfferChecks({ ...BASE_OFFER, payTo: "" }, RESOURCE, "testnet")).toThrow(
+      OfferRejectedError,
+    );
   });
 
   it("rejects an offer with a whitespace-only payTo", () => {
-    expect(() =>
-      runOfferChecks({ ...BASE_OFFER, payTo: "  " }, RESOURCE, "testnet"),
-    ).toThrow(OfferRejectedError);
+    expect(() => runOfferChecks({ ...BASE_OFFER, payTo: "  " }, RESOURCE, "testnet")).toThrow(
+      OfferRejectedError,
+    );
   });
 
   it("rejects an offer with an empty asset", () => {
-    expect(() =>
-      runOfferChecks({ ...BASE_OFFER, asset: "" }, RESOURCE, "testnet"),
-    ).toThrow(OfferRejectedError);
+    expect(() => runOfferChecks({ ...BASE_OFFER, asset: "" }, RESOURCE, "testnet")).toThrow(
+      OfferRejectedError,
+    );
   });
 
   it("rejects an offer with no models", () => {
-    expect(() =>
-      runOfferChecks({ ...BASE_OFFER, models: [] }, RESOURCE, "testnet"),
-    ).toThrow(OfferRejectedError);
+    expect(() => runOfferChecks({ ...BASE_OFFER, models: [] }, RESOURCE, "testnet")).toThrow(
+      OfferRejectedError,
+    );
   });
 
   it("rejects a non-integer amount string", () => {
@@ -104,9 +104,9 @@ describe("structural check", () => {
   });
 
   it("rejects a negative amount string", () => {
-    expect(() =>
-      runOfferChecks({ ...BASE_OFFER, amount: "-1" }, RESOURCE, "testnet"),
-    ).toThrow(OfferRejectedError);
+    expect(() => runOfferChecks({ ...BASE_OFFER, amount: "-1" }, RESOURCE, "testnet")).toThrow(
+      OfferRejectedError,
+    );
   });
 
   it("rejects a zero amount", () => {
@@ -289,21 +289,15 @@ describe("maxAmount check", () => {
     const huge = "90000000000000000000";
     const ceiling = "100000000000000000000";
     expect(() =>
-      runOfferChecks(
-        { ...BASE_OFFER, amount: huge },
-        RESOURCE,
-        "testnet",
-        { maxAmount: { [USDC]: ceiling } },
-      ),
+      runOfferChecks({ ...BASE_OFFER, amount: huge }, RESOURCE, "testnet", {
+        maxAmount: { [USDC]: ceiling },
+      }),
     ).not.toThrow();
 
     expect(() =>
-      runOfferChecks(
-        { ...BASE_OFFER, amount: ceiling },
-        RESOURCE,
-        "testnet",
-        { maxAmount: { [USDC]: huge } },
-      ),
+      runOfferChecks({ ...BASE_OFFER, amount: ceiling }, RESOURCE, "testnet", {
+        maxAmount: { [USDC]: huge },
+      }),
     ).toThrow(OfferRejectedError);
   });
 });
@@ -340,9 +334,7 @@ describe("allowedPayees check", () => {
   });
 
   it("does not apply when allowedPayees is not configured", () => {
-    expect(() =>
-      runOfferChecks(BASE_OFFER, RESOURCE, "testnet", {}),
-    ).not.toThrow();
+    expect(() => runOfferChecks(BASE_OFFER, RESOURCE, "testnet", {})).not.toThrow();
   });
 });
 
@@ -387,9 +379,9 @@ describe("createClient: rejected offer never reaches settler or policy", () => {
       offerChecks: { maxAmount: { [USDC]: "9999" } },
     });
 
-    await expect(
-      client.pay({ resource: RESOURCE, offer: BASE_OFFER }),
-    ).rejects.toBeInstanceOf(OfferRejectedError);
+    await expect(client.pay({ resource: RESOURCE, offer: BASE_OFFER })).rejects.toBeInstanceOf(
+      OfferRejectedError,
+    );
 
     expect(settler.settle).not.toHaveBeenCalled();
   });
@@ -405,7 +397,9 @@ describe("createClient: rejected offer never reaches settler or policy", () => {
       network: "testnet",
       settler,
       policy,
-      offerChecks: { allowedPayees: ["GDIFFERENT000000000000000000000000000000000000000000000000"] },
+      offerChecks: {
+        allowedPayees: ["GDIFFERENT000000000000000000000000000000000000000000000000"],
+      },
     });
 
     await expect(client.pay({ resource: RESOURCE, offer: BASE_OFFER })).rejects.toBeInstanceOf(
@@ -504,7 +498,7 @@ describe("createX402Settler: PaymentPolicy filters multi-option challenges", () 
     );
 
     let calledWithPayTo: string | null = null;
-    const fetcher = vi.fn(async (url: string | URL | Request, init?: RequestInit) => {
+    const fetcher = vi.fn(async (_url: string | URL | Request, init?: RequestInit) => {
       const headers = init?.headers as Record<string, string> | undefined;
       if (!headers?.[PAYMENT_REQUIRED_HEADER]) {
         return new Response(null, {
