@@ -40,8 +40,8 @@
  * that asset.
  */
 
-import { TollwayError } from "@vegaforge/tollway-core";
 import type { PaymentOffer, StellarNetwork } from "@vegaforge/tollway-core";
+import { TollwayError } from "@vegaforge/tollway-core";
 
 // ---------------------------------------------------------------------------
 // Public types

@@ -32,8 +32,8 @@ import { decodePaymentRequiredHeader, encodePaymentSignatureHeader } from "@x402
 import type { PaymentPayload, PaymentRequired, PaymentRequirements } from "@x402/core/types";
 import type { ClientStellarSigner } from "@x402/stellar";
 import { ExactStellarScheme } from "@x402/stellar/exact/client";
-import type { OfferChecks } from "./offer-checks.js";
 import type { ClientSettler, SettleRequest } from "./index.js";
+import type { OfferChecks } from "./offer-checks.js";
 
 export const PAYMENT_REQUIRED_HEADER = "PAYMENT-REQUIRED";
 export const PAYMENT_SIGNATURE_HEADER = "PAYMENT-SIGNATURE";

@@ -235,12 +235,7 @@ export function createClient(options: TollwayClientOptions): TollwayClient {
         // Offer sanity checks run first — before policy and before the settler
         // — so a malicious or misconfigured offer never reaches a signer.
         try {
-          runOfferChecks(
-            request.offer,
-            request.resource,
-            options.network,
-            options.offerChecks,
-          );
+          runOfferChecks(request.offer, request.resource, options.network, options.offerChecks);
         } catch (checkError) {
           if (checkError instanceof OfferRejectedError) {
             emit({
@@ -393,6 +388,7 @@ function normalizeError(value: unknown): Error {
   return new Error(typeof value === "string" ? value : JSON.stringify(value));
 }
 
+export { type OfferChecks, OfferRejectedError } from "./offer-checks.js";
 export {
   createX402Settler,
   PAYMENT_REQUIRED_HEADER,
@@ -400,5 +396,3 @@ export {
   TOLLWAY_RECEIPT_HEADER,
   type X402SettlerOptions,
 } from "./x402-settler.js";
-
-export { type OfferChecks, OfferRejectedError } from "./offer-checks.js";
