@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import { TollwayError } from "./errors.js";
 import type { PaymentIntent } from "./policy.js";
 import { createPolicyEngine } from "./policy.js";
+import { type PolicyInput, PolicyValidationError } from "./policy-schema.js";
 
 function intent(overrides: Partial<PaymentIntent> = {}): PaymentIntent {
   return {
@@ -546,35 +547,54 @@ describe("createPolicyEngine", () => {
       expect(await engine.check(intent({ amount: "100" }))).toEqual({ allowed: true });
     });
 
-    it("rejects a non-positive window when the engine is created", () => {
-      expect(() =>
-        createPolicyEngine({
-          perService: { GSERVICE: { window: { windowSeconds: 0, cap: "100" } } },
-        }),
-      ).toThrow(TollwayError);
-    });
-
-    it("rejects a fractional window when the engine is created", () => {
-      // A fractional value would put a non-integer `seconds` in the trace,
-      // which policyTraceSchema rejects.
-      expect(() =>
-        createPolicyEngine({
-          perService: { GSERVICE: { window: { windowSeconds: 90.5, cap: "100" } } },
-        }),
-      ).toThrow(/whole number of seconds/);
-    });
-
-    it("rejects a malformed perResource window and cap when the engine is created", () => {
-      expect(() =>
-        createPolicyEngine({
+    it.each([
+      [
+        "a window of zero seconds",
+        { perService: { GSERVICE: { window: { windowSeconds: 0, cap: "100" } } } },
+        "perService.GSERVICE.window.windowSeconds",
+      ],
+      [
+        // A fractional value would put a non-integer `seconds` in the trace,
+        // which policyTraceSchema rejects.
+        "a fractional window",
+        { perService: { GSERVICE: { window: { windowSeconds: 90.5, cap: "100" } } } },
+        "perService.GSERVICE.window.windowSeconds",
+      ],
+      [
+        "a sub-second perResource window",
+        {
           perResource: { "/api/": { match: "prefix", window: { windowSeconds: 1e-6, cap: "1" } } },
-        }),
-      ).toThrow(TollwayError);
-      expect(() =>
-        createPolicyEngine({
+        },
+        "perResource./api/.window.windowSeconds",
+      ],
+      [
+        "a decimal perResource window cap",
+        {
           perResource: { "/api/": { match: "prefix", window: { windowSeconds: 60, cap: "1.5" } } },
-        }),
-      ).toThrow(TollwayError);
+        },
+        "perResource./api/.window.cap",
+      ],
+      [
+        "a decimal daily cap",
+        { perService: { GSERVICE: { dailyCap: "0.5" } } },
+        "perService.GSERVICE.dailyCap",
+      ],
+      [
+        "an unknown match kind",
+        { perResource: { "/api/": { match: "glob", cap: "1" } } },
+        "perResource./api/.match",
+      ],
+    ])("rejects %s when the engine is created, naming the field", (_name, input, path) => {
+      let thrown: unknown;
+      try {
+        // Policies arrive as JSON, so the cases include values the type forbids.
+        createPolicyEngine(input as unknown as PolicyInput);
+      } catch (error) {
+        thrown = error;
+      }
+      expect(thrown).toBeInstanceOf(PolicyValidationError);
+      const issues = (thrown as PolicyValidationError).issues;
+      expect(issues.map((issue) => issue.path.join("."))).toContain(path);
     });
 
     it("blocks a payment at the exact window boundary and allows it one bucket later", async () => {

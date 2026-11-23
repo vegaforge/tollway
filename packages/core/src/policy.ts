@@ -1,5 +1,11 @@
 import { TollwayError } from "./errors.js";
 import {
+  type Policy,
+  type PolicyInput,
+  PolicyValidationError,
+  parsePolicy,
+} from "./policy-schema.js";
+import {
   decisionFromTrace,
   POLICY_TRACE_VERSION,
   type PolicyDecision,
@@ -7,97 +13,12 @@ import {
   type PolicyTrace,
   type PolicyTraceEntry,
   type PolicyWindow,
-  policyModes,
 } from "./policy-trace.js";
 import { RollingSum } from "./rolling-sum.js";
 import type { SettlementModel } from "./types.js";
 
-/**
- * Policy is data, not code: a small declarative schema the engine enforces
- * across every settlement model. See docs/design.md, "Policy and budgets".
- *
- * All amounts are integer strings in the asset's smallest unit, same as
- * receipts.
- */
-export type Policy = {
-  /**
-   * `enforce` (the default) blocks a payment when a rule fails. `dry-run`
-   * allows it and only marks the would-be block in the trace. Spend is
-   * recorded the same way in both modes, so budgets stay real.
-   */
-  mode?: PolicyMode;
-  budgets?: {
-    /** Spend ceiling per UTC day. */
-    daily?: string;
-    /** Lifetime ceiling for this policy. */
-    total?: string;
-  };
-  /**
-   * Caps per counterparty service, keyed by the payee address or service id.
-   * Issue #192: `cap` is a **lifetime** ceiling (never resets); `dailyCap`
-   * resets every UTC day; `window` is a rolling sliding window with
-   * approximate accounting (see `RollingSum`).
-   */
-  perService?: Record<
-    string,
-    {
-      /** Lifetime ceiling per service across all time. */
-      cap?: string;
-      /** Ceiling per UTC day; resets at the same instant as `budgets.daily`. */
-      dailyCap?: string;
-      /**
-       * Sliding-window ceiling, e.g. 5 USDC per hour. Accuracy is
-       * bounded by the accumulator's bucket granularity. See
-       * `RollingSum` and the docs for the ~1-bucket over-count.
-       */
-      window?: { windowSeconds: number; cap: string };
-    }
-  >;
-  /**
-   * Caps per resource. `match` picks between `exact` (default) and
-   * `prefix`; the resource identity is the exact string the receipt
-   * carries, query string included. No regex or glob is evaluated from
-   * config. Every entry that matches a resource applies and is charged,
-   * so a narrower entry can tighten a broader one but never lift it.
-   */
-  perResource?: Record<
-    string,
-    {
-      cap?: string;
-      dailyCap?: string;
-      window?: { windowSeconds: number; cap: string };
-      match?: "exact" | "prefix";
-    }
-  >;
-  perModel?: Partial<
-    Record<
-      SettlementModel,
-      {
-        enabled?: boolean;
-        /** Channel mode only makes sense above a minimum deposit. */
-        minChannelDeposit?: string;
-      }
-    >
-  >;
-  rateLimit?: {
-    requestsPerMinute?: number;
-  };
-  anomaly?: {
-    /** Trips the anomaly stop when spend in any minute exceeds this. */
-    maxSpendPerMinute?: string;
-    /** An explainable EWMA detector over committed per-minute spend. */
-    adaptive?: {
-      kind: "ewma";
-      smoothing: { numerator: string; denominator: string };
-      sensitivity: { numerator: string; denominator: string };
-      /** Number of completed minute buckets before this rule can block. */
-      warmupPeriods: number;
-      scope?: "asset" | "asset-payee";
-      /** Maximum increase allowed when a completed bucket trains the baseline. */
-      maxBaselineGrowthPerMinute?: string;
-    };
-  };
-};
+// Re-exported so existing `import type { Policy } from "./policy.js"` keeps working.
+export type { Policy, PolicyInput } from "./policy-schema.js";
 
 /** A payment the engine is asked to allow or block, before it happens. */
 export type PaymentIntent = {
@@ -151,6 +72,10 @@ function parseAmount(s: string): bigint {
  * A request count from the policy. It is a count, not an amount, but the
  * trace carries it as an integer string like every other limit, so a value
  * that is not a whole non-negative number is refused rather than rounded.
+ *
+ * `policySchema` already refuses such a value when the engine is created, so
+ * this check, `parseRational` and `adaptiveConfig` cannot fail through the
+ * engine. They stay as defence in depth for the rules that read the values.
  */
 function parseCount(value: number): bigint {
   if (!Number.isSafeInteger(value) || value < 0) {
@@ -160,17 +85,6 @@ function parseCount(value: number): bigint {
     );
   }
   return BigInt(value);
-}
-
-function resolveMode(policy: Policy): PolicyMode {
-  const mode: unknown = policy.mode ?? "enforce";
-  // Policy may come from JSON. An unknown mode is refused: guessing would
-  // either enforce what the operator meant to watch, or the reverse.
-  const known = policyModes.find((candidate) => candidate === mode);
-  if (known === undefined) {
-    throw new TollwayError("invalid-policy", `unknown policy mode: ${String(mode)}`);
-  }
-  return known;
 }
 
 /** Spend and request history the stateful rules read. */
@@ -263,60 +177,6 @@ function matchResourceEntries(
   }
   prefixes.sort((a, b) => b.key.length - a.key.length);
   return [...matches, ...prefixes];
-}
-
-/**
- * A rolling window length from the policy. It must be a whole number of
- * seconds, at least 1: the trace carries it as an integer, and the
- * accumulator needs a bucket of at least a millisecond.
- */
-function parseWindowSeconds(value: number, label: string): number {
-  if (!Number.isSafeInteger(value) || value < 1) {
-    throw new TollwayError(
-      "invalid-policy",
-      `${label}.windowSeconds must be a whole number of seconds, at least 1, got ${value}`,
-    );
-  }
-  return value;
-}
-
-/** The caps a `perService` or `perResource` entry can set. */
-type CapEntry = {
-  cap?: string;
-  dailyCap?: string;
-  window?: { windowSeconds: number; cap: string };
-};
-
-function validateCapEntry(entry: CapEntry | undefined, label: string): void {
-  if (entry === undefined) return;
-  if (entry.cap != null) parseAmount(entry.cap);
-  if (entry.dailyCap != null) parseAmount(entry.dailyCap);
-  if (entry.window != null) {
-    parseWindowSeconds(entry.window.windowSeconds, `${label}.window`);
-    parseAmount(entry.window.cap);
-  }
-}
-
-/**
- * Checks the issue #192 caps when the engine is created, so a malformed
- * value is refused at startup. Found later, it would surface inside
- * `record()`, after a payment had already settled.
- */
-function validateCaps(policy: Policy): void {
-  for (const [payee, entry] of Object.entries(policy.perService ?? {})) {
-    validateCapEntry(entry, `perService["${payee}"]`);
-  }
-  for (const [key, entry] of Object.entries(policy.perResource ?? {})) {
-    const label = `perResource["${key}"]`;
-    const match = entry?.match;
-    if (match !== undefined && match !== "exact" && match !== "prefix") {
-      throw new TollwayError(
-        "invalid-policy",
-        `${label}.match must be "exact" or "prefix", got ${String(match)}`,
-      );
-    }
-    validateCapEntry(entry, label);
-  }
 }
 
 const FIXED_SCALE = 1_000_000n;
@@ -901,20 +761,24 @@ const RULES: readonly RuleEvaluator[] = [
  * constraints, rate limits, and anomaly stops. All state is held in memory;
  * see docs/design.md, "Policy and budgets".
  *
- * Throws `invalid-policy` when `policy.mode` is not a known mode, or when a
- * `perService` or `perResource` entry has a malformed window or `match`.
- * Throws `invalid-amount` when one of their caps is not a base-unit integer.
+ * The policy is parsed with `policySchema` first, so a bad amount, a negative
+ * rate, or an unknown key throws {@link PolicyValidationError} here, listing
+ * every issue with its path, instead of failing on the first payment.
+ * Unversioned policies from older releases are migrated to the current
+ * version before validation.
  */
 export function createPolicyEngine(
-  policy: Policy,
+  input: PolicyInput,
   opts?: {
     clock?: () => number;
     onAnomalyDetected?: (event: AdaptiveAnomalyEvent) => void | Promise<void>;
   },
 ): PolicyEngine {
+  const parsed = parsePolicy(input);
+  if (!parsed.ok) throw new PolicyValidationError(parsed.issues);
+  const policy = parsed.policy;
   const clock = opts?.clock ?? Date.now;
-  const mode = resolveMode(policy);
-  validateCaps(policy);
+  const mode: PolicyMode = policy.mode ?? "enforce";
   const state: EngineState = {
     day: utcDate(clock),
     dailySpend: new Map(),
