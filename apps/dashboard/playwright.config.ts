@@ -39,41 +39,27 @@ export default defineConfig({
       use: { ...devices["Pixel 7"], colorScheme: "light" },
     },
   ],
-  webServer: [
-    {
-      command: "pnpm --filter @vegaforge/tollway-service start",
-      url: "http://127.0.0.1:3200/health",
-      reuseExistingServer: !process.env.CI,
-      timeout: 120_000,
-      env: {
-        PORT: "3200",
-        SERVICE_API_KEY: "playwright-only-service-api-key",
-      },
+  webServer: {
+    command: `pnpm exec next start -p ${port}`,
+    url: `${baseURL}/login`,
+    reuseExistingServer: !process.env.CI,
+    timeout: 120_000,
+    env: {
+      // Test-only values. The hashes are bcrypt cost 10 of the passwords in
+      // e2e/fixtures.ts; no real deployment uses either.
+      DASHBOARD_SESSION_SECRET: "playwright-only-session-secret-at-least-32-bytes",
+      DASHBOARD_USERS: JSON.stringify([
+        {
+          username: "e2e",
+          passwordHash: "$2b$10$XOB07DhxQPzPxVSlgvHJoOla6KoC5YMMUygiWnHRS0p8/O29kVrWq",
+          role: "viewer",
+        },
+        {
+          username: "e2e-admin",
+          passwordHash: "$2b$10$gMMFSFGjdZiBguqZkPQubuG5wlNRfZHQNzT7u6WWj8IAoL5gQw/D.",
+          role: "admin",
+        },
+      ]),
     },
-    {
-      command: `pnpm exec next start -p ${port}`,
-      url: `${baseURL}/login`,
-      reuseExistingServer: !process.env.CI,
-      timeout: 120_000,
-      env: {
-        // Test-only values. The hashes are bcrypt cost 10 of the passwords in
-        // e2e/fixtures.ts; no real deployment uses either.
-        DASHBOARD_SESSION_SECRET: "playwright-only-session-secret-at-least-32-bytes",
-        DASHBOARD_USERS: JSON.stringify([
-          {
-            username: "e2e",
-            passwordHash: "$2b$10$XOB07DhxQPzPxVSlgvHJoOla6KoC5YMMUygiWnHRS0p8/O29kVrWq",
-            role: "viewer",
-          },
-          {
-            username: "e2e-admin",
-            passwordHash: "$2b$10$gMMFSFGjdZiBguqZkPQubuG5wlNRfZHQNzT7u6WWj8IAoL5gQw/D.",
-            role: "admin",
-          },
-        ]),
-        SERVICE_URL: "http://127.0.0.1:3200",
-        SERVICE_API_KEY: "playwright-only-service-api-key",
-      },
-    },
-  ],
+  },
 });
