@@ -199,6 +199,127 @@ describe("createPolicyEngine", () => {
     });
   });
 
+  // Issue #197 coverage.
+  describe("rate-limit (#197) semantics", () => {
+    it("rejects both requestsPerMinute and windows set at once", async () => {
+      const engine = createPolicyEngine({
+        rateLimit: {
+          requestsPerMinute: 5,
+          windows: [{ windowSeconds: 60, limit: 5 }],
+        },
+      });
+      await expect(engine.check(intent())).rejects.toMatchObject({
+        code: "invalid-policy",
+      });
+    });
+
+    it("count: attempts writes on evaluate, so an unsettled call still counts", async () => {
+      const engine = createPolicyEngine({
+        rateLimit: {
+          windows: [{ windowSeconds: 60, limit: 2 }],
+          count: "attempts",
+        },
+      });
+      // Two evaluate calls (no record in between): the third should fail.
+      await engine.check(intent());
+      await engine.check(intent());
+      const blocked = await engine.check(intent());
+      expect(blocked).toMatchObject({ allowed: false, rule: "rate-limit" });
+    });
+
+    it("per-counterparty scope isolates one payee from another", async () => {
+      const engine = createPolicyEngine({
+        rateLimit: {
+          windows: [{ windowSeconds: 60, limit: 1 }],
+          scope: "per-counterparty",
+        },
+      });
+      await engine.record(intent({ payee: "GA" }));
+      // GA is at the limit.
+      const blockedA = await engine.check(intent({ payee: "GA" }));
+      expect(blockedA.allowed).toBe(false);
+      // GB has its own quota.
+      const allowedB = await engine.check(intent({ payee: "GB" }));
+      expect(allowedB.allowed).toBe(true);
+    });
+
+    it("per-counterparty detail names the counterparty", async () => {
+      const engine = createPolicyEngine({
+        rateLimit: {
+          windows: [{ windowSeconds: 60, limit: 1 }],
+          scope: "per-counterparty",
+        },
+      });
+      await engine.record(intent({ payee: "GSERVICE" }));
+      const trace = await engine.evaluate(intent({ payee: "GSERVICE" }));
+      const line = trace.entries.find((e) => e.id === "rate-limit");
+      expect(line?.detail).toContain("GSERVICE");
+    });
+
+    it("multiple windows: the tightest violation reports the failing window", async () => {
+      let now = Date.parse("2026-06-10T12:00:00Z");
+      const engine = createPolicyEngine(
+        {
+          rateLimit: {
+            windows: [
+              { windowSeconds: 60, limit: 100 }, // not the binding one
+              { windowSeconds: 3600, limit: 2 }, // tight hourly cap
+            ],
+          },
+        },
+        { clock: () => now },
+      );
+      await engine.record(intent());
+      await engine.record(intent());
+      const trace = await engine.evaluate(intent());
+      const line = trace.entries.find((e) => e.id === "rate-limit");
+      expect(line?.outcome).toBe("fail");
+      expect(line?.detail).toContain("3600 seconds");
+      // The passing minute window does not hide the failing hour window.
+      now += 70 * 1000;
+      const allowed = await engine.check(intent());
+      expect(allowed.allowed).toBe(false);
+    });
+
+    it("evicts the least-recently-used counterparty when the key cap is hit", async () => {
+      const engine = createPolicyEngine({
+        rateLimit: {
+          windows: [{ windowSeconds: 60, limit: 1 }],
+          scope: "per-counterparty",
+          perCounterpartyKeyLimit: 2,
+        },
+      });
+      await engine.record(intent({ payee: "GA" }));
+      await engine.record(intent({ payee: "GB" }));
+      // Writing GC should evict GA (LRU). GA then gets a fresh slot.
+      await engine.record(intent({ payee: "GC" }));
+      const allowedA = await engine.check(intent({ payee: "GA" }));
+      expect(allowedA.allowed).toBe(true);
+    });
+
+    it("rejects a windows entry with a non-positive windowSeconds", async () => {
+      const engine = createPolicyEngine({
+        rateLimit: { windows: [{ windowSeconds: 0, limit: 5 }] },
+      });
+      await expect(engine.check(intent())).rejects.toMatchObject({
+        code: "invalid-policy",
+      });
+    });
+
+    it("rejects a negative perCounterpartyKeyLimit", async () => {
+      const engine = createPolicyEngine({
+        rateLimit: {
+          windows: [{ windowSeconds: 60, limit: 5 }],
+          scope: "per-counterparty",
+          perCounterpartyKeyLimit: -1,
+        },
+      });
+      await expect(engine.check(intent())).rejects.toMatchObject({
+        code: "invalid-policy",
+      });
+    });
+  });
+
   describe("anomaly stop", () => {
     it("allows spending within the anomaly threshold", async () => {
       const engine = createPolicyEngine({

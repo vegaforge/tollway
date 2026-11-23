@@ -35,11 +35,31 @@ import {
   verifyReceipt,
 } from "@vegaforge/tollway-core";
 import type { ReceiptStore } from "./receipt-store.js";
+import {
+  AmbiguousSettlementError,
+  normaliseRetryOptions,
+  type RetryOptions,
+  SettlementOutcomeError,
+} from "./retry.js";
+
+export {
+  AmbiguousSettlementError,
+  type RetryOptions,
+  SettlementOutcomeError,
+  type SettlementOutcomeKind,
+} from "./retry.js";
 
 /** Events the client emits so callers and observability can follow along. */
 export type ClientEvent =
   | { type: "payment"; resource: string; model: SettlementModel; receipt: SignedReceipt }
   | { type: "skip"; resource: string; reason: string }
+  /**
+   * Issue #203: a retry attempt is about to run. `attempt` is 1-based
+   * and names the attempt being started (so `attempt: 2` is the first
+   * retry). `reason` carries the settler-reported cause of the previous
+   * failure.
+   */
+  | { type: "retry"; resource: string; attempt: number; reason: string }
   /**
    * The active policy's full trace for this payment, emitted before the
    * payment proceeds or is blocked. In dry-run, `trace.wouldBlock` marks a
@@ -127,6 +147,15 @@ export type TollwayClientOptions = {
    * hide it. Mirrors the gate's `onCacheError`.
    */
   onStoreError?: (error: Error, receipt: SignedReceipt) => void;
+  /**
+   * Issue #203: how many times the client will call the settler per
+   * `pay()`. The default is 2 (one retry): the first attempt plus one
+   * fresh-authorization retry on an x402 expiry or nonce reuse. Only
+   * rejections classified `retryable-with-fresh-auth` or
+   * `settlement-in-progress` consume a retry; an `ambiguous` outcome
+   * never retries because the payment may have landed.
+   */
+  retry?: RetryOptions;
 };
 
 export type PayRequest = {
@@ -234,6 +263,7 @@ export function createClient(options: TollwayClientOptions): TollwayClient {
       handlers.push(handler);
     },
     async pay(request): Promise<PayResult> {
+      const retry = normaliseRetryOptions(options.retry);
       try {
         const model = await decideModel(options.router, request);
         const intent: PaymentIntent = {
@@ -244,11 +274,12 @@ export function createClient(options: TollwayClientOptions): TollwayClient {
           model,
         };
 
+        // Run policy check before the first attempt. Shadow runs once;
+        // retries re-run check on the same intent. record() runs at most
+        // once per pay() call, only on the first successful attempt.
         let activeTrace: PolicyTrace | undefined;
         if (options.policy) {
           activeTrace = await options.policy.evaluate(intent);
-          // No handler, no event object: the quiet path stays as cheap as a
-          // plain check().
           if (handlers.length > 0) {
             emit({ type: "policy:decision", resource: request.resource, trace: activeTrace });
           }
@@ -265,8 +296,6 @@ export function createClient(options: TollwayClientOptions): TollwayClient {
         }
 
         if (activeTrace) {
-          // The same function check() uses, so the trace just emitted and the
-          // decision below cannot disagree.
           const decision = decisionFromTrace(activeTrace);
           if (!decision.allowed) {
             emit({
@@ -278,11 +307,69 @@ export function createClient(options: TollwayClientOptions): TollwayClient {
           }
         }
 
-        const settled = await options.settler.settle({
-          resource: request.resource,
-          offer: request.offer,
-          model,
-        });
+        const settleOnce = () =>
+          options.settler.settle({
+            resource: request.resource,
+            offer: request.offer,
+            model,
+          });
+
+        let settled: SignedReceipt | undefined;
+        let lastError: SettlementOutcomeError | undefined;
+        // Issue #203: bounded retry loop. Attempt 1 is the first call;
+        // every subsequent attempt re-runs the policy check so a budget
+        // that newly bites after a failure stops the retry.
+        for (let attempt = 1; attempt <= retry.maxAttempts; attempt += 1) {
+          try {
+            settled = await settleOnce();
+            break;
+          } catch (rawError) {
+            if (!(rawError instanceof SettlementOutcomeError)) {
+              throw rawError;
+            }
+            lastError = rawError;
+            if (rawError.kind === "ambiguous") {
+              throw new AmbiguousSettlementError(rawError.reason);
+            }
+            if (rawError.kind === "fatal") {
+              throw rawError;
+            }
+            if (attempt >= retry.maxAttempts) {
+              throw rawError;
+            }
+            emit({
+              type: "retry",
+              resource: request.resource,
+              attempt: attempt + 1,
+              reason: rawError.reason,
+            });
+            if (rawError.kind === "settlement-in-progress" && rawError.retryAfterMs) {
+              await retry.sleep(rawError.retryAfterMs);
+            }
+            // retryable-with-fresh-auth re-runs the policy check before
+            // asking the settler for a fresh signature. A budget that
+            // now bites stops the retry.
+            if (rawError.kind === "retryable-with-fresh-auth" && options.policy) {
+              const retryTrace = await options.policy.evaluate(intent);
+              const retryDecision = decisionFromTrace(retryTrace);
+              if (!retryDecision.allowed) {
+                emit({
+                  type: "skip",
+                  resource: request.resource,
+                  reason: `${retryDecision.rule}: ${retryDecision.detail}`,
+                });
+                throw new PolicyBlockedError(retryDecision.rule, retryDecision.detail);
+              }
+            }
+          }
+        }
+
+        if (!settled) {
+          // Loop exited without settling: surface the last outcome.
+          throw (
+            lastError ?? new TollwayError("payment-failed", "settlement failed without an error")
+          );
+        }
 
         // Only the parsed receipt leaves pay(), never the settler's object,
         // so a field the signature does not cover cannot reach the caller.

@@ -37,6 +37,7 @@ function createFakeAdapter(overrides?: {
   let openCount = 0;
   let closeCount = 0;
 
+  let ledger = 100_000;
   const adapter: MppChannelAdapter = {
     async openChannel(input) {
       calls.openChannel.push(input);
@@ -46,6 +47,13 @@ function createFakeAdapter(overrides?: {
         channelId: `CTEST${openCount.toString().padStart(3, "0")}`,
         openTxHash: `tx-open-${openCount}`,
       };
+    },
+    async getChannelState() {
+      ledger += 1;
+      return { balance: "1000", currentLedger: ledger };
+    },
+    async findChannelSettlement() {
+      return null;
     },
     async signCommitment(input) {
       calls.signCommitment.push(input);
@@ -337,7 +345,17 @@ describe("ChannelManager off-chain invariant", () => {
       settledAmount: "0",
       returnedRemainder: "0",
     }));
-    const adapter: MppChannelAdapter = { openChannel, signCommitment, closeChannel };
+    const adapter: MppChannelAdapter = {
+      openChannel,
+      signCommitment,
+      closeChannel,
+      async getChannelState() {
+        return { balance: "0", currentLedger: 100_000 };
+      },
+      async findChannelSettlement() {
+        return null;
+      },
+    };
 
     const manager = createChannelManager({ adapter });
     const channel = await manager.open({
@@ -678,7 +696,12 @@ describe("ChannelManager.close", () => {
     expect(calls.closeChannel).toHaveLength(1);
   });
 
-  it("rolls the channel status back to open and surfaces the adapter error on failure", async () => {
+  it("keeps the channel in closing on an adapter error so resume can ask the chain (Issue #176)", async () => {
+    // Pre-#176 behaviour rolled back to "open" here, which could make
+    // the manager sign a second close for a payment that had already
+    // landed. The new contract: an adapter error after the attempt was
+    // recorded is indeterminate, so the channel stays in `closing`
+    // with the close attempt recorded for `resume()` to inspect.
     const sentinel = new Error("network unreachable");
     const { adapter, calls } = createFakeAdapter({
       close: () => {
@@ -698,11 +721,16 @@ describe("ChannelManager.close", () => {
     expect(calls.closeChannel).toHaveLength(1);
 
     const refreshed = await manager.get(channel.id);
-    expect(refreshed?.status).toBe("open");
+    expect(refreshed?.status).toBe("closing");
+    expect(refreshed?.closeAttempt).toBeDefined();
     expect(refreshed?.settlementTxHash).toBeUndefined();
   });
 
-  it("throws SettlementMismatchError when the adapter under-settles the latest commitment", async () => {
+  it("moves the channel to settlement-mismatched (terminal) when the adapter under-settles (Issue #176)", async () => {
+    // Pre-#176 behaviour rolled back to "open" here, letting the agent
+    // sign over a chain state that no longer agreed with the commitment
+    // stream. The new contract: the mismatch is terminal and the
+    // channel never reopens for commits.
     const { adapter } = createFakeAdapter({
       close: (input) => ({
         settlementTxHash: "tx-mismatch",
@@ -721,7 +749,11 @@ describe("ChannelManager.close", () => {
 
     await expect(manager.close(channel.id)).rejects.toBeInstanceOf(SettlementMismatchError);
     const refreshed = await manager.get(channel.id);
-    expect(refreshed?.status).toBe("open");
+    expect(refreshed?.status).toBe("settlement-mismatched");
+    expect(refreshed?.settlementMismatch).toEqual({
+      expectedAmount: "500",
+      observedAmount: "1",
+    });
   });
 
   it("transitions through closing on the way to closed", async () => {
@@ -863,5 +895,214 @@ describe("typed error codes are distinguishable on .code", () => {
       new InvalidAmountError("oops", "deposit").code,
     ]);
     expect(codes.size).toBe(6);
+  });
+});
+
+// Issue #176 coverage for the resume path.
+describe("ChannelManager.resume (Issue #176)", () => {
+  function fakeAdapterWithChain(
+    chain: {
+      state: { balance: string; closeEffectiveAtLedger?: number; currentLedger: number };
+      settlement?: {
+        settlementTxHash: string;
+        settledAmount: string;
+        returnedRemainder: string;
+        settledAtLedger: number;
+      };
+    },
+    overrides: {
+      close?: (input: CloseAdapterInput) => CloseAdapterResult | Promise<CloseAdapterResult>;
+    } = {},
+  ): { adapter: MppChannelAdapter; calls: { close: number; find: number } } {
+    const calls = { close: 0, find: 0 };
+    let openCount = 0;
+    return {
+      adapter: {
+        async openChannel() {
+          openCount += 1;
+          return {
+            channelId: `CTEST${openCount.toString().padStart(3, "0")}`,
+            openTxHash: `tx-open-${openCount}`,
+          };
+        },
+        async signCommitment(input) {
+          return { commitment: `sig:${input.cumulativeAmount}` };
+        },
+        async closeChannel(input) {
+          calls.close += 1;
+          if (overrides.close) return overrides.close(input);
+          return {
+            settlementTxHash: "tx-close",
+            settledAmount: input.cumulativeAmount,
+            returnedRemainder: (BigInt(input.deposit) - BigInt(input.cumulativeAmount)).toString(),
+          };
+        },
+        async getChannelState() {
+          return chain.state;
+        },
+        async findChannelSettlement() {
+          calls.find += 1;
+          return chain.settlement ?? null;
+        },
+      },
+      calls,
+    };
+  }
+
+  it("resume on a channel stuck in closing retries close when nothing is on chain yet", async () => {
+    // Build a manager whose close() throws, then run resume() against the
+    // same store with a new adapter that completes close() cleanly.
+    const store = createMemoryCommitmentStore();
+    const { adapter: failing } = fakeAdapterWithChain(
+      {
+        state: { balance: "1000", currentLedger: 100 },
+      },
+      {
+        close: () => {
+          throw new Error("submit timed out");
+        },
+      },
+    );
+    const mgr1 = createChannelManager({ adapter: failing, store });
+    const channel = await mgr1.open({
+      counterparty: "GR",
+      asset: "USDC",
+      deposit: "1000",
+      network: "testnet",
+    });
+    await mgr1.commit(channel.id, "200");
+    await expect(mgr1.close(channel.id)).rejects.toThrow();
+
+    const { adapter: healthy, calls } = fakeAdapterWithChain({
+      state: { balance: "1000", currentLedger: 150 },
+    });
+    const mgr2 = createChannelManager({ adapter: healthy, store });
+    const outcome = await mgr2.resume(channel.id);
+    expect(outcome.kind).toBe("reclosed");
+    expect(calls.close).toBe(1);
+    const refreshed = await mgr2.get(channel.id);
+    expect(refreshed?.status).toBe("closed");
+  });
+
+  it("resume on a channel whose close already landed fetches settlement details and marks closed", async () => {
+    const store = createMemoryCommitmentStore();
+    const { adapter: failing } = fakeAdapterWithChain(
+      { state: { balance: "1000", currentLedger: 100 } },
+      {
+        close: () => {
+          throw new Error("poll timeout");
+        },
+      },
+    );
+    const mgr1 = createChannelManager({ adapter: failing, store });
+    const channel = await mgr1.open({
+      counterparty: "GR",
+      asset: "USDC",
+      deposit: "1000",
+      network: "testnet",
+    });
+    await mgr1.commit(channel.id, "400");
+    await expect(mgr1.close(channel.id)).rejects.toThrow();
+
+    const { adapter: resolved, calls } = fakeAdapterWithChain({
+      state: { balance: "0", closeEffectiveAtLedger: 120, currentLedger: 150 },
+      settlement: {
+        settlementTxHash: "tx-landed",
+        settledAmount: "400",
+        returnedRemainder: "600",
+        settledAtLedger: 120,
+      },
+    });
+    const mgr2 = createChannelManager({ adapter: resolved, store });
+    const outcome = await mgr2.resume(channel.id);
+    expect(outcome.kind).toBe("closed");
+    if (outcome.kind !== "closed") throw new Error("expected closed");
+    expect(outcome.settlementTxHash).toBe("tx-landed");
+    expect(outcome.returnedRemainder).toBe("600");
+    expect(calls.find).toBe(1);
+    const refreshed = await mgr2.get(channel.id);
+    expect(refreshed?.status).toBe("closed");
+  });
+
+  it("resume hands a non-zero-balance close to the recovery path", async () => {
+    const store = createMemoryCommitmentStore();
+    const { adapter: failing } = fakeAdapterWithChain(
+      { state: { balance: "1000", currentLedger: 100 } },
+      {
+        close: () => {
+          throw new Error("poll timeout");
+        },
+      },
+    );
+    const mgr1 = createChannelManager({ adapter: failing, store });
+    const channel = await mgr1.open({
+      counterparty: "GR",
+      asset: "USDC",
+      deposit: "1000",
+      network: "testnet",
+    });
+    await mgr1.commit(channel.id, "400");
+    await expect(mgr1.close(channel.id)).rejects.toThrow();
+
+    const { adapter: funderInitiated } = fakeAdapterWithChain({
+      state: { balance: "600", closeEffectiveAtLedger: 160, currentLedger: 180 },
+    });
+    const mgr2 = createChannelManager({ adapter: funderInitiated, store });
+    const outcome = await mgr2.resume(channel.id);
+    expect(outcome.kind).toBe("recovering");
+    const refreshed = await mgr2.get(channel.id);
+    expect(refreshed?.status).toBe("recovering");
+  });
+
+  it("resume is a no-op for a channel that never started closing", async () => {
+    const { adapter } = fakeAdapterWithChain({
+      state: { balance: "1000", currentLedger: 100 },
+    });
+    const manager = createChannelManager({ adapter });
+    const channel = await manager.open({
+      counterparty: "GR",
+      asset: "USDC",
+      deposit: "1000",
+      network: "testnet",
+    });
+    const outcome = await manager.resume(channel.id);
+    expect(outcome.kind).toBe("no-change");
+  });
+
+  it("resumeAll resumes every closing channel and reports per-channel outcomes", async () => {
+    const store = createMemoryCommitmentStore();
+    const { adapter: failing } = fakeAdapterWithChain(
+      { state: { balance: "1000", currentLedger: 100 } },
+      {
+        close: () => {
+          throw new Error("poll timeout");
+        },
+      },
+    );
+    const mgr1 = createChannelManager({ adapter: failing, store });
+    const cA = await mgr1.open({
+      counterparty: "GR",
+      asset: "USDC",
+      deposit: "1000",
+      network: "testnet",
+    });
+    await mgr1.commit(cA.id, "100");
+    await expect(mgr1.close(cA.id)).rejects.toThrow();
+    const cB = await mgr1.open({
+      counterparty: "GS",
+      asset: "USDC",
+      deposit: "1000",
+      network: "testnet",
+    });
+    await mgr1.commit(cB.id, "200");
+    await expect(mgr1.close(cB.id)).rejects.toThrow();
+
+    const { adapter: healthy } = fakeAdapterWithChain({
+      state: { balance: "1000", currentLedger: 200 },
+    });
+    const mgr2 = createChannelManager({ adapter: healthy, store });
+    const result = await mgr2.resumeAll();
+    expect(result.outcomes).toHaveLength(2);
+    expect(result.outcomes.every((o) => o.kind === "reclosed")).toBe(true);
   });
 });

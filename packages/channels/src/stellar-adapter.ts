@@ -15,8 +15,10 @@ import { Keypair, StrKey } from "@stellar/stellar-sdk";
 import { type StellarNetwork, TollwayError } from "@vegaforge/tollway-core";
 import { Credential, Store } from "mppx";
 import type {
+  ChannelChainState,
   CloseAdapterInput,
   CloseAdapterResult,
+  FoundChannelSettlement,
   MppChannelAdapter,
   OpenAdapterInput,
   OpenAdapterResult,
@@ -235,6 +237,36 @@ export function createStellarMppChannelAdapter(
         settledAmount: amount.toString(),
         returnedRemainder: (deposit - amount).toString(),
       };
+    },
+
+    async getChannelState(input): Promise<ChannelChainState> {
+      assertChannel(channelContract, input.network);
+      const state = await getChannelState({
+        channel: channelContract,
+        network,
+        rpcUrl,
+        simulationTimeoutMs,
+      });
+      const chainState: ChannelChainState = {
+        balance: state.balance.toString(),
+        currentLedger: state.currentLedger,
+      };
+      if (state.closeEffectiveAtLedger != null) {
+        chainState.closeEffectiveAtLedger = state.closeEffectiveAtLedger;
+      }
+      return chainState;
+    },
+
+    async findChannelSettlement(_input): Promise<FoundChannelSettlement | null> {
+      // Issue #176: the event-scan implementation lives with the real
+      // adapter work in #101. Until #101 lands this method throws a
+      // typed error so a caller running `resume` against the real
+      // adapter sees the gap instead of silently skipping. Fake
+      // adapters in tests implement it fully.
+      throw new TollwayError(
+        "not-implemented",
+        "stellarMppChannelAdapter.findChannelSettlement is tracked under #101",
+      );
     },
   };
 }

@@ -43,8 +43,52 @@ export type Policy = {
       }
     >
   >;
+  /**
+   * Agent-side rate limit. Covered in docs/receipt-format and
+   * apps/web/src/content/docs/policy.mdx ("Rate limit").
+   *
+   * Issue #197: `requestsPerMinute` is kept as a shorthand for
+   * `windows: [{ windowSeconds: 60, limit }]` so policies written against
+   * the pre-#197 schema still parse. New policies should use `windows`,
+   * `scope`, and `count` explicitly.
+   */
   rateLimit?: {
+    /** Shorthand for a single 60s window. Mutually exclusive with `windows`. */
     requestsPerMinute?: number;
+    /**
+     * One or more sliding-window limits applied in parallel. A payment
+     * fails rate-limit if any window is exceeded. Example: 60/min AND
+     * 1000/hour: `windows: [{ windowSeconds: 60, limit: 60 }, { windowSeconds: 3600, limit: 1000 }]`.
+     */
+    windows?: ReadonlyArray<{
+      /** Window length in seconds. Must be a positive integer. */
+      windowSeconds: number;
+      /** Maximum requests allowed in the window. Non-negative integer. */
+      limit: number;
+    }>;
+    /**
+     * `settlements` (the default) counts each call to `record(intent)`.
+     * `attempts` counts each call to `evaluate(intent)` regardless of
+     * outcome - noting that concurrent attempts can still slip the
+     * last-slot race until the reserve-at-check-time work from #189
+     * lands.
+     */
+    count?: "settlements" | "attempts";
+    /**
+     * `global` (the default) counts every payment against one window.
+     * `per-counterparty` splits the window per payee so one noisy
+     * counterparty does not consume another's quota. The counterparty
+     * key is the payee address, matching `perService`.
+     */
+    scope?: "global" | "per-counterparty";
+    /**
+     * Cap on how many counterparty keys the engine will track at once
+     * when `scope === "per-counterparty"`. Defaults to 1024. When the
+     * cap is reached, the engine evicts the least-recently-used
+     * counterparty and the rate-limit rule reports it in the trace
+     * detail. Set to `0` to disable the cap (unbounded memory).
+     */
+    perCounterpartyKeyLimit?: number;
   };
   anomaly?: {
     /** Trips the anomaly stop when spend in any minute exceeds this. */
@@ -143,7 +187,14 @@ type EngineState = {
   dailySpend: Map<string, bigint>;
   totalSpend: Map<string, bigint>;
   serviceSpend: Map<string, bigint>;
-  requestTimestamps: number[];
+  /**
+   * Issue #197: rate-limit history, bucketised per counterparty (or the
+   * sentinel `__global__` under global scope). The map value is a
+   * sliding log of timestamps the rate-limit rule ages out per its
+   * configured windows. `touchedAt` orders eviction when
+   * `perCounterpartyKeyLimit` is reached.
+   */
+  rateLimit: Map<string, { timestamps: number[]; touchedAt: number }>;
   anomalySamples: { amount: bigint; asset: string; ts: number }[];
   adaptive: Map<string, AdaptiveState>;
 };
@@ -388,10 +439,114 @@ const perService: RuleEvaluator = ({ policy, intent, amount, state }) =>
     LIFETIME,
   );
 
-const rateLimit: RuleEvaluator = ({ policy, state }) => {
+const DEFAULT_PER_COUNTERPARTY_KEY_LIMIT = 1024;
+const GLOBAL_RATE_LIMIT_KEY = "__global__";
+
+type ResolvedRateLimit = {
+  windows: ReadonlyArray<{ windowMs: number; limit: bigint; windowSeconds: number }>;
+  count: "settlements" | "attempts";
+  scope: "global" | "per-counterparty";
+  perCounterpartyKeyLimit: number;
+};
+
+/**
+ * Normalises the rate-limit config into the shape the evaluator and the
+ * writer both use. Rejects an invalid shape with `invalid-policy` so
+ * callers see one error class, not a Zod spit at the field.
+ */
+function resolveRateLimit(policy: Policy): ResolvedRateLimit | undefined {
+  const config = policy.rateLimit;
+  if (!config) return undefined;
+  if (config.requestsPerMinute != null && config.windows && config.windows.length > 0) {
+    throw new TollwayError(
+      "invalid-policy",
+      "rateLimit: set either requestsPerMinute or windows, not both",
+    );
+  }
+  const windows: Array<{ windowMs: number; limit: bigint; windowSeconds: number }> = [];
+  if (config.windows && config.windows.length > 0) {
+    for (const entry of config.windows) {
+      if (!Number.isSafeInteger(entry.windowSeconds) || entry.windowSeconds <= 0) {
+        throw new TollwayError(
+          "invalid-policy",
+          `rateLimit.windows[].windowSeconds must be a positive integer, got ${entry.windowSeconds}`,
+        );
+      }
+      windows.push({
+        windowSeconds: entry.windowSeconds,
+        windowMs: entry.windowSeconds * 1000,
+        limit: parseCount(entry.limit),
+      });
+    }
+  } else if (config.requestsPerMinute != null) {
+    windows.push({
+      windowSeconds: 60,
+      windowMs: 60_000,
+      limit: parseCount(config.requestsPerMinute),
+    });
+  } else {
+    return undefined;
+  }
+  const count = config.count ?? "settlements";
+  const scope = config.scope ?? "global";
+  const perCounterpartyKeyLimit =
+    config.perCounterpartyKeyLimit ?? DEFAULT_PER_COUNTERPARTY_KEY_LIMIT;
+  if (!Number.isSafeInteger(perCounterpartyKeyLimit) || perCounterpartyKeyLimit < 0) {
+    throw new TollwayError(
+      "invalid-policy",
+      `rateLimit.perCounterpartyKeyLimit must be a non-negative integer, got ${perCounterpartyKeyLimit}`,
+    );
+  }
+  return { windows, count, scope, perCounterpartyKeyLimit };
+}
+
+/** The counterparty key the rate limit measures under; `__global__` under global scope. */
+function rateLimitKey(intent: PaymentIntent, scope: "global" | "per-counterparty"): string {
+  return scope === "global" ? GLOBAL_RATE_LIMIT_KEY : intent.payee;
+}
+
+/**
+ * Ages out timestamps older than the longest configured window. Keeping
+ * only what matters means every per-key array is bounded by the sum of
+ * the per-second request rate and the longest window; in practice a
+ * few hundred entries at most.
+ */
+function pruneRateLimitEntry(timestamps: number[], now: number, longestMs: number): void {
+  const cutoff = now - longestMs;
+  while (timestamps.length > 0 && (timestamps[0] ?? Infinity) <= cutoff) {
+    timestamps.shift();
+  }
+}
+
+/**
+ * Evicts the least-recently-touched key when the per-counterparty cap
+ * is hit. Only applies when scope is `per-counterparty` and the cap is
+ * positive (a cap of 0 disables eviction).
+ */
+function evictLruIfNeeded(state: EngineState, perCounterpartyKeyLimit: number): number | undefined {
+  if (perCounterpartyKeyLimit === 0) return undefined;
+  if (state.rateLimit.size < perCounterpartyKeyLimit) return undefined;
+  let lruKey: string | undefined;
+  let lruAt = Number.POSITIVE_INFINITY;
+  for (const [key, entry] of state.rateLimit) {
+    if (key === GLOBAL_RATE_LIMIT_KEY) continue;
+    if (entry.touchedAt < lruAt) {
+      lruAt = entry.touchedAt;
+      lruKey = key;
+    }
+  }
+  if (lruKey !== undefined) {
+    state.rateLimit.delete(lruKey);
+  }
+  return lruKey === undefined ? undefined : lruAt;
+}
+
+const rateLimit: RuleEvaluator = ({ policy, intent, now, state }) => {
   const base = { id: "rate-limit", rule: "rate-limit" } as const;
-  const rpm = policy.rateLimit?.requestsPerMinute;
-  if (rpm == null) {
+  // resolveRateLimit throws `invalid-policy` on a bad shape; let it
+  // propagate - evaluate() is already the path that refuses a bad policy.
+  const resolved = resolveRateLimit(policy);
+  if (!resolved) {
     return {
       ...base,
       configured: false,
@@ -403,21 +558,61 @@ const rateLimit: RuleEvaluator = ({ policy, state }) => {
       detail: "policy sets no rate limit",
     };
   }
-  const limit = parseCount(rpm);
-  const current = BigInt(state.requestTimestamps.length);
-  const projected = current + 1n;
-  const fails = projected > limit;
+  const key = rateLimitKey(intent, resolved.scope);
+  const entry = state.rateLimit.get(key);
+  const timestamps = entry?.timestamps ?? [];
+  const longestMs = Math.max(...resolved.windows.map((w) => w.windowMs));
+  // Age-out before measuring so `current` names the live count.
+  const measured = [...timestamps];
+  pruneRateLimitEntry(measured, now, longestMs);
+  // Find the tightest violation (first failing window), reporting the
+  // numbers for the tightest window when nothing fails.
+  let failingWindow: (typeof resolved.windows)[number] | undefined;
+  let failingCurrent = 0n;
+  let tightestWindow = resolved.windows[0] ?? {
+    windowMs: 60_000,
+    limit: 0n,
+    windowSeconds: 60,
+  };
+  let tightestCurrent = 0n;
+  for (const w of resolved.windows) {
+    const windowCutoff = now - w.windowMs;
+    let count = 0n;
+    for (const ts of measured) {
+      if (ts > windowCutoff) count += 1n;
+    }
+    if (count + 1n > w.limit) {
+      if (!failingWindow || count > failingCurrent) {
+        failingWindow = w;
+        failingCurrent = count;
+      }
+    }
+    // Pick the tightest for reporting.
+    if (!tightestWindow || w.limit - count < tightestWindow.limit - tightestCurrent) {
+      tightestWindow = w;
+      tightestCurrent = count;
+    }
+  }
+  const reported = failingWindow ?? tightestWindow;
+  const reportedCurrent = failingWindow ? failingCurrent : tightestCurrent;
+  const projected = reportedCurrent + 1n;
+  const windowShape: PolicyWindow = {
+    kind: "sliding",
+    seconds: reported.windowSeconds,
+  };
+  const where = resolved.scope === "per-counterparty" ? ` for ${intent.payee}` : "";
+  const detail = failingWindow
+    ? `rate limit${where} exceeded: ${reportedCurrent} requests in the last ${reported.windowSeconds} seconds (limit ${reported.limit})`
+    : `rate limit${where}: ${projected} of ${reported.limit} requests in the last ${reported.windowSeconds} seconds`;
   return {
     ...base,
     configured: true,
-    outcome: fails ? "fail" : "pass",
-    limit: limit.toString(),
-    current: current.toString(),
+    outcome: failingWindow ? "fail" : "pass",
+    limit: reported.limit.toString(),
+    current: reportedCurrent.toString(),
     projected: projected.toString(),
-    window: MINUTE_WINDOW,
-    detail: fails
-      ? `rate limit exceeded: ${current} requests in the last minute`
-      : `rate limit: ${projected} of ${limit} requests in the last minute`,
+    window: windowShape,
+    detail,
   };
 };
 
@@ -555,7 +750,7 @@ export function createPolicyEngine(
     dailySpend: new Map(),
     totalSpend: new Map(),
     serviceSpend: new Map(),
-    requestTimestamps: [],
+    rateLimit: new Map(),
     anomalySamples: [],
     adaptive: new Map(),
   };
@@ -569,15 +764,33 @@ export function createPolicyEngine(
   }
 
   function pruneWindow(now: number): void {
-    const cutoff = now - WINDOW_MS;
+    // Issue #197: the anomaly window and the rate-limit window are now
+    // independent. The anomaly rule still uses the hard-coded one-minute
+    // sample window; the rate-limit window is per-configured-entry and
+    // ages out inside the evaluator.
     while (
-      state.requestTimestamps.length > 0 &&
-      (state.requestTimestamps[0] ?? Infinity) < cutoff
+      state.anomalySamples.length > 0 &&
+      (state.anomalySamples[0]?.ts ?? Infinity) < now - WINDOW_MS
     ) {
-      state.requestTimestamps.shift();
-    }
-    while (state.anomalySamples.length > 0 && (state.anomalySamples[0]?.ts ?? Infinity) < cutoff) {
       state.anomalySamples.shift();
+    }
+    // Prune rate-limit entries whose longest window has fully drained.
+    const resolved = (() => {
+      try {
+        return resolveRateLimit(policy);
+      } catch {
+        // An invalid policy throws at evaluate() time; pruning tolerates it.
+        return undefined;
+      }
+    })();
+    if (resolved) {
+      const longestMs = Math.max(...resolved.windows.map((w) => w.windowMs));
+      for (const [key, entry] of state.rateLimit) {
+        pruneRateLimitEntry(entry.timestamps, now, longestMs);
+        if (entry.timestamps.length === 0) {
+          state.rateLimit.delete(key);
+        }
+      }
     }
   }
 
@@ -620,8 +833,41 @@ export function createPolicyEngine(
       detector.bucketSpend += amount;
       state.adaptive.set(key, detector);
     }
-    state.requestTimestamps.push(now);
+    recordRateLimit(now, intent, "settlements");
     state.anomalySamples.push({ amount, asset: intent.asset, ts: now });
+  }
+
+  /**
+   * Writes a timestamp into the rate-limit log when the configured
+   * `count` mode matches the trigger. `attempts` writes on evaluate;
+   * `settlements` writes on record. Handles LRU eviction when
+   * `perCounterpartyKeyLimit` is reached.
+   */
+  function recordRateLimit(
+    now: number,
+    intent: PaymentIntent,
+    trigger: "settlements" | "attempts",
+  ): void {
+    const resolved = (() => {
+      try {
+        return resolveRateLimit(policy);
+      } catch {
+        return undefined;
+      }
+    })();
+    if (!resolved) return;
+    if (resolved.count !== trigger) return;
+    const key = rateLimitKey(intent, resolved.scope);
+    const existing = state.rateLimit.get(key);
+    if (!existing) {
+      if (resolved.scope === "per-counterparty") {
+        evictLruIfNeeded(state, resolved.perCounterpartyKeyLimit);
+      }
+      state.rateLimit.set(key, { timestamps: [now], touchedAt: now });
+      return;
+    }
+    existing.timestamps.push(now);
+    existing.touchedAt = now;
   }
 
   async function evaluate(intent: PaymentIntent): Promise<PolicyTrace> {
@@ -635,6 +881,12 @@ export function createPolicyEngine(
     const entries = RULES.map((rule) => inFieldOrder(rule(input)));
     const firstFail = entries.find((entry) => entry.outcome === "fail");
     const wouldBlock = firstFail !== undefined;
+    // Issue #197: `count: attempts` writes on evaluate so the rule sees
+    // every attempt, not only settled ones. Full concurrency safety
+    // across in-flight attempts follows the reserve-at-check-time work
+    // in #189; until then, two concurrent attempts can still race the
+    // last slot - documented in apps/web/src/content/docs/policy.mdx.
+    recordRateLimit(now, intent, "attempts");
     return {
       version: POLICY_TRACE_VERSION,
       mode,

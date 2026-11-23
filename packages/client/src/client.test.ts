@@ -18,6 +18,7 @@ import {
   ReceiptVerificationError,
 } from "./index.js";
 import { createMemoryReceiptStore, type ReceiptStore } from "./receipt-store.js";
+import { AmbiguousSettlementError, SettlementOutcomeError } from "./retry.js";
 
 const OFFER: PaymentOffer = {
   resource: "/quotes/latest",
@@ -627,5 +628,171 @@ describe("createClient shadow policy", () => {
     expect(evaluate).not.toHaveBeenCalled();
     // Spend is still recorded, so the shadow is accurate once someone listens.
     expect(record).toHaveBeenCalledTimes(1);
+  });
+});
+
+// Issue #203 coverage.
+describe("createClient retry (#203)", () => {
+  function retryableThenOk(): { settler: ClientSettler; calls: { count: number } } {
+    const calls = { count: 0 };
+    const settler: ClientSettler = {
+      async settle() {
+        calls.count += 1;
+        if (calls.count === 1) {
+          throw new SettlementOutcomeError({
+            kind: "retryable-with-fresh-auth",
+            reason: "expired authorization",
+          });
+        }
+        return baselineReceipt;
+      },
+    };
+    return { settler, calls };
+  }
+
+  it("retries once on retryable-with-fresh-auth and succeeds", async () => {
+    const { settler, calls } = retryableThenOk();
+    const policy = createPolicyEngine({ budgets: { daily: "1000000" } });
+    const events: ClientEvent[] = [];
+    const client = createClient({ network: "testnet", settler, policy });
+    client.on((event) => events.push(event));
+
+    const result = await client.pay({ resource: OFFER.resource, offer: OFFER });
+    expect(result.receipt).toEqual(baselineReceipt);
+    expect(calls.count).toBe(2);
+    const retry = events.find((e) => e.type === "retry");
+    expect(retry).toMatchObject({ type: "retry", attempt: 2, reason: "expired authorization" });
+  });
+
+  it("calls policy.record exactly once on success, no matter how many attempts", async () => {
+    const { settler } = retryableThenOk();
+    const inner = createPolicyEngine({ budgets: { daily: "1000000" } });
+    const record = vi.fn(inner.record);
+    const policy = { mode: inner.mode, evaluate: inner.evaluate, check: inner.check, record };
+    const client = createClient({ network: "testnet", settler, policy });
+    await client.pay({ resource: OFFER.resource, offer: OFFER });
+    expect(record).toHaveBeenCalledTimes(1);
+  });
+
+  it("re-runs policy.check before each retry and stops if the policy now blocks", async () => {
+    let shouldBlock = false;
+    const inner = createPolicyEngine({ budgets: { daily: "1000000" } });
+    const policy = {
+      mode: inner.mode,
+      async evaluate(intent: Parameters<typeof inner.evaluate>[0]) {
+        const trace = await inner.evaluate(intent);
+        if (shouldBlock) {
+          // Mutate the trace to a failing budget to exercise the block.
+          return {
+            ...trace,
+            allowed: false,
+            wouldBlock: true,
+            blockedBy: "budget-daily" as const,
+            entries: trace.entries.map((e) =>
+              e.id === "budget-daily"
+                ? { ...e, outcome: "fail" as const, detail: "newly blocked" }
+                : e,
+            ),
+          };
+        }
+        return trace;
+      },
+      check: inner.check,
+      record: inner.record,
+    };
+    const calls = { count: 0 };
+    const settler: ClientSettler = {
+      async settle() {
+        calls.count += 1;
+        shouldBlock = true;
+        throw new SettlementOutcomeError({
+          kind: "retryable-with-fresh-auth",
+          reason: "expired",
+        });
+      },
+    };
+    const client = createClient({ network: "testnet", settler, policy });
+    await expect(client.pay({ resource: OFFER.resource, offer: OFFER })).rejects.toBeInstanceOf(
+      PolicyBlockedError,
+    );
+    // Settler called once, policy check saw the second (blocked) trace.
+    expect(calls.count).toBe(1);
+  });
+
+  it("surfaces an ambiguous outcome as AmbiguousSettlementError and never retries", async () => {
+    const calls = { count: 0 };
+    const settler: ClientSettler = {
+      async settle() {
+        calls.count += 1;
+        throw new SettlementOutcomeError({
+          kind: "ambiguous",
+          reason: "502 after signing",
+        });
+      },
+    };
+    const client = createClient({ network: "testnet", settler });
+    await expect(client.pay({ resource: OFFER.resource, offer: OFFER })).rejects.toBeInstanceOf(
+      AmbiguousSettlementError,
+    );
+    expect(calls.count).toBe(1);
+  });
+
+  it("resends the same header after Retry-After on settlement-in-progress", async () => {
+    const calls = { count: 0 };
+    const sleep = vi.fn(async (_ms: number) => {});
+    const settler: ClientSettler = {
+      async settle() {
+        calls.count += 1;
+        if (calls.count === 1) {
+          throw new SettlementOutcomeError({
+            kind: "settlement-in-progress",
+            reason: "409",
+            retryAfterMs: 250,
+          });
+        }
+        return baselineReceipt;
+      },
+    };
+    const client = createClient({
+      network: "testnet",
+      settler,
+      retry: { sleep },
+    });
+    const result = await client.pay({ resource: OFFER.resource, offer: OFFER });
+    expect(result.receipt).toEqual(baselineReceipt);
+    expect(sleep).toHaveBeenCalledWith(250);
+  });
+
+  it("honours maxAttempts and surfaces the last outcome", async () => {
+    const calls = { count: 0 };
+    const settler: ClientSettler = {
+      async settle() {
+        calls.count += 1;
+        throw new SettlementOutcomeError({
+          kind: "retryable-with-fresh-auth",
+          reason: "still expired",
+        });
+      },
+    };
+    const client = createClient({ network: "testnet", settler, retry: { maxAttempts: 3 } });
+    await expect(client.pay({ resource: OFFER.resource, offer: OFFER })).rejects.toBeInstanceOf(
+      SettlementOutcomeError,
+    );
+    expect(calls.count).toBe(3);
+  });
+
+  it("passes through a plain (non-SettlementOutcomeError) failure without retrying", async () => {
+    const calls = { count: 0 };
+    const settler: ClientSettler = {
+      async settle() {
+        calls.count += 1;
+        throw new TollwayError("payment-failed", "legacy error");
+      },
+    };
+    const client = createClient({ network: "testnet", settler });
+    await expect(client.pay({ resource: OFFER.resource, offer: OFFER })).rejects.toBeInstanceOf(
+      TollwayError,
+    );
+    expect(calls.count).toBe(1);
   });
 });

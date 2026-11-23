@@ -91,3 +91,26 @@ export class SettlementMismatchError extends TollwayError {
     this.actualSettled = actualSettled;
   }
 }
+
+/**
+ * Issue #176: thrown by the adapter when a settlement lookup cannot
+ * reach back to the recorded start ledger because the RPC provider's
+ * event history window has elapsed. Surfacing it (rather than silently
+ * returning null) lets `resume()` fail loudly so an operator can
+ * investigate instead of accidentally marking a channel closed on a
+ * blind retry.
+ */
+export class MissingEventHistoryError extends TollwayError {
+  readonly channelId: string;
+  readonly startLedger: number;
+
+  constructor(channelId: string, startLedger: number) {
+    super(
+      "payment-failed",
+      `channel "${channelId}" settlement lookup could not reach ledger ${startLedger}: RPC event window elapsed`,
+    );
+    this.name = "MissingEventHistoryError";
+    this.channelId = channelId;
+    this.startLedger = startLedger;
+  }
+}

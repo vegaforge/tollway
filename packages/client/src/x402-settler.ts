@@ -33,6 +33,7 @@ import type { PaymentPayload, PaymentRequired, PaymentRequirements } from "@x402
 import type { ClientStellarSigner } from "@x402/stellar";
 import { ExactStellarScheme } from "@x402/stellar/exact/client";
 import type { ClientSettler, SettleRequest } from "./index.js";
+import { SettlementOutcomeError } from "./retry.js";
 
 export const PAYMENT_REQUIRED_HEADER = "PAYMENT-REQUIRED";
 export const PAYMENT_SIGNATURE_HEADER = "PAYMENT-SIGNATURE";
@@ -127,21 +128,57 @@ export function createX402Settler(options: X402SettlerOptions): ClientSettler {
         );
       }
 
-      const paid = await doFetch(resource, {
-        method,
-        headers: { [PAYMENT_SIGNATURE_HEADER]: encodePaymentSignatureHeader(payload) },
-      });
+      let paid: Response;
+      try {
+        paid = await doFetch(resource, {
+          method,
+          headers: { [PAYMENT_SIGNATURE_HEADER]: encodePaymentSignatureHeader(payload) },
+        });
+      } catch (networkError) {
+        // Issue #203: a network error after the paid request went out may
+        // mean the payment landed and the response never came back. That
+        // is the canonical ambiguous outcome.
+        throw new SettlementOutcomeError({
+          kind: "ambiguous",
+          reason: `network error after sending the paid request: ${messageOf(networkError)}`,
+        });
+      }
+      // Issue #203: classify the server's response so the client can decide
+      // whether to retry with a fresh authorization.
       if (paid.status === 402) {
-        throw new TollwayError(
-          "payment-failed",
-          `${resource} answered the signed payment with another 402`,
-        );
+        // The gate re-challenged the signed payment (expired auth or nonce
+        // reuse are the common causes). The caller can sign again safely:
+        // nothing settled on chain under the Soroban nonce yet.
+        throw new SettlementOutcomeError({
+          kind: "retryable-with-fresh-auth",
+          reason: `${resource} answered the signed payment with another 402`,
+        });
+      }
+      if (paid.status === 409) {
+        // A duplicate of this payment is in flight on the gate. Resend the
+        // exact same header after Retry-After so the gate idempotency
+        // returns the original receipt.
+        const retryAfterMs = parseRetryAfterMs(paid.headers.get("retry-after"));
+        throw new SettlementOutcomeError({
+          kind: "settlement-in-progress",
+          reason: `${resource} reports a concurrent settlement in progress (409)`,
+          retryAfterMs,
+        });
+      }
+      if (paid.status >= 500 && paid.status < 600) {
+        // Settle failures from the gate are returned as 502 today; a 5xx
+        // after the signed payment is an outcome-unknown: the payment
+        // may have landed on chain and only the response was lost.
+        throw new SettlementOutcomeError({
+          kind: "ambiguous",
+          reason: `${resource} answered the signed payment with ${paid.status}`,
+        });
       }
       if (!paid.ok) {
-        throw new TollwayError(
-          "payment-failed",
-          `${resource} answered the signed payment with ${paid.status}`,
-        );
+        throw new SettlementOutcomeError({
+          kind: "fatal",
+          reason: `${resource} answered the signed payment with ${paid.status}`,
+        });
       }
       return readReceipt(paid, resource);
     },
@@ -233,4 +270,17 @@ function readReceipt(response: Response, resource: string): SignedReceipt {
 
 function messageOf(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
+}
+
+/**
+ * Parses an HTTP `Retry-After` header into ms. Supports the "delay in
+ * seconds" form only; a date-stamped form is ignored (returns undefined)
+ * because clock skew between client and gate makes an absolute date
+ * unreliable and the retry logic uses an injected clock.
+ */
+function parseRetryAfterMs(header: string | null): number | undefined {
+  if (!header) return undefined;
+  const seconds = Number(header.trim());
+  if (!Number.isFinite(seconds) || seconds < 0) return undefined;
+  return seconds * 1000;
 }

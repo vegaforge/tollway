@@ -301,16 +301,18 @@ describe("createX402Settler", () => {
       expect(calls).toHaveLength(1);
     });
 
-    it("rejects a second 402", async () => {
+    it("classifies a second 402 as retryable-with-fresh-auth (Issue #203)", async () => {
       const { fetch } = scriptedFetch(challenge(), challenge());
       const error = await rejection(fetch);
-      expect(error.message).toBe(`${RESOURCE} answered the signed payment with another 402`);
+      expect(error.message).toContain(`${RESOURCE} answered the signed payment with another 402`);
+      expect((error as { kind?: string }).kind).toBe("retryable-with-fresh-auth");
     });
 
-    it("rejects another failure status after paying", async () => {
+    it("classifies a 5xx after paying as ambiguous (Issue #203)", async () => {
       const { fetch } = scriptedFetch(challenge(), new Response(null, { status: 500 }));
       const error = await rejection(fetch);
-      expect(error.message).toBe(`${RESOURCE} answered the signed payment with 500`);
+      expect(error.message).toContain(`${RESOURCE} answered the signed payment with 500`);
+      expect((error as { kind?: string }).kind).toBe("ambiguous");
     });
 
     it("rejects a paid response with no receipt header", async () => {

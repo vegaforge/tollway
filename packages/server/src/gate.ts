@@ -17,6 +17,8 @@ import {
 } from "@vegaforge/tollway-core";
 import { x402Version } from "@x402/core";
 import type { PaymentRequired, PaymentPayload as X402Payload } from "@x402/core/types";
+import type { DeclareDiscoveryExtensionInput } from "@x402/extensions/bazaar";
+import { declareDiscoveryExtension, validateDiscoveryExtensionSpec } from "@x402/extensions/bazaar";
 import type { SettlementCache, SettlementLock } from "./cache.js";
 import { type FacilitatorClient, stellarCaip2, toPaymentRequirements } from "./facilitator.js";
 import {
@@ -88,7 +90,44 @@ export type PaywallConfig = {
   maxTimeoutSeconds?: number;
   /** x402: scheme-specific data, sent as `PaymentRequirements.extra`. */
   extra?: Record<string, unknown>;
+  /**
+   * Issue #154: x402 Bazaar discovery. When set, `createPaywall` declares
+   * the route for Bazaar catalogues via `@x402/extensions`:
+   * `extensions.bazaar` is added to the `PaymentRequired` challenge and
+   * carried on the payload forwarded to `/verify` and `/settle` so a
+   * cataloguing facilitator can extract it with `extractDiscoveryInfo`.
+   * Routes without this block behave exactly as today and publish
+   * nothing.
+   */
+  discovery?: DiscoveryDeclaration;
 };
+
+/**
+ * The route-level discovery declaration (Issue #154). A query route uses
+ * `kind: "query"` with query-string `input`; a body route uses
+ * `kind: "body"` with a `bodyType`. Route templates must not leak path
+ * parameters that identify a user (use `:param` templates). The service
+ * description and tags, if set, are validated by `@x402/extensions`
+ * before they land on a 402.
+ */
+export type DiscoveryDeclaration =
+  | {
+      kind: "query";
+      input?: Record<string, unknown>;
+      inputSchema?: Record<string, unknown>;
+      pathParams?: Record<string, unknown>;
+      pathParamsSchema?: Record<string, unknown>;
+      output?: { example?: unknown; schema?: Record<string, unknown> };
+    }
+  | {
+      kind: "body";
+      bodyType: "json" | "form-data" | "text";
+      input?: Record<string, unknown>;
+      inputSchema?: Record<string, unknown>;
+      pathParams?: Record<string, unknown>;
+      pathParamsSchema?: Record<string, unknown>;
+      output?: { example?: unknown; schema?: Record<string, unknown> };
+    };
 
 /**
  * What the gate decided for one request: a 402 with the challenge, a settled
@@ -941,6 +980,16 @@ async function paymentRequired(
       }),
     ],
   };
+  // Issue #154: attach the Bazaar discovery extension when the route
+  // opts in. The upstream helper builds the shape; a cataloguing
+  // facilitator reads it back with `extractDiscoveryInfo` at settle
+  // time. Routes without a `discovery` config publish nothing.
+  if (config.discovery) {
+    challenge.extensions = {
+      ...(challenge.extensions ?? {}),
+      ...declareDiscoveryExtension(toDeclareDiscoveryInput(config.discovery)),
+    };
+  }
   const headers: Record<string, string> = {
     [PAYMENT_REQUIRED_HEADER]: encodePaymentRequiredHeader(challenge),
   };
@@ -979,6 +1028,10 @@ export function createPaywallWithInFlight(
   validateDynamicPriceConfig(config);
   assertCompleteLocking(deps.cache);
   if (deps.servicePolicy) validateServicePolicy(deps.servicePolicy);
+  // Issue #154: refuse an invalid discovery declaration at construction
+  // time rather than at every 402. The upstream validator checks the
+  // declaration's schema and (optionally) the route template.
+  if (config.discovery) validateDiscoveryAtConstruction(config.discovery);
   const acceptedModels = config.models ?? ["x402"];
   const clock = deps.clock ?? Date.now;
   const servicePolicyStore =
@@ -1156,4 +1209,57 @@ export function createPaywallWithInFlight(
       reason: `model "${decision.model}" routing is selected but settlement is not implemented yet`,
     };
   };
+}
+
+/**
+ * Issue #154: maps the Tollway-shape discovery declaration onto the
+ * upstream {@link DeclareDiscoveryExtensionInput}. The upstream helper
+ * expects a `bodyType` to discriminate body routes; the query variant
+ * omits it.
+ */
+function toDeclareDiscoveryInput(
+  declaration: DiscoveryDeclaration,
+): DeclareDiscoveryExtensionInput {
+  if (declaration.kind === "query") {
+    const input: DeclareDiscoveryExtensionInput = {};
+    if (declaration.input) input.input = declaration.input;
+    if (declaration.inputSchema) input.inputSchema = declaration.inputSchema;
+    if (declaration.pathParams) input.pathParams = declaration.pathParams;
+    if (declaration.pathParamsSchema) input.pathParamsSchema = declaration.pathParamsSchema;
+    if (declaration.output) input.output = declaration.output;
+    return input;
+  }
+  const input: DeclareDiscoveryExtensionInput = { bodyType: declaration.bodyType };
+  if (declaration.input) input.input = declaration.input;
+  if (declaration.inputSchema) input.inputSchema = declaration.inputSchema;
+  if (declaration.pathParams) input.pathParams = declaration.pathParams;
+  if (declaration.pathParamsSchema) input.pathParamsSchema = declaration.pathParamsSchema;
+  if (declaration.output) input.output = declaration.output;
+  return input;
+}
+
+/**
+ * Issue #154: validates the discovery declaration at `createPaywall`
+ * time with the upstream schema check. A declaration that fails here
+ * will never reach a 402, so the error surfaces where it originates.
+ */
+function validateDiscoveryAtConstruction(declaration: DiscoveryDeclaration): void {
+  // Use the spec-level validator: it checks protocol-level invariants
+  // (`info.input.type`, allowed methods, `bodyType`) that are required
+  // for every declaration before enrichment. The info-vs-schema
+  // `validateDiscoveryExtension` is more precise but assumes the
+  // declaration has already been enriched with request-time fields
+  // (`method`, concrete `input` matching the schema), which only
+  // happens when the facilitator pulls the extension out of a real
+  // payment payload.
+  const built = declareDiscoveryExtension(toDeclareDiscoveryInput(declaration));
+  for (const extension of Object.values(built)) {
+    const result = validateDiscoveryExtensionSpec(extension as unknown as Record<string, unknown>);
+    if (!result.valid) {
+      throw new TollwayError(
+        "invalid-quote",
+        `invalid Bazaar discovery declaration: ${result.errors?.join("; ") ?? "unknown error"}`,
+      );
+    }
+  }
 }
