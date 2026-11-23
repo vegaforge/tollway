@@ -1,0 +1,6 @@
+---
+"@vegaforge/tollway-server": minor
+"@vegaforge/tollway-core": minor
+---
+
+Multi-facilitator client with health checks and safe failover (#156). New `createFailoverFacilitator({ facilitators, ... })` in `@vegaforge/tollway-server` returns a drop-in `FacilitatorClient` that fails over across healthy members for `/verify` and `/supported`, pins `/settle` to the first facilitator reached so retries never leak a signed payment to a second one, releases the pin on Node's `ECONNREFUSED` / `ENOTFOUND` / `EAI_AGAIN` pre-send failures, and raises the new `TollwayError` code `outcome-unknown` (added in `@vegaforge/tollway-core`) on `FacilitatorTimeoutError` / `FacilitatorResponseError` / any other post-send failure without trying another facilitator. Per-member health counts consecutive failures with a configurable cool-down and half-open probe; capability filtering uses the #155 validator. New exports: `createFailoverFacilitator`, `createMemoryPinStore`, `FailoverFacilitatorOptions`, `FailoverMember`, `FailoverEvent`, `SettlementPinStore`. The on-chain Soroban nonce check the issue hints at is not implemented; the issue's permitted "hold as outcome-unknown until the pinned facilitator answers" fallback is what ships.

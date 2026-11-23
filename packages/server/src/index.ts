@@ -57,6 +57,14 @@ export {
   validatePaywall,
 } from "./facilitator-capabilities.js";
 export {
+  createFailoverFacilitator,
+  createMemoryPinStore,
+  type FailoverEvent,
+  type FailoverFacilitatorOptions,
+  type FailoverMember,
+  type SettlementPinStore,
+} from "./failover-facilitator.js";
+export {
   createPaywall,
   type DynamicPriceFunction,
   type Gate,
