@@ -322,39 +322,28 @@ const TRANSPORT_ERROR_CODES = new Set([
   "UND_ERR_SOCKET",
 ]);
 
-/**
- * True for errors raised by the HTTP layer rather than by payment checks:
- * axios errors (stellar-sdk's RPC client), fetch's `TypeError`, aborts and
- * timeouts, and socket error codes.
- */
 function isTransportFailure(error: unknown): boolean {
-  if (!(error instanceof Error)) return false;
-  if (error instanceof Errors.PaymentError || error instanceof StellarMppError) return false;
-  if ("isAxiosError" in error && error.isAxiosError === true) return true;
-  if (error.name === "AbortError" || error.name === "TimeoutError") return true;
-  if (error instanceof TypeError && error.message === "fetch failed") return true;
-  const code = "code" in error ? error.code : undefined;
+  if (error instanceof TypeError) return true;
+  const code = (error as { code?: unknown } | null)?.code;
   return typeof code === "string" && TRANSPORT_ERROR_CODES.has(code);
-}
-
-function rejectionMessage(error: unknown): string {
-  if (error instanceof Errors.PaymentError || error instanceof StellarMppError) {
-    return error.message;
-  }
-  return `invalid payment: ${errorMessage(error)}`;
 }
 
 function errorMessage(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
 }
 
+function rejectionMessage(error: unknown): string {
+  if (error instanceof Errors.PaymentError || error instanceof StellarMppError) {
+    return error.message;
+  }
+  return errorMessage(error);
+}
+
 /**
- * A stable idempotency key for an MPP charge payment. The payload is unique
- * per payment, so its SHA-256 digest dedupes retries without leaking the
- * payload into cache keys or logs.
+ * A stable nonce for one credential. The payload is unique per signed
+ * transfer, so hashing it gives each payment its own key.
  */
-export async function deriveMppChargeNonce(payload: string): Promise<string> {
-  const data = new Uint8Array(utf8Bytes(payload));
-  const digest = await crypto.subtle.digest("SHA-256", data);
+async function deriveMppChargeNonce(payload: string): Promise<string> {
+  const digest = await crypto.subtle.digest("SHA-256", utf8Bytes(payload));
   return bytesToBase64Url(new Uint8Array(digest));
 }

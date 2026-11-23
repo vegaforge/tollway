@@ -14,6 +14,9 @@
  * settler backed by @x402/stellar (and later @stellar/mpp). Keeping the
  * settler injected means the client itself stays pure orchestration and
  * the test surface is small.
+ *
+ * `createMppChargeSettler` (in ./mpp-charge-settler) is the MPP charge
+ * settler that plugs into this seam.
  */
 
 import {
@@ -34,6 +37,11 @@ import {
   TollwayError,
   verifyReceipt,
 } from "@vegaforge/tollway-core";
+
+export {
+  createMppChargeSettler,
+  type MppChargeSettlerOptions,
+} from "./mpp-charge-settler";
 
 /** Events the client emits so callers and observability can follow along. */
 export type ClientEvent =
@@ -326,24 +334,17 @@ export class ReceiptVerificationError extends TollwayError {
  * Without a verifier the signature is not checked, but the shape still is.
  */
 async function checkedReceipt(
-  candidate: unknown,
+  settled: SignedReceipt,
   verifier: ReceiptVerifier | undefined,
 ): Promise<SignedReceipt> {
   if (verifier) {
-    const verification = await verifyReceipt(candidate, verifier);
-    if (!verification.valid) {
-      throw new ReceiptVerificationError(verification.reason);
+    const result = await verifyReceipt(settled, verifier);
+    if (!result.valid) {
+      throw new ReceiptVerificationError(result.reason);
     }
-    return verification.receipt;
+    return result.receipt;
   }
-  const parsed = signedReceiptSchema.safeParse(candidate);
-  if (!parsed.success) {
-    throw new TollwayError(
-      "invalid-receipt",
-      `settler returned a malformed receipt: ${parsed.error.issues.map((i) => i.message).join("; ")}`,
-    );
-  }
-  return parsed.data;
+  return signedReceiptSchema.parse(settled);
 }
 
 async function decideModel(
@@ -351,24 +352,10 @@ async function decideModel(
   request: PayRequest,
 ): Promise<SettlementModel> {
   if (request.model) return request.model;
-  if (!router) return "x402";
-  const decision = await router.decide({
-    counterparty: request.offer.payTo,
-    resource: request.resource,
-    offer: request.offer,
-  });
-  return decision.model;
+  if (router) return router.route(request.offer);
+  return "x402";
 }
 
-function normalizeError(value: unknown): Error {
-  if (value instanceof Error) return value;
-  return new Error(typeof value === "string" ? value : JSON.stringify(value));
+function normalizeError(raw: unknown): Error {
+  return raw instanceof Error ? raw : new Error(String(raw));
 }
-
-export {
-  createX402Settler,
-  PAYMENT_REQUIRED_HEADER,
-  PAYMENT_SIGNATURE_HEADER,
-  TOLLWAY_RECEIPT_HEADER,
-  type X402SettlerOptions,
-} from "./x402-settler.js";
