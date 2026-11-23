@@ -44,6 +44,29 @@ export type Channel = {
   returnedRemainder?: string;
 };
 
+/**
+ * Filters and paging for {@link CommitmentStore.listChannels} and
+ * {@link ChannelManager.listChannels}. Every filter is exact; there is no
+ * prefix or range matching.
+ */
+export type ChannelListFilter = {
+  status?: ChannelStatus;
+  counterparty?: string;
+  asset?: string;
+  /** `nextCursor` from a previous page. Opaque to the caller. */
+  cursor?: string;
+  /** Page size from 1 to 200. Defaults to 50. */
+  limit?: number;
+};
+
+/** One page of tracked channels, newest first. */
+export type ChannelPage = {
+  /** The channels in this page, ordered by `openedAt` and then id, both descending. */
+  channels: readonly Channel[];
+  /** Pass as `cursor` for the next page; absent when this is the last page. */
+  nextCursor?: string;
+};
+
 export type Commitment = {
   channelId: string;
   sequence: number;
@@ -83,6 +106,8 @@ export interface ChannelManager {
   get(channelId: string): Promise<Channel | undefined>;
   /** Read-only access to a channel's commitment stream, ordered by sequence. */
   list(channelId: string): Promise<readonly Commitment[]>;
+  /** Read-only, filtered, paginated view of every tracked channel. */
+  listChannels(filter?: ChannelListFilter): Promise<ChannelPage>;
   shouldClose(channelId: string): Promise<boolean>;
   close(channelId: string): Promise<CloseResult>;
   recover(channelId: string): Promise<RecoveryResult>;
