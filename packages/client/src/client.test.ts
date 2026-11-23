@@ -293,7 +293,7 @@ describe("createClient returns only signed receipt fields", () => {
     const padded = {
       ...baselineReceipt,
       receipt: { ...baselineReceipt.receipt, refunded: "true" },
-    } as SignedReceipt;
+    } as unknown as SignedReceipt;
     const client = createClient({ network: "testnet", settler: mockSettler(padded), verifier });
     await expect(client.pay({ resource: OFFER.resource, offer: OFFER })).rejects.toBeInstanceOf(
       ReceiptVerificationError,

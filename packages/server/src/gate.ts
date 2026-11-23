@@ -3,6 +3,7 @@ import {
   buildReceipt,
   bytesToBase64Url,
   canonicalJson,
+  hashOffer,
   type ModelRouter,
   type MppChargePayment,
   type PaymentOffer,
@@ -884,6 +885,12 @@ async function settleAndRecord<TPayment>(
     return { ok: false, outcome: { kind: "rejected", status: 502, reason: settlement.reason } };
   }
 
+  // Issue #166: receipts are v2 by default. The offerHash is the SHA-256
+  // of the canonical bytes of the offer the payer accepted, so two offers
+  // for the same URL and price with different models or facilitator URLs
+  // produce distinguishable receipts. The method is the HTTP method the
+  // request used, so a receipt for GET does not unlock POST.
+  const offerHash = await hashOffer(offer);
   const receipt = await signReceipt(
     buildReceipt({
       payer: verification.payer,
@@ -894,6 +901,8 @@ async function settleAndRecord<TPayment>(
       model,
       settlement: { kind: "transaction", txHash: settlement.txHash },
       network: offer.network,
+      offerHash,
+      method,
     }),
     context.signer,
   );

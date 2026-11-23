@@ -22,34 +22,87 @@ import { TollwayError } from "../errors.js";
 import type { ReceiptVerifier } from "./signer.js";
 
 const ED25519 = "Ed25519";
-
+const EDDSA_ALG = "EdDSA";
+const ECDSA_P256_ALG = "ES256";
 /**
- * One key in a key-set document. The JWK fields follow RFC 8037 for
- * Ed25519 keys; the Tollway-specific `status` field says whether the key
- * is `active`, `retired` (with `retiredAt`) or `revoked`. A verifier
- * decides what to do with each state below.
+ * The receipt-signature algorithm identifiers the key-set verifier
+ * accepts. `Ed25519` is the pre-#167 v1 value and is kept so receipts
+ * signed before the key-set work still verify; `EdDSA` is the RFC 8037
+ * JOSE name used in the JWK and in a receipt signed by a key-set-aware
+ * signer; `ES256` is JOSE for ECDSA P-256 over SHA-256.
  */
-export const keySetEntrySchema = z.strictObject({
+export const RECEIPT_ALGORITHMS = [ED25519, EDDSA_ALG, ECDSA_P256_ALG] as const;
+export type ReceiptAlgorithm = (typeof RECEIPT_ALGORITHMS)[number];
+
+/** Collapses `Ed25519` and `EdDSA` into a single canonical name for comparison. */
+function canonicalAlg(input: string): string {
+  return input === ED25519 ? EDDSA_ALG : input;
+}
+
+/** P-256 group order (hex) and n/2, used for the high-S malleability check. */
+const P256_N = BigInt("0xffffffff00000000ffffffffffffffffbce6faada7179e84f3b9cac2fc632551");
+const P256_HALF_N = P256_N >> 1n;
+
+function isHighS(signature: Uint8Array): boolean {
+  let s = 0n;
+  for (const byte of signature.subarray(32)) {
+    s = (s << 8n) | BigInt(byte);
+  }
+  return s > P256_HALF_N;
+}
+
+const statusSchema = z
+  .discriminatedUnion("state", [
+    z.strictObject({ state: z.literal("active") }),
+    z.strictObject({
+      state: z.literal("retired"),
+      retiredAt: z.iso.datetime(),
+    }),
+    z.strictObject({
+      state: z.literal("revoked"),
+      revokedAt: z.iso.datetime().optional(),
+    }),
+  ])
+  .default({ state: "active" });
+
+/** An Ed25519 key entry in a key-set document, following RFC 8037. */
+export const ed25519KeyEntrySchema = z.strictObject({
   kty: z.literal("OKP"),
   crv: z.literal(ED25519),
   x: z.string().min(1),
   kid: z.string().min(1),
-  alg: z.literal("EdDSA"),
+  alg: z.literal(EDDSA_ALG),
   use: z.literal("sig").optional(),
-  status: z
-    .discriminatedUnion("state", [
-      z.strictObject({ state: z.literal("active") }),
-      z.strictObject({
-        state: z.literal("retired"),
-        retiredAt: z.iso.datetime(),
-      }),
-      z.strictObject({
-        state: z.literal("revoked"),
-        revokedAt: z.iso.datetime().optional(),
-      }),
-    ])
-    .default({ state: "active" }),
+  status: statusSchema,
 });
+
+/**
+ * A P-256 (`ES256`) key entry in a key-set document (Issue #169). The
+ * algorithm is bound to the key record: a receipt whose
+ * `signature.algorithm` disagrees with `alg` is rejected, so an attacker
+ * cannot have an Ed25519 key record interpret an ES256 signature or the
+ * other way round.
+ */
+export const p256KeyEntrySchema = z.strictObject({
+  kty: z.literal("EC"),
+  crv: z.literal("P-256"),
+  x: z.string().min(1),
+  y: z.string().min(1),
+  kid: z.string().min(1),
+  alg: z.literal(ECDSA_P256_ALG),
+  use: z.literal("sig").optional(),
+  status: statusSchema,
+});
+
+/**
+ * One key in a key-set document. Discriminated on `kty`; each variant
+ * binds a specific algorithm. A verifier decides what to do with the
+ * status (`active`, `retired` with a cutoff, `revoked`).
+ */
+export const keySetEntrySchema = z.discriminatedUnion("kty", [
+  ed25519KeyEntrySchema,
+  p256KeyEntrySchema,
+]);
 
 /** One entry in a key-set document; see {@link keySetEntrySchema}. */
 export type KeySetEntry = z.infer<typeof keySetEntrySchema>;
@@ -282,7 +335,7 @@ export function createKeySetVerifier(options: KeySetVerifierOptions): KeySetVeri
     keyId: string;
     algorithm: string;
   }): Promise<boolean> {
-    if (input.algorithm !== ED25519) return false;
+    if (!(RECEIPT_ALGORITHMS as readonly string[]).includes(input.algorithm)) return false;
     await ensureFresh(cached ? cached.expiresAt <= clock() : true);
     if (!cached) return false;
     let entry = cached.byKid.get(input.keyId);
@@ -291,6 +344,12 @@ export function createKeySetVerifier(options: KeySetVerifierOptions): KeySetVeri
       entry = cached.byKid.get(input.keyId);
       if (!entry) return false;
     }
+    // Algorithm must be bound to the key record (Issue #169). A receipt
+    // whose `signature.algorithm` disagrees with the entry's `alg` is
+    // rejected, so an Ed25519 record never verifies an ES256 signature
+    // and the other way round. `Ed25519` (pre-#167 receipt spelling) and
+    // `EdDSA` (JWK/JOSE spelling) are treated as the same algorithm.
+    if (canonicalAlg(entry.alg) !== canonicalAlg(input.algorithm)) return false;
     if (entry.status.state === "revoked") {
       // Revoked means reject every receipt the key ever signed. A
       // compromised signer can backdate `issuedAt`, so there is no
@@ -300,23 +359,44 @@ export function createKeySetVerifier(options: KeySetVerifierOptions): KeySetVeri
     if (entry.status.state === "retired") {
       // Retired is a planned rotation. A retired key verifies receipts
       // whose body says they were issued strictly before `retiredAt`,
-      // and fails anything later. We parse the receipt body here
-      // because `verifyReceipt` already exposes the verifier the
-      // `message` bytes it signed; `issuedAt` is one of those bytes.
-      // We do not re-parse the full receipt; we scan the canonical
-      // bytes for the `issuedAt` field. See the test for the exact
-      // shape this assumes.
+      // and fails anything later. We scan the canonical bytes for the
+      // `issuedAt` field so the signature-level check does not depend
+      // on a second full parse.
       const retiredMs = Date.parse(entry.status.retiredAt);
       const issuedMs = readIssuedAt(input.message);
       if (issuedMs === undefined) return false;
       if (issuedMs >= retiredMs) return false;
     }
-    const raw = base64UrlToBytes(entry.x);
-    const key = await crypto.subtle.importKey("raw", raw as BufferSource, ED25519, false, [
-      "verify",
-    ]);
+    if (entry.kty === "OKP") {
+      const raw = base64UrlToBytes(entry.x);
+      const key = await crypto.subtle.importKey("raw", raw as BufferSource, ED25519, false, [
+        "verify",
+      ]);
+      return crypto.subtle.verify(
+        ED25519,
+        key,
+        input.signature as BufferSource,
+        input.message as BufferSource,
+      );
+    }
+    // P-256: reject the length check and high-S up front so a malleated
+    // signature cannot verify alongside its canonical form.
+    if (input.signature.length !== 64) return false;
+    if (isHighS(input.signature)) return false;
+    const key = await crypto.subtle.importKey(
+      "jwk",
+      {
+        kty: "EC",
+        crv: "P-256",
+        x: entry.x,
+        y: entry.y,
+      },
+      { name: "ECDSA", namedCurve: "P-256" },
+      false,
+      ["verify"],
+    );
     return crypto.subtle.verify(
-      ED25519,
+      { name: "ECDSA", hash: "SHA-256" },
       key,
       input.signature as BufferSource,
       input.message as BufferSource,

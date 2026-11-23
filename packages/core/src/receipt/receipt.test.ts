@@ -1,6 +1,13 @@
 import { describe, expect, it } from "vitest";
 import { TollwayError } from "../errors.js";
-import { type BuildReceiptInput, buildReceipt, signReceipt, verifyReceipt } from "./receipt.js";
+import type { PaymentOffer } from "../types.js";
+import {
+  type BuildReceiptInput,
+  buildReceipt,
+  hashOffer,
+  signReceipt,
+  verifyReceipt,
+} from "./receipt.js";
 import { Ed25519Signer, Ed25519Verifier } from "./signer.js";
 
 const x402Input: BuildReceiptInput = {
@@ -127,5 +134,144 @@ describe("TM-05 tampered receipt fields", () => {
     const { signed, verifier } = await signedPair();
     const result = await verifyReceipt(structuredClone(signed), verifier);
     expect(result).toEqual({ valid: true, receipt: signed });
+  });
+});
+
+describe("hashOffer (Issue #166)", () => {
+  const baseOffer: PaymentOffer = {
+    resource: "https://api.example.com/x",
+    amount: "10000",
+    asset: "CBIELTK6YBZJU5UP2WWQEUCYKLPU6AUNZ2BQ4WWFEIE3USCIHMXQDAMA",
+    payTo: "GPAYEESKFIBHLLNBWMG6YXZIJPUKETNUEPAUU5DGKUHX5F5V5NXHSXDM",
+    network: "testnet",
+    models: ["x402"],
+  };
+
+  it("is deterministic for the same offer", async () => {
+    const a = await hashOffer(baseOffer);
+    const b = await hashOffer({ ...baseOffer });
+    expect(a).toBe(b);
+  });
+
+  it("changes when the model list changes", async () => {
+    const a = await hashOffer(baseOffer);
+    const b = await hashOffer({ ...baseOffer, models: ["x402", "mpp-charge"] });
+    expect(a).not.toBe(b);
+  });
+
+  it("changes when the facilitator URL changes", async () => {
+    const a = await hashOffer(baseOffer);
+    const b = await hashOffer({ ...baseOffer, facilitatorUrl: "https://facilitator.example" });
+    expect(a).not.toBe(b);
+  });
+
+  it("changes when the model order changes (the payer saw the ordered list)", async () => {
+    const a = await hashOffer({ ...baseOffer, models: ["x402", "mpp-charge"] });
+    const b = await hashOffer({ ...baseOffer, models: ["mpp-charge", "x402"] });
+    expect(a).not.toBe(b);
+  });
+});
+
+describe("receipt v2 (Issue #166)", () => {
+  const v2Input: BuildReceiptInput = {
+    ...x402Input,
+    offerHash: "offer-hash-placeholder",
+    method: "GET",
+  };
+
+  it("buildReceipt returns a v2 receipt when offerHash and method are set", () => {
+    const receipt = buildReceipt(v2Input);
+    expect(receipt.version).toBe(2);
+    if (receipt.version === 2) {
+      expect(receipt.offerHash).toBe("offer-hash-placeholder");
+      expect(receipt.method).toBe("GET");
+    }
+  });
+
+  it("buildReceipt returns a v1 receipt when offerHash and method are absent", () => {
+    const receipt = buildReceipt(x402Input);
+    expect(receipt.version).toBe(1);
+  });
+
+  it("rejects an expiresAt that is not strictly after issuedAt", () => {
+    expect(() =>
+      buildReceipt({
+        ...v2Input,
+        issuedAt: "2026-11-23T12:00:00.000Z",
+        expiresAt: "2026-11-23T12:00:00.000Z",
+      }),
+    ).toThrow(/expiresAt/);
+    expect(() =>
+      buildReceipt({
+        ...v2Input,
+        issuedAt: "2026-11-23T12:00:01.000Z",
+        expiresAt: "2026-11-23T12:00:00.000Z",
+      }),
+    ).toThrow(/expiresAt/);
+  });
+
+  it("verifyReceipt rejects an expired v2 receipt and accepts one before expiry", async () => {
+    const signer = await Ed25519Signer.generate("v2-key");
+    const verifier = Ed25519Verifier.forSigner(signer);
+    const receipt = await signReceipt(
+      buildReceipt({
+        ...v2Input,
+        issuedAt: "2026-11-23T12:00:00.000Z",
+        expiresAt: "2026-11-23T12:30:00.000Z",
+      }),
+      signer,
+    );
+    const before = await verifyReceipt(receipt, verifier, {
+      now: Date.parse("2026-11-23T12:15:00.000Z"),
+    });
+    expect(before.valid).toBe(true);
+    const after = await verifyReceipt(receipt, verifier, {
+      now: Date.parse("2026-11-23T12:45:00.000Z"),
+    });
+    expect(after.valid).toBe(false);
+    if (!after.valid) expect(after.reason).toBe("receipt expired");
+  });
+
+  it("a v2 receipt without expiresAt never expires", async () => {
+    const signer = await Ed25519Signer.generate("v2-key");
+    const verifier = Ed25519Verifier.forSigner(signer);
+    const receipt = await signReceipt(buildReceipt(v2Input), signer);
+    const far = await verifyReceipt(receipt, verifier, {
+      now: Date.parse("2099-01-01T00:00:00.000Z"),
+    });
+    expect(far.valid).toBe(true);
+  });
+
+  it("a v1 receipt still verifies against a v1 schema path", async () => {
+    const signer = await Ed25519Signer.generate("v1-key");
+    const verifier = Ed25519Verifier.forSigner(signer);
+    const receipt = await signReceipt(buildReceipt(x402Input), signer);
+    expect(receipt.receipt.version).toBe(1);
+    const result = await verifyReceipt(receipt, verifier);
+    expect(result.valid).toBe(true);
+  });
+
+  it("rejects a tampered method field", async () => {
+    const signer = await Ed25519Signer.generate("v2-key");
+    const verifier = Ed25519Verifier.forSigner(signer);
+    const signed = await signReceipt(buildReceipt(v2Input), signer);
+    const tampered = {
+      ...signed,
+      receipt: { ...signed.receipt, method: "POST" },
+    };
+    const result = await verifyReceipt(tampered, verifier);
+    expect(result.valid).toBe(false);
+  });
+
+  it("rejects a tampered offerHash field", async () => {
+    const signer = await Ed25519Signer.generate("v2-key");
+    const verifier = Ed25519Verifier.forSigner(signer);
+    const signed = await signReceipt(buildReceipt(v2Input), signer);
+    const tampered = {
+      ...signed,
+      receipt: { ...signed.receipt, offerHash: "different-hash" },
+    };
+    const result = await verifyReceipt(tampered, verifier);
+    expect(result.valid).toBe(false);
   });
 });

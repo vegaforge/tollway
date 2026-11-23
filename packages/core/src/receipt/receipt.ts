@@ -1,8 +1,11 @@
 import { base64UrlToBytes, bytesToBase64Url } from "../encoding.js";
 import { TollwayError } from "../errors.js";
+import type { PaymentOffer } from "../types.js";
 import { canonicalBytes, type JsonValue } from "./canonical.js";
 import {
   type ReceiptBody,
+  type ReceiptBodyV1,
+  type ReceiptBodyV2,
   receiptBodySchema,
   type SignedReceipt,
   signedReceiptSchema,
@@ -10,24 +13,48 @@ import {
 import type { ReceiptSigner, ReceiptVerifier } from "./signer.js";
 
 /**
- * What `buildReceipt` needs. `version` is fixed, and `id` and `issuedAt` are
- * generated when omitted (a random UUID and the current time).
+ * Input to {@link buildReceipt}. The function returns a v2 receipt when the
+ * caller supplies `offerHash` and `method`, and a v1 receipt otherwise;
+ * `version` is set by the function, so callers do not provide it. `id` and
+ * `issuedAt` default to a fresh UUID and the current time.
  */
-export type BuildReceiptInput = Omit<ReceiptBody, "version" | "id" | "issuedAt"> & {
+export type BuildReceiptInput =
+  | (Omit<ReceiptBodyV1, "version" | "id" | "issuedAt"> & {
+      id?: string;
+      issuedAt?: string;
+    })
+  | (Omit<ReceiptBodyV2, "version" | "id" | "issuedAt"> & {
+      id?: string;
+      issuedAt?: string;
+    });
+
+function isV2Input(input: BuildReceiptInput): input is Omit<
+  ReceiptBodyV2,
+  "version" | "id" | "issuedAt"
+> & {
   id?: string;
   issuedAt?: string;
-};
+} {
+  return (
+    "offerHash" in input &&
+    typeof input.offerHash === "string" &&
+    "method" in input &&
+    typeof input.method === "string"
+  );
+}
 
 /**
  * Assembles and validates a receipt body. Throws a TollwayError when the
  * input does not satisfy the canonical schema, including the rule that the
- * settlement reference kind must match the model.
+ * settlement reference kind must match the model and, for v2, that
+ * `expiresAt` is strictly after `issuedAt`.
  */
 export function buildReceipt(input: BuildReceiptInput): ReceiptBody {
-  const parsed = receiptBodySchema.safeParse({
-    version: 1,
-    id: input.id ?? crypto.randomUUID(),
-    issuedAt: input.issuedAt ?? new Date().toISOString(),
+  const id = input.id ?? crypto.randomUUID();
+  const issuedAt = input.issuedAt ?? new Date().toISOString();
+  const common = {
+    id,
+    issuedAt,
     payer: input.payer,
     payee: input.payee,
     amount: input.amount,
@@ -36,11 +63,58 @@ export function buildReceipt(input: BuildReceiptInput): ReceiptBody {
     model: input.model,
     settlement: input.settlement,
     network: input.network,
-  });
+  };
+  const candidate = isV2Input(input)
+    ? {
+        version: 2 as const,
+        ...common,
+        offerHash: input.offerHash,
+        method: input.method,
+        ...(input.expiresAt === undefined ? {} : { expiresAt: input.expiresAt }),
+      }
+    : {
+        version: 1 as const,
+        ...common,
+      };
+  const parsed = receiptBodySchema.safeParse(candidate);
   if (!parsed.success) {
     throw new TollwayError("invalid-receipt", parsed.error.issues.map(formatIssue).join("; "));
   }
   return parsed.data;
+}
+
+/**
+ * Hashes the fields of a {@link PaymentOffer} that distinguish one offer
+ * from another. Two offers that differ in models, facilitator URL, or
+ * routing hint produce different hashes, so a v2 receipt is bound to the
+ * exact offer the payer accepted.
+ *
+ * The hash is base64url of SHA-256 over the RFC 8785 canonical bytes of a
+ * projection of the offer. The projection is stable: dropping or renaming
+ * a field is a receipt-format version bump.
+ *
+ * Returned as a Promise so the function uses `crypto.subtle.digest` and
+ * runs in every runtime Tollway supports.
+ */
+export async function hashOffer(offer: PaymentOffer): Promise<string> {
+  const projection: JsonValue = {
+    resource: offer.resource,
+    amount: offer.amount,
+    asset: offer.asset,
+    payTo: offer.payTo,
+    network: offer.network,
+    // `models` is ordered: the service's preference list is part of the
+    // offer the payer saw, so different orders are different offers.
+    models: [...offer.models],
+    ...(offer.mppSessionSupported === undefined
+      ? {}
+      : { mppSessionSupported: offer.mppSessionSupported }),
+    ...(offer.facilitatorUrl === undefined ? {} : { facilitatorUrl: offer.facilitatorUrl }),
+    ...(offer.quote === undefined ? {} : { quote: offer.quote }),
+  };
+  const bytes = canonicalBytes(projection);
+  const digest = new Uint8Array(await crypto.subtle.digest("SHA-256", bytes as BufferSource));
+  return bytesToBase64Url(digest);
 }
 
 /**
@@ -76,21 +150,42 @@ export type ReceiptVerification =
     }
   | { valid: false; reason: string };
 
+/** Options for {@link verifyReceipt}. */
+export type VerifyReceiptOptions = {
+  /**
+   * Current time in ms, used to check a v2 receipt's `expiresAt`. Defaults
+   * to `Date.now()`. A v1 receipt never expires; a v2 receipt with no
+   * `expiresAt` never expires either.
+   */
+  now?: number;
+};
+
 /**
  * Checks a signed receipt against the schema and the verifier's trusted
  * keys. Accepts unknown as input on purpose: receipts arrive over the wire,
  * and the schema is the gate. Any field the signature does not cover makes
  * the receipt invalid, and a valid result carries the parsed receipt.
+ *
+ * For a v2 receipt that carries `expiresAt`, verification also fails when
+ * `options.now` (or the current time) is at or past the expiry.
  */
 export async function verifyReceipt(
   candidate: unknown,
   verifier: ReceiptVerifier,
+  options: VerifyReceiptOptions = {},
 ): Promise<ReceiptVerification> {
   const parsed = signedReceiptSchema.safeParse(candidate);
   if (!parsed.success) {
     return { valid: false, reason: parsed.error.issues.map(formatIssue).join("; ") };
   }
   const { receipt, signature } = parsed.data;
+  if (receipt.version === 2 && receipt.expiresAt !== undefined) {
+    const expires = Date.parse(receipt.expiresAt);
+    const now = options.now ?? Date.now();
+    if (Number.isFinite(expires) && now >= expires) {
+      return { valid: false, reason: "receipt expired" };
+    }
+  }
   const matches = await verifier.verify({
     message: canonicalBytes(receipt as JsonValue),
     signature: base64UrlToBytes(signature.value),
