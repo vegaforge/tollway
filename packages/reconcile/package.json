@@ -33,7 +33,7 @@
     "@vegaforge/tollway-core": "workspace:*"
   },
   "devDependencies": {
-    "fast-check": "^3.23.2",
+    "fast-check": "^4.10.3",
     "tsup": "^8.5.1",
     "typescript": "^5.9.3",
     "vitest": "^4.1.12"
