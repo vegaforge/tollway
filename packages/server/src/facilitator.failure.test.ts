@@ -45,11 +45,34 @@ describe("facilitator transport faults", () => {
 
   beforeEach(() => {
     vi.stubGlobal("fetch", fetchMock);
+    vi.useFakeTimers();
+    // @x402/core arms its transport deadline with AbortSignal.timeout, which
+    // fake timers do not drive. Route it through setTimeout so the test
+    // controls the clock and nothing waits on wall time.
+    vi.spyOn(AbortSignal, "timeout").mockImplementation((ms: number) => {
+      const controller = new AbortController();
+      setTimeout(() => controller.abort(new DOMException("timed out", "TimeoutError")), ms);
+      return controller.signal;
+    });
   });
   afterEach(() => {
     fetchMock.mockReset();
     vi.unstubAllGlobals();
+    vi.restoreAllMocks();
+    vi.useRealTimers();
   });
+
+  /** Runs `call` and moves the fake clock past the transport deadline. */
+  async function pastDeadline<T>(call: Promise<T>, timeoutMs: number): Promise<T> {
+    const settled = call.then(
+      (value) => ({ ok: true as const, value }),
+      (error: unknown) => ({ ok: false as const, error }),
+    );
+    await vi.advanceTimersByTimeAsync(timeoutMs);
+    const outcome = await settled;
+    if (!outcome.ok) throw outcome.error;
+    return outcome.value;
+  }
 
   /** A socket that stays open until the client's abort signal fires. */
   function hangingSocket(_url: string, init: RequestInit): Promise<Response> {
@@ -62,7 +85,10 @@ describe("facilitator transport faults", () => {
     fetchMock.mockImplementation(hangingSocket);
 
     await expect(
-      createHttpFacilitator(FACILITATOR_URL, { timeoutMs: 10 }).verify({ payment, offer }),
+      pastDeadline(
+        createHttpFacilitator(FACILITATOR_URL, { timeoutMs: 5_000 }).verify({ payment, offer }),
+        5_000,
+      ),
     ).rejects.toMatchObject({ code: "payment-failed" });
   });
 
@@ -70,12 +96,15 @@ describe("facilitator transport faults", () => {
     fetchMock.mockImplementation(hangingSocket);
 
     await expect(
-      createHttpFacilitator(FACILITATOR_URL, { timeoutMs: 10 }).settle({
-        payment,
-        offer,
-        payer: "GPAYER",
-        nonce: "n",
-      }),
+      pastDeadline(
+        createHttpFacilitator(FACILITATOR_URL, { timeoutMs: 5_000 }).settle({
+          payment,
+          offer,
+          payer: "GPAYER",
+          nonce: "n",
+        }),
+        5_000,
+      ),
     ).rejects.toMatchObject({ code: "payment-failed" });
   });
 
@@ -116,8 +145,8 @@ describe("facilitator transport faults", () => {
   it("wraps a failed /supported", async () => {
     fetchMock.mockResolvedValueOnce(new Response("upstream boom", { status: 500 }));
 
-    await expect(
-      createHttpFacilitator(FACILITATOR_URL, { timeoutMs: 10 }).supported(),
-    ).rejects.toMatchObject({ code: "payment-failed" });
+    await expect(createHttpFacilitator(FACILITATOR_URL).supported()).rejects.toMatchObject({
+      code: "payment-failed",
+    });
   });
 });

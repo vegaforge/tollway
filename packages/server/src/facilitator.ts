@@ -195,8 +195,10 @@ export type HttpFacilitatorOptions = X402Terms & {
   /**
    * Transport deadline for each request, in milliseconds. The abort signal it
    * produces closes the connection, which the gate's own deadline cannot do.
-   * Defaults to the `@x402/core` client's 90 s; keep it at or below
-   * `PaywallDeps.facilitatorTimeoutMs` so the transport aborts first.
+   * Defaults to the `@x402/core` client's 90 s. A `/settle` that hits it may
+   * already have reached the facilitator, so the gate holds that payment
+   * (see `PaywallDeps.ambiguousSettlementHoldMs`); keep the hold longer than
+   * this deadline plus the authorization lifetime.
    */
   timeoutMs?: number;
 };

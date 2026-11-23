@@ -19,9 +19,7 @@ export type Fault =
   | { kind: "delay"; ms: number }
   /** Never settles: the call hangs until the caller stops waiting. */
   | { kind: "hang" }
-  | { kind: "reject"; error: Error }
-  /** Resolves a value that does not satisfy the caller's contract. */
-  | { kind: "malformed"; value: unknown };
+  | { kind: "reject"; error: Error };
 
 export const pass = (): Fault => ({ kind: "pass" });
 export const delay = (ms: number): Fault => ({ kind: "delay", ms });
@@ -30,12 +28,6 @@ export const rejectWith = (error: unknown): Fault => ({
   kind: "reject",
   error: error instanceof Error ? error : new Error(String(error)),
 });
-export const malformed = (value: unknown): Fault => ({ kind: "malformed", value });
-
-/** `successes` normal answers, then `error` on every later call. */
-export function succeedThenFail(successes: number, error: unknown): Fault[] {
-  return [...Array.from({ length: successes }, pass), rejectWith(error)];
-}
 
 function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
@@ -55,15 +47,10 @@ async function applyFault<T>(fault: Fault | undefined, run: () => Promise<T>): P
       // Deliberately never settles. The caller's deadline is what ends it.
     });
   }
-  if (fault.kind === "reject") {
-    throw fault.error;
-  }
-  // A malformed answer is the point of the fault: the caller must reject it.
-  // The cast is how the test hands over a value the type system forbids.
-  return fault.value as T;
+  throw fault.error;
 }
 
-/** Faulscripted answers per facilitator operation, one entry per call. */
+/** Scripted answers per facilitator operation, one entry per call. */
 export type FacilitatorPlan = {
   verify?: readonly Fault[];
   settle?: readonly Fault[];
