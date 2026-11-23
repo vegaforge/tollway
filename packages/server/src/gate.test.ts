@@ -329,7 +329,11 @@ describe("createPaywall", () => {
         return { settled: true, txHash: "a".repeat(64) };
       },
       async supported() {
-        return { models: ["x402"], assets: [] };
+        return {
+          kinds: [{ x402Version: 2, scheme: "exact", network: "stellar:*" }],
+          extensions: [],
+          signers: {},
+        };
       },
     };
     const gate = createPaywall(

@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import { TollwayError } from "./errors.js";
 import type { PaymentIntent } from "./policy.js";
 import { createPolicyEngine } from "./policy.js";
+import { type PolicyInput, PolicyValidationError } from "./policy-schema.js";
 
 function intent(overrides: Partial<PaymentIntent> = {}): PaymentIntent {
   return {
@@ -454,6 +455,312 @@ describe("createPolicyEngine", () => {
       });
       const result = await engine.check(intent({ amount: "100" }));
       expect(result).toEqual({ allowed: true });
+    });
+  });
+
+  describe("per-service daily cap (Issue #192)", () => {
+    it("allows payments within the daily cap", async () => {
+      const engine = createPolicyEngine({
+        perService: { GSERVICE: { dailyCap: "200" } },
+      });
+      expect(await engine.check(intent({ amount: "100" }))).toEqual({ allowed: true });
+    });
+
+    it("blocks when the per-service daily cap is exceeded", async () => {
+      const engine = createPolicyEngine({
+        perService: { GSERVICE: { dailyCap: "150" } },
+      });
+      await engine.record(intent({ amount: "100" }));
+      const result = await engine.check(intent({ amount: "100" }));
+      expect(result).toEqual({
+        allowed: false,
+        rule: "per-service-daily",
+        detail: expect.stringContaining("per-service daily cap exceeded"),
+      });
+    });
+
+    it("resets on a new UTC day", async () => {
+      let now = new Date("2026-06-10T12:00:00Z").getTime();
+      const engine = createPolicyEngine(
+        { perService: { GSERVICE: { dailyCap: "150" } } },
+        { clock: () => now },
+      );
+      await engine.record(intent({ amount: "100" }));
+      expect(await engine.check(intent({ amount: "100" }))).toMatchObject({
+        allowed: false,
+        rule: "per-service-daily",
+      });
+      now = new Date("2026-06-11T00:01:00Z").getTime();
+      expect(await engine.check(intent({ amount: "100" }))).toEqual({ allowed: true });
+    });
+
+    it("is isolated per (payee, asset)", async () => {
+      const engine = createPolicyEngine({
+        perService: {
+          GSERVICE: { dailyCap: "150" },
+          GOTHER: { dailyCap: "150" },
+        },
+      });
+      await engine.record(intent({ amount: "100", payee: "GSERVICE", asset: "USDC:GA5Z" }));
+      expect(
+        await engine.check(intent({ amount: "100", payee: "GOTHER", asset: "USDC:GA5Z" })),
+      ).toEqual({ allowed: true });
+      expect(
+        await engine.check(intent({ amount: "100", payee: "GSERVICE", asset: "EURC:GBBB" })),
+      ).toEqual({ allowed: true });
+    });
+  });
+
+  describe("per-service rolling-window cap (Issue #192)", () => {
+    it("allows payments within the window cap", async () => {
+      const engine = createPolicyEngine({
+        perService: { GSERVICE: { window: { windowSeconds: 3600, cap: "500" } } },
+      });
+      expect(await engine.check(intent({ amount: "100" }))).toEqual({ allowed: true });
+    });
+
+    it("blocks when the rolling-window sum exceeds the cap", async () => {
+      let now = Date.parse("2026-06-10T12:00:00Z");
+      const engine = createPolicyEngine(
+        { perService: { GSERVICE: { window: { windowSeconds: 3600, cap: "150" } } } },
+        { clock: () => now },
+      );
+      await engine.record(intent({ amount: "100" }));
+      now += 60_000;
+      expect(await engine.check(intent({ amount: "100" }))).toMatchObject({
+        allowed: false,
+        rule: "per-service-window",
+      });
+    });
+
+    it("recovers once older spend rolls out of the window", async () => {
+      let now = Date.parse("2026-06-10T12:00:00Z");
+      const engine = createPolicyEngine(
+        { perService: { GSERVICE: { window: { windowSeconds: 60, cap: "150" } } } },
+        { clock: () => now },
+      );
+      await engine.record(intent({ amount: "100" }));
+      now += 65 * 1_000; // one bucket past the window
+      // After enough buckets expire the earlier spend drops out and a
+      // second payment is allowed again.
+      now += 60 * 1_000;
+      expect(await engine.check(intent({ amount: "100" }))).toEqual({ allowed: true });
+    });
+
+    it.each([
+      [
+        "a window of zero seconds",
+        { perService: { GSERVICE: { window: { windowSeconds: 0, cap: "100" } } } },
+        "perService.GSERVICE.window.windowSeconds",
+      ],
+      [
+        // A fractional value would put a non-integer `seconds` in the trace,
+        // which policyTraceSchema rejects.
+        "a fractional window",
+        { perService: { GSERVICE: { window: { windowSeconds: 90.5, cap: "100" } } } },
+        "perService.GSERVICE.window.windowSeconds",
+      ],
+      [
+        "a sub-second perResource window",
+        {
+          perResource: { "/api/": { match: "prefix", window: { windowSeconds: 1e-6, cap: "1" } } },
+        },
+        "perResource./api/.window.windowSeconds",
+      ],
+      [
+        "a decimal perResource window cap",
+        {
+          perResource: { "/api/": { match: "prefix", window: { windowSeconds: 60, cap: "1.5" } } },
+        },
+        "perResource./api/.window.cap",
+      ],
+      [
+        "a decimal daily cap",
+        { perService: { GSERVICE: { dailyCap: "0.5" } } },
+        "perService.GSERVICE.dailyCap",
+      ],
+      [
+        "an unknown match kind",
+        { perResource: { "/api/": { match: "glob", cap: "1" } } },
+        "perResource./api/.match",
+      ],
+    ])("rejects %s when the engine is created, naming the field", (_name, input, path) => {
+      let thrown: unknown;
+      try {
+        // Policies arrive as JSON, so the cases include values the type forbids.
+        createPolicyEngine(input as unknown as PolicyInput);
+      } catch (error) {
+        thrown = error;
+      }
+      expect(thrown).toBeInstanceOf(PolicyValidationError);
+      const issues = (thrown as PolicyValidationError).issues;
+      expect(issues.map((issue) => issue.path.join("."))).toContain(path);
+    });
+
+    it("blocks a payment at the exact window boundary and allows it one bucket later", async () => {
+      // The accumulator over-counts by at most one bucket, never under-counts.
+      const start = Date.parse("2026-06-10T12:00:00Z");
+      let now = start;
+      const engine = createPolicyEngine(
+        { perService: { GSERVICE: { window: { windowSeconds: 60, cap: "150" } } } },
+        { clock: () => now },
+      );
+      await engine.record(intent({ amount: "100" }));
+      now = start + 59_999;
+      expect(await engine.check(intent({ amount: "100" }))).toMatchObject({
+        allowed: false,
+        rule: "per-service-window",
+      });
+      now = start + 120_000;
+      expect(await engine.check(intent({ amount: "100" }))).toEqual({ allowed: true });
+    });
+  });
+
+  describe("per-resource caps (Issue #192)", () => {
+    it("blocks on an exact-match lifetime cap", async () => {
+      const engine = createPolicyEngine({
+        perResource: { "/api/quotes": { cap: "150" } },
+      });
+      await engine.record(intent({ amount: "100" }));
+      expect(await engine.check(intent({ amount: "100" }))).toMatchObject({
+        allowed: false,
+        rule: "per-resource",
+      });
+    });
+
+    it("blocks on a daily cap and resets at UTC midnight", async () => {
+      let now = new Date("2026-06-10T12:00:00Z").getTime();
+      const engine = createPolicyEngine(
+        { perResource: { "/api/quotes": { dailyCap: "150" } } },
+        { clock: () => now },
+      );
+      await engine.record(intent({ amount: "100" }));
+      expect(await engine.check(intent({ amount: "100" }))).toMatchObject({
+        allowed: false,
+        rule: "per-resource-daily",
+      });
+      now = new Date("2026-06-11T00:01:00Z").getTime();
+      expect(await engine.check(intent({ amount: "100" }))).toEqual({ allowed: true });
+    });
+
+    it("blocks on a rolling-window cap", async () => {
+      let now = Date.parse("2026-06-10T12:00:00Z");
+      const engine = createPolicyEngine(
+        {
+          perResource: {
+            "/api/quotes": { window: { windowSeconds: 3600, cap: "150" } },
+          },
+        },
+        { clock: () => now },
+      );
+      await engine.record(intent({ amount: "100" }));
+      now += 60_000;
+      expect(await engine.check(intent({ amount: "100" }))).toMatchObject({
+        allowed: false,
+        rule: "per-resource-window",
+      });
+    });
+
+    it("longest-prefix wins among prefix entries", async () => {
+      const engine = createPolicyEngine({
+        perResource: {
+          "/api/": { cap: "10000", match: "prefix" },
+          "/api/quotes/": { cap: "150", match: "prefix" },
+        },
+      });
+      await engine.record(intent({ resource: "/api/quotes/usd", amount: "100" }));
+      const blocked = await engine.evaluate(intent({ resource: "/api/quotes/usd", amount: "100" }));
+      expect(blocked.entries.find((e) => e.id === "per-resource")).toMatchObject({
+        outcome: "fail",
+        limit: "150",
+      });
+    });
+
+    it("enforces a broader prefix cap that a narrower, looser prefix also matches", async () => {
+      // The operator caps everything under /api/ at 150. A more specific
+      // entry with a higher cap must not lift that ceiling.
+      const engine = createPolicyEngine({
+        perResource: {
+          "/api/": { cap: "150", match: "prefix" },
+          "/api/quotes/": { cap: "10000", match: "prefix" },
+        },
+      });
+      await engine.record(intent({ resource: "/api/quotes/usd", amount: "100" }));
+      const trace = await engine.evaluate(intent({ resource: "/api/quotes/usd", amount: "100" }));
+      expect(trace.entries.find((e) => e.id === "per-resource")).toMatchObject({
+        outcome: "fail",
+        limit: "150",
+        current: "100",
+      });
+    });
+
+    it("charges every matching entry, so spend under one prefix counts toward the broader one", async () => {
+      const engine = createPolicyEngine({
+        perResource: {
+          "/api/": { cap: "150", match: "prefix" },
+          "/api/quotes/": { cap: "10000", match: "prefix" },
+        },
+      });
+      await engine.record(intent({ resource: "/api/quotes/usd", amount: "100" }));
+      // A different resource under /api/ sees the 100 already spent.
+      expect(await engine.check(intent({ resource: "/api/other", amount: "100" }))).toMatchObject({
+        allowed: false,
+        rule: "per-resource",
+      });
+    });
+
+    it("applies a prefix window to a resource that also has an exact entry", async () => {
+      let now = Date.parse("2026-06-10T12:00:00Z");
+      const engine = createPolicyEngine(
+        {
+          perResource: {
+            "/api/": { match: "prefix", window: { windowSeconds: 3600, cap: "150" } },
+            "/api/premium": { dailyCap: "100000" },
+          },
+        },
+        { clock: () => now },
+      );
+      await engine.record(intent({ resource: "/api/premium", amount: "100" }));
+      now += 60_000;
+      expect(await engine.check(intent({ resource: "/api/premium", amount: "100" }))).toMatchObject(
+        {
+          allowed: false,
+          rule: "per-resource-window",
+        },
+      );
+    });
+
+    it("reports the entry closest to its limit when every matching entry passes", async () => {
+      const engine = createPolicyEngine({
+        perResource: {
+          "/api/": { cap: "1000", match: "prefix" },
+          "/api/quotes": { cap: "300" },
+        },
+      });
+      const trace = await engine.evaluate(intent({ resource: "/api/quotes", amount: "100" }));
+      expect(trace.entries.find((e) => e.id === "per-resource")).toMatchObject({
+        outcome: "pass",
+        limit: "300",
+      });
+    });
+
+    it("does not treat Object.prototype members as entries", async () => {
+      const engine = createPolicyEngine({ perResource: { "/api/other": { cap: "100" } } });
+      const trace = await engine.evaluate(intent({ resource: "constructor", amount: "100" }));
+      expect(trace.entries.find((e) => e.id === "per-resource")).toMatchObject({
+        outcome: "not-applicable",
+        detail: "no perResource entry matches resource constructor",
+      });
+    });
+
+    it("is not-applicable when no entry matches", async () => {
+      const engine = createPolicyEngine({
+        perResource: { "/api/other": { cap: "100" } },
+      });
+      const trace = await engine.evaluate(intent({ resource: "/api/quotes", amount: "100" }));
+      expect(trace.entries.find((e) => e.id === "per-resource")).toMatchObject({
+        outcome: "not-applicable",
+      });
     });
   });
 });
