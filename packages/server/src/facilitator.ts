@@ -243,9 +243,12 @@ export function createHttpFacilitator(
             reason: reason(error.invalidReason, error.invalidMessage, "payment rejected"),
           };
         }
+        // Keep the underlying error as the cause: the failover client reads
+        // it to tell a connection that was never made from one that was.
         throw new TollwayError(
           "payment-failed",
           `facilitator /verify request failed: ${message(error)}`,
+          { cause: error },
         );
       }
 
@@ -281,9 +284,12 @@ export function createHttpFacilitator(
             reason: reason(error.errorReason, error.errorMessage, "settlement rejected"),
           };
         }
+        // Keep the underlying error as the cause: the failover client reads
+        // it to tell a connection that was never made from one that was.
         throw new TollwayError(
           "payment-failed",
           `facilitator /settle request failed: ${message(error)}`,
+          { cause: error },
         );
       }
 
@@ -301,17 +307,16 @@ export function createHttpFacilitator(
       try {
         response = await client.getSupported();
       } catch (error) {
+        // Keep the underlying error as the cause: the failover client reads
+        // it to tell a connection that was never made from one that was.
         throw new TollwayError(
           "payment-failed",
           `facilitator /supported request failed: ${message(error)}`,
+          { cause: error },
         );
       }
-      // Issue #155: parse the raw response at the boundary so the gate
-      // sees `kinds`, `extensions` and `signers` rather than the lossy
-      // `{ models, assets }` shape this returned previously. The parser
-      // throws `TollwayError("payment-failed", ...)` on malformed data,
-      // matching the error class used by every other facilitator-side
-      // failure in this module.
+      // Parse at the boundary into Tollway's type. A malformed body throws
+      // `facilitator-invalid-response` naming the field.
       return parseFacilitatorCapabilities(response);
     },
   };

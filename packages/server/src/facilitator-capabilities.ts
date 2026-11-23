@@ -127,6 +127,25 @@ function describeFlag(value: unknown): string {
 }
 
 /**
+ * The kind a facilitator would use to settle x402 on a Stellar network: x402
+ * version 2, the `exact` scheme, and the network's CAIP-2 id or `stellar:*`.
+ * Undefined when the facilitator cannot settle that network. The failover
+ * client uses it to decide which facilitators are eligible for a payment.
+ */
+export function findMatchingKind(
+  capabilities: FacilitatorCapabilities,
+  network: StellarNetwork,
+): FacilitatorKind | undefined {
+  const expectedNetwork = NETWORK_CAIP2[network];
+  return capabilities.kinds.find(
+    (kind) =>
+      kind.x402Version === EXPECTED_X402_VERSION &&
+      kind.scheme === STELLAR_EXACT_SCHEME &&
+      (kind.network === expectedNetwork || kind.network === STELLAR_WILDCARD_CAIP2),
+  );
+}
+
+/**
  * Checks one paywall against a facilitator's capabilities and returns every
  * mismatch:
  *
@@ -174,9 +193,7 @@ export function validatePaywall(
     });
   }
 
-  const matchingKind = v2Exact.find(
-    (kind) => kind.network === expectedNetwork || kind.network === STELLAR_WILDCARD_CAIP2,
-  );
+  const matchingKind = findMatchingKind(capabilities, paywall.network);
   if (v2Exact.length > 0 && !matchingKind) {
     mismatches.push({
       route,

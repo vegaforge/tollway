@@ -1,3 +1,5 @@
+import { createServer, type Server } from "node:http";
+import type { AddressInfo } from "node:net";
 import type { PaymentOffer, X402Payment } from "@vegaforge/tollway-core";
 import { TollwayError } from "@vegaforge/tollway-core";
 import {
@@ -6,9 +8,12 @@ import {
   SettleError,
   VerifyError,
 } from "@x402/core/types";
-import { beforeEach, describe, expect, it, vi } from "vitest";
-import type { FacilitatorClient } from "./facilitator.js";
-import type { FacilitatorCapabilities } from "./facilitator-capabilities.js";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { createHttpFacilitator, type FacilitatorClient } from "./facilitator.js";
+import {
+  createFacilitatorValidator,
+  type FacilitatorCapabilities,
+} from "./facilitator-capabilities.js";
 import {
   createFailoverFacilitator,
   createMemoryPinStore,
@@ -168,43 +173,137 @@ describe("createFailoverFacilitator", () => {
   });
 
   describe("capability filtering", () => {
-    it("skips a member whose validator rejects the offer", async () => {
+    it("skips a member whose advertised capabilities do not cover the offer's network", async () => {
       const bSettle = vi.fn(async () => ({ settled: true as const, txHash: "tx-b" }));
+      const evmOnly = stubClient({
+        async supported() {
+          return {
+            kinds: [{ x402Version: 2, scheme: "exact", network: "eip155:8453" }],
+            extensions: [],
+            signers: {},
+          };
+        },
+      });
+      const stellar = stubClient({ settle: bSettle });
       const client = createFailoverFacilitator({
         facilitators: [
-          {
-            id: "evm-only",
-            client: stubClient(),
-            validator: {
-              async validate() {
-                return { valid: false };
-              },
-            },
-          },
-          { id: "stellar", client: stubClient({ settle: bSettle }) },
+          { id: "evm-only", client: evmOnly, validator: createFacilitatorValidator(evmOnly) },
+          { id: "stellar", client: stellar, validator: createFacilitatorValidator(stellar) },
         ],
       });
       await client.settle({ payment: payment(), offer: offer(), payer: "GPAYER", nonce: "n1" });
       expect(bSettle).toHaveBeenCalledOnce();
     });
 
-    it("throws payment-failed when no member is eligible for the offer", async () => {
+    it("excludes a member whose capabilities cannot be read, and reports it", async () => {
+      const events: FailoverEvent[] = [];
+      const down = stubClient({ supported: () => Promise.reject(connectionRefused()) });
+      const bSettle = vi.fn(async () => ({ settled: true as const, txHash: "tx-b" }));
       const client = createFailoverFacilitator({
         facilitators: [
-          {
-            id: "a",
-            client: stubClient(),
-            validator: {
-              async validate() {
-                return { valid: false };
-              },
-            },
-          },
+          { id: "down", client: down, validator: createFacilitatorValidator(down) },
+          { id: "b", client: stubClient({ settle: bSettle }) },
+        ],
+        onEvent: (event) => events.push(event),
+      });
+      await client.settle({ payment: payment(), offer: offer(), payer: "GPAYER", nonce: "n1" });
+      expect(bSettle).toHaveBeenCalledOnce();
+      expect(events).toContainEqual({
+        type: "capabilities-unavailable",
+        facilitator: "down",
+        reason: "ECONNREFUSED 127.0.0.1:443",
+      });
+    });
+
+    it("throws payment-failed when no member is eligible for the offer", async () => {
+      const evmOnly = stubClient({
+        async supported() {
+          return {
+            kinds: [{ x402Version: 2, scheme: "exact", network: "eip155:8453" }],
+            extensions: [],
+            signers: {},
+          };
+        },
+      });
+      const client = createFailoverFacilitator({
+        facilitators: [
+          { id: "a", client: evmOnly, validator: createFacilitatorValidator(evmOnly) },
         ],
       });
       await expect(
         client.settle({ payment: payment(), offer: offer(), payer: "GPAYER", nonce: "n1" }),
       ).rejects.toMatchObject({ code: "payment-failed" });
+    });
+  });
+
+  describe("with real HTTP facilitators", () => {
+    // These go through createHttpFacilitator and @x402/core's HTTP client,
+    // so the errors are the ones a deployment actually sees, not stand-ins.
+    let servers: Server[] = [];
+    afterEach(async () => {
+      await Promise.all(servers.map((server) => new Promise((resolve) => server.close(resolve))));
+      servers = [];
+    });
+
+    async function listen(handler: Parameters<typeof createServer>[1]): Promise<string> {
+      const server = createServer(handler);
+      servers.push(server);
+      await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+      return `http://127.0.0.1:${(server.address() as AddressInfo).port}`;
+    }
+
+    async function closedPortUrl(): Promise<string> {
+      const server = createServer();
+      await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+      const { port } = server.address() as AddressInfo;
+      await new Promise((resolve) => server.close(resolve));
+      return `http://127.0.0.1:${port}`;
+    }
+
+    it("fails settle over to the next member when the first refuses the connection", async () => {
+      const events: FailoverEvent[] = [];
+      const bSettle = vi.fn(async () => ({ settled: true as const, txHash: "tx-b" }));
+      const client = createFailoverFacilitator({
+        facilitators: [
+          { id: "refused", client: createHttpFacilitator(await closedPortUrl()) },
+          { id: "b", client: stubClient({ settle: bSettle }) },
+        ],
+        onEvent: (event) => events.push(event),
+      });
+      const result = await client.settle({
+        payment: payment(),
+        offer: offer(),
+        payer: "GPAYER",
+        nonce: "n-refused",
+      });
+      expect(result).toEqual({ settled: true, txHash: "tx-b" });
+      expect(bSettle).toHaveBeenCalledOnce();
+      expect(events).toContainEqual(
+        expect.objectContaining({
+          type: "failover",
+          operation: "settle",
+          from: "refused",
+          to: "b",
+        }),
+      );
+    });
+
+    it("keeps the pin and reports outcome-unknown when the first member answers 500", async () => {
+      const url = await listen((_request, response) => {
+        response.writeHead(500, { "Content-Type": "text/plain" });
+        response.end("boom");
+      });
+      const bSettle = vi.fn(async () => ({ settled: true as const, txHash: "tx-b" }));
+      const client = createFailoverFacilitator({
+        facilitators: [
+          { id: "errors", client: createHttpFacilitator(url) },
+          { id: "b", client: stubClient({ settle: bSettle }) },
+        ],
+      });
+      await expect(
+        client.settle({ payment: payment(), offer: offer(), payer: "GPAYER", nonce: "n-500" }),
+      ).rejects.toMatchObject({ code: "outcome-unknown" });
+      expect(bSettle).not.toHaveBeenCalled();
     });
   });
 

@@ -52,6 +52,7 @@ export {
   type FacilitatorKind,
   type FacilitatorValidator,
   type FacilitatorValidatorOptions,
+  findMatchingKind,
   type PaywallMismatch,
   type PaywallTarget,
   type PaywallValidation,

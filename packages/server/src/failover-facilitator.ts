@@ -6,7 +6,7 @@
  * out across several facilitators is naive-dangerous for settlement because
  * `@x402/stellar`'s facilitator picks its own transaction hash per `/settle`,
  * so two facilitators that both receive the same signed payment are not
- * idempotent at the network layer — Soroban's nonce prevents double on-chain
+ * idempotent at the network layer. Soroban's nonce prevents double on-chain
  * settlement, but the second facilitator reports an opaque rejection and the
  * payer who was in fact charged sees a failure.
  *
@@ -23,9 +23,18 @@
  *   - filtering facilitators by the capabilities they advertise, via the
  *     Issue #155 validator, before they are eligible for a given offer.
  *
- * The on-chain nonce check the issue hints at is not implemented: the issue
- * explicitly allows the fallback "hold the payment as outcome-unknown until
- * the pinned facilitator answers", which is what retries end up doing here.
+ * Classifying a failure relies on the error's cause chain:
+ * `createHttpFacilitator` keeps the network error as the cause of the
+ * `TollwayError` it throws, and Node's fetch reports a refused connection or
+ * a failed DNS lookup as a `cause.code`.
+ *
+ * Not solved here: resolving an `outcome-unknown` payment. The on-chain
+ * nonce check is not implemented, and on a retry the gate verifies before
+ * it settles, so a payment that did land can come back as a failed verify
+ * rather than reaching the pinned facilitator again. Until that is built,
+ * an `outcome-unknown` payment needs an operator or a later on-chain check
+ * to confirm. Rendering `outcome-unknown` with `Retry-After` in the gate and
+ * adapters is #161.
  */
 
 import { TollwayError } from "@vegaforge/tollway-core";
@@ -36,7 +45,11 @@ import {
   VerifyError,
 } from "@x402/core/types";
 import type { FacilitatorClient, SettleInput, VerifyInput } from "./facilitator.js";
-import type { FacilitatorCapabilities } from "./facilitator-capabilities.js";
+import {
+  type FacilitatorCapabilities,
+  type FacilitatorValidator,
+  findMatchingKind,
+} from "./facilitator-capabilities.js";
 
 /**
  * Short-lived pin that ties a payment nonce to the facilitator that first
@@ -68,15 +81,14 @@ const DEFAULT_COOLDOWN_MS = 30_000;
 /**
  * One backing facilitator inside the failover. Each carries a stable id
  * (written to pins and events), the client Tollway talks to, and an optional
- * validator that filters out facilitators whose advertised capabilities do
- * not cover a given offer (Issue #155).
+ * validator, usually `createFacilitatorValidator(client)`. With a validator,
+ * the member is only eligible for an offer whose network its cached
+ * `/supported` covers (Issue #155).
  */
 export type FailoverMember = {
   id: string;
   client: FacilitatorClient;
-  validator?: {
-    validate(offer: VerifyInput["offer"]): Promise<{ valid: boolean }>;
-  };
+  validator?: Pick<FacilitatorValidator, "getCapabilities">;
 };
 
 type Health = {
@@ -98,7 +110,9 @@ export type FailoverEvent =
       reason: string;
     }
   | { type: "outcome-unknown"; facilitator: string; operation: "settle"; reason: string }
-  | { type: "health-changed"; facilitator: string; healthy: boolean };
+  | { type: "health-changed"; facilitator: string; healthy: boolean }
+  /** A member's `/supported` could not be read, so it was left out of this call. */
+  | { type: "capabilities-unavailable"; facilitator: string; reason: string };
 
 export type FailoverFacilitatorOptions = {
   /** Backing facilitators, in preferred order. At least one, unique ids. */
@@ -189,6 +203,15 @@ function describe(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
 }
 
+/** The message of the innermost cause, the error the network layer raised. */
+function rootMessage(error: unknown): string {
+  let cursor = error;
+  while (cursor instanceof Error && cursor.cause instanceof Error) {
+    cursor = cursor.cause;
+  }
+  return describe(cursor);
+}
+
 /**
  * Multi-facilitator `FacilitatorClient`. `createHttpFacilitator` can be
  * swapped for this value without touching the gate: it implements the same
@@ -276,13 +299,22 @@ export function createFailoverFacilitator(options: FailoverFacilitatorOptions): 
         eligible.push(member);
         continue;
       }
+      let capabilities: FacilitatorCapabilities;
       try {
-        const result = await member.validator.validate(offer);
-        if (result.valid) eligible.push(member);
-      } catch {
-        // A validator that itself errors excludes the member from eligibility
-        // for this call. Health is counted through the next call this member
-        // actually answers, not through a capability lookup failure.
+        capabilities = await member.validator.getCapabilities();
+      } catch (error) {
+        // Unknown capabilities are not "supports everything": leave the
+        // member out of this call and say why. Its health is judged by the
+        // calls it actually answers.
+        emit({
+          type: "capabilities-unavailable",
+          facilitator: member.id,
+          reason: rootMessage(error),
+        });
+        continue;
+      }
+      if (findMatchingKind(capabilities, offer.network)) {
+        eligible.push(member);
       }
     }
     return eligible;

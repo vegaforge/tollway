@@ -23,7 +23,11 @@ and turns the single-facilitator single-point-of-failure into N.
   mirrors the `SettlementCache` shape; an in-memory implementation ships
   by default and a shared-backend plug-in slots in for multi-process gates.
 - Settle errors are classified: `pre-send` (Node's ECONNREFUSED / ENOTFOUND /
-  EAI_AGAIN on the fetch cause chain) releases the pin and moves on;
+  EAI_AGAIN on the fetch cause chain) releases the pin and moves on.
+  `createHttpFacilitator` now keeps the network error as the `cause` of the
+  `TollwayError` it throws, which is what makes this work with real
+  facilitators; tests cover a refused connection and a 500 from a real HTTP
+  facilitator;
   `outcome-unknown` (`FacilitatorTimeoutError`, `FacilitatorResponseError`,
   or any other post-send transport failure) keeps the pin and raises
   `TollwayError("outcome-unknown", ...)` without retrying on another
@@ -31,21 +35,23 @@ and turns the single-facilitator single-point-of-failure into N.
 - Per-member health counts consecutive failures, trips a cool-down at a
   configurable threshold, and lets the next call through as a half-open
   probe once the cool-down elapses. The clock is injectable.
-- Each member may carry an optional validator built from the Issue #155
-  `createFacilitatorValidator`; members whose advertised capabilities
-  cannot verify an offer are skipped for that call without being marked
-  unhealthy.
+- Each member may carry a validator built with the Issue #155
+  `createFacilitatorValidator`. A member whose cached `/supported` does not
+  cover the offer's network is skipped for that call, and a member whose
+  `/supported` cannot be read is skipped and reported with a
+  `capabilities-unavailable` event. Neither is marked unhealthy.
 - Every failover and every `outcome-unknown` is reported through an
   `onEvent` callback for observability.
 
-The on-chain Soroban nonce check the issue outlines as the strict solution
-to indeterminate settle outcomes is not implemented; the issue's permitted
-fallback ("hold the payment as outcome-unknown until the pinned facilitator
-answers") is the semantics here, and every retry of an `outcome-unknown`
-payment is routed back to the pinned facilitator.
+Not solved yet: resolving an `outcome-unknown` payment. The on-chain
+Soroban nonce check is not implemented. On a retry the gate verifies before
+it settles, so a payment that did land on chain can come back as a failed
+verify instead of reaching the pinned facilitator again. Until the nonce
+check exists, an `outcome-unknown` settlement needs an operator, or a later
+on-chain check, to confirm.
 
 A new `outcome-unknown` `TollwayErrorCode` ships in `@vegaforge/tollway-core`
 (the related Issue #161 covers wiring the adapter-level `Retry-After`;
 that stays in scope for its own issue).
 
-Closes #156.
+Pull request: #325. Closes #156.
