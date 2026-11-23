@@ -46,7 +46,7 @@
     "@stellar/stellar-sdk": "16.4.1",
     "@types/node": "^22.20.5",
     "fast-check": "^3.23.2",
-    "tsup": "^8.5.1",
+    "tsup": "^9.0.0",
     "typescript": "^5.9.3",
     "vitest": "^4.1.12"
   },
