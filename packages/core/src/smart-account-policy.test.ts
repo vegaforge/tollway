@@ -5,6 +5,7 @@ describe("smart-account policy mapping", () => {
   it("plans token-scoped daily limits and reports residual rules", () => {
     const plan = planSmartAccountPolicy(
       {
+        policyVersion: 1,
         budgets: { daily: "1000", total: "5000" },
         perService: { SERVICE: { cap: "100" } },
         anomaly: { maxSpendPerMinute: "500" },
@@ -31,7 +32,7 @@ describe("smart-account policy mapping", () => {
 
   it("checks weaker, equal, stronger, and missing limits", async () => {
     const plan = planSmartAccountPolicy(
-      { budgets: { daily: "100" } },
+      { policyVersion: 1, budgets: { daily: "100" } },
       { tokenContracts: { A: "CA", B: "CB", C: "CC", D: "CD" }, dailyPeriodLedgers: 10 },
     );
     const result = await checkSmartAccountPolicy(plan, {

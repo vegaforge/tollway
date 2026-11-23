@@ -1,0 +1,145 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/vegaforge/tollway/blob/dev/packages/core/schema/policy.schema.json",
+  "title": "Tollway policy",
+  "description": "A Tollway policy document. Amounts are integer strings in the asset's smallest unit.",
+  "type": "object",
+  "properties": {
+    "policyVersion": {
+      "type": "number",
+      "const": 1
+    },
+    "mode": {
+      "type": "string",
+      "enum": ["enforce", "dry-run"]
+    },
+    "budgets": {
+      "type": "object",
+      "properties": {
+        "daily": {
+          "type": "string",
+          "pattern": "^[0-9]+$"
+        },
+        "total": {
+          "type": "string",
+          "pattern": "^[0-9]+$"
+        }
+      },
+      "additionalProperties": false
+    },
+    "perService": {
+      "type": "object",
+      "propertyNames": {
+        "type": "string",
+        "minLength": 1
+      },
+      "additionalProperties": {
+        "type": "object",
+        "properties": {
+          "cap": {
+            "type": "string",
+            "pattern": "^[0-9]+$"
+          }
+        },
+        "additionalProperties": false
+      }
+    },
+    "perModel": {
+      "type": "object",
+      "propertyNames": {
+        "type": "string",
+        "enum": ["x402", "mpp-charge", "mpp-channel"]
+      },
+      "additionalProperties": {
+        "type": "object",
+        "properties": {
+          "enabled": {
+            "type": "boolean"
+          },
+          "minChannelDeposit": {
+            "type": "string",
+            "pattern": "^[0-9]+$"
+          }
+        },
+        "additionalProperties": false
+      }
+    },
+    "rateLimit": {
+      "type": "object",
+      "properties": {
+        "requestsPerMinute": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 9007199254740991
+        }
+      },
+      "additionalProperties": false
+    },
+    "anomaly": {
+      "type": "object",
+      "properties": {
+        "maxSpendPerMinute": {
+          "type": "string",
+          "pattern": "^[0-9]+$"
+        },
+        "adaptive": {
+          "type": "object",
+          "properties": {
+            "kind": {
+              "type": "string",
+              "const": "ewma"
+            },
+            "smoothing": {
+              "type": "object",
+              "properties": {
+                "numerator": {
+                  "type": "string",
+                  "pattern": "^[1-9][0-9]*$"
+                },
+                "denominator": {
+                  "type": "string",
+                  "pattern": "^[1-9][0-9]*$"
+                }
+              },
+              "required": ["numerator", "denominator"],
+              "additionalProperties": false
+            },
+            "sensitivity": {
+              "type": "object",
+              "properties": {
+                "numerator": {
+                  "type": "string",
+                  "pattern": "^[1-9][0-9]*$"
+                },
+                "denominator": {
+                  "type": "string",
+                  "pattern": "^[1-9][0-9]*$"
+                }
+              },
+              "required": ["numerator", "denominator"],
+              "additionalProperties": false
+            },
+            "warmupPeriods": {
+              "type": "integer",
+              "exclusiveMinimum": 0,
+              "maximum": 9007199254740991
+            },
+            "scope": {
+              "type": "string",
+              "enum": ["asset", "asset-payee"]
+            },
+            "maxBaselineGrowthPerMinute": {
+              "type": "string",
+              "pattern": "^[0-9]+$"
+            }
+          },
+          "required": ["kind", "smoothing", "sensitivity", "warmupPeriods"],
+          "additionalProperties": false
+        }
+      },
+      "additionalProperties": false
+    }
+  },
+  "required": ["policyVersion"],
+  "additionalProperties": false
+}

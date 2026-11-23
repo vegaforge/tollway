@@ -601,7 +601,10 @@ describe("createClient shadow policy", () => {
   });
 
   it("reports a failing candidate as policy:shadow-error and pays anyway", async () => {
-    const shadow = createPolicyEngine({ budgets: { daily: "not-a-number" } });
+    const shadow = createPolicyEngine({ budgets: { daily: "100000" } });
+    vi.spyOn(shadow, "evaluate").mockRejectedValue(
+      new TollwayError("invalid-amount", "invalid amount: not-a-number"),
+    );
     const settler = mockSettler();
     const events: ClientEvent[] = [];
     const client = createClient({ network: "testnet", settler, shadow });

@@ -18,10 +18,17 @@
       "types": "./dist/index.d.ts",
       "import": "./dist/index.js",
       "require": "./dist/index.cjs"
-    }
+    },
+    "./policy-loader": {
+      "types": "./dist/policy-loader.d.ts",
+      "import": "./dist/policy-loader.js",
+      "require": "./dist/policy-loader.cjs"
+    },
+    "./schema/policy.schema.json": "./schema/policy.schema.json"
   },
   "files": [
-    "dist"
+    "dist",
+    "schema"
   ],
   "scripts": {
     "build": "tsup",

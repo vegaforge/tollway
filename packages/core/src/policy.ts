@@ -1,5 +1,11 @@
 import { TollwayError } from "./errors.js";
 import {
+  type Policy,
+  type PolicyInput,
+  PolicyValidationError,
+  parsePolicy,
+} from "./policy-schema.js";
+import {
   decisionFromTrace,
   POLICY_TRACE_VERSION,
   type PolicyDecision,
@@ -7,61 +13,11 @@ import {
   type PolicyTrace,
   type PolicyTraceEntry,
   type PolicyWindow,
-  policyModes,
 } from "./policy-trace.js";
 import type { SettlementModel } from "./types.js";
 
-/**
- * Policy is data, not code: a small declarative schema the engine enforces
- * across every settlement model. See docs/design.md, "Policy and budgets".
- *
- * All amounts are integer strings in the asset's smallest unit, same as
- * receipts.
- */
-export type Policy = {
-  /**
-   * `enforce` (the default) blocks a payment when a rule fails. `dry-run`
-   * allows it and only marks the would-be block in the trace. Spend is
-   * recorded the same way in both modes, so budgets stay real.
-   */
-  mode?: PolicyMode;
-  budgets?: {
-    /** Spend ceiling per UTC day. */
-    daily?: string;
-    /** Lifetime ceiling for this policy. */
-    total?: string;
-  };
-  /** Caps per counterparty service, keyed by the payee address or service id. */
-  perService?: Record<string, { cap?: string }>;
-  perModel?: Partial<
-    Record<
-      SettlementModel,
-      {
-        enabled?: boolean;
-        /** Channel mode only makes sense above a minimum deposit. */
-        minChannelDeposit?: string;
-      }
-    >
-  >;
-  rateLimit?: {
-    requestsPerMinute?: number;
-  };
-  anomaly?: {
-    /** Trips the anomaly stop when spend in any minute exceeds this. */
-    maxSpendPerMinute?: string;
-    /** An explainable EWMA detector over committed per-minute spend. */
-    adaptive?: {
-      kind: "ewma";
-      smoothing: { numerator: string; denominator: string };
-      sensitivity: { numerator: string; denominator: string };
-      /** Number of completed minute buckets before this rule can block. */
-      warmupPeriods: number;
-      scope?: "asset" | "asset-payee";
-      /** Maximum increase allowed when a completed bucket trains the baseline. */
-      maxBaselineGrowthPerMinute?: string;
-    };
-  };
-};
+// Re-exported so existing `import type { Policy } from "./policy.js"` keeps working.
+export type { Policy, PolicyInput } from "./policy-schema.js";
 
 /** A payment the engine is asked to allow or block, before it happens. */
 export type PaymentIntent = {
@@ -124,17 +80,6 @@ function parseCount(value: number): bigint {
     );
   }
   return BigInt(value);
-}
-
-function resolveMode(policy: Policy): PolicyMode {
-  const mode: unknown = policy.mode ?? "enforce";
-  // Policy may come from JSON. An unknown mode is refused: guessing would
-  // either enforce what the operator meant to watch, or the reverse.
-  const known = policyModes.find((candidate) => candidate === mode);
-  if (known === undefined) {
-    throw new TollwayError("invalid-policy", `unknown policy mode: ${String(mode)}`);
-  }
-  return known;
 }
 
 /** Spend and request history the stateful rules read. */
@@ -539,17 +484,24 @@ const RULES: readonly RuleEvaluator[] = [
  * constraints, rate limits, and anomaly stops. All state is held in memory;
  * see docs/design.md, "Policy and budgets".
  *
- * Throws `invalid-policy` when `policy.mode` is not a known mode.
+ * The policy is parsed with `policySchema` first, so a bad amount, a negative
+ * rate, or an unknown key throws {@link PolicyValidationError} here, listing
+ * every issue with its path, instead of failing on the first payment.
+ * Unversioned policies from older releases are migrated to the current
+ * version before validation.
  */
 export function createPolicyEngine(
-  policy: Policy,
+  input: PolicyInput,
   opts?: {
     clock?: () => number;
     onAnomalyDetected?: (event: AdaptiveAnomalyEvent) => void | Promise<void>;
   },
 ): PolicyEngine {
+  const parsed = parsePolicy(input);
+  if (!parsed.ok) throw new PolicyValidationError(parsed.issues);
+  const policy = parsed.policy;
   const clock = opts?.clock ?? Date.now;
-  const mode = resolveMode(policy);
+  const mode: PolicyMode = policy.mode ?? "enforce";
   const state: EngineState = {
     day: utcDate(clock),
     dailySpend: new Map(),
