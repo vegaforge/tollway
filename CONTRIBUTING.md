@@ -35,7 +35,8 @@ Useful commands:
 | `pnpm test` | Run all Vitest suites |
 | `pnpm typecheck` | Typecheck all packages |
 | `pnpm lint` | Biome lint and format check; warnings fail |
-| `pnpm mutation` | Run Stryker mutation testing on `@vegaforge/tollway-core` and `@vegaforge/tollway-server`; slow, not part of `preflight.sh` |
+| `pnpm mutation` | Full Stryker mutation run on `@vegaforge/tollway-core` and `@vegaforge/tollway-server`. Slow; `pnpm test` and `preflight.sh` never run it. Reports land in `packages/<name>/reports/mutation/` |
+| `pnpm mutation:incremental` | Re-test only the mutants changed since the last run's report, as CI does on a pull request |
 | `pnpm format:check` | Biome format check only |
 | `pnpm lint:fix` | Apply Biome fixes |
 | `pnpm --filter @vegaforge/tollway-core test` | Run one package's tests |

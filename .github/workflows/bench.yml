@@ -13,9 +13,6 @@ name: Bench
 #
 # Actions are pinned to the same commit SHAs as ci.yml, with the release tag
 # in a comment. Dependabot updates both together.
-#
-# Mutation testing (issue #247) is handled by .github/workflows/mutation.yml,
-# not here; this workflow only compares benchmark timings.
 
 on:
   pull_request:
