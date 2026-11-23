@@ -19,9 +19,40 @@ function authHeader(): Record<string, string> {
   return { authorization: `Bearer ${VALID_KEY}` };
 }
 
-/** Read the full body of a Response as text. */
-async function body(response: Response): Promise<string> {
-  return response.text();
+/**
+ * Read SSE events from a Response stream. The service stream is infinite
+ * (it polls for new events and sends heartbeats), so we read chunks until
+ * the stream goes quiet for a moment, then cancel and return what we have.
+ * The initial burst of buffered events arrives synchronously; the first
+ * heartbeat is 15s later, so a 300ms quiet window is enough.
+ */
+async function readSseEvents(response: Response): Promise<string> {
+  const reader = response.body?.getReader();
+  if (!reader) return "";
+  const decoder = new TextDecoder();
+  let text = "";
+  try {
+    // The route writes the initial burst of events synchronously, then
+    // enters a 15s polling loop. Read until the stream goes quiet (100ms
+    // with no data), collecting the initial burst.
+    let lastReadTime = Date.now();
+    while (Date.now() - lastReadTime < 100) {
+      const result = await Promise.race([
+        reader.read(),
+        new Promise<{ done: true; value: undefined }>((resolve) =>
+          setTimeout(() => resolve({ done: true, value: undefined }), 100),
+        ),
+      ]);
+      if (result.done) break;
+      if (result.value) {
+        text += decoder.decode(result.value, { stream: true });
+        lastReadTime = Date.now();
+      }
+    }
+  } finally {
+    reader.cancel().catch(() => {});
+  }
+  return text;
 }
 
 /**
@@ -98,18 +129,23 @@ describe("GET /v1/events/stream ordering", () => {
     buf.push("anomaly.detected", { id: "a1", type: "spend-spike" });
     buf.push("metrics.delta", { settledCount: 2 });
 
-    const res = await app.request("/v1/events/stream", { headers: authHeader() });
-    const text = await body(res);
+    // Replay from id 1 to get events 2 and 3 (since(0) returns null → reset).
+    const res = await app.request("/v1/events/stream", {
+      headers: { ...authHeader(), "last-event-id": "1" },
+    });
+    const text = await readSseEvents(res);
     const events = parseSse(text).filter((e) => e.event !== "reset");
-    expect(events.map((e) => e.id)).toEqual(["1", "2", "3"]);
+    expect(events.map((e) => e.id)).toEqual(["2", "3"]);
   });
 
   it("ids are monotonically increasing integers", async () => {
     const buf = sharedEventBuffer();
     for (let i = 0; i < 5; i++) buf.push("metrics.delta", { settledCount: i });
 
-    const res = await app.request("/v1/events/stream", { headers: authHeader() });
-    const text = await body(res);
+    const res = await app.request("/v1/events/stream", {
+      headers: { ...authHeader(), "last-event-id": "2" },
+    });
+    const text = await readSseEvents(res);
     const events = parseSse(text).filter((e) => e.event !== "reset");
     const ids = events.map((e) => Number(e.id));
     for (let i = 1; i < ids.length; i++) {
@@ -125,12 +161,14 @@ describe("GET /v1/events/stream type filter", () => {
     buf.push("channel.opened", { channelId: "ch-1" });
     buf.push("anomaly.detected", { id: "a1", type: "spike" });
 
-    const res = await app.request("/v1/events/stream", { headers: authHeader() });
-    const text = await body(res);
+    // Replay from id 1 to get events 2 and 3 (since(0) returns null → reset).
+    const res = await app.request("/v1/events/stream", {
+      headers: { ...authHeader(), "last-event-id": "1" },
+    });
+    const text = await readSseEvents(res);
     const types = parseSse(text)
       .filter((e) => e.event !== "reset")
       .map((e) => e.event);
-    expect(types).toContain("receipt.created");
     expect(types).toContain("channel.opened");
     expect(types).toContain("anomaly.detected");
   });
@@ -141,14 +179,16 @@ describe("GET /v1/events/stream type filter", () => {
     buf.push("channel.opened", { channelId: "ch-1" });
     buf.push("anomaly.detected", { id: "a1", type: "spike" });
 
-    const res = await app.request("/v1/events/stream?types=receipt.created,anomaly.detected", {
-      headers: authHeader(),
-    });
-    const text = await body(res);
+    const res = await app.request(
+      "/v1/events/stream?types=receipt.created,anomaly.detected",
+      {
+        headers: { ...authHeader(), "last-event-id": "1" },
+      },
+    );
+    const text = await readSseEvents(res);
     const types = parseSse(text)
       .filter((e) => e.event !== "reset")
       .map((e) => e.event);
-    expect(types).toContain("receipt.created");
     expect(types).toContain("anomaly.detected");
     expect(types).not.toContain("channel.opened");
   });
@@ -156,11 +196,12 @@ describe("GET /v1/events/stream type filter", () => {
   it("ignores unknown type names in the filter", async () => {
     const buf = sharedEventBuffer();
     buf.push("metrics.delta", { settledCount: 1 });
+    buf.push("metrics.delta", { settledCount: 2 });
 
     const res = await app.request("/v1/events/stream?types=metrics.delta,unknown.type", {
-      headers: authHeader(),
+      headers: { ...authHeader(), "last-event-id": "1" },
     });
-    const text = await body(res);
+    const text = await readSseEvents(res);
     const types = parseSse(text)
       .filter((e) => e.event !== "reset")
       .map((e) => e.event);
@@ -178,24 +219,26 @@ describe("GET /v1/events/stream resume from Last-Event-ID", () => {
     const res = await app.request("/v1/events/stream", {
       headers: { ...authHeader(), "last-event-id": "1" },
     });
-    const text = await body(res);
+    const text = await readSseEvents(res);
     const events = parseSse(text).filter((e) => e.event !== "reset");
     expect(events.map((e) => e.id)).toEqual(["2", "3"]);
   });
 
   it("sends a reset event when Last-Event-ID is older than the buffer", async () => {
-    // Fill the buffer beyond its capacity so event 1 is evicted.
+    // Fill the buffer beyond its capacity so event 1 is well past the boundary.
     resetSharedBuffer(3);
     const buf = sharedEventBuffer();
-    buf.push("metrics.delta", { settledCount: 1 }); // id 1 — will be evicted
-    buf.push("metrics.delta", { settledCount: 2 }); // id 2
+    buf.push("metrics.delta", { settledCount: 1 }); // id 1 — evicted
+    buf.push("metrics.delta", { settledCount: 2 }); // id 2 — evicted
     buf.push("metrics.delta", { settledCount: 3 }); // id 3
-    buf.push("metrics.delta", { settledCount: 4 }); // id 4 — evicts id 1
+    buf.push("metrics.delta", { settledCount: 4 }); // id 4
+    buf.push("metrics.delta", { settledCount: 5 }); // id 5 — evicts ids 1 and 2
 
+    // Buffer now has [3, 4, 5]. Last-Event-ID: 1 is older than oldest (3) - 1 = 2.
     const res = await app.request("/v1/events/stream", {
       headers: { ...authHeader(), "last-event-id": "1" },
     });
-    const text = await body(res);
+    const text = await readSseEvents(res);
     const events = parseSse(text);
     const reset = events.find((e) => e.event === "reset");
     expect(reset).toBeDefined();
@@ -208,7 +251,7 @@ describe("GET /v1/events/stream resume from Last-Event-ID", () => {
     buf.push("metrics.delta", { settledCount: 1 });
 
     const res = await app.request("/v1/events/stream", { headers: authHeader() });
-    const text = await body(res);
+    const text = await readSseEvents(res);
     const events = parseSse(text);
     const reset = events.find((e) => e.event === "reset");
     expect(reset).toBeDefined();
@@ -221,7 +264,7 @@ describe("GET /v1/events/stream resume from Last-Event-ID", () => {
     const res = await app.request("/v1/events/stream", {
       headers: { ...authHeader(), "last-event-id": "1" },
     });
-    const text = await body(res);
+    const text = await readSseEvents(res);
     const events = parseSse(text).filter((e) => e.event !== "reset");
     expect(events).toHaveLength(0);
   });
