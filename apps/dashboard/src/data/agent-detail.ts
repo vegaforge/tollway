@@ -362,6 +362,7 @@ const STUB_AGENTS: StubAgent[] = [
     policy: {
       effectiveFrom: "2026-11-01T00:00:00.000Z",
       document: {
+        policyVersion: 1,
         budgets: { daily: "5000000000", total: "20000000000" },
         perService: { GSERVICEALPHA: { cap: "10000000000" }, GSERVICEBETA: { cap: "3000000000" } },
         perModel: { "mpp-channel": { enabled: true, minChannelDeposit: "1000000" } },
@@ -464,6 +465,7 @@ const STUB_AGENTS: StubAgent[] = [
     policy: {
       effectiveFrom: "2026-11-15T00:00:00.000Z",
       document: {
+        policyVersion: 1,
         budgets: { daily: "1000000000" },
         perService: { GSERVICEGAMMA: { cap: "500000000" } },
       },
@@ -487,6 +489,7 @@ const STUB_AGENTS: StubAgent[] = [
     policy: {
       effectiveFrom: "2026-11-10T00:00:00.000Z",
       document: {
+        policyVersion: 1,
         budgets: { daily: "500000000", total: "1000000000" },
         perService: { GSERVICEDELTA: { cap: "200000000" } },
       },

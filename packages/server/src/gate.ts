@@ -3,6 +3,7 @@ import {
   buildReceipt,
   bytesToBase64Url,
   canonicalJson,
+  hashOffer,
   type ModelRouter,
   type MppChargePayment,
   type PaymentOffer,
@@ -193,6 +194,19 @@ export type PaywallDeps = {
   facilitatorTimeoutMs?: number;
   /** Clock for quote expiry and service policy windows; injected tests can avoid waiting. */
   clock?: () => number;
+  /**
+   * The receipt version this gate issues (Issue #166). Defaults to 1.
+   *
+   * Version 2 adds `offerHash`, `method` and an optional `expiresAt`, so a
+   * receipt names the exact offer the payer accepted. A process from before
+   * #166 reads a cached v2 receipt as a cache miss and would settle the
+   * payment again, so switch in this order: deploy this version everywhere
+   * with `receiptVersion` unset, wait until no older process serves traffic
+   * or shares the settlement cache, then set `receiptVersion: 2`. Cached v1
+   * receipts keep being served after the switch. See docs/receipt-format.md,
+   * "Receipt v2".
+   */
+  receiptVersion?: 1 | 2;
 };
 
 type Handler<TPayment> = {
@@ -445,6 +459,7 @@ export type InFlightSettlementResult = SettlementResult;
 
 type SettlementContext = {
   signer: ReceiptSigner;
+  receiptVersion: 1 | 2;
   cache?: SettlementCache;
   onCacheError?: (error: Error, key: string) => void;
   /** Settlements in progress in this process, by cache key. */
@@ -714,7 +729,7 @@ async function settleWithHandler<TPayment>(
         bound.unref();
       }
     }
-    return toOutcome(result, offer, model, method, false);
+    return await toOutcome(result, offer, model, method, false);
   } finally {
     if (!abandoned) {
       context.inFlight.delete(key);
@@ -805,14 +820,18 @@ async function reportPolicyStoreFailure(
  * only returned for the offer it was issued against, and for the HTTP method
  * it was paid with; anything else is a rejection, never a replay. See
  * docs/design.md, "Design notes" (duplicate protection).
+ *
+ * A v1 receipt is bound by its six offer fields. A v2 receipt is also bound
+ * by its `offerHash` and `method`, so a cached v2 receipt for offer A is
+ * never served for offer B even when the six fields match (#166).
  */
-function toOutcome(
+async function toOutcome(
   result: SettlementResult,
   offer: PaymentOffer,
   model: SettlementModel,
   method: string,
   waited: boolean,
-): GateOutcome {
+): Promise<GateOutcome> {
   if (!result.ok) {
     return result.outcome;
   }
@@ -823,6 +842,15 @@ function toOutcome(
   }
   if (receiptBinding(result.receipt) !== offerBinding(offer, model)) {
     return OFFER_MISMATCH;
+  }
+  const body = result.receipt.receipt;
+  // A receipt this call just settled was built from this very offer and
+  // method, so hashing the offer again would only repeat that work. Any
+  // receipt from elsewhere, a concurrent request or the cache, is checked.
+  if (body.version === 2 && (waited || result.replayed)) {
+    if (body.method !== method || body.offerHash !== (await hashOffer(offer))) {
+      return OFFER_MISMATCH;
+    }
   }
   const outcome: GateOutcome = {
     kind: "settled",
@@ -1053,7 +1081,7 @@ async function settleAndRecord<TPayment>(
     return { ok: false, outcome: { kind: "rejected", status: 502, reason: settlement.reason } };
   }
 
-  const receipt = await receiptFor(settlement.txHash, offer, model, verification, context.signer);
+  const receipt = await receiptFor(settlement.txHash, offer, model, method, verification, context);
 
   if (!context.cache) {
     return { ok: true, receipt, method, replayed: false };
@@ -1071,14 +1099,25 @@ async function settleAndRecord<TPayment>(
   return { ok: true, receipt, method, replayed: false };
 }
 
-/** Signs the receipt for a completed settlement. */
+/**
+ * Signs the receipt for a completed settlement.
+ *
+ * Issue #166: a v2 receipt carries the SHA-256 of the canonical offer the
+ * payer accepted, so two offers for the same URL and price with different
+ * models or facilitator URLs produce distinguishable receipts, and the HTTP
+ * method, so a receipt for GET does not unlock POST. v1 stays the default
+ * until the operator switches (see `PaywallDeps.receiptVersion`).
+ */
 async function receiptFor(
   txHash: string,
   offer: PaymentOffer,
   model: SettlementModel,
+  method: string,
   verification: { payer: string },
-  signer: ReceiptSigner,
+  context: SettlementContext,
 ): Promise<SignedReceipt> {
+  const v2 =
+    context.receiptVersion === 2 ? { offerHash: await hashOffer(offer), method } : undefined;
   return signReceipt(
     buildReceipt({
       payer: verification.payer,
@@ -1089,8 +1128,9 @@ async function receiptFor(
       model,
       settlement: { kind: "transaction", txHash },
       network: offer.network,
+      ...v2,
     }),
-    signer,
+    context.signer,
   );
 }
 
@@ -1113,7 +1153,7 @@ async function recordLateSettlement(
     return;
   }
   try {
-    const receipt = await receiptFor(late.txHash, offer, model, verification, context.signer);
+    const receipt = await receiptFor(late.txHash, offer, model, method, verification, context);
     await context.cache.set(key, { receipt, method });
   } catch (error) {
     context.onCacheError?.(asError(error, "late settlement cache write failed"), key);
@@ -1193,8 +1233,12 @@ export function createPaywallWithInFlight(
   const clock = deps.clock ?? Date.now;
   const servicePolicyStore =
     deps.servicePolicy && (deps.servicePolicyStore ?? createInMemoryServicePolicyStore());
+  if (deps.receiptVersion !== undefined && deps.receiptVersion !== 1 && deps.receiptVersion !== 2) {
+    throw new TypeError(`receiptVersion must be 1 or 2, got ${String(deps.receiptVersion)}`);
+  }
   const context: SettlementContext = {
     signer: deps.signer,
+    receiptVersion: deps.receiptVersion ?? 1,
     cache: deps.cache,
     onCacheError: deps.onCacheError,
     ...(deps.onServicePolicyError ? { onServicePolicyError: deps.onServicePolicyError } : {}),

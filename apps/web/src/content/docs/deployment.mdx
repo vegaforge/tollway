@@ -1,0 +1,275 @@
+---
+title: Production deployment
+description: Run a Tollway gate across processes with Redis, a stable receipt key, a facilitator account and alerting that matches the code
+---
+
+This guide is for the operator who runs a Tollway gate in production. It covers the topology, the settlement cache and its locks, receipt signing keys, facilitator configuration, monitoring, and a security checklist. Every statement here was checked against the source at the pull request's head commit; where a behaviour is not built yet, the tracking issue is linked.
+
+For how the pieces fit together, read [design.md](https://github.com/vegaforge/tollway/blob/dev/docs/design.md). For a single-process local demo, see [Getting started](/docs/getting-started).
+
+## Topology
+
+```text
+agents ──► TLS / load balancer ──► gate process 1 ─┐
+                                   gate process 2 ─┼──► facilitator ──► Stellar
+                                   gate process N ─┘         │
+                                          │                 └── /verify, /settle
+                                          └──► Redis (settlement cache + locks)
+```
+
+A gate process is stateless apart from three in-process stores:
+
+- the in-flight map that joins concurrent copies of one payment inside a process;
+- the service policy windows, when a policy is configured (#190 adds a shared store);
+- the observability hub, when one is wired in process.
+
+Nothing in a gate process holds funds. Payments settle to the `payTo` account you configure, and Tollway only signs the receipt that records it.
+
+Run at least two processes behind a load balancer that keeps a client on the same process only by accident. Correctness must come from Redis, not from sticky routing.
+
+## Settlement cache and locks
+
+The cache is the duplicate-payment defence. The gate derives an idempotency key from the signed payment (`<model>:<nonce>`), looks it up before verification, and returns the cached receipt for the same offer instead of settling again.
+
+### The in-memory cache is single-process only
+
+`createInMemorySettlementCache(ttlMs = 30_000, { maxEntries = 10_000 })` keeps entries in a `Map` in one process. It sweeps expired entries on every `set`, evicts the oldest entry when full, and has no background timer.
+
+That is correct for one process and wrong for several: two processes each have their own map, so both can miss, verify and settle the same payment. The in-flight map has the same boundary. A deployment with more than one process needs a shared cache.
+
+### The Redis cache
+
+```ts
+import { createRedisSettlementCache } from "@vegaforge/tollway-server";
+import { Redis } from "ioredis";
+
+const redis = new Redis(process.env.REDIS_URL!);
+const cache = createRedisSettlementCache({
+  client: redis, // any ioredis-compatible client
+  ttlMs: 30_000,
+});
+```
+
+Keys are `tollway:settlement:<model>:<nonce>` and locks are `tollway:settlement:lock:<model>:<nonce>`; `keyPrefix` changes the prefix. The lock is `SET NX PX` with a per-acquisition token. Renew and release run a Lua script that compares the token first, so a process whose lock expired can never extend or delete the lock another process now holds. Corrupted or foreign cached values are treated as a miss, and a cached receipt is only replayed when its resource, amount, asset, payee, network and model match the offer being served.
+
+A cache that implements only some of `acquire`, `renew` and `release` is refused at gate construction, because a half-implemented lock would silently settle without one. The Redis cache implements all three; the in-memory cache implements none, which is the single-process case.
+
+### TTL, the replay window and ledger close time
+
+Stellar closes a ledger roughly every five seconds. The default `ttlMs` of 30 000 is about six ledger closes: long enough that a client retry arrives while the receipt is still cached.
+
+The cache TTL is the replay window, and it is worth understanding what happens after it:
+
+1. The retry misses the cache.
+2. The gate verifies the payment with the facilitator.
+3. The payment's authorization nonce is already spent on chain, so verification fails.
+4. The agent gets a `402`, not the receipt it paid for.
+
+So set the TTL at or above your clients' retry budget. Do not shrink it to a ledger close. Serving a receipt after the cache expires is tracked in [#162](https://github.com/vegaforge/tollway/issues/162).
+
+A Redis failure before settlement fails the request and nothing is charged: a cache read or lock acquisition that throws propagates out of the gate. A failure after settlement does not lose the receipt; see below.
+
+### Lock behaviour and its limits
+
+- The cross-process lock TTL defaults to 30 000 ms and is configurable with `PaywallDeps.settlementLockTtlMs`. It matches the default cache TTL.
+- While a settlement runs, the gate renews the lock every third of its TTL. The timer is `unref`'d, so it never keeps the process alive.
+- If another process holds the lock, the request is rejected with `409` and `{"error": "settlement in progress"}`. That is normal under concurrency; see monitoring for when it is not.
+- If renewal or release fails, or the lock is found to belong to someone else, the payer still gets the receipt and the outcome carries `lockLost: true` and `cacheError`. `onCacheError(error, key)` is called. Treat `lockLost` as a possible duplicate settlement and alert: detection of duplicates across processes is tracked in [#216](https://github.com/vegaforge/tollway/issues/216).
+- A successful settlement whose cache write fails returns the receipt with `cacheError` set and calls `onCacheError`. The retry no longer replays from cache, so a client that retries gets `402` after its nonce is spent.
+
+## Receipt signing keys
+
+A receipt is signed by a `ReceiptSigner`; the agent verifies it against a public key it trusts. `Ed25519Signer` is the built-in implementation (WebCrypto Ed25519, on Node and edge runtimes). To keep the key in an HSM or KMS, implement `ReceiptSigner` yourself.
+
+### One stable key per deployment
+
+`Ed25519Signer.generate()` creates a new key on every cold start, which makes each instance's receipts verify against a different public key. Do not use it in production.
+
+Use a persisted key and a stable `keyId`:
+
+```ts
+import { Ed25519Signer } from "@vegaforge/tollway-core";
+
+const signer = await Ed25519Signer.fromPrivateKey(
+  process.env.RECEIPT_SIGNING_KEY!, // base64url, 32-byte seed or 48-byte PKCS#8
+  process.env.RECEIPT_KEY_ID!, // for example "gate-2026-11"
+);
+```
+
+- The value is base64url without padding, holding either a raw 32-byte Ed25519 seed or the 48-byte PKCS#8 DER document (`openssl genpkey -algorithm ed25519 -outform DER` produces one).
+- `keyId` defaults to the base64url public key, which is stable for a given private key. Set an explicit, meaningful id anyway, because it is the only handle an agent has when deciding which public key to trust.
+- Every process in one deployment should use the same key and key id, so an agent needs one trusted public key. Per-instance keys work only if every agent is configured with every public key.
+- Load the value from your secret manager at boot. The error messages for a bad key describe the problem and never include the key itself.
+
+Agents verify with `Ed25519Verifier`:
+
+```ts
+import { Ed25519Verifier } from "@vegaforge/tollway-core";
+
+const verifier = new Ed25519Verifier({ "gate-2026-11": publicKeyBase64Url });
+```
+
+Publishing the public keys as a JWKS-style set, so agents can fetch and cache them, is tracked in [#167](https://github.com/vegaforge/tollway/issues/167). Until it lands, distributing the public key to your agents is your job.
+
+### Rotation runbook
+
+Receipts carry `issuedAt` but no expiry. [#166](https://github.com/vegaforge/tollway/issues/166) is the issue that would add one, so today an old receipt stays valid as far as its signature is concerned.
+
+1. Generate the new key and pick a new `keyId`.
+2. Put the new public key into every agent's trusted set and deploy that first, so a receipt signed with the new key verifies before one exists.
+3. Deploy the gate with the new private key and `keyId`.
+4. Keep the old public key trusted for as long as you are willing to accept receipts signed with it. With no receipt expiry, that usually means keeping it until you no longer care about the old history.
+5. Remove the old public key from the agents' trusted set. That is revocation.
+
+There is no online revocation list and no key set endpoint yet; both depend on [#167](https://github.com/vegaforge/tollway/issues/167). A HashiCorp Vault Transit signer, so the private key never leaves the HSM, is tracked in [#168](https://github.com/vegaforge/tollway/issues/168); ECDSA P-256 alongside Ed25519 in [#169](https://github.com/vegaforge/tollway/issues/169).
+
+## Facilitator
+
+The facilitator verifies and settles x402 payments. `createHttpFacilitator(baseUrl, options)` wraps `@x402/core`'s client and speaks the x402 V2 wire format.
+
+| Network | Default URL |
+| ------- | ----------- |
+| `testnet` | `https://channels.openzeppelin.com/x402/testnet` |
+| `mainnet` | `https://channels.openzeppelin.com/x402` |
+
+These are the defaults used by `apps/demo/src/config.ts`; pass `FACILITATOR_URL` to override one.
+
+### API keys
+
+The OpenZeppelin Channels facilitator requires an API key on both testnet and mainnet. `createHttpFacilitator` takes a `createAuthHeaders` callback returning headers per endpoint, and the gate sends the same key to `verify`, `settle` and `supported`:
+
+```ts
+const auth = { Authorization: `Bearer ${process.env.OZ_API_KEY}` };
+const facilitator = createHttpFacilitator(url, {
+  maxTimeoutSeconds: 60,
+  createAuthHeaders: async () => ({ verify: auth, settle: auth, supported: auth }),
+});
+```
+
+Use a separate key per environment, keep it in the secret manager, and rotate it by deploying the new value; the callback is read per request, so no restart dance is needed beyond the deploy itself.
+
+### Checking capabilities at startup
+
+Run the capability check before the service starts serving. It reads the facilitator's `/supported` and compares every paywall with it: x402 version 2, the `exact` scheme on the paywall's network (or `stellar:*`), the paywall's `extra.areFeesSponsored` against the facilitator's, a contract-address `asset` and a valid `payTo`.
+
+```ts
+import { createFacilitatorValidator } from "@vegaforge/tollway-server";
+
+const validator = createFacilitatorValidator(facilitator, { mode: "fail" });
+await validator.check({ "GET /quotes": quotesPaywall, "GET /report": reportPaywall });
+```
+
+- `fail`, the default, throws a `FacilitatorCheckError` that names the route, the field, the expected and the advertised value of every mismatch. Its `code` is `facilitator-unsupported`, or `facilitator-unavailable` when `/supported` cannot be read; an unreachable facilitator is never treated as supporting everything.
+- `warn` passes the report to `onWarn` and lets the service start. Use it while a facilitator deploy is rolling out.
+- `off` skips the check.
+
+The result is cached for `ttlMs` (one minute by default). Call `check` again on a timer, or `refresh()` first, to notice a facilitator deploy that drops a network without restarting. The demo's live mode runs this check before it serves.
+
+x402 `/supported` does not advertise assets. It lists versions, schemes and networks, not tokens, so the check cannot tell you whether the facilitator accepts your asset. That is only confirmed by the first `/verify`. The check covers x402 only: MPP charge settles without a facilitator.
+
+### Timeouts
+
+- `maxTimeoutSeconds` is how long an x402 authorization stays valid. It defaults to 60 in both `createHttpFacilitator` and `PaywallConfig`, and the same value must go into the challenge, so set it in both places (the sample reads one environment value for both).
+- Each facilitator HTTP request has its own timeout of 90 seconds from `@x402/core`. Tollway's `createHttpFacilitator` does not expose a knob for it today.
+- A settlement lock lives 30 seconds by default and is renewed while the request runs, so a facilitator call slower than that does not lose its lock; it keeps renewing.
+
+### What the gate returns when the facilitator fails
+
+| Situation | Gate outcome |
+| --------- | ------------ |
+| `/verify` returns `isValid: false` or a structured rejection | `402` with the reason |
+| `/verify` transport error or timeout | thrown `TollwayError` with code `payment-failed` |
+| `/settle` returns `success: false` or a structured rejection | `502` with the reason |
+| `/settle` transport error or timeout | thrown `TollwayError` with code `payment-failed` |
+| A `PAYMENT-SIGNATURE` header that is not a base64 x402 payload, or the wrong x402 version | `400` |
+| Same payment replayed against a different offer | `409` `payment already settled for a different offer` |
+| Another process holds this payment's lock | `409` `settlement in progress` |
+
+The adapters turn a thrown error into the framework's error path: Express calls `next(error)`, Hono propagates it, and the default response is a `500`. Install your framework's error handler if you want a different status or body.
+
+A `/settle` timeout is an indeterminate outcome: the facilitator may still have settled the payment. Tollway then has no receipt and the nonce is spent, so a retry cannot verify. Reconcile from chain state; confirming a receipt on chain with Stellar RPC is tracked in [#211](https://github.com/vegaforge/tollway/issues/211). A multi-facilitator client with health checks and failover is tracked in [#156](https://github.com/vegaforge/tollway/issues/156).
+
+## Monitoring and alerting
+
+The gate returns a `GateOutcome`; it does not emit metrics itself yet. Feed the outcomes into your own metrics, or use the sample's `onGateOutcome` hook, and alert on these:
+
+| Signal | Where it appears | Why it matters |
+| ------ | ---------------- | -------------- |
+| `cacheError` | settled outcome, and `onCacheError(error, key)` | A settled payment could not be cached or its lock could not be released. The retry stops replaying from cache. Alert. |
+| `lockLost` | settled outcome, and `onCacheError` | The cross-process lock was not held for the whole settlement. A second process may have settled the same payment too. Page. |
+| `409 settlement in progress` | rejection with that reason | Expected while another process settles the same payment. Alert on a sustained rate or a client retry loop: it suggests a stuck or expired lock holder, or a lock TTL shorter than the facilitator call. |
+| `409 payment already settled for a different offer` | rejection with that reason | A receipt is being replayed for a different resource or price. Investigate; do not widen the binding check. |
+| `502` | rejection with a facilitator reason | `/settle` declined. Alert on rate, per reason. |
+| thrown `payment-failed` | framework error path, usually `500` | Facilitator transport failure or timeout. Alert; for settle, treat the payment as indeterminate. |
+| `402` rate | normal challenge traffic | It is the honest "not paid yet" answer; a jump means agents are failing to pay or reusing spent nonces. |
+| Redis latency and errors | your Redis metrics | A pre-settlement failure refuses the request; a post-settlement one becomes `cacheError`. |
+
+The observability hub can roll spend, latency and failures up, including per-asset time series, but the gate does not feed it yet: that is [#106](https://github.com/vegaforge/tollway/issues/106). A Prometheus `/metrics` exporter with documented names is [#218](https://github.com/vegaforge/tollway/issues/218).
+
+Webhook deliveries from the observability hub are retried but not signed, and their queue is in memory: signing is [#104](https://github.com/vegaforge/tollway/issues/104), a durable outbox is [#220](https://github.com/vegaforge/tollway/issues/220).
+
+Log receipt ids, payment hashes and outcome kinds. Do not log API keys, receipt signing keys or the full `PAYMENT-SIGNATURE` payload.
+
+## Security checklist
+
+- **TLS everywhere.** Terminate at the proxy and require HTTPS to the facilitator. Receipts and payment headers are bearer material in transit.
+- **Bound request headers at the proxy.** `PAYMENT-SIGNATURE` carries a base64-encoded Stellar transaction envelope and can be several kilobytes; framework defaults differ and Tollway does not impose its own limit. Set an explicit header limit (64 KB is a reasonable start), a separate body limit, and keep the two independent.
+- **Secrets.** Receipt signing key and facilitator API key come from a secret manager, never from a file in the image and never from Git. `.env` files stay out of the repository; only `.env.example` is committed.
+- **No telemetry by default.** Tollway makes no outbound call except the facilitator you configure and the webhooks you register. There is no analytics client.
+- **No custody.** The gate never holds or forwards funds. `payTo` is your account, and the channel models settle in the channel contract. If a guide or a tool suggests routing payments through Tollway, it is wrong.
+- **Redis access.** Keep Redis on a private network with auth enabled, and give each deployment its own `keyPrefix` if one Redis serves several. Treat a cache write as an idempotency record, not as a source of truth for money.
+- **Rate limiting in front of the gate.** The gate's per-payer service policy runs after verification and before settlement, and is not a shield for the facilitator; put your proxy's rate limit in front. Semantics for a gate-level limit are discussed in [#197](https://github.com/vegaforge/tollway/issues/197).
+- **Review the threat model.** The abuse-case model and its tests are tracked in [#256](https://github.com/vegaforge/tollway/issues/256); read it alongside this checklist before opening the service to the internet.
+
+## Reference configuration
+
+[`examples/production-gate/src/index.ts`](https://github.com/vegaforge/tollway/blob/dev/examples/production-gate/src/index.ts) is a real TypeScript file in the workspace, not a snippet. It imports the real packages, reads its settings through a zod schema, wires the Redis cache, the persisted signer, the facilitator auth and `onCacheError`, and is type-checked by `pnpm typecheck` in CI.
+
+| Variable | Required | Default | Meaning |
+| -------- | -------- | ------- | ------- |
+| `STELLAR_NETWORK` | no | `testnet` | `testnet` or `mainnet`. The same value in every process. |
+| `STELLAR_RECIPIENT` | yes | | `G...` account that receives payments. |
+| `PRICE_AMOUNT` | yes | | Price as an integer string in the asset's smallest unit. |
+| `STELLAR_ASSET` | no | USDC for the network | `C...` asset contract address. |
+| `RECEIPT_SIGNING_KEY` | yes | | base64url Ed25519 seed or PKCS#8 document. |
+| `RECEIPT_KEY_ID` | no | `gate-1` | Stable key id, so rotation does not orphan receipts. |
+| `OZ_API_KEY` | yes | | Facilitator API key, sent as a Bearer token. |
+| `FACILITATOR_URL` | no | OpenZeppelin for the network | Override for a different facilitator. |
+| `REDIS_URL` | yes | | Shared Redis for the settlement cache and locks. |
+| `SETTLEMENT_CACHE_TTL_MS` | no | `30000` | Replay window, in milliseconds. |
+| `SETTLEMENT_LOCK_TTL_MS` | no | `30000` | Cross-process lock TTL, renewed while settling. |
+| `PAYMENT_TIMEOUT_SECONDS` | no | `60` | x402 authorization validity, in both challenge and facilitator requirements. |
+
+Mount the gate with any adapter, for example `app.get("/feed", expressPaywall(gate), handler)`. The four adapters agree on status codes, headers and the receipt location.
+
+## Verifying the deployment
+
+Before sending real traffic:
+
+```bash
+# The offline happy path through core, server and the Express adapter:
+MOCK_MODE=true pnpm --filter @vegaforge/tollway-demo start
+```
+
+For the deployed processes, check three things:
+
+1. An unpaid request to a paid route returns `402` with a `PAYMENT-REQUIRED` header and no receipt.
+2. A paid request returns `200`, a `PAYMENT-RESPONSE` header and the `TOLLWAY-RECEIPT` header, and the receipt verifies against the public key your agents trust.
+3. Two processes replaying the same payment at once make exactly one `/settle` call: one request settles, the other gets `409 settlement in progress` or a replayed receipt, and no double debit appears in the recipient account. Run it a few times; this is the property Redis is there for.
+
+## Known gaps
+
+| Gap | Tracking issue |
+| --- | -------------- |
+| Gate does not emit metrics to the observability hub | [#106](https://github.com/vegaforge/tollway/issues/106) |
+| No Prometheus `/metrics` exporter | [#218](https://github.com/vegaforge/tollway/issues/218) |
+| No JWKS-style receipt key set or verifier cache | [#167](https://github.com/vegaforge/tollway/issues/167) |
+| No Vault Transit signer | [#168](https://github.com/vegaforge/tollway/issues/168) |
+| No ECDSA receipt keys | [#169](https://github.com/vegaforge/tollway/issues/169) |
+| Retries after the cache TTL cannot be served from a receipt archive | [#162](https://github.com/vegaforge/tollway/issues/162) |
+| No duplicate-settlement detection across processes | [#216](https://github.com/vegaforge/tollway/issues/216) |
+| No on-chain confirmation of a settled receipt | [#211](https://github.com/vegaforge/tollway/issues/211) |
+| Webhooks are not signed | [#104](https://github.com/vegaforge/tollway/issues/104) |
+| Webhook delivery is not durable across restarts | [#220](https://github.com/vegaforge/tollway/issues/220) |
+| Service policy windows are process-local | [#190](https://github.com/vegaforge/tollway/issues/190) |
+| Threat model and abuse-case tests are pending | [#256](https://github.com/vegaforge/tollway/issues/256) |

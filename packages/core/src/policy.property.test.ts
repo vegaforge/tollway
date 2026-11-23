@@ -22,6 +22,7 @@ const PAYEES = [...CAPPED_PAYEES, "svc-uncapped"] as const;
 const ASSETS = ["USDC:GA5Z", "EURC:GBBB"] as const;
 
 const POLICY: Policy = {
+  policyVersion: 1,
   budgets: { daily: DAILY_LIMIT.toString(), total: TOTAL_LIMIT.toString() },
   perService: Object.fromEntries(
     CAPPED_PAYEES.map((payee) => [payee, { cap: SERVICE_CAP.toString() }]),
