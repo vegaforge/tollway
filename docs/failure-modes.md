@@ -10,18 +10,50 @@ The tests that pin these rows down live in `packages/server/src/gate.failure.tes
 and `packages/server/src/facilitator.failure.test.ts`, driven by the harness in
 `packages/server/src/testing/faults.ts`.
 
-## Deadlines
+## Deadlines and the settlement hold
 
-`PaywallDeps.facilitatorTimeoutMs` bounds every `/verify` and `/settle` call,
-default 15 seconds. `createHttpFacilitator({ timeoutMs })` sets a transport
-deadline for the same calls; it aborts the socket, which the gate's own
-deadline cannot do. Keep the transport deadline at or below the gate's, so the
-connection closes first. The `@x402/core` client defaults to 90 seconds when
-`timeoutMs` is omitted.
+`PaywallDeps.facilitatorTimeoutMs` bounds how long the gate waits for each
+`/verify` and `/settle` call, default 15 seconds. `createHttpFacilitator({ timeoutMs })`
+sets a transport deadline for the same calls; it aborts the socket, which the
+gate's own deadline cannot do. The `@x402/core` client defaults to 90 seconds
+when `timeoutMs` is omitted.
 
-A verify that misses its deadline is a rejection, because nothing has settled
-and a retry is always safe. A settle that misses its deadline is an
-ambiguity, because the transaction may still land.
+A `/verify` that misses its deadline is a rejection, because nothing has settled
+and a retry is always safe.
+
+A `/settle` whose outcome is unknown is held. That covers a `/settle` that
+misses the gate's deadline, and one that fails after the request may have
+reached the facilitator: a transport timeout, a connection reset, or an error
+answer. Only a failure that proves the request never left the process (a
+refused connection, or a DNS failure: `ECONNREFUSED`, `ENOTFOUND`, `EAI_AGAIN`
+in the cause chain) frees the payment at once.
+
+While a payment is held:
+
+- this process keeps the payment's in-flight slot, so a retry here shares the
+  held attempt and gets the same answer;
+- this process keeps renewing the cross-process settlement lock, so a retry in
+  any other process gets 409 `settlement in progress`;
+- nothing calls `/settle` for the payment again.
+
+The hold ends at the first of:
+
+- the abandoned call answers with a success: the receipt is written to the
+  settlement cache first, so a retry replays it;
+- the abandoned call answers with a definite failure (`success: false`, or a
+  refused connection): the payment can be tried again;
+- `PaywallDeps.ambiguousSettlementHoldMs` has passed since the `/settle` call
+  started, default 120 seconds.
+
+Set `ambiguousSettlementHoldMs` to at least the payment authorization's lifetime
+(`maxTimeoutSeconds`, 60 seconds by default) plus the facilitator transport
+timeout. After that the authorization can no longer be submitted, so a retry
+cannot settle a payment that is still in flight. The gate refuses a hold that is
+not longer than `facilitatorTimeoutMs`.
+
+If the process holding a payment dies, its lock is no longer renewed and expires
+after `settlementLockTtlMs`. That is the one case where a retry can reach
+`/settle` while the first call may still land.
 
 ## Facilitator failures
 
@@ -29,28 +61,23 @@ ambiguity, because the transaction may still land.
 | ------- | ------------ | --------------------------- | --------------- |
 | `/verify` hangs past the deadline | rejected, 503, reason `facilitator-timeout`, `Retry-After: 1` | no | Check facilitator health; the agent retries with the same payment. |
 | `/verify` returns a malformed body, a non-protocol body, or a transport error | thrown `TollwayError("payment-failed")` | no | Adapter behaviour for a thrown gate error is #107; the payment was never settled. Check the facilitator version and URL. |
-| `/settle` hangs past the deadline | rejected, 503, reason `settlement-unknown`, `Retry-After` equal to the settlement lock TTL | possibly | Do not ask the agent to pay again. Reconcile the payment nonce on chain before the lock TTL passes; a retry inside that window gets the same 503. |
-| `/settle` answers success after the deadline | the original request already got the 503 above; the late receipt is written to the settlement cache | yes | None until the cache expires. A later retry replays the late receipt. |
-| `/settle` returns `success: false` | rejected, 502, reason from the facilitator | no | Treat as an insufficient balance or a rejected authorization; the agent may pay again. |
-| `/settle` fails at the transport layer | thrown `TollwayError("payment-failed")`, lock released | no | Retriable. Check facilitator health. |
-| `/supported` fails | thrown `TollwayError("payment-failed")` | no | Capability checks are advisory; a paying request does not depend on them. |
+| `/settle` hangs past the deadline | rejected, 503, reason `settlement-unknown`, `Retry-After` equal to the hold; payment held | possibly | Do not ask the agent to pay again. If the hold ends without an answer, reconcile the payment nonce on chain. |
+| `/settle` answers success after the deadline | the original request already got the 503 above; the late receipt is cached, then the hold ends | yes | None. A retry replays the late receipt. |
+| `/settle` answers success after the deadline but the cache write fails | the hold continues to its end; the failure goes to `onCacheError` | yes | Reconcile the nonce on chain: once the hold ends, a retry would settle again. |
+| `/settle` returns `success: false` | rejected, 502, reason from the facilitator; payment freed | no | Treat as an insufficient balance or a rejected authorization; the agent may pay again. |
+| `/settle` fails after the request may have been sent (timeout, reset, error answer) | thrown `TollwayError("payment-failed")`; payment held | possibly | Same as a hung `/settle`: retries are refused until the hold ends. Check facilitator health. |
+| `/settle` connection refused or DNS failure | thrown `TollwayError("payment-failed")`; payment freed at once | no | Retriable. Check the facilitator URL and health. |
+| `/supported` fails | the gate never calls it; payments are unaffected | no | Capability checks run at startup (`createFacilitatorValidator`); see the deployment guide. |
 
 ## Settlement lock timing
 
 A locked settlement holds a `SET NX PX` lock under `<prefix>lock:<model>:<nonce>`.
-The holder renews it every third of its TTL while the settlement runs, so a slow
-but healthy `/settle` keeps duplicate protection. AGENTS.md item 4.
+The holder renews it every third of its TTL while the settlement runs, and for
+as long as the payment is held, so a slow `/settle` or an ambiguous one keeps
+duplicate protection across processes. AGENTS.md item 4.
 
-When a settle is abandoned at its deadline the gate does not release the lock.
-It stays until its TTL, and the in-flight slot for that payment is freed when
-the abandoned call answers or when the TTL passes, whichever comes first. Until
-then a retry of the same payment either shares the in-flight result or is
-rejected with 409 `settlement in progress` from the lock.
-
-After the lock TTL the payment is retriable again. If the abandoned `/settle`
-lands later than that, the payment can settle twice. This window is the cost of
-not holding a request open forever; reconcile any `settlement-unknown` before
-the TTL passes if the amount matters.
+When the hold ends the gate releases the lock. A lock that was lost or could
+not be released during the hold is reported through `onCacheError`.
 
 ## Settlement store (Redis) failures
 
@@ -61,12 +88,13 @@ the TTL passes if the amount matters.
 | `set` fails after a successful settlement | settled, 200 with the receipt, `cacheError` set and sent to `onCacheError` | yes | The payer got its receipt. A retry may not be recognised as a replay until the write succeeds or the TTL passes. |
 | `release` fails after a successful settlement | settled, 200 with the receipt, `cacheError` set | yes | The lock expires at its TTL. Check Redis latency. |
 | renewal fails or the lock is lost mid-settlement | settled, 200 with the receipt, `lockLost` and `cacheError` set | yes | Treat as an alert: another process may have settled the same payment. Reconcile the nonce. |
-| the store is slower than the lock TTL | bounded by the TTL; `lockLost` is reported when the lock cannot be confirmed | yes | Raise `settlementLockTtlMs` above the observed p99, or fix the store. |
+| the store is slower than the lock TTL | the lock can expire while `/settle` runs; `lockLost` is reported with the receipt | yes | Treat as an alert: a second process that received the same payment in that gap could have settled it too. Keep store latency well under a third of `settlementLockTtlMs`, or raise the TTL. |
+| a foreign or corrupt value under the settlement key | treated as a miss; the payment settles once and the entry is overwritten | yes | Check for another tenant or a manual write sharing the key prefix. |
 
 ## Multi-process deployments
 
 Everything in this page assumes the lock methods are implemented. A cache
 without `acquire`, `renew` and `release` (the in-memory cache) only deduplicates
-concurrent requests inside one process, so the 409 and lock-abandonment rows do
-not apply across replicas. Use `createRedisSettlementCache` for more than one
+concurrent requests inside one process, so the 409 rows and the cross-process
+part of the hold do not apply across replicas. Use `createRedisSettlementCache` for more than one
 process.
