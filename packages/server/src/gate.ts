@@ -503,10 +503,18 @@ const OFFER_MISMATCH: RejectedOutcome = {
   reason: "payment already settled for a different offer",
 };
 
+/**
+ * The same payment is being settled right now. `Retry-After` is the signal a
+ * client reads to resend the identical payment (issue #203): the offer
+ * mismatch above is also a 409, but carries none, because that payment has
+ * already settled and must not be retried. One second is the shortest wait
+ * the header can express. Machine-readable codes for every rejection are #161.
+ */
 const SETTLEMENT_IN_PROGRESS: RejectedOutcome = {
   kind: "rejected",
   status: 409,
   reason: "settlement in progress",
+  headers: { "retry-after": "1" },
 };
 
 /**

@@ -1,29 +1,32 @@
 /**
- * Retry orchestration for x402 payments (Issue #203). The client calls
- * the settler; when the settler throws a {@link SettlementOutcomeError}
- * with `kind: "retryable-with-fresh-auth"`, the client re-runs the
- * policy check and asks for a fresh signature. A 409
- * "settlement in progress" resends the same header after `Retry-After`,
- * so the gate's idempotency returns the original receipt. Anything
- * ambiguous (a 5xx settle failure, a transport error after the signed
- * request went out) is never retried: the payment may have landed on
- * chain and signing a fresh authorization could charge twice.
+ * Retry orchestration for x402 payments (issue #203). See
+ * docs/design.md, "Failure semantics", and the client README.
  *
- * The retry logic lives next to the client orchestrator rather than
- * inside each settler because `record()` and the policy check belong
- * to the orchestrator, not the protocol-specific settler.
+ * A settler classifies each failure with a {@link SettlementOutcomeError}
+ * so the client never parses an English reason:
+ *
+ * - `retryable-with-fresh-auth`: the service refused the signed payment
+ *   before settling it (an expired authorization or a used nonce). Nothing
+ *   moved, so signing again is safe. The client re-runs the policy check
+ *   first, and pins the next challenge to the terms already signed, so an
+ *   offer that changed under the agent stops the retry.
+ * - `settlement-in-progress`: the same payment is already being settled.
+ *   The client waits `Retry-After` and resends the identical payment
+ *   header through `resend`, never a new authorization, so the service's
+ *   idempotency answers with the original receipt.
+ * - `ambiguous`: the payment may have landed (a 5xx after the signed
+ *   request, a dropped connection, a 409 the client cannot read as "in
+ *   progress"). It is never retried with a new authorization, because that
+ *   can charge twice. The caller reconciles.
+ * - `fatal`: the service refused for a reason another attempt will not fix.
+ *
+ * The orchestration lives in the client rather than in each settler
+ * because the policy check and `record` belong to the client.
  */
 
+import type { SignedReceipt } from "@vegaforge/tollway-core";
 import { TollwayError } from "@vegaforge/tollway-core";
 
-/**
- * The kinds of outcome a settler surfaces so the client can decide what
- * to do. `retryable-with-fresh-auth` is safe to sign again under a new
- * authorization; `settlement-in-progress` must resend the same header
- * after `retryAfterMs`; `ambiguous` must not be retried on another
- * authorization because the payment may have landed; `fatal` is a
- * deliberate rejection the service made and nothing further will help.
- */
 export type SettlementOutcomeKind =
   | "retryable-with-fresh-auth"
   | "settlement-in-progress"
@@ -31,59 +34,78 @@ export type SettlementOutcomeKind =
   | "fatal";
 
 /**
- * Typed error a settler throws so the orchestrator knows what to do
- * without parsing English reason strings. Extends `TollwayError` so
- * callers branching on `.code` elsewhere see the same shape; `kind`
- * carries the classification.
+ * The payment terms a settler signed: what the next challenge must still
+ * ask for before the client lets it sign again.
+ */
+export type SignedTerms = { amount: string; asset: string; payTo: string };
+
+type OutcomeOptions =
+  | { kind: "retryable-with-fresh-auth"; reason: string; signedTerms: SignedTerms }
+  | {
+      kind: "settlement-in-progress";
+      reason: string;
+      /** The service's `Retry-After`, in milliseconds. */
+      retryAfterMs: number;
+      /** Resends the identical payment header. Never signs anything new. */
+      resend: () => Promise<SignedReceipt>;
+    }
+  | { kind: "ambiguous" | "fatal"; reason: string; cause?: unknown };
+
+/**
+ * A settlement failure, classified so the client can decide what to do.
+ * `fatal` and the retryable kinds carry code `payment-failed`; `ambiguous`
+ * carries `outcome-unknown`.
  */
 export class SettlementOutcomeError extends TollwayError {
   readonly kind: SettlementOutcomeKind;
   readonly reason: string;
   readonly retryAfterMs: number | undefined;
+  readonly signedTerms: SignedTerms | undefined;
+  readonly resend: (() => Promise<SignedReceipt>) | undefined;
 
-  constructor(options: { kind: SettlementOutcomeKind; reason: string; retryAfterMs?: number }) {
-    const code =
-      options.kind === "ambiguous"
-        ? "outcome-unknown"
-        : options.kind === "fatal"
-          ? "payment-failed"
-          : "payment-failed";
-    super(code, `settlement ${options.kind}: ${options.reason}`);
+  constructor(options: OutcomeOptions) {
+    super(
+      options.kind === "ambiguous" ? "outcome-unknown" : "payment-failed",
+      `settlement ${options.kind}: ${options.reason}`,
+      "cause" in options ? { cause: options.cause } : undefined,
+    );
     this.name = "SettlementOutcomeError";
     this.kind = options.kind;
     this.reason = options.reason;
-    this.retryAfterMs = options.retryAfterMs;
+    this.retryAfterMs =
+      options.kind === "settlement-in-progress" ? options.retryAfterMs : undefined;
+    this.signedTerms =
+      options.kind === "retryable-with-fresh-auth" ? options.signedTerms : undefined;
+    this.resend = options.kind === "settlement-in-progress" ? options.resend : undefined;
   }
 }
 
 /**
- * Thrown when a settlement outcome is ambiguous (the signed payment may
- * have landed on chain and only the response was lost). The caller must
- * reconcile - do not retry with a fresh authorization because it can
- * charge twice. See docs/design.md, "Failure semantics".
+ * Thrown by `pay()` when the payment may have landed and only the outcome
+ * is unknown. Do not pay again with a fresh authorization: reconcile first
+ * (#211). Code `outcome-unknown`.
  */
 export class AmbiguousSettlementError extends TollwayError {
   readonly ambiguous = true as const;
   readonly reason: string;
-  constructor(reason: string) {
-    super("outcome-unknown", `settlement outcome unknown: ${reason}`);
+  constructor(reason: string, options?: { cause?: unknown }) {
+    super("outcome-unknown", `settlement outcome unknown: ${reason}`, options);
     this.name = "AmbiguousSettlementError";
     this.reason = reason;
   }
 }
 
-/** Options for retry orchestration on {@link createClient}. */
+/** Options for retry orchestration on `createClient`. */
 export type RetryOptions = {
   /**
-   * Maximum settler calls per `pay()`. Defaults to 2 (one retry).
-   * Clamped between 1 and 5; a fresh authorization is bounded by the
-   * server's challenge timeout anyway, so a hard upper bound protects
-   * callers from a misconfigured loop.
+   * Most settler calls per `pay()`, counting the first one and every resend.
+   * Defaults to 2 (one retry). Clamped to between 1 and 5; set 1 to turn
+   * retries off.
    */
   maxAttempts?: number;
   /**
-   * Injectable sleep for `settlement-in-progress` retries. Defaults to
-   * `setTimeout`. Tests pass `async () => {}` (no actual wait).
+   * Waits out a `Retry-After`. Defaults to `setTimeout`; tests inject one
+   * that resolves at once.
    */
   sleep?: (ms: number) => Promise<void>;
 };
@@ -92,17 +114,21 @@ const DEFAULT_MAX_ATTEMPTS = 2;
 const MAX_ATTEMPTS_CEILING = 5;
 
 /**
- * Normalises the retry config into a strict shape. Caps `maxAttempts`
- * between 1 and `MAX_ATTEMPTS_CEILING`.
+ * The longest `Retry-After` the client waits out. A service asking for
+ * longer is treated as an unknown outcome: the payment is in flight, and
+ * the caller reconciles instead of the client sleeping for minutes.
  */
+export const MAX_RETRY_AFTER_MS = 30_000;
+
 export function normaliseRetryOptions(options: RetryOptions | undefined): {
   maxAttempts: number;
   sleep: (ms: number) => Promise<void>;
 } {
   const raw = options?.maxAttempts ?? DEFAULT_MAX_ATTEMPTS;
-  const maxAttempts = Math.min(MAX_ATTEMPTS_CEILING, Math.max(1, Math.floor(raw)));
+  const maxAttempts = Number.isFinite(raw)
+    ? Math.min(MAX_ATTEMPTS_CEILING, Math.max(1, Math.floor(raw)))
+    : DEFAULT_MAX_ATTEMPTS;
   const sleep =
-    options?.sleep ??
-    ((ms: number) => new Promise<void>((resolve) => setTimeout(resolve, Math.max(0, ms))));
+    options?.sleep ?? ((ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms)));
   return { maxAttempts, sleep };
 }

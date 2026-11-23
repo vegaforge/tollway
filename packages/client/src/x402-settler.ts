@@ -33,7 +33,7 @@ import type { PaymentPayload, PaymentRequired, PaymentRequirements } from "@x402
 import type { ClientStellarSigner } from "@x402/stellar";
 import { ExactStellarScheme } from "@x402/stellar/exact/client";
 import type { ClientSettler, SettleRequest } from "./index.js";
-import { SettlementOutcomeError } from "./retry.js";
+import { SettlementOutcomeError, type SignedTerms } from "./retry.js";
 
 export const PAYMENT_REQUIRED_HEADER = "PAYMENT-REQUIRED";
 export const PAYMENT_SIGNATURE_HEADER = "PAYMENT-SIGNATURE";
@@ -80,7 +80,7 @@ export function createX402Settler(options: X402SettlerOptions): ClientSettler {
   );
 
   return {
-    async settle({ resource, offer, model }: SettleRequest): Promise<SignedReceipt> {
+    async settle({ resource, offer, model, pinned }: SettleRequest): Promise<SignedReceipt> {
       if (model !== "x402") {
         throw new TollwayError("payment-failed", `the x402 settler cannot settle model "${model}"`);
       }
@@ -104,6 +104,12 @@ export function createX402Settler(options: X402SettlerOptions): ClientSettler {
         );
       }
       assertMatchesOffer(requirements, offer, resource);
+      if (pinned) assertMatchesPinned(requirements, pinned, resource);
+      const signedTerms: SignedTerms = {
+        amount: requirements.amount,
+        asset: requirements.asset,
+        payTo: requirements.payTo,
+      };
 
       // A client per settlement, so the spend cap belongs to this offer
       // alone and two concurrent settlements cannot see each other's cap.
@@ -128,59 +134,77 @@ export function createX402Settler(options: X402SettlerOptions): ClientSettler {
         );
       }
 
-      let paid: Response;
-      try {
-        paid = await doFetch(resource, {
-          method,
-          headers: { [PAYMENT_SIGNATURE_HEADER]: encodePaymentSignatureHeader(payload) },
-        });
-      } catch (networkError) {
-        // Issue #203: a network error after the paid request went out may
-        // mean the payment landed and the response never came back. That
-        // is the canonical ambiguous outcome.
-        throw new SettlementOutcomeError({
-          kind: "ambiguous",
-          reason: `network error after sending the paid request: ${messageOf(networkError)}`,
-        });
-      }
-      // Issue #203: classify the server's response so the client can decide
-      // whether to retry with a fresh authorization.
-      if (paid.status === 402) {
-        // The gate re-challenged the signed payment (expired auth or nonce
-        // reuse are the common causes). The caller can sign again safely:
-        // nothing settled on chain under the Soroban nonce yet.
-        throw new SettlementOutcomeError({
-          kind: "retryable-with-fresh-auth",
-          reason: `${resource} answered the signed payment with another 402`,
-        });
-      }
-      if (paid.status === 409) {
-        // A duplicate of this payment is in flight on the gate. Resend the
-        // exact same header after Retry-After so the gate idempotency
-        // returns the original receipt.
-        const retryAfterMs = parseRetryAfterMs(paid.headers.get("retry-after"));
-        throw new SettlementOutcomeError({
-          kind: "settlement-in-progress",
-          reason: `${resource} reports a concurrent settlement in progress (409)`,
-          retryAfterMs,
-        });
-      }
-      if (paid.status >= 500 && paid.status < 600) {
-        // Settle failures from the gate are returned as 502 today; a 5xx
-        // after the signed payment is an outcome-unknown: the payment
-        // may have landed on chain and only the response was lost.
-        throw new SettlementOutcomeError({
-          kind: "ambiguous",
-          reason: `${resource} answered the signed payment with ${paid.status}`,
-        });
-      }
-      if (!paid.ok) {
-        throw new SettlementOutcomeError({
-          kind: "fatal",
-          reason: `${resource} answered the signed payment with ${paid.status}`,
-        });
-      }
-      return readReceipt(paid, resource);
+      const paymentHeader = encodePaymentSignatureHeader(payload);
+
+      /**
+       * Sends the signed payment and classifies the answer. A 409 that the
+       * service marks as in progress returns `resend`, which calls this
+       * again with the identical header: the same payment, never a new one.
+       */
+      const submit = async (): Promise<SignedReceipt> => {
+        let paid: Response;
+        try {
+          paid = await doFetch(resource, {
+            method,
+            headers: { [PAYMENT_SIGNATURE_HEADER]: paymentHeader },
+          });
+        } catch (networkError) {
+          // The signed request may have reached the service and settled,
+          // with only the answer lost.
+          throw new SettlementOutcomeError({
+            kind: "ambiguous",
+            reason: `the paid request to ${resource} failed after it was sent: ${messageOf(networkError)}`,
+            cause: networkError,
+          });
+        }
+        if (paid.status === 402) {
+          // The service challenged the signed payment again instead of
+          // settling it, typically an expired authorization or a used
+          // nonce. Nothing settled, so the client may sign afresh.
+          throw new SettlementOutcomeError({
+            kind: "retryable-with-fresh-auth",
+            reason: `${resource} answered the signed payment with another 402`,
+            signedTerms,
+          });
+        }
+        if (paid.status === 409) {
+          // The gate answers 409 for two cases: this payment is being
+          // settled right now (with Retry-After), or it already settled for
+          // a different offer (without). Only the first may be resent. The
+          // second, and any 409 this client cannot read, may mean the money
+          // moved, so it is never retried. Machine-readable codes are #161.
+          const retryAfterMs = parseRetryAfterMs(paid.headers.get("retry-after"));
+          if (retryAfterMs === undefined) {
+            throw new SettlementOutcomeError({
+              kind: "ambiguous",
+              reason: `${resource} answered the signed payment with 409 and no Retry-After; the payment may already have settled`,
+            });
+          }
+          throw new SettlementOutcomeError({
+            kind: "settlement-in-progress",
+            reason: `${resource} is already settling this payment`,
+            retryAfterMs,
+            resend: submit,
+          });
+        }
+        if (paid.status >= 500) {
+          // A settle failure is 502 today. The transaction may have landed
+          // and only the answer failed.
+          throw new SettlementOutcomeError({
+            kind: "ambiguous",
+            reason: `${resource} answered the signed payment with ${paid.status}`,
+          });
+        }
+        if (!paid.ok) {
+          throw new SettlementOutcomeError({
+            kind: "fatal",
+            reason: `${resource} answered the signed payment with ${paid.status}`,
+          });
+        }
+        return readReceipt(paid, resource);
+      };
+
+      return submit();
     },
   };
 }
@@ -240,6 +264,27 @@ function assertMatchesOffer(
   }
 }
 
+/**
+ * A retry signs only what the first attempt signed. A fresh challenge that
+ * asks for a different amount, asset or payee means the offer changed under
+ * the agent, so the retry stops.
+ */
+function assertMatchesPinned(
+  requirements: PaymentRequirements,
+  pinned: SignedTerms,
+  resource: string,
+): void {
+  const changed = (["amount", "asset", "payTo"] as const).filter(
+    (field) => requirements[field] !== pinned[field],
+  );
+  if (changed.length > 0) {
+    throw new SettlementOutcomeError({
+      kind: "fatal",
+      reason: `the offer from ${resource} changed between attempts (${changed.join(", ")}); not signing again`,
+    });
+  }
+}
+
 function readReceipt(response: Response, resource: string): SignedReceipt {
   const header = response.headers.get(TOLLWAY_RECEIPT_HEADER);
   if (!header) {
@@ -273,14 +318,12 @@ function messageOf(error: unknown): string {
 }
 
 /**
- * Parses an HTTP `Retry-After` header into ms. Supports the "delay in
- * seconds" form only; a date-stamped form is ignored (returns undefined)
- * because clock skew between client and gate makes an absolute date
- * unreliable and the retry logic uses an injected clock.
+ * Reads `Retry-After` as whole seconds, the form the gate sends. The date
+ * form is not used: it depends on the two clocks agreeing. Anything else
+ * is treated as absent.
  */
 function parseRetryAfterMs(header: string | null): number | undefined {
-  if (!header) return undefined;
-  const seconds = Number(header.trim());
-  if (!Number.isFinite(seconds) || seconds < 0) return undefined;
-  return seconds * 1000;
+  const value = header?.trim();
+  if (value === undefined || !/^[0-9]{1,6}$/.test(value)) return undefined;
+  return Number(value) * 1000;
 }
