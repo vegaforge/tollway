@@ -8,4 +8,7 @@ export default defineConfig({
   dts: true,
   sourcemap: true,
   clean: true,
+  // Keep "node:sqlite" as written. tsup strips the node: prefix by default,
+  // which would make the built subpath import the npm package "sqlite".
+  removeNodeProtocol: false,
 });

@@ -17,7 +17,8 @@ pnpm add @vegaforge/tollway-client @vegaforge/tollway-core
 
 The main entry is runtime-agnostic. The SQLite store lives in a subpath,
 `@vegaforge/tollway-client/sqlite`, and needs Node 22.13 or later because it
-uses the built-in `node:sqlite` module.
+uses the built-in `node:sqlite` module. Node 22 and 24 still print an
+`ExperimentalWarning` the first time that module loads.
 
 ## Pay for a resource
 
