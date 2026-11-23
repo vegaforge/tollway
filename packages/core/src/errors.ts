@@ -10,6 +10,7 @@ export type TollwayErrorCode =
   | "invalid-signing-key"
   | "invalid-amount"
   | "invalid-quote"
+  | "invalid-discovery"
   | "invalid-policy"
   | "canonicalization-failed"
   | "invalid-signature-encoding"
