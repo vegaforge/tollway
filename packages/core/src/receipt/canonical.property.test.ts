@@ -19,19 +19,26 @@ type NestedJson =
   | NestedJson[]
   | { [key: string]: NestedJson | undefined };
 
-// `grapheme` strings cover non-ASCII text and supplementary-plane characters
-// with well-formed surrogate pairs. The pre-#165 serialiser used the
-// `binary` unit, which also covered lone surrogates - RFC 8785 I-JSON forbids
-// those and the new canonicaliser rejects them, so dedicated unit tests cover
-// the rejection path separately.
-const textArb = fc.string({ unit: "grapheme", maxLength: 12 });
+/** Matches a lone surrogate, the one thing RFC 8785's I-JSON input forbids in a string. */
+const LONE_SURROGATE = /\p{Cs}/u;
+
+function wellFormed(value: string): boolean {
+  return !LONE_SURROGATE.test(value);
+}
+
+// `binary` strings cover every UTF-16 code unit: non-ASCII text, astral
+// characters and surrogates. fast-check's default unit is ASCII only. Lone
+// surrogates are filtered out here because canonicalJson refuses them; the
+// last property below generates them on purpose and checks the refusal.
+const binaryText = fc.string({ unit: "binary", maxLength: 12 });
+const textArb = binaryText.filter(wellFormed);
 
 // Keys where ordering and object semantics are easiest to get wrong: integer
 // keys (which JavaScript objects enumerate first), `__proto__`, non-ASCII, and
 // pairs whose UTF-16 order differs from code point order.
 const keyArb = fc.oneof(
-  fc.string({ unit: "grapheme", minLength: 1, maxLength: 8 }),
-  fc.constantFrom("__proto__", "0", "2", "10", "a", "B", "é", "￿", "😀"),
+  fc.string({ unit: "binary", minLength: 1, maxLength: 8 }).filter(wellFormed),
+  fc.constantFrom("__proto__", "0", "2", "10", "a", "B", "é", "\uffff", "😀", "\ufb33", "\u20ac"),
 );
 
 // Finite doubles, including -0, fractions and both ends of the exponent
@@ -173,6 +180,83 @@ function withNonFiniteArb(depth: number): fc.Arbitrary<NestedJson> {
   );
 }
 
+/**
+ * The serialiser as it was before #165, copied verbatim from dev. #165 must
+ * not change the bytes of any input it already handled correctly, or a
+ * receipt signed before the change would stop verifying.
+ */
+function canonicalJsonBefore165(value: JsonValue): string {
+  if (value === null || typeof value === "string" || typeof value === "boolean") {
+    return JSON.stringify(value);
+  }
+  if (typeof value === "number") {
+    if (!Number.isFinite(value)) {
+      throw new TollwayError("canonicalization-failed", `cannot canonicalize ${value}`);
+    }
+    return JSON.stringify(value);
+  }
+  if (Array.isArray(value)) {
+    return `[${value.map((item) => canonicalJsonBefore165(item)).join(",")}]`;
+  }
+  const parts: string[] = [];
+  for (const key of Object.keys(value).sort()) {
+    const item = value[key];
+    if (item === undefined) {
+      continue;
+    }
+    parts.push(`${JSON.stringify(key)}:${canonicalJsonBefore165(item)}`);
+  }
+  return `{${parts.join(",")}}`;
+}
+
+/** Schema-shaped v1 receipt bodies: every field the schema allows, any text. */
+const receiptTextArb = fc
+  .string({ unit: "binary", minLength: 1, maxLength: 24 })
+  .filter(wellFormed);
+const v1BodyArb = fc.record({
+  version: fc.constant(1),
+  id: receiptTextArb,
+  payer: receiptTextArb,
+  payee: receiptTextArb,
+  amount: fc.bigInt({ min: 0n, max: 2n ** 64n }).map(String),
+  asset: receiptTextArb,
+  resource: receiptTextArb,
+  model: fc.constantFrom("x402", "mpp-charge", "mpp-channel"),
+  settlement: fc.oneof(
+    fc.record({ kind: fc.constant("transaction"), txHash: receiptTextArb }),
+    fc.record({
+      kind: fc.constant("channel-commitment"),
+      channelId: receiptTextArb,
+      sequence: fc.nat(),
+    }),
+  ),
+  network: fc.constantFrom("testnet", "pubnet"),
+  issuedAt: fc
+    .date({ min: new Date(0), max: new Date("2100-01-01T00:00:00.000Z"), noInvalidDate: true })
+    .map((date) => date.toISOString()),
+});
+
+describe("canonicalJson compared with the serialiser before #165", () => {
+  it("produces the same bytes for every schema-shaped v1 receipt body", () => {
+    fc.assert(
+      fc.property(v1BodyArb, (body) => {
+        expect(canonicalJson(body as JsonValue)).toBe(canonicalJsonBefore165(body as JsonValue));
+      }),
+      { seed: SEED, numRuns: 500 },
+    );
+  });
+
+  it("produces the same bytes for any JSON value without lone surrogates", () => {
+    fc.assert(
+      fc.property(jsonArb(3), (value) => {
+        const stripped = stripUndefined(value);
+        expect(canonicalJson(stripped)).toBe(canonicalJsonBefore165(stripped));
+      }),
+      ASSERT_OPTS,
+    );
+  });
+});
+
 describe("canonicalJson properties", () => {
   it("is identical for any key permutation at every depth", () => {
     fc.assert(
@@ -223,6 +307,27 @@ describe("canonicalJson properties", () => {
     fc.assert(
       fc.property(withNonFiniteArb(3), (value) => {
         expectCanonicalizationFailure(value);
+      }),
+      ASSERT_OPTS,
+    );
+  });
+
+  it("refuses any string or key that holds a lone surrogate", () => {
+    const loneArb = fc.constantFrom("\ud800", "\udbff", "\udc00", "\udfff");
+    const withLone = fc
+      .tuple(binaryText, loneArb, binaryText)
+      .map(([before, lone, after]) => `${before}${lone}${after}`)
+      .filter((text) => !wellFormed(text));
+    fc.assert(
+      fc.property(withLone, fc.boolean(), (text, asKey) => {
+        const value: NestedJson = asKey ? objectFromEntries([[text, 1]]) : { field: [text] };
+        try {
+          canonicalJson(value as JsonValue);
+          expect.fail("canonicalJson should have refused a lone surrogate");
+        } catch (error) {
+          expect(error).toBeInstanceOf(TollwayError);
+          expect((error as TollwayError).message).toMatch(/lone (high|low) surrogate/);
+        }
       }),
       ASSERT_OPTS,
     );

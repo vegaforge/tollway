@@ -35,109 +35,116 @@ export type JsonValue =
   | JsonValue[]
   | { [key: string]: JsonValue };
 
-function fail(reason: string): never {
-  throw new TollwayError("canonicalization-failed", reason);
+/**
+ * The path to the value being serialised, kept as a stack of keys and array
+ * indexes. It is only joined into a string when a value is refused, so the
+ * common case, a valid receipt, pays for a push and a pop per member and
+ * never builds a path string.
+ */
+type PathStack = (string | number)[];
+
+function pathLabel(path: PathStack): string {
+  let label = "$";
+  for (const segment of path) {
+    label += typeof segment === "number" ? `[${segment}]` : `.${segment}`;
+  }
+  return label;
+}
+
+/** Throws `canonicalization-failed` as "<subject> at <path>: <detail>". */
+function fail(subject: string, path: PathStack, detail?: string): never {
+  const suffix = detail === undefined ? "" : `: ${detail}`;
+  throw new TollwayError("canonicalization-failed", `${subject} at ${pathLabel(path)}${suffix}`);
+}
+
+/** Names the surrogate {@link LONE_SURROGATE} found, high or low. */
+function surrogateKind(value: string): "high" | "low" {
+  const match = LONE_SURROGATE.exec(value);
+  const unit = match ? match[0].charCodeAt(0) : 0;
+  return unit <= 0xdbff ? "high" : "low";
 }
 
 /**
- * Rejects a string that contains a lone surrogate. UTF-16 high surrogates
- * (0xD800-0xDBFF) must be followed immediately by a low surrogate
- * (0xDC00-0xDFFF); either half appearing alone is invalid I-JSON, and a
- * conforming JCS verifier in another language will reject or replace it.
- * We reject at the input so the bytes the signer signs are always
- * well-formed UTF-8.
+ * Matches a lone surrogate. With the `u` flag a well-formed surrogate pair is
+ * one code point, so `\p{Cs}` only matches a high surrogate (0xD800-0xDBFF)
+ * without a following low one, or a low surrogate (0xDC00-0xDFFF) on its own.
+ * Either is invalid I-JSON, and a conforming JCS verifier in another language
+ * will reject or replace it, so the signer refuses it instead. The regular
+ * expression runs natively, which keeps the check cheap on every string.
  */
-function assertNoLoneSurrogate(value: string, where: string): void {
-  for (let i = 0; i < value.length; i += 1) {
-    const unit = value.charCodeAt(i);
-    if (unit >= 0xd800 && unit <= 0xdbff) {
-      const next = value.charCodeAt(i + 1);
-      if (!(next >= 0xdc00 && next <= 0xdfff)) {
-        fail(`lone high surrogate in ${where}`);
-      }
-      i += 1;
-      continue;
-    }
-    if (unit >= 0xdc00 && unit <= 0xdfff) {
-      fail(`lone low surrogate in ${where}`);
-    }
-  }
-}
+const LONE_SURROGATE = /\p{Cs}/u;
 
 /**
  * True when `value` is a plain object literal: either `Object.prototype`
  * or a null-prototype object. A `Date`, a class instance, a `Map`, a
  * `RegExp`, or anything else returns false. `JSON.stringify` silently
- * turns many of these into `{}`; we reject them at the canonical boundary
- * so a signing primitive never signs something that does not round-trip.
+ * turns many of these into `{}`; they are refused here so a signing
+ * primitive never signs something that does not round-trip.
  */
 function isPlainObject(value: object): boolean {
   const prototype = Object.getPrototypeOf(value);
   return prototype === Object.prototype || prototype === null;
 }
 
-function walk(value: unknown, path: string): string {
+/**
+ * Serialises one value. Validation happens in the same pass as
+ * serialisation: each value is checked as it is written, so a valid input
+ * is walked exactly once.
+ */
+function walk(value: unknown, path: PathStack): string {
+  switch (typeof value) {
+    case "string":
+      if (LONE_SURROGATE.test(value))
+        fail(`lone ${surrogateKind(value)} surrogate in string`, path);
+      return JSON.stringify(value);
+    case "number":
+      if (!Number.isFinite(value)) fail(`non-finite number ${value}`, path);
+      return JSON.stringify(value);
+    case "boolean":
+      return value ? "true" : "false";
+    case "bigint":
+      return fail("bigint", path, "JSON cannot represent it; convert it to a decimal string first");
+    case "function":
+    case "symbol":
+    case "undefined":
+      return fail(typeof value, path, "JSON cannot represent it");
+    default:
+      break;
+  }
   if (value === null) return "null";
-  if (typeof value === "string") {
-    assertNoLoneSurrogate(value, `string at ${path}`);
-    return JSON.stringify(value);
-  }
-  if (typeof value === "boolean") {
-    return value ? "true" : "false";
-  }
-  if (typeof value === "number") {
-    if (!Number.isFinite(value)) {
-      fail(`non-finite number at ${path}: ${value}`);
+  const object = value as object;
+  if (Array.isArray(object)) {
+    let out = "[";
+    for (let i = 0; i < object.length; i += 1) {
+      path.push(i);
+      // `undefined` in an array has no JSON representation. The serialiser
+      // before #165 raised a raw TypeError here; this reports it with the index.
+      out += (i === 0 ? "" : ",") + walk(object[i], path);
+      path.pop();
     }
-    return JSON.stringify(value);
+    return `${out}]`;
   }
-  if (typeof value === "bigint") {
-    fail(`bigint at ${path}: JSON cannot represent it; convert to a decimal string first`);
+  if (!isPlainObject(object)) {
+    return fail("non-plain object", path, "JSON would silently render it as {}");
   }
-  if (typeof value === "function") {
-    fail(`function at ${path}: JSON cannot represent it`);
-  }
-  if (typeof value === "symbol") {
-    fail(`symbol at ${path}: JSON cannot represent it`);
-  }
-  if (typeof value === "undefined") {
-    fail(`undefined at ${path}: JSON cannot represent it`);
-  }
-  if (typeof value !== "object") {
-    fail(`unsupported type at ${path}: ${typeof value}`);
-  }
-  if (Array.isArray(value)) {
-    const parts: string[] = [];
-    for (let i = 0; i < value.length; i += 1) {
-      const item = value[i];
-      if (item === undefined) {
-        // Rejecting `undefined` in an array matches RFC 8785's I-JSON
-        // requirement that every member has a representation. The old
-        // serialiser fell through to the object branch and raised a raw
-        // `TypeError`; the new one reports it as a canonicalization
-        // failure with the index in the path.
-        fail(`undefined at ${path}[${i}]`);
-      }
-      parts.push(walk(item, `${path}[${i}]`));
-    }
-    return `[${parts.join(",")}]`;
-  }
-  if (!isPlainObject(value)) {
-    fail(`non-plain object at ${path}: JSON would silently render as {}`);
-  }
-  const record = value as Record<string, unknown>;
+  const record = object as Record<string, unknown>;
+  // Object.keys(...).sort() compares UTF-16 code units, the order RFC 8785
+  // section 3.2.3 specifies.
   const keys = Object.keys(record).sort();
-  const parts: string[] = [];
+  let out = "{";
+  let first = true;
   for (const key of keys) {
     const item = record[key];
-    // `undefined` values on an object are dropped the way `JSON.stringify`
-    // drops them. This matches the previous serialiser and gives callers a
-    // single spelling for "not present".
+    // `undefined` members are dropped the way `JSON.stringify` drops them,
+    // as the serialiser before #165 did, so "absent" has one spelling.
     if (item === undefined) continue;
-    assertNoLoneSurrogate(key, `object key at ${path}`);
-    parts.push(`${JSON.stringify(key)}:${walk(item, `${path}.${key}`)}`);
+    path.push(key);
+    if (LONE_SURROGATE.test(key)) fail(`lone ${surrogateKind(key)} surrogate in object key`, path);
+    out += `${first ? "" : ","}${JSON.stringify(key)}:${walk(item, path)}`;
+    path.pop();
+    first = false;
   }
-  return `{${parts.join(",")}}`;
+  return `${out}}`;
 }
 
 /**
@@ -147,7 +154,7 @@ function walk(value: unknown, path: string): string {
  * a class instance) that would silently render as `{}`.
  */
 export function canonicalJson(value: JsonValue): string {
-  return walk(value, "$");
+  return walk(value, []);
 }
 
 /**

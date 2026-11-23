@@ -3,6 +3,7 @@ import { fileURLToPath } from "node:url";
 import { describe, expect, it } from "vitest";
 import { base64UrlToBytes, bytesToBase64Url, utf8Bytes } from "../encoding.js";
 import { canonicalBytes, canonicalJson, type JsonValue } from "./canonical.js";
+import { EcdsaP256Verifier } from "./ecdsa.js";
 import { Ed25519Signer, Ed25519Verifier } from "./signer.js";
 
 /**
@@ -10,7 +11,7 @@ import { Ed25519Signer, Ed25519Verifier } from "./signer.js";
  * them against the implementation. If this test drifts, a verifier in
  * another language that pins to the same vectors is going to fail against
  * Tollway's receipts, so the drift must be a deliberate, called-out change
- * in the release note - not an accident.
+ * in the release note, not an accident.
  *
  * The signing key is the RFC 8032 section 7.1 TEST 2 key: published,
  * insecure, deterministic. Nothing in this test material is a real signing
@@ -19,9 +20,11 @@ import { Ed25519Signer, Ed25519Verifier } from "./signer.js";
 
 type VectorFile = {
   schema: {
-    version: 1;
+    version: 2;
     specification: string;
+    encoding: string;
     signingAlgorithm: "Ed25519";
+    es256TestKey: { x: string; y: string; d: string; kid: string; alg: "ES256" };
     signingTestKey: {
       description: string;
       private: string;
@@ -36,15 +39,24 @@ type VectorFile = {
     canonicalHex: string;
     signatureBase64url: string;
   }>;
+  es256Vectors: Array<{
+    name: string;
+    input: JsonValue;
+    canonicalHex: string;
+    signatureBase64url: string;
+  }>;
 };
 
 const VECTOR_PATH = fileURLToPath(
   new URL("../../../../docs/receipt-vectors/canonical-and-ed25519.json", import.meta.url),
 );
 
+function readVectorText(): string {
+  return readFileSync(VECTOR_PATH, "utf8");
+}
+
 function loadVectors(): VectorFile {
-  const raw = readFileSync(VECTOR_PATH, "utf8");
-  return JSON.parse(raw) as VectorFile;
+  return JSON.parse(readVectorText()) as VectorFile;
 }
 
 function hex(bytes: Uint8Array): string {
@@ -54,9 +66,21 @@ function hex(bytes: Uint8Array): string {
 describe("docs/receipt-vectors/canonical-and-ed25519.json", () => {
   const file = loadVectors();
 
-  it("has schema version 1", () => {
-    expect(file.schema.version).toBe(1);
+  it("has schema version 2", () => {
+    expect(file.schema.version).toBe(2);
     expect(file.schema.signingAlgorithm).toBe("Ed25519");
+  });
+
+  it("is plain ASCII, with every other character escaped, so no editor can normalise it", () => {
+    const nonAscii = [...readVectorText()].filter((character) => character.charCodeAt(0) > 0x7f);
+    expect(nonAscii).toEqual([]);
+  });
+
+  it("keeps U+FB33 in the key-order vector, where UTF-16 and code point order differ", () => {
+    const vector = file.vectors.find((candidate) => candidate.name === "utf16-key-order");
+    expect(vector?.canonicalHex).toContain("efacb3");
+    const keys = Object.keys(vector?.input ?? {});
+    expect(keys).toContain(String.fromCodePoint(0xfb33));
   });
 
   it("every vector's canonical bytes match canonicalJson and canonicalBytes", () => {
@@ -99,6 +123,23 @@ describe("docs/receipt-vectors/canonical-and-ed25519.json", () => {
       expect(resigned, `vector ${vector.name}: deterministic Ed25519 signature`).toBe(
         vector.signatureBase64url,
       );
+    }
+  });
+
+  it("every ES256 vector verifies with the published RFC 6979 test key", async () => {
+    const key = file.schema.es256TestKey;
+    const verifier = new EcdsaP256Verifier({ [key.kid]: { x: key.x, y: key.y } });
+    expect(file.es256Vectors.length).toBeGreaterThan(0);
+    for (const vector of file.es256Vectors) {
+      const message = canonicalBytes(vector.input);
+      expect(hex(message), `es256 vector ${vector.name}: canonicalHex`).toBe(vector.canonicalHex);
+      const ok = await verifier.verify({
+        message,
+        signature: base64UrlToBytes(vector.signatureBase64url),
+        keyId: key.kid,
+        algorithm: key.alg,
+      });
+      expect(ok, `es256 vector ${vector.name}: signature verifies`).toBe(true);
     }
   });
 });

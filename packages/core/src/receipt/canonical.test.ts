@@ -123,38 +123,82 @@ describe("canonicalJson", () => {
   });
 
   describe("RFC 8785 examples", () => {
-    it("sorts keys by UTF-16 code units, matching the RFC 3.2.3 example", () => {
-      // The same input as the RFC, in a shuffled order. The RFC's expected
-      // order is: \r (U+000D), € (EURO SIGN), \u{1f602} (FACE WITH
-      // TEARS OF JOY, pair D83D DE02), דּ (HEBREW LETTER DALET WITH
-      // DAGESH). Node's Object.keys preserves insertion order, then
-      // Array.prototype.sort picks the UTF-16 code-unit ordering, so the
-      // high surrogate 0xD83D precedes the BMP letter 0xFB33.
-      const input: Record<string, number> = {
-        "€": 1,
-        "\r": 2,
-        "😂": 3,
-        דּ: 4,
+    // Non-ASCII text is written as \u escapes throughout, so no editor or
+    // formatter can normalise it. U+FB33 normalises to U+05D3 U+05BC under
+    // NFC, which would sort differently and hide the case the RFC is about.
+
+    it("sorts keys by UTF-16 code units: the RFC section 3.2.3 example", () => {
+      // RFC 8785 section 3.2.3, input in the RFC's order.
+      const input: Record<string, string> = {
+        "\u20ac": "Euro Sign",
+        "\r": "Carriage Return",
+        "\ufb33": "Hebrew Letter Dalet With Dagesh",
+        "1": "One",
+        "\ud83d\ude00": "Emoji: Grinning Face",
+        "\u0080": "Control",
+        "\u00f6": "Latin Small Letter O With Diaeresis",
       };
-      const out = canonicalJson(input);
-      expect(out).toBe('{"\\r":2,"€":1,"😂":3,"דּ":4}');
+      // The RFC's expected order: \r, 1, U+0080, U+00F6, U+20AC, then the
+      // emoji (high surrogate 0xD83D) before U+FB33, which a code point sort
+      // would reverse.
+      expect(canonicalJson(input)).toBe(
+        '{"\\r":"Carriage Return","1":"One","\u0080":"Control","\u00f6":"Latin Small Letter O With Diaeresis","\u20ac":"Euro Sign","\ud83d\ude00":"Emoji: Grinning Face","\ufb33":"Hebrew Letter Dalet With Dagesh"}',
+      );
     });
 
-    it("formats numbers per ECMA-262 ToString(Number), the JCS 3.2.2.3 rule", () => {
-      // A representative subset of the RFC 8785 Appendix B number cases.
-      // Values that cannot round-trip or that JS rejects (-0 round-tripping,
-      // signalling NaN, etc.) are excluded; a widely used subset is enough
-      // to pin down the ECMA-262 Number-to-String behaviour JCS requires.
-      expect(canonicalJson(0)).toBe("0");
-      expect(canonicalJson(-0)).toBe("0"); // -0 renders as 0 per ECMA-262.
-      expect(canonicalJson(1)).toBe("1");
-      expect(canonicalJson(-1)).toBe("-1");
-      expect(canonicalJson(1.5)).toBe("1.5");
-      expect(canonicalJson(1e21)).toBe("1e+21");
-      expect(canonicalJson(1e-7)).toBe("1e-7");
-      expect(canonicalJson(1e-6)).toBe("0.000001");
-      // Max safe integer and the next step beyond.
-      expect(canonicalJson(Number.MAX_SAFE_INTEGER)).toBe("9007199254740991");
+    it("escapes strings as the RFC section 3.2.2.2 example shows", () => {
+      // RFC 8785 section 3.2.2.2: only U+0000-U+001F, the quote and the
+      // backslash are escaped; the slash and everything else are literal.
+      const input = { string: "\u20ac$\u000F\u000aA'\u0042\u0022\u005c\\\"/" };
+      expect(canonicalJson(input)).toBe('{"string":"\u20ac$\\u000f\\nA\'B\\"\\\\\\\\\\"/"}');
+    });
+
+    // RFC 8785 Appendix B: IEEE 754 bit patterns and the text JCS requires
+    // for each, copied from the RFC. The two non-finite rows are refused.
+    const APPENDIX_B: readonly [hex: string, expected: string][] = [
+      ["0000000000000000", "0"],
+      ["8000000000000000", "0"],
+      ["0000000000000001", "5e-324"],
+      ["8000000000000001", "-5e-324"],
+      ["7fefffffffffffff", "1.7976931348623157e+308"],
+      ["ffefffffffffffff", "-1.7976931348623157e+308"],
+      ["4340000000000000", "9007199254740992"],
+      ["c340000000000000", "-9007199254740992"],
+      ["4430000000000000", "295147905179352830000"],
+      ["44b52d02c7e14af5", "9.999999999999997e+22"],
+      ["44b52d02c7e14af6", "1e+23"],
+      ["44b52d02c7e14af7", "1.0000000000000001e+23"],
+      ["444b1ae4d6e2ef4e", "999999999999999700000"],
+      ["444b1ae4d6e2ef4f", "999999999999999900000"],
+      ["444b1ae4d6e2ef50", "1e+21"],
+      ["3eb0c6f7a0b5ed8c", "9.999999999999997e-7"],
+      ["3eb0c6f7a0b5ed8d", "0.000001"],
+      ["41b3de4355555553", "333333333.3333332"],
+      ["41b3de4355555554", "333333333.33333325"],
+      ["41b3de4355555555", "333333333.3333333"],
+      ["41b3de4355555556", "333333333.3333334"],
+      ["41b3de4355555557", "333333333.33333343"],
+      ["becbf647612f3696", "-0.0000033333333333333333"],
+      ["43143ff3c1cb0959", "1424953923781206.2"],
+    ];
+
+    function fromBits(hex: string): number {
+      const view = new DataView(new ArrayBuffer(8));
+      view.setBigUint64(0, BigInt(`0x${hex}`));
+      return view.getFloat64(0);
+    }
+
+    it.each(APPENDIX_B)("formats the Appendix B number %s as %s", (hex, expected) => {
+      expect(canonicalJson(fromBits(hex))).toBe(expected);
+    });
+
+    it.each([
+      "7fffffffffffffff",
+      "7ff0000000000000",
+    ])("refuses the Appendix B non-finite number %s", (hex) => {
+      expect(() => canonicalJson(fromBits(hex))).toThrow(
+        expect.objectContaining({ code: "canonicalization-failed" }),
+      );
     });
   });
 
