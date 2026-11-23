@@ -8,6 +8,7 @@ import {
   verifyReceipt,
 } from "@vegaforge/tollway-core";
 import {
+  createFacilitatorValidator,
   createHttpFacilitator,
   createInMemorySettlementCache,
   createMockFacilitator,
@@ -16,6 +17,7 @@ import {
   decodePaymentRequiredHeader,
   decodePaymentResponseHeader,
   encodePaymentSignatureHeader,
+  type FacilitatorCheckReport,
   type FacilitatorClient,
   PAYMENT_REQUIRED_HEADER,
   PAYMENT_RESPONSE_HEADER,
@@ -52,7 +54,16 @@ export type DemoResult = {
   challenge: { amount: string; asset: string; resource: string };
   receipt: SignedReceipt;
   receiptValid: boolean;
+  /**
+   * Live mode only: the facilitator capability check run before serving.
+   * Mock mode skips it, since its placeholder accounts are not real
+   * Stellar addresses.
+   */
+  facilitatorCheck?: FacilitatorCheckReport;
 };
+
+/** The route the demo serves, as the capability report labels it. */
+const DEMO_ROUTE = "GET /quotes/latest";
 
 /** Price of the demo quote: 0.001 USDC in 7-decimal base units. */
 const DEMO_AMOUNT = "10000";
@@ -159,6 +170,15 @@ export async function runDemo(options: DemoOptions = {}): Promise<DemoResult> {
     extra: SPONSORED_FEES,
   };
 
+  // Live mode asks the facilitator what it supports before serving, and
+  // refuses to start on a mismatch, so a misconfigured route is not first
+  // discovered by a paying agent.
+  const facilitatorCheck = mock
+    ? undefined
+    : await createFacilitatorValidator(facilitator, { mode: "fail" }).check({
+        [DEMO_ROUTE]: config,
+      });
+
   const gate = createPaywall(config, {
     signer,
     facilitator,
@@ -213,6 +233,7 @@ export async function runDemo(options: DemoOptions = {}): Promise<DemoResult> {
       },
       receipt,
       receiptValid: verification.valid,
+      ...(facilitatorCheck ? { facilitatorCheck } : {}),
     };
   } finally {
     await new Promise((resolve) => server.close(resolve));
