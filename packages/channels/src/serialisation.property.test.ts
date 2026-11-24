@@ -63,6 +63,16 @@ function delayedAdapter(delays: { sign: number[]; close: number[] }) {
     async findChannelSettlement() {
       return null;
     },
+    // These properties exercise commit and close only; recovery fails loudly.
+    async getState() {
+      throw new Error("the serialisation properties do not read recovery state");
+    },
+    async startClose() {
+      throw new Error("the serialisation properties do not start a funder close");
+    },
+    async refund() {
+      throw new Error("the serialisation properties do not refund");
+    },
     async signCommitment(input) {
       await sleep(delays.sign.shift() ?? 0);
       return { commitment: `sig:${input.channelId}:${input.cumulativeAmount}` };
