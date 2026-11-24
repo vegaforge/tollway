@@ -31,7 +31,13 @@ type Policy = {
     enabled?: boolean;
     minChannelDeposit?: string;
   }>>;
-  rateLimit?: { requestsPerMinute?: number };
+  rateLimit?: {
+    requestsPerMinute?: number;                         // shorthand: one 60s window
+    windows?: { windowSeconds: number; limit: number }[]; // all apply together
+    count?: "settlements" | "attempts";                 // default "settlements"
+    scope?: "global" | "per-counterparty";              // default "global"
+    perCounterpartyKeyLimit?: number;                   // default 1024
+  };
   anomaly?: {
     maxSpendPerMinute?: string;
     adaptive?: {
@@ -142,7 +148,37 @@ const policy: Policy = {
 
 USDC on Stellar has 7 decimals, so `10000000` is 1 USDC.
 
-**`rateLimit.requestsPerMinute`** is a sliding-window cap. The window is one minute.
+**`rateLimit`** caps how often the agent pays. It answers three questions.
+
+- **Over which windows.** `windows` lists one or more sliding windows, and a payment must fit in every one of them. An event counts while it is at most `windowSeconds` old: one recorded at 12:00:00 still counts at 12:01:00 against a 60 second window, and stops counting a millisecond later. `requestsPerMinute: 30` is shorthand for `windows: [{ windowSeconds: 60, limit: 30 }]`. Set one or the other, not both.
+- **What is counted.** With `count: "settlements"`, the default, a payment counts when it is recorded after it settles, so failed and blocked payments never count. With `count: "attempts"`, a payment counts at the moment the client sends it, whether or not it then settles, and each retry with a fresh authorization counts again. A payment the policy blocked is not an attempt and is not counted. The client counts an attempt through the engine's `admit`, which evaluates and counts in one step, so of several concurrent attempts only as many pass as there are free slots. Evaluating, `check`, a shadow comparison or a dry run never counts anything.
+- **Per whom.** With `scope: "global"`, the default, every payment shares one count. With `scope: "per-counterparty"`, each payee address has its own count, the same key `perService` uses, and the decision detail names the payee. At most `perCounterpartyKeyLimit` payees (default 1024) are tracked. A payee whose events have all left every window is idle and is dropped first. When every tracked payee is still active, a payment to a new payee is refused until one goes idle: dropping an active payee would reset its count and let it through.
+
+The count is exact: each tracked key keeps the timestamps of its newest events, never more than the largest limit, so memory is bounded and no approximation is involved. The rate limit has its own windows, independent of the one-minute window the anomaly stop uses.
+
+A worked example: an agent that may make 60 payment attempts a minute and 1000 an hour to each service, however the payments turn out.
+
+```ts
+const policy: Policy = {
+  policyVersion: 1,
+  rateLimit: {
+    windows: [
+      { windowSeconds: 60, limit: 60 },
+      { windowSeconds: 3600, limit: 1000 },
+    ],
+    count: "attempts",
+    scope: "per-counterparty",
+  },
+};
+```
+
+After 1000 attempts to `GQUOTES` in the last hour, the next one is blocked with the hourly window in the trace, even if the last minute was quiet:
+
+```text
+per-counterparty rate limit for GQUOTES exceeded: 1000 attempts in the last 3600 seconds, limit 1000
+```
+
+A payment to `GWEATHER` in the same hour is still allowed, because each payee has its own count. With the default `scope: "global"`, it would be blocked too.
 
 **`anomaly.maxSpendPerMinute`** is the per-minute spend ceiling. Crossing it trips the anomaly stop, which the agent surfaces as a hard error: a sudden burst of spending is the most common signal of a compromised key or a runaway agent, and the engine fails closed rather than rationalize the spike.
 
@@ -281,7 +317,7 @@ This is a real trace, for a sixth payment of 1 USDC (`10000000` at 7 decimals) u
       "current": "5",
       "projected": "6",
       "window": { "kind": "sliding", "seconds": 60 },
-      "detail": "rate limit: 6 of 30 requests in the last minute"
+      "detail": "global rate limit: 6 of 30 settled payments in the last 60 seconds"
     },
     {
       "id": "anomaly",

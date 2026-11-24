@@ -30,6 +30,11 @@ export {
   type WatchtowerChannel,
 } from "./channel-watchtower.js";
 export {
+  type DiscoveryCatalogue,
+  type DiscoveryDeclaration,
+  listDiscoveryResources,
+} from "./discovery.js";
+export {
   createHttpFacilitator,
   createMockFacilitator,
   DEFAULT_MAX_TIMEOUT_SECONDS,

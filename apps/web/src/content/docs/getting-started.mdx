@@ -66,6 +66,18 @@ export const config = { matcher: ["/api/paid/:path*"] };
 
 The proxy runs on Node.js. It strips a caller-supplied Tollway receipt header and forwards only the receipt returned by the gate. In a route handler, `getProxyReceipt(request)` reads and schema-validates that receipt. The proxy also returns the `PAYMENT-RESPONSE` and `TOLLWAY-RECEIPT` headers to the caller.
 
+## When a payment fails
+
+The client retries an x402 payment only when retrying cannot pay twice. If the
+service refuses the signed payment before settling it, for example because the
+authorization expired, the client checks the policy again and signs a fresh
+authorization for the same terms. If the service reports the same payment as
+still settling, the client waits the `Retry-After` it sends and resends the
+identical payment. Anything that may have settled, such as a 5xx after the
+signed request went out, is never retried: `pay()` rejects with
+`AmbiguousSettlementError`, and you reconcile before paying again. The client
+README has the full table and the `retry` option.
+
 ## What is built today
 
 Tollway is pre-release and no package is published to npm yet.
