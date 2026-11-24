@@ -25,7 +25,46 @@ The reconciliation engine therefore gets property tests against randomly generat
 
 ## What it does when drift fires
 
-A flagged drift event surfaces through the observability hub (`anomaly.detected`) so the operator sees it immediately, and the engine can block further commitments to a counterparty that is behaving inconsistently. Closing the channel and recovering what is reflected on chain becomes the next step.
+A flagged drift event surfaces through the observability hub (`anomaly.detected`) so the operator sees it immediately, and `createQuarantineEnforcer` in `@vegaforge/tollway-reconcile` maps each drift kind to an action (`quarantine`, `warn`, or `ignore`) against a `CounterpartyQuarantine` store.
+
+By default, proven counterparty cheating (`under-settled`, `recipient-mismatch`, and `token-mismatch`) triggers `quarantine`, while other drift kinds default to `warn` and unknown or transient outcomes do not quarantine.
+
+Once a counterparty is quarantined:
+
+- `ChannelManager.open` and `ChannelManager.commit` refuse new commitments with a `counterparty-quarantined` error (`CounterpartyQuarantinedError`).
+- `createDefaultRouter` excludes `mpp-channel` for that counterparty and records `reason: "quarantined"` (failing closed if quarantine lookup fails).
+- `TollwayClient` emits a `counterparty:quarantined` event so callers and monitoring pipelines can react.
+- A `pay()` call that names `model: "mpp-channel"` for a quarantined counterparty is refused with `counterparty-quarantined`, the same as the router's rule. An explicit model skips the router, so the client checks it itself.
+- `createQuarantineEnforcer` remembers the last 10000 processed results (`maxRememberedResults`) so a result processed twice acts once. A result older than that runs its actions again; quarantining an already active counterparty is a no-op, so the only cost is a repeated `onWarn` or `onQuarantine` call.
+
+## Operator workflow: inspect, close and recover, release
+
+Quarantine blocks future commitments without stranding funds already locked in open channels:
+
+1. **Inspect drift**: read the `QuarantineEntry` from `quarantine.lookup(counterparty)` or `quarantine.history(counterparty)` to review `drift.kind`, `drift.detail`, `drift.channelId`, `reason`, and `quarantinedAt`.
+2. **Close and recover**: `ChannelManager.close` stays allowed for quarantined counterparties so open channels can settle on chain and return any uncommitted remainder.
+3. **Release**: after verifying the root cause, explicitly lift the quarantine with `quarantine.release({ counterparty, releasedBy })`. Release is manual by default and audited with `releasedBy` and `releasedAt` (automatic expiry only runs if `autoReleaseAfterMs` is configured).
+
+Use `createDriftAlertBridge({ emitter, store, severity })` to forward `ReconciliationResult[]` into an `ObservabilityHub` (or any compatible `emit` target):
+
+- **Alert payload (`anomaly.detected`):** `{ source: "reconcile", subject, kind, detail, severity }`.
+- **Deduplication:** the same `(subject, kind, detail)` alerts once until it resolves or its `detail` changes. Back `store` with a persistent `DriftAlertStore` (or seed `createMemoryDriftAlertStore(previousResults)`) to preserve deduplication across restarts.
+- **Severity defaults:** `under-settled`, `unexpected-remainder`, and `non-monotonic-cumulative` default to `critical`; `over-settled`, `missing-commitment`, and `malformed-record` default to `high`; `sequence-gap` and `duplicate-sequence` default to `medium`; `foreign-commitment` defaults to `low`. Override per kind via `severity`.
+- **Failure isolation:** delivery failures reported in `DeliveryReport.failures` (or thrown by the emitter) are collected in the bridge run summary and never fail the reconciliation run. A failure the hub reports is the hub's to retry, so that drift counts as alerted. A drift whose `emit` threw never reached the hub, so it is not recorded and the next run alerts on it again.
+
+## Reports and exports
+
+`buildReconciliationReport(results, { generatedAt, range })` produces a versioned JSON report (`version: 1`) with `generatedAt`, optional `range` (`{ from, to }`), `totals` (`total`, `ok`, `drifted`, `driftItems`, `byDriftKind`, and optional `bigint`-summed `amounts` as integer strings), and per-subject `entries` (`subject`, `ok`, `drift`, optional `amounts`).
+
+`reconciliationReportToCsv(report)` and `exportReconciliationReport(report, "csv")` emit RFC 4180 CSV with one row per drift item and columns:
+
+1. `generatedAt`
+2. `subject`
+3. `kind`
+4. `severity`
+5. `detail`
+
+Cells starting with `=`, `+`, `-`, `@`, a tab, or a carriage return are prefixed with a single quote (`'`) to neutralize spreadsheet formula injection.
 
 ## In the code
 

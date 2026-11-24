@@ -20,6 +20,7 @@
  */
 
 import {
+  type CounterpartyQuarantine,
   canonicalJson,
   comparePolicyTraces,
   createPolicyEngine,
@@ -30,7 +31,9 @@ import {
   type PolicyEngine,
   type PolicyTrace,
   type PolicyTraceComparison,
+  type QuarantineEntry,
   type ReceiptVerifier,
+  type RouteDecision,
   type SettlementModel,
   type SignedReceipt,
   type StellarNetwork,
@@ -38,6 +41,12 @@ import {
   TollwayError,
   verifyReceipt,
 } from "@vegaforge/tollway-core";
+import {
+  assertOfferForRequest,
+  assertReceiptMatchesOffer,
+  DEFAULT_RECEIPT_MAX_SKEW_MS,
+  OfferNetworkMismatchError,
+} from "./receipt-binding.js";
 import type { ReceiptStore } from "./receipt-store.js";
 
 /** Events the client emits so callers and observability can follow along. */
@@ -78,7 +87,14 @@ export type ClientEvent =
   | { type: "error"; resource: string; error: Error }
   | { type: "budget:warning"; remaining: string }
   | { type: "channel:opened"; channelId: string }
-  | { type: "channel:closed"; channelId: string };
+  | { type: "channel:closed"; channelId: string }
+  | {
+      type: "counterparty:quarantined";
+      counterparty: string;
+      resource: string;
+      reason: string;
+      entry?: QuarantineEntry;
+    };
 
 export type ClientEventHandler = (event: ClientEvent) => void;
 
@@ -91,6 +107,11 @@ export type ClientEventHandler = (event: ClientEvent) => void;
  */
 export interface ClientSettler {
   settle(input: SettleRequest): Promise<SignedReceipt>;
+  /**
+   * The Stellar address this settler pays from, when it knows it. The
+   * client then requires `receipt.payer` to equal it.
+   */
+  readonly payer?: string;
 }
 
 export type SettleRequest = {
@@ -119,14 +140,35 @@ export type TollwayClientOptions = {
   /** Optional router. When omitted, defaults to x402 unless `model` is on the request. */
   router?: ModelRouter;
   /**
+   * Optional quarantine store. When provided, `pay()` checks the
+   * counterparty's standing before routing, emits `counterparty:quarantined`,
+   * and passes `quarantined: true` to the router (failing closed on lookup
+   * error).
+   */
+  quarantine?: CounterpartyQuarantine;
+  /**
    * Optional verifier. When provided, the returned receipt is checked
    * against the verifier's trusted public keys before `pay()` resolves;
    * a tampered or unknown-key receipt produces a `TollwayError` with
    * code `"receipt-verification-failed"`. Recommended in production: the
    * receipt is the service's signature, and skipping verification leaves
    * a tampered receipt undetected on the agent side.
+   *
+   * Whether or not a verifier is set, the receipt must also describe the
+   * paid offer (amount, asset, payee, resource, network, model, settlement
+   * kind, payer and `issuedAt`); a mismatch rejects with code
+   * `"receipt-offer-mismatch"`. Without a verifier that check runs on an
+   * unauthenticated receipt, so it catches mistakes, not forgeries.
    */
   verifier?: ReceiptVerifier;
+  /**
+   * How far a receipt's `issuedAt` may be from the client clock, in
+   * milliseconds, either way. Defaults to five minutes. A receipt replayed
+   * from an older payment falls outside it and is rejected.
+   */
+  receiptMaxSkewMs?: number;
+  /** The clock for the `issuedAt` check. Defaults to `Date.now`. */
+  clock?: () => number;
   /** Default facilitator URL when an offer does not name one. */
   facilitatorUrl?: string;
   /**
@@ -189,6 +231,14 @@ export interface TollwayClient {
  */
 export function createClient(options: TollwayClientOptions): TollwayClient {
   const handlers: ClientEventHandler[] = [];
+  if (
+    options.receiptMaxSkewMs !== undefined &&
+    !(Number.isFinite(options.receiptMaxSkewMs) && options.receiptMaxSkewMs >= 0)
+  ) {
+    throw new TypeError(
+      `receiptMaxSkewMs must be a non-negative finite number, got ${options.receiptMaxSkewMs}`,
+    );
+  }
   // Settlements in progress, by purchase key. In process only: two workers
   // of the same agent do not see each other's entries.
   const inFlight = new Map<string, Promise<Settled>>();
@@ -312,6 +362,19 @@ export function createClient(options: TollwayClientOptions): TollwayClient {
       // so a field the signature does not cover cannot reach the caller.
       const receipt = await checkedReceipt(settled, options.verifier);
 
+      // A valid signature proves only that the service signed something.
+      // The receipt must describe this payment before it is stored,
+      // recorded on the policy engine or reported as a payment.
+      assertReceiptMatchesOffer({
+        receipt,
+        offer: request.offer,
+        model,
+        network: options.network,
+        ...(options.settler.payer === undefined ? {} : { payer: options.settler.payer }),
+        now: (options.clock ?? Date.now)(),
+        maxSkewMs: options.receiptMaxSkewMs ?? DEFAULT_RECEIPT_MAX_SKEW_MS,
+      });
+
       // The payment has settled, so a store failure must not cost the payer
       // the receipt. The error goes on the result and to onStoreError.
       let storeError: Error | undefined;
@@ -350,10 +413,61 @@ export function createClient(options: TollwayClientOptions): TollwayClient {
     },
     async pay(request): Promise<PayResult> {
       let model: SettlementModel;
+      let emittedQuarantine = false;
       try {
-        model = await decideModel(options.router, request);
+        // Refused before any policy check or signature: paying on the wrong
+        // network is never what the agent configured.
+        if (request.offer.network !== options.network) {
+          throw new OfferNetworkMismatchError(request.offer.network, options.network);
+        }
+        assertOfferForRequest(request.resource, request.offer);
+        let quarantined = false;
+        if (options.quarantine) {
+          let entry: QuarantineEntry | undefined;
+          let lookupFailed = false;
+          try {
+            entry = await options.quarantine.lookup(request.offer.payTo);
+          } catch {
+            lookupFailed = true;
+          }
+          if (entry || lookupFailed) {
+            quarantined = true;
+            emittedQuarantine = true;
+            emit({
+              type: "counterparty:quarantined",
+              counterparty: request.offer.payTo,
+              resource: request.resource,
+              reason: entry ? entry.reason : "quarantine lookup failed; failing closed",
+              ...(entry ? { entry } : {}),
+            });
+          }
+        }
+
+        const decision = await decideModel(options.router, request, quarantined);
+        if (decision.reason === "quarantined" && !emittedQuarantine) {
+          emittedQuarantine = true;
+          emit({
+            type: "counterparty:quarantined",
+            counterparty: request.offer.payTo,
+            resource: request.resource,
+            reason: "router excluded mpp-channel for quarantined counterparty",
+          });
+        }
+        model = decision.model;
       } catch (rawError) {
         const error = normalizeError(rawError);
+        if (
+          error instanceof TollwayError &&
+          error.code === "counterparty-quarantined" &&
+          !emittedQuarantine
+        ) {
+          emit({
+            type: "counterparty:quarantined",
+            counterparty: request.offer.payTo,
+            resource: request.resource,
+            reason: error.message,
+          });
+        }
         emit({ type: "error", resource: request.resource, error });
         throw error;
       }
@@ -473,15 +587,27 @@ async function checkedReceipt(
 async function decideModel(
   router: ModelRouter | undefined,
   request: PayRequest,
-): Promise<SettlementModel> {
-  if (request.model) return request.model;
-  if (!router) return "x402";
-  const decision = await router.decide({
+  quarantined: boolean,
+): Promise<RouteDecision> {
+  if (request.model) {
+    // An explicit model skips the router, so the quarantine rule the router
+    // applies has to be applied here too: a quarantined counterparty never
+    // gets a new channel commitment.
+    if (request.model === "mpp-channel" && quarantined) {
+      throw new TollwayError(
+        "counterparty-quarantined",
+        `counterparty "${request.offer.payTo}" is quarantined; cannot pay it through mpp-channel`,
+      );
+    }
+    return { model: request.model, reason: "override" };
+  }
+  if (!router) return { model: "x402", reason: "default" };
+  return router.decide({
     counterparty: request.offer.payTo,
     resource: request.resource,
     offer: request.offer,
+    ...(quarantined ? { quarantined: true } : {}),
   });
-  return decision.model;
 }
 
 function normalizeError(value: unknown): Error {
@@ -489,6 +615,12 @@ function normalizeError(value: unknown): Error {
   return new Error(typeof value === "string" ? value : JSON.stringify(value));
 }
 
+export {
+  DEFAULT_RECEIPT_MAX_SKEW_MS,
+  OfferNetworkMismatchError,
+  ReceiptOfferMismatchError,
+  resourceIdentity,
+} from "./receipt-binding.js";
 export {
   createMemoryReceiptStore,
   DEFAULT_RECEIPT_PAGE_SIZE,

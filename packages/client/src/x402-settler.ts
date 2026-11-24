@@ -79,6 +79,8 @@ export function createX402Settler(options: X402SettlerOptions): ClientSettler {
   );
 
   return {
+    // The client requires the receipt's payer to be the account that signed.
+    payer: options.signer.address,
     async settle({ resource, offer, model }: SettleRequest): Promise<SignedReceipt> {
       if (model !== "x402") {
         throw new TollwayError("payment-failed", `the x402 settler cannot settle model "${model}"`);
