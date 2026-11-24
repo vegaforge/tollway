@@ -84,6 +84,57 @@ still unauthenticated: the checks catch a service that returns the wrong
 receipt by mistake, but anyone who can answer the request can forge one that
 passes them. Configure a verifier in production.
 
+## Retries
+
+A payment can fail in ways that are safe to try again and ways that are not.
+The settler classifies each failure, and `pay()` acts on the class:
+
+| What happened | What `pay()` does |
+| --- | --- |
+| The service challenged the signed payment again (an expired authorization or a used nonce). Nothing settled. | Checks the policy again, then signs a fresh authorization for the same terms. A challenge asking for a different amount, asset or payee stops the retry. |
+| The service is already settling this payment (409 with `Retry-After`). | Waits `Retry-After`, up to 30 seconds, and resends the identical payment. It never signs a new one, so the service answers with the original receipt. |
+| The payment may have landed (a 5xx after the signed request, a dropped connection, or a 409 without `Retry-After`). | Never retries. Rejects with `AmbiguousSettlementError` (code `outcome-unknown`). |
+| Anything else. | Rejects at once. |
+
+Two consequences are deliberate. A 429 from the service's own rate limit is
+"anything else": `pay()` rejects at once and leaves waiting to the caller. A
+5xx the service returns before settling, such as a failure to price the
+request, still reads as ambiguous, because the client cannot tell it from a
+failure after settling. Both err toward never paying twice.
+
+Signing again after an ambiguous outcome is how a payer gets charged twice:
+the first transaction may already be on chain, and only the answer was lost.
+Reconcile against the chain or the receipt store before paying again.
+
+```ts
+import { AmbiguousSettlementError, createClient } from "@vegaforge/tollway-client";
+
+const client = createClient({
+  network: "testnet",
+  settler,
+  policy,
+  retry: { maxAttempts: 3 }, // default 2, clamped to 1..5; 1 turns retries off
+});
+
+client.on((event) => {
+  if (event.type === "retry") console.info(`retry ${event.attempt}: ${event.reason}`);
+});
+
+try {
+  await client.pay({ resource: "/quotes/latest", offer });
+} catch (error) {
+  if (error instanceof AmbiguousSettlementError) {
+    // Do not pay again. Find out whether the first payment landed.
+  }
+}
+```
+
+Retries are on by default (`maxAttempts: 2`). `maxAttempts` counts every
+settler call, resends included. Each fresh authorization is a new payment
+attempt for the policy: it is checked again, and it counts toward a rate
+limit with `count: "attempts"`. The policy records spend once, after the
+payment settles, however many attempts it took.
+
 ## Receipt store
 
 ```ts
