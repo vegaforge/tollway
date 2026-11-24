@@ -26,6 +26,7 @@ import {
 } from "./index.js";
 import { assertReceiptMatchesOffer } from "./receipt-binding.js";
 import { createMemoryReceiptStore, type ReceiptStore } from "./receipt-store.js";
+import { AmbiguousSettlementError, MAX_RETRY_AFTER_MS, SettlementOutcomeError } from "./retry.js";
 
 const OFFER: PaymentOffer = {
   resource: "/quotes/latest",
@@ -654,6 +655,246 @@ describe("createClient shadow policy", () => {
     expect(evaluate).not.toHaveBeenCalled();
     // Spend is still recorded, so the shadow is accurate once someone listens.
     expect(record).toHaveBeenCalledTimes(1);
+  });
+});
+
+// Issue #203 coverage.
+describe("createClient retry (#203)", () => {
+  const TERMS = { amount: OFFER.amount, asset: OFFER.asset, payTo: OFFER.payTo };
+
+  function expired(reason = "expired authorization") {
+    return new SettlementOutcomeError({
+      kind: "retryable-with-fresh-auth",
+      reason,
+      signedTerms: TERMS,
+    });
+  }
+
+  /** A settler that fails with each scripted error in turn, then settles. */
+  function scripted(...failures: Error[]) {
+    const requests: SettleRequest[] = [];
+    const settler: ClientSettler = {
+      async settle(request) {
+        requests.push(request);
+        const failure = failures.shift();
+        if (failure) throw failure;
+        return baselineReceipt;
+      },
+    };
+    return { settler, requests };
+  }
+
+  it("signs again after an expired authorization, pinned to the terms it signed", async () => {
+    const { settler, requests } = scripted(expired());
+    const events: ClientEvent[] = [];
+    const client = createClient({ network: "testnet", settler });
+    client.on((event) => events.push(event));
+
+    const result = await client.pay({ resource: OFFER.resource, offer: OFFER });
+    expect(result.receipt).toEqual(baselineReceipt);
+    expect(requests).toHaveLength(2);
+    expect(requests[0]?.pinned).toBeUndefined();
+    expect(requests[1]?.pinned).toEqual(TERMS);
+    expect(events.find((event) => event.type === "retry")).toEqual({
+      type: "retry",
+      resource: OFFER.resource,
+      attempt: 2,
+      reason: "expired authorization",
+    });
+  });
+
+  it("records the payment exactly once, however many attempts it took", async () => {
+    const { settler } = scripted(expired());
+    const inner = createPolicyEngine({ budgets: { daily: "1000000" } });
+    const record = vi.fn(inner.record);
+    const client = createClient({
+      network: "testnet",
+      settler,
+      policy: { ...inner, record },
+      retry: { maxAttempts: 3 },
+    });
+    await client.pay({ resource: OFFER.resource, offer: OFFER });
+    expect(record).toHaveBeenCalledTimes(1);
+  });
+
+  it("checks the policy again before a fresh authorization and stops if it now blocks", async () => {
+    // One attempt per minute: the retry is a second attempt, so the policy
+    // refuses it before anything is signed again.
+    const policy = createPolicyEngine({
+      rateLimit: { windows: [{ windowSeconds: 60, limit: 1 }], count: "attempts" },
+    });
+    const { settler, requests } = scripted(expired());
+    const client = createClient({ network: "testnet", settler, policy });
+    await expect(client.pay({ resource: OFFER.resource, offer: OFFER })).rejects.toBeInstanceOf(
+      PolicyBlockedError,
+    );
+    expect(requests).toHaveLength(1);
+  });
+
+  it("counts each payment it sends on the shadow too, never its evaluations", async () => {
+    const shadow = createPolicyEngine({
+      rateLimit: { windows: [{ windowSeconds: 60, limit: 10 }], count: "attempts" },
+    });
+    const recordAttempt = vi.fn(shadow.recordAttempt);
+    const { settler } = scripted(expired());
+    const client = createClient({
+      network: "testnet",
+      settler,
+      shadow: { ...shadow, recordAttempt },
+    });
+    client.on(() => {});
+    await client.pay({ resource: OFFER.resource, offer: OFFER });
+    expect(recordAttempt).toHaveBeenCalledTimes(2);
+  });
+
+  it("never retries an ambiguous outcome, and keeps the settler's error as the cause", async () => {
+    const ambiguous = new SettlementOutcomeError({
+      kind: "ambiguous",
+      reason: "502 after signing",
+    });
+    const { settler, requests } = scripted(ambiguous);
+    const client = createClient({ network: "testnet", settler, retry: { maxAttempts: 5 } });
+    const error = await client.pay({ resource: OFFER.resource, offer: OFFER }).catch((e) => e);
+    expect(error).toBeInstanceOf(AmbiguousSettlementError);
+    expect(error.code).toBe("outcome-unknown");
+    expect(error.cause).toBe(ambiguous);
+    expect(requests).toHaveLength(1);
+  });
+
+  it("never retries a fatal outcome", async () => {
+    const fatal = new SettlementOutcomeError({ kind: "fatal", reason: "403" });
+    const { settler, requests } = scripted(fatal);
+    const client = createClient({ network: "testnet", settler, retry: { maxAttempts: 5 } });
+    await expect(client.pay({ resource: OFFER.resource, offer: OFFER })).rejects.toBe(fatal);
+    expect(requests).toHaveLength(1);
+  });
+
+  describe("a settlement already in progress", () => {
+    function inProgress(retryAfterMs: number, resend: () => Promise<SignedReceipt>) {
+      return new SettlementOutcomeError({
+        kind: "settlement-in-progress",
+        reason: "already settling",
+        retryAfterMs,
+        resend,
+      });
+    }
+
+    it("shares one resend with a concurrent identical call, and records the spend once", async () => {
+      // The retry runs inside the shared settlement (#210), so a second
+      // caller waiting on the same purchase neither signs nor resends.
+      const resend = vi.fn(async () => baselineReceipt);
+      const sleep = vi.fn(async (_ms: number) => {});
+      const { settler, requests } = scripted(inProgress(250, resend));
+      const record = vi.fn(async () => {});
+      const policy = createPolicyEngine({ budgets: { daily: "1000000" } });
+      const spy = vi.spyOn(policy, "record").mockImplementation(record);
+      const client = createClient({ network: "testnet", settler, policy, retry: { sleep } });
+
+      const [a, b] = await Promise.all([
+        client.pay({ resource: OFFER.resource, offer: OFFER }),
+        client.pay({ resource: OFFER.resource, offer: { ...OFFER } }),
+      ]);
+
+      expect(requests).toHaveLength(1);
+      expect(resend).toHaveBeenCalledTimes(1);
+      expect(spy).toHaveBeenCalledTimes(1);
+      expect(a).toMatchObject({ deduplicated: false, receipt: baselineReceipt });
+      expect(b).toMatchObject({ deduplicated: true, receipt: baselineReceipt });
+    });
+
+    it("refuses a resent receipt that does not describe the paid offer", async () => {
+      // A resend's receipt is bound to the offer like any other (#202).
+      const resend = vi.fn(async () => mppChargeReceipt);
+      const { settler } = scripted(inProgress(250, resend));
+      const client = createClient({
+        network: "testnet",
+        settler,
+        retry: { sleep: async () => {} },
+      });
+
+      await expect(client.pay({ resource: OFFER.resource, offer: OFFER })).rejects.toMatchObject({
+        code: "receipt-offer-mismatch",
+      });
+    });
+
+    it("waits Retry-After and resends the same payment instead of signing a new one", async () => {
+      const resend = vi.fn(async () => baselineReceipt);
+      const sleep = vi.fn(async (_ms: number) => {});
+      const { settler, requests } = scripted(inProgress(250, resend));
+      const client = createClient({ network: "testnet", settler, retry: { sleep } });
+      const result = await client.pay({ resource: OFFER.resource, offer: OFFER });
+      expect(result.receipt).toEqual(baselineReceipt);
+      expect(sleep).toHaveBeenCalledWith(250);
+      expect(resend).toHaveBeenCalledTimes(1);
+      expect(requests).toHaveLength(1);
+    });
+
+    it("does not re-run the policy for a resend: it is the same payment", async () => {
+      const policy = createPolicyEngine({
+        rateLimit: { windows: [{ windowSeconds: 60, limit: 1 }], count: "attempts" },
+      });
+      const resend = vi.fn(async () => baselineReceipt);
+      const { settler } = scripted(inProgress(1, resend));
+      const client = createClient({
+        network: "testnet",
+        settler,
+        policy,
+        retry: { sleep: async () => {} },
+      });
+      await expect(client.pay({ resource: OFFER.resource, offer: OFFER })).resolves.toBeDefined();
+    });
+
+    it(`gives up with an unknown outcome when Retry-After exceeds ${MAX_RETRY_AFTER_MS}ms`, async () => {
+      const resend = vi.fn(async () => baselineReceipt);
+      const sleep = vi.fn(async (_ms: number) => {});
+      const { settler } = scripted(inProgress(MAX_RETRY_AFTER_MS + 1, resend));
+      const client = createClient({ network: "testnet", settler, retry: { sleep } });
+      await expect(client.pay({ resource: OFFER.resource, offer: OFFER })).rejects.toBeInstanceOf(
+        AmbiguousSettlementError,
+      );
+      expect(sleep).not.toHaveBeenCalled();
+      expect(resend).not.toHaveBeenCalled();
+    });
+
+    it("gives up with an unknown outcome when no attempt is left", async () => {
+      const resend = vi.fn(async () => baselineReceipt);
+      const { settler } = scripted(inProgress(1, resend));
+      const client = createClient({
+        network: "testnet",
+        settler,
+        retry: { maxAttempts: 1, sleep: async () => {} },
+      });
+      await expect(client.pay({ resource: OFFER.resource, offer: OFFER })).rejects.toBeInstanceOf(
+        AmbiguousSettlementError,
+      );
+      expect(resend).not.toHaveBeenCalled();
+    });
+  });
+
+  it("stops at maxAttempts and surfaces the last outcome", async () => {
+    const last = expired("still expired");
+    const { settler, requests } = scripted(expired(), expired(), last);
+    const client = createClient({ network: "testnet", settler, retry: { maxAttempts: 3 } });
+    await expect(client.pay({ resource: OFFER.resource, offer: OFFER })).rejects.toBe(last);
+    expect(requests).toHaveLength(3);
+  });
+
+  it("clamps maxAttempts to five", async () => {
+    const { settler, requests } = scripted(...Array.from({ length: 9 }, () => expired()));
+    const client = createClient({ network: "testnet", settler, retry: { maxAttempts: 100 } });
+    await expect(client.pay({ resource: OFFER.resource, offer: OFFER })).rejects.toBeInstanceOf(
+      SettlementOutcomeError,
+    );
+    expect(requests).toHaveLength(5);
+  });
+
+  it("passes any other error through without retrying", async () => {
+    const { settler, requests } = scripted(new TollwayError("payment-failed", "legacy error"));
+    const client = createClient({ network: "testnet", settler });
+    await expect(client.pay({ resource: OFFER.resource, offer: OFFER })).rejects.toThrow(
+      "legacy error",
+    );
+    expect(requests).toHaveLength(1);
   });
 });
 

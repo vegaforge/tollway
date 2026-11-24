@@ -57,8 +57,22 @@ describe.skipIf(!RUN)("createStellarMppChannelAdapter (testnet integration)", ()
     }
     expect(BigInt(last)).toBe(BigInt(step) * BigInt(Math.max(10, commits)));
 
+    const before = await adapter.getChannelState({ channelId: channel.id, network: "testnet" });
     const closed = await manager.close(channel.id);
     expect(closed.settlementTxHash).toMatch(/^[0-9a-f]{64}$/);
     expect(closed.returnedRemainder).toBe((BigInt(deposit) - BigInt(last)).toString());
+
+    // The lookup resume relies on (#176) reads the same settlement back
+    // from the contract's events.
+    const found = await adapter.findChannelSettlement({
+      channelId: channel.id,
+      network: "testnet",
+      startLedger: before.currentLedger,
+    });
+    expect(found).toMatchObject({
+      settlementTxHash: closed.settlementTxHash,
+      settledAmount: last,
+      returnedRemainder: closed.returnedRemainder,
+    });
   }, 180_000);
 });

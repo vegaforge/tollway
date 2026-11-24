@@ -1,0 +1,66 @@
+---
+title: Discovery
+description: Publishing paywalled routes to x402 Bazaar catalogues, and how to opt out
+---
+
+Some x402 facilitators keep a catalogue of the paid routes they settle, so agents can find services to pay for. The catalogue format is the Bazaar discovery extension from `@x402/extensions`. Tollway can publish a route to it, but only when you ask: a route without a `discovery` block publishes nothing, and nothing changes for it.
+
+## What is published, and to whom
+
+With a `discovery` block, the route's 402 challenge carries an `extensions.bazaar` declaration: the kind of input (query string or body), an example input and its JSON Schema, an example output, the HTTP method, and the route template. The challenge's `resource` also gets your `description` and `mimeType`.
+
+The agent's x402 client copies those extensions into the payment it signs, and Tollway forwards that payment unchanged to your facilitator's `/verify` and `/settle`. A facilitator that runs a catalogue reads the declaration there with `extractDiscoveryInfo` and lists the route. Nobody else receives it: Tollway does not run a catalogue and sends the declaration nowhere else.
+
+The catalogue lists the route template, for example `https://api.example.com/weather/:city`, not the path a particular payer requested. Tollway also removes the concrete path values that the upstream enrichment would otherwise copy into the declaration, so `/weather/:city` never publishes the city a payer asked for. It publishes your declared `pathParams` example instead, or none. Two things are outside discovery: every x402 payment carries the requested URL in `resource.url`, so the facilitator sees that whether or not you publish, and the query-string and body examples you declare are published as written, so never put real customer data in them.
+
+## Declaring a route
+
+```ts
+import { createPaywall } from "@vegaforge/tollway-server";
+
+const weather = createPaywall(
+  {
+    amount: "100000",
+    asset: USDC,
+    payTo: PAYEE,
+    network: "testnet",
+    discovery: {
+      kind: "query", // a query-string route: GET, HEAD or DELETE
+      routeTemplate: "/weather/:city",
+      description: "Current weather for a city",
+      mimeType: "application/json",
+      input: { units: "metric" },
+      inputSchema: { properties: { units: { type: "string", enum: ["metric", "imperial"] } } },
+      output: { example: { tempC: 21 } },
+    },
+  },
+  { signer, facilitator },
+);
+```
+
+A route that takes a request body uses `kind: "body"` with `bodyType: "json"`, `"form-data"` or `"text"`, and `input` is then an example body. The method is not declared: it is taken from the request, as the upstream enrichment does, so a query route called with GET is published as GET.
+
+`routeTemplate` must be a path of `/` segments with `:param` names. Make every segment that could identify a person a parameter. A template with `..` or `://` is refused.
+
+`createPaywall` checks the whole declaration when it is created, with the validators from `@x402/extensions`: the protocol rules, and that your examples match your schemas. A bad declaration throws `TollwayError` with code `invalid-discovery`, so it never reaches a 402.
+
+## Opting out
+
+Leave out `discovery`. That is the default, and a route without it carries no `extensions` at all. To withdraw a route that was published, remove the block; when a facilitator drops stale entries is up to the facilitator.
+
+## Reading a catalogue
+
+`listDiscoveryResources` reads one page of a facilitator's catalogue through `withBazaar` from `@x402/extensions` (`GET <facilitator>/discovery/resources`). The response is checked against a schema at the boundary, so a malformed catalogue throws `facilitator-invalid-response` naming the field, instead of reaching your code half-checked.
+
+```ts
+import { listDiscoveryResources } from "@vegaforge/tollway-server";
+
+const page = await listDiscoveryResources("https://facilitator.example", {
+  params: { type: "http", limit: 50, offset: 0 },
+});
+for (const item of page.items) {
+  console.log(item.resource, item.description, item.accepts[0]?.amount);
+}
+```
+
+The model router does not use catalogue data yet. A catalogue entry is what a service says about itself, relayed by a facilitator, and nothing ties it to the offer a service actually makes when it answers 402. The router decides from the live offer and the agent's own policy.
