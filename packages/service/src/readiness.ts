@@ -10,11 +10,13 @@ const storeStatusSchema = z.object({
   reason: enumSchema(["timeout", "error"]).optional(),
 });
 
+/** Schema for `/readyz` status reports across every backing store. */
 export const readinessReportSchema = z.object({
   status: enumSchema(["ready", "not-ready"]),
   stores: z.record(z.string(), storeStatusSchema),
 });
 
+/** Readiness report returned by `/readyz`. */
 export type ReadinessReport = z.infer<typeof readinessReportSchema>;
 type StoreStatus = z.infer<typeof storeStatusSchema>;
 

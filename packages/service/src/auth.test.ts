@@ -3,9 +3,9 @@ import { z } from "zod";
 import type { ServiceModule } from "./app.js";
 import { hashApiKey } from "./auth.js";
 import { defineRoute } from "./routes.js";
-import { bearer, KEYS, testService } from "./test-support.js";
+import { bearer, DEFAULT_TENANT, KEYS, testService } from "./test-support.js";
 
-// A route that needs the admin scope, mounted the way #225 to #228 will mount theirs.
+// A route that needs the admin scope, mounted the way #225 to #228 mount theirs.
 const adminModule: ServiceModule = () => [
   defineRoute({
     method: "post",
@@ -15,6 +15,18 @@ const adminModule: ServiceModule = () => [
     request: { body: z.object({ value: z.string() }) },
     responses: { 200: { description: "ok" } },
     handler: (c, { body }) => c.json({ echoed: body.value }),
+  }),
+];
+
+// An operator-only route, mounted the way adminModule() mounts /v1/admin/tenants.
+const operatorModule: ServiceModule = () => [
+  defineRoute({
+    method: "get",
+    path: "/v1/operator-only",
+    summary: "Test route",
+    scope: "operator",
+    responses: { 200: { description: "ok" } },
+    handler: (c) => c.json({ ok: true }),
   }),
 ];
 
@@ -78,6 +90,24 @@ describe("API-key authentication on /v1/*", () => {
     });
   });
 
+  it("refuses an operator key on tenant routes with 403", async () => {
+    const { response, text } = await call(bearer(KEYS.operator));
+    expect(response.status).toBe(403);
+    expect(JSON.parse(text)).toEqual({
+      error: { code: "forbidden", message: "operator keys cannot access tenant routes" },
+    });
+  });
+
+  it("refuses a revoked operator key on the operator route with 401", async () => {
+    const config = {
+      operatorKeys: [{ name: "ops", sha256: await hashApiKey(KEYS.operator), revoked: true }],
+    };
+    const { app } = await testService({ config, modules: [operatorModule] });
+    const response = await app.request("/v1/operator-only", { headers: bearer(KEYS.operator) });
+    expect(response.status).toBe(401);
+    expect((await response.json()).error.message).toContain("revoked");
+  });
+
   it("lets a key with the scope through", async () => {
     const { response, text } = await call(bearer(KEYS.admin));
     expect(response.status).toBe(200);
@@ -103,6 +133,7 @@ describe("API-key authentication on /v1/*", () => {
       bearer(KEYS.reader),
       bearer(KEYS.revoked),
       bearer(KEYS.admin),
+      bearer(KEYS.operator),
     ]) {
       const { response, text, logger } = await call(headers);
       const exposed = [text, headerText(response.headers), JSON.stringify(logger.lines)];
@@ -113,18 +144,29 @@ describe("API-key authentication on /v1/*", () => {
     }
   });
 
-  it("logs the key name, not the key", async () => {
+  it("logs the key name and tenant, never the key", async () => {
     const { logger } = await call(bearer(KEYS.admin));
     expect(logger.lines).toContainEqual({
       level: "info",
       event: "request",
-      fields: expect.objectContaining({ path: "/v1/admin-only", status: 200, key: "admin" }),
+      fields: expect.objectContaining({
+        path: "/v1/admin-only",
+        status: 200,
+        key: "admin",
+        orgId: DEFAULT_TENANT.orgId,
+        projectId: DEFAULT_TENANT.projectId,
+      }),
     });
   });
 
-  it("reports the calling key through /v1/whoami", async () => {
+  it("reports the calling key and its tenant through /v1/whoami", async () => {
     const { app } = await testService();
     const response = await app.request("/v1/whoami", { headers: bearer(KEYS.admin) });
-    expect(await response.json()).toEqual({ name: "admin", scopes: ["read", "admin"] });
+    expect(await response.json()).toEqual({
+      name: "admin",
+      orgId: DEFAULT_TENANT.orgId,
+      projectId: DEFAULT_TENANT.projectId,
+      scopes: ["read", "admin"],
+    });
   });
 });
