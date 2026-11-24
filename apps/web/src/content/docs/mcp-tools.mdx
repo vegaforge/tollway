@@ -1,0 +1,70 @@
+---
+title: Paying for MCP tools
+description: Let an agent call paid MCP tools while Tollway applies its policy, checks the offer and verifies the receipt
+---
+
+A paid MCP tool answers an unpaid call with a payment request instead of a result. `createTollwayMcpClient`, in the `@vegaforge/tollway-client/mcp` subpath, wraps an MCP client so the agent pays that request through the Tollway client and gets the tool result back with a verified receipt. The payment passes the same checks as an HTTP payment: offer checks, counterparty quarantine, policy, retry rules, receipt signature, receipt-to-offer binding and the receipt store.
+
+## The wire format
+
+Tollway follows the x402 MCP transport, as the published `@x402/mcp` 2.31 client implements it:
+
+1. An unpaid call returns `isError: true` with an x402 V2 `PaymentRequired` challenge in `structuredContent`, or JSON-encoded in the first text block.
+2. The client calls the tool again with the signed `PaymentPayload` in `_meta["x402/payment"]`.
+3. A settled call returns the tool result with `_meta["x402/payment-response"]`, and, from a Tollway gate, the signed receipt in `_meta["tollway/receipt"]`.
+
+The challenge is parsed with the x402 V2 schema. A tool error that is not a valid challenge is a plain tool error: the wrapper returns it unchanged and never pays.
+
+## Use it
+
+```ts
+import { Client } from "@modelcontextprotocol/sdk/client/index.js";
+import { createMemoryReceiptStore, PolicyBlockedError } from "@vegaforge/tollway-client";
+import { createTollwayMcpClient } from "@vegaforge/tollway-client/mcp";
+import { createPolicyEngine, Ed25519Verifier } from "@vegaforge/tollway-core";
+import { createEd25519Signer } from "@x402/stellar";
+
+const mcp = new Client({ name: "my-agent", version: "1.0.0" });
+await mcp.connect(transport);
+
+const agent = createTollwayMcpClient({
+  client: mcp,
+  network: "testnet",
+  signer: createEd25519Signer(process.env.AGENT_SECRET, "stellar:testnet"),
+  policy: createPolicyEngine({ budgets: { daily: "1000000" } }),
+  verifier: new Ed25519Verifier({ "weather-service": servicePublicKey }),
+  receiptStore: createMemoryReceiptStore(),
+});
+
+try {
+  const call = await agent.callTool({ name: "forecast", arguments: { city: "Lagos" } });
+  console.log(call.result.content, call.paid, call.receipt?.receipt.id);
+} catch (error) {
+  if (error instanceof PolicyBlockedError) console.log(`blocked by ${error.rule}`);
+  else throw error;
+}
+```
+
+`callTool` returns `{ result, paid, receipt, model, deduplicated, storeError }`. Anything you pass after the call parameters, such as the MCP SDK's result schema and request options, goes to both the first call and the paid one.
+
+The wrapper is typed against the shape of an MCP client rather than the MCP SDK, so the subpath does not import the SDK. The SDK's `Client` fits it; the tests run against `@modelcontextprotocol/sdk` 1.32.
+
+## What it guarantees
+
+- **Policy first.** Every payment goes through `pay()`. A blocked payment rejects with `PolicyBlockedError` and emits a `skip` event, and nothing is signed.
+- **The offer comes from the challenge.** The offer's `resource` is the challenge's `resource.url`, and the amount, asset and payee come from its Stellar `exact` option. Only that option is ever signed.
+- **The receipt is checked before the result is returned.** With a `verifier`, the signature must verify. With or without one, the receipt must describe the offer that was paid.
+- **One payment per call, within the retry rules.** If the tool answers the paid call with another payment request, the client may sign once more under its retry policy (two attempts by default), and only for the same terms. With `retry: { maxAttempts: 1 }`, a second request rejects.
+- **Concurrent calls stay apart.** Paid calls to the same tool are paid one at a time, so each call's arguments travel with its own payment.
+- **No user data in logs.** Tool arguments and results are never logged or put in error messages.
+
+`onPaymentRequested` runs before `pay()` with the tool name and offer. Returning `false` rejects with `PolicyBlockedError` (rule `onPaymentRequested`) and a `skip` event. Use it for a human approval step; budgets and limits belong in the policy.
+
+## Example
+
+`examples/agent-tools` runs an agent against a mock paid MCP tool in process. It pays for two forecasts, is refused the third by its daily budget, and prints the spend summary from the receipt store:
+
+```bash
+pnpm turbo run build --filter='@vegaforge/tollway-example-agent-tools...'
+pnpm --filter @vegaforge/tollway-example-agent-tools mcp
+```
