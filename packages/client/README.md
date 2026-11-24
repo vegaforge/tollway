@@ -93,6 +93,23 @@ Two settlers ship with the package, one per per-request model:
 - `createMppChargeSettler({ secretKey | keypair, network, mode? })` pays MPP charge routes with `@stellar/mpp`. It refuses a challenge unless the amount, recipient, token contract and network match the approved offer, and nothing is signed until they do. In `pull` mode (the default) the service submits the transaction and pays the fee; in `push` mode the agent submits it, so its account also needs XLM. It never patches `globalThis.fetch`.
 
 Both read the Tollway receipt from the `TOLLWAY-RECEIPT` header.
+## Paying for MCP tools
+
+`@vegaforge/tollway-client/mcp` wraps an MCP client so a paid tool call is
+paid through the same client: offer checks, policy, retries and receipt
+verification all apply, and the tool result comes back with the verified
+receipt. A tool error that is not an x402 payment request is returned
+unchanged and never paid.
+
+```ts
+import { createTollwayMcpClient } from "@vegaforge/tollway-client/mcp";
+
+const agent = createTollwayMcpClient({ client: mcp, network: "testnet", signer, policy, verifier });
+const { result, paid, receipt } = await agent.callTool({ name: "forecast", arguments: { city: "Lagos" } });
+```
+
+See the [MCP tools guide](https://github.com/vegaforge/tollway/blob/dev/apps/web/src/content/docs/mcp-tools.mdx).
+
 ## Hardening an agent
 
 A 402 challenge is attacker-controlled input. Before the policy engine and
