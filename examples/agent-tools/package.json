@@ -1,0 +1,29 @@
+{
+  "name": "@vegaforge/tollway-example-agent-tools",
+  "version": "0.0.0",
+  "private": true,
+  "description": "Example: an agent that pays for MCP tools and an AI SDK model that fetches paid URLs, both within a Tollway budget",
+  "license": "Apache-2.0",
+  "type": "module",
+  "scripts": {
+    "mcp": "tsx src/mcp-agent.ts",
+    "ai": "tsx src/ai-agent.ts",
+    "test": "vitest run",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "1.32.2",
+    "@vegaforge/tollway-ai-sdk": "workspace:*",
+    "@vegaforge/tollway-client": "workspace:*",
+    "@vegaforge/tollway-core": "workspace:*",
+    "ai": "7.0.165",
+    "zod": "^4.6.7"
+  },
+  "devDependencies": {
+    "@types/node": "^22.20.5",
+    "@x402/core": "^2.31.0",
+    "tsx": "^4.23.15",
+    "typescript": "^5.9.3",
+    "vitest": "^4.1.12"
+  }
+}
