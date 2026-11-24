@@ -293,3 +293,16 @@ export function createReconciler(options: ReconcilerOptions = {}): Reconciler {
     },
   };
 }
+
+export {
+  createQuarantineEnforcer,
+  DEFAULT_DRIFT_ACTIONS,
+  type DriftAction,
+  type DriftQuarantineEvent,
+  type DriftWarnEvent,
+  type ProcessedDriftAction,
+  type ProcessReconciliationInput,
+  type ProcessReconciliationOutput,
+  type QuarantineEnforcerOptions,
+  type ReconciliationQuarantineEnforcer,
+} from "./quarantine.js";
