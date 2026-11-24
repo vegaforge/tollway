@@ -84,6 +84,15 @@ still unauthenticated: the checks catch a service that returns the wrong
 receipt by mistake, but anyone who can answer the request can forge one that
 passes them. Configure a verifier in production.
 
+
+## Settlers
+
+Two settlers ship with the package, one per per-request model:
+
+- `createX402Settler({ signer, network })` pays x402 V2 routes with `@x402/stellar`.
+- `createMppChargeSettler({ secretKey | keypair, network, mode? })` pays MPP charge routes with `@stellar/mpp`. It refuses a challenge unless the amount, recipient, token contract and network match the approved offer, and nothing is signed until they do. In `pull` mode (the default) the service submits the transaction and pays the fee; in `push` mode the agent submits it, so its account also needs XLM. It never patches `globalThis.fetch`.
+
+Both read the Tollway receipt from the `TOLLWAY-RECEIPT` header.
 ## Hardening an agent
 
 A 402 challenge is attacker-controlled input. Before the policy engine and

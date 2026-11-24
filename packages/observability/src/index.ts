@@ -845,3 +845,20 @@ export function createObservabilityHub(options: ObservabilityHubOptions = {}): O
     },
   };
 }
+
+export {
+  type AppendOutcome,
+  type ArchiveSearchOptions,
+  type ArchiveSearchResult,
+  createMemoryReceiptArchive,
+  DEFAULT_ARCHIVE_PAGE_SIZE,
+  MAX_ARCHIVE_PAGE_SIZE,
+  type ReceiptArchive,
+  type ReceiptArchiveOptions,
+  type ReceiptFilter,
+} from "./receipt-archive.js";
+export {
+  createSqliteReceiptArchive,
+  type SqliteReceiptArchive,
+  type SqliteReceiptArchiveOptions,
+} from "./receipt-archive-sqlite.js";
