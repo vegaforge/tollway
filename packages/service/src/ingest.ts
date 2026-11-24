@@ -239,8 +239,15 @@ export function ingestModule(options: IngestModuleOptions = {}): ServiceModule {
             const sink = observabilityFor(tenant);
             if (sink !== undefined) {
               for (const event of events) {
+                // Webhook receivers dedupe on the event id, and one hub may
+                // serve every tenant. Prefixing a caller-chosen id with the
+                // tenant stops one tenant from reusing another's id to get
+                // that tenant's event dropped as a duplicate. orgId and
+                // projectId never contain "/", so the prefix is unambiguous.
                 await sink.emit({
-                  ...(event.id === undefined ? {} : { id: event.id }),
+                  ...(event.id === undefined
+                    ? {}
+                    : { id: `${tenant.orgId}/${tenant.projectId}/${event.id}` }),
                   type: event.type,
                   at: event.at,
                   data: {

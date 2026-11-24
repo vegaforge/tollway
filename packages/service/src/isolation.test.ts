@@ -1103,6 +1103,41 @@ describe("batch ingest (#229) tenant claims and scoped deduplication", () => {
       ).status,
     ).toBe(503);
   });
+
+  it("namespaces caller-chosen event ids per tenant so a shared hub never sees one tenant reuse another's id", async () => {
+    // Webhook receivers dedupe on the event id. If tenant A could emit an
+    // event under the same id as tenant B, a subscriber of a shared hub
+    // would drop one of them as a duplicate.
+    const harness = await buildHarness();
+    const { app, emitted } = harness;
+    const event = {
+      id: "evt-shared-1",
+      type: "receipt.created",
+      at: "2026-11-24T11:00:00.000Z",
+      data: { receiptId: "r-1" },
+    };
+    for (const key of [KEY_A, KEY_B]) {
+      const response = await app.request("/v1/ingest", {
+        method: "POST",
+        headers: { ...bearer(key), "Content-Type": "application/json" },
+        body: JSON.stringify({ events: [event] }),
+      });
+      expect(response.status).toBe(202);
+    }
+
+    expect(emitted.map((entry) => entry.id)).toEqual([
+      `${TENANT_A.orgId}/${TENANT_A.projectId}/evt-shared-1`,
+      `${TENANT_B.orgId}/${TENANT_B.projectId}/evt-shared-1`,
+    ]);
+    // An event without an id is left for the hub to assign a fresh one.
+    const withoutId = await app.request("/v1/ingest", {
+      method: "POST",
+      headers: { ...bearer(KEY_A), "Content-Type": "application/json" },
+      body: JSON.stringify({ events: [{ ...event, id: undefined }] }),
+    });
+    expect(withoutId.status).toBe(202);
+    expect(emitted.at(-1)?.id).toBeUndefined();
+  });
 });
 
 describe("per-tenant quotas (429 responses), per-tenant observability, and operator admin path", () => {
