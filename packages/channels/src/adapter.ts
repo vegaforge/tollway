@@ -124,8 +124,11 @@ export interface MppChannelAdapter {
    * Funder-side `close_start` (#38): starts a dispute on the one-way-channel
    * contract and returns the transaction hash together with the ledger at
    * which the close becomes effective. The waiting period is reported by
-   * `getState`; no wall-clock time is involved. The real contract invocation
-   * is implemented by the Stellar adapter's follow-up (#101).
+   * `getState`; no wall-clock time is involved. Throw
+   * `CloseNotSubmittedError` only when nothing reached the network, so the
+   * manager can hand the channel back to the status it had; any other error
+   * is treated as possibly submitted. The real contract invocation is the
+   * Stellar adapter's follow-up (#101).
    */
   startClose(input: { channelId: string; network: StellarNetwork }): Promise<StartCloseResult>;
   /**
