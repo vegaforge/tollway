@@ -8,6 +8,9 @@
  * settlement on the policy engine so budgets advance, and hands back the
  * canonical receipt. See docs/design.md, "Architecture" (agent side).
  *
+ * Calls that overlap for the same purchase share one settlement, so an agent
+ * that fires the same request twice in parallel pays once.
+ *
  * The settler is the seam between this orchestrator and the protocol-
  * specific dance (Soroban auth entry signing for x402, MPP channel
  * commitments, etc.). Tests inject a mock settler; production wires a
@@ -17,6 +20,7 @@
  */
 
 import {
+  canonicalJson,
   comparePolicyTraces,
   createPolicyEngine,
   decisionFromTrace,
@@ -39,6 +43,17 @@ import type { ReceiptStore } from "./receipt-store.js";
 /** Events the client emits so callers and observability can follow along. */
 export type ClientEvent =
   | { type: "payment"; resource: string; model: SettlementModel; receipt: SignedReceipt }
+  /**
+   * A call that shared another call's settlement instead of paying. It
+   * carries the receipt of the one payment that was made, which the settling
+   * call reports as `payment`. Count `payment` events to count payments.
+   */
+  | {
+      type: "payment:deduplicated";
+      resource: string;
+      model: SettlementModel;
+      receipt: SignedReceipt;
+    }
   | { type: "skip"; resource: string; reason: string }
   /**
    * The active policy's full trace for this payment, emitted before the
@@ -136,11 +151,23 @@ export type PayRequest = {
   offer: PaymentOffer;
   /** Force a settlement model, bypassing the router. */
   model?: SettlementModel;
+  /**
+   * Names the purchase. Concurrent calls with the same key share one
+   * settlement, whatever their resource and offer, and calls with different
+   * keys never share one. When omitted, the key is derived from the resource,
+   * the routed model, and the offer's amount, asset, payTo and network.
+   */
+  idempotencyKey?: string;
 };
 
 export type PayResult = {
   receipt: SignedReceipt;
   model: SettlementModel;
+  /**
+   * True when this call shared a concurrent call's settlement and did not
+   * pay. The receipt is the one that call was given.
+   */
+  deduplicated: boolean;
   /**
    * Set when the payment settled but the receipt store could not persist the
    * receipt. The receipt itself is complete and valid; the store's history has
@@ -162,6 +189,9 @@ export interface TollwayClient {
  */
 export function createClient(options: TollwayClientOptions): TollwayClient {
   const handlers: ClientEventHandler[] = [];
+  // Settlements in progress, by purchase key. In process only: two workers
+  // of the same agent do not see each other's entries.
+  const inFlight = new Map<string, Promise<Settled>>();
   // With a shadow policy and no active one, the candidate is compared with
   // "no policy", which an empty policy evaluates to exactly.
   const shadowBaseline =
@@ -229,97 +259,155 @@ export function createClient(options: TollwayClientOptions): TollwayClient {
     }
   }
 
+  /**
+   * One payment from policy check to recorded spend. Only this path
+   * evaluates the policy, stores the receipt, records the spend and emits
+   * `payment`, so calls that share the settlement are not counted twice.
+   */
+  async function settleOnce(request: PayRequest, model: SettlementModel): Promise<Settled> {
+    try {
+      const intent: PaymentIntent = {
+        payee: request.offer.payTo,
+        resource: request.resource,
+        amount: request.offer.amount,
+        asset: request.offer.asset,
+        model,
+      };
+
+      let activeTrace: PolicyTrace | undefined;
+      if (options.policy) {
+        activeTrace = await options.policy.evaluate(intent);
+        // No handler, no event object: the quiet path stays as cheap as a
+        // plain check().
+        if (handlers.length > 0) {
+          emit({ type: "policy:decision", resource: request.resource, trace: activeTrace });
+        }
+      }
+
+      if (options.shadow && shadowBaseline && handlers.length > 0) {
+        await shadowCompare(options.shadow, shadowBaseline, activeTrace, intent, request.resource);
+      }
+
+      if (activeTrace) {
+        // The same function check() uses, so the trace just emitted and the
+        // decision below cannot disagree.
+        const decision = decisionFromTrace(activeTrace);
+        if (!decision.allowed) {
+          emit({
+            type: "skip",
+            resource: request.resource,
+            reason: `${decision.rule}: ${decision.detail}`,
+          });
+          throw new PolicyBlockedError(decision.rule, decision.detail);
+        }
+      }
+
+      const settled = await options.settler.settle({
+        resource: request.resource,
+        offer: request.offer,
+        model,
+      });
+
+      // Only the parsed receipt leaves pay(), never the settler's object,
+      // so a field the signature does not cover cannot reach the caller.
+      const receipt = await checkedReceipt(settled, options.verifier);
+
+      // The payment has settled, so a store failure must not cost the payer
+      // the receipt. The error goes on the result and to onStoreError.
+      let storeError: Error | undefined;
+      if (options.receiptStore) {
+        try {
+          await options.receiptStore.put(receipt);
+        } catch (rawStoreError) {
+          storeError = normalizeError(rawStoreError);
+          try {
+            options.onStoreError?.(storeError, receipt);
+          } catch {
+            // A throwing alert hook must not poison the pay() promise either.
+          }
+        }
+      }
+
+      if (options.policy) {
+        await options.policy.record(intent);
+      }
+      if (options.shadow) {
+        await shadowRecord(options.shadow, intent, request.resource);
+      }
+
+      emit({ type: "payment", resource: request.resource, model, receipt });
+      return storeError ? { receipt, model, storeError } : { receipt, model };
+    } catch (rawError) {
+      const error = normalizeError(rawError);
+      emit({ type: "error", resource: request.resource, error });
+      throw error;
+    }
+  }
+
   return {
     on(handler) {
       handlers.push(handler);
     },
     async pay(request): Promise<PayResult> {
+      let model: SettlementModel;
       try {
-        const model = await decideModel(options.router, request);
-        const intent: PaymentIntent = {
-          payee: request.offer.payTo,
-          resource: request.resource,
-          amount: request.offer.amount,
-          asset: request.offer.asset,
-          model,
-        };
-
-        let activeTrace: PolicyTrace | undefined;
-        if (options.policy) {
-          activeTrace = await options.policy.evaluate(intent);
-          // No handler, no event object: the quiet path stays as cheap as a
-          // plain check().
-          if (handlers.length > 0) {
-            emit({ type: "policy:decision", resource: request.resource, trace: activeTrace });
-          }
-        }
-
-        if (options.shadow && shadowBaseline && handlers.length > 0) {
-          await shadowCompare(
-            options.shadow,
-            shadowBaseline,
-            activeTrace,
-            intent,
-            request.resource,
-          );
-        }
-
-        if (activeTrace) {
-          // The same function check() uses, so the trace just emitted and the
-          // decision below cannot disagree.
-          const decision = decisionFromTrace(activeTrace);
-          if (!decision.allowed) {
-            emit({
-              type: "skip",
-              resource: request.resource,
-              reason: `${decision.rule}: ${decision.detail}`,
-            });
-            throw new PolicyBlockedError(decision.rule, decision.detail);
-          }
-        }
-
-        const settled = await options.settler.settle({
-          resource: request.resource,
-          offer: request.offer,
-          model,
-        });
-
-        // Only the parsed receipt leaves pay(), never the settler's object,
-        // so a field the signature does not cover cannot reach the caller.
-        const receipt = await checkedReceipt(settled, options.verifier);
-
-        // The payment has settled, so a store failure must not cost the payer
-        // the receipt. The error goes on the result and to onStoreError.
-        let storeError: Error | undefined;
-        if (options.receiptStore) {
-          try {
-            await options.receiptStore.put(receipt);
-          } catch (rawStoreError) {
-            storeError = normalizeError(rawStoreError);
-            try {
-              options.onStoreError?.(storeError, receipt);
-            } catch {
-              // A throwing alert hook must not poison the pay() promise either.
-            }
-          }
-        }
-
-        if (options.policy) {
-          await options.policy.record(intent);
-        }
-        if (options.shadow) {
-          await shadowRecord(options.shadow, intent, request.resource);
-        }
-
-        emit({ type: "payment", resource: request.resource, model, receipt });
-        return storeError ? { receipt, model, storeError } : { receipt, model };
+        model = await decideModel(options.router, request);
       } catch (rawError) {
         const error = normalizeError(rawError);
         emit({ type: "error", resource: request.resource, error });
         throw error;
       }
+
+      // A call that arrives while the same purchase is being settled waits
+      // for that settlement instead of paying again. The map is read and
+      // written with no await in between, so two calls cannot both miss it.
+      const key = purchaseKey(request, model);
+      const pending = inFlight.get(key);
+      if (pending) {
+        // A shared failure rejects here with the error the settling call
+        // already reported, so one failure is one `error` event.
+        const shared = await pending;
+        emit({
+          type: "payment:deduplicated",
+          resource: request.resource,
+          model: shared.model,
+          receipt: shared.receipt,
+        });
+        return { ...shared, deduplicated: true };
+      }
+
+      const attempt = settleOnce(request, model);
+      inFlight.set(key, attempt);
+      try {
+        return { ...(await attempt), deduplicated: false };
+      } finally {
+        // Completed receipts are not kept: a later call is a new purchase.
+        inFlight.delete(key);
+      }
     },
   };
+}
+
+/** What one settlement produced, before a call marks it as its own or shared. */
+type Settled = { receipt: SignedReceipt; model: SettlementModel; storeError?: Error };
+
+/**
+ * The key two calls must share to count as the same purchase. A caller's
+ * `idempotencyKey` and a derived key carry different prefixes, so a caller's
+ * string can never equal a derived key.
+ */
+function purchaseKey(request: PayRequest, model: SettlementModel): string {
+  if (request.idempotencyKey !== undefined) {
+    return `key:${request.idempotencyKey}`;
+  }
+  return `offer:${canonicalJson({
+    resource: request.resource,
+    model,
+    amount: request.offer.amount,
+    asset: request.offer.asset,
+    payTo: request.offer.payTo,
+    network: request.offer.network,
+  })}`;
 }
 
 /**

@@ -50,6 +50,7 @@ import {
   type FacilitatorValidator,
   findMatchingKind,
 } from "./facilitator-capabilities.js";
+import { isPreSendFailure } from "./transport-errors.js";
 
 /**
  * Short-lived pin that ties a payment nonce to the facilitator that first
@@ -186,16 +187,7 @@ function classifyError(error: unknown): ErrorKind {
   if (error instanceof VerifyError || error instanceof SettleError) return "structured";
   if (error instanceof FacilitatorTimeoutError) return "outcome-unknown";
   if (error instanceof FacilitatorResponseError) return "outcome-unknown";
-  // Node fetch's connection-level failures arrive as TypeError with a
-  // `cause.code` of ECONNREFUSED / ENOTFOUND / EAI_AGAIN for pre-send
-  // failures. Walk the cause chain, since fetch wraps.
-  for (let cursor: unknown = error; cursor; cursor = (cursor as { cause?: unknown }).cause) {
-    if (!(cursor instanceof Error)) break;
-    const code = (cursor as unknown as { code?: string }).code;
-    if (code === "ECONNREFUSED" || code === "ENOTFOUND" || code === "EAI_AGAIN") {
-      return "pre-send";
-    }
-  }
+  if (isPreSendFailure(error)) return "pre-send";
   return "outcome-unknown";
 }
 
