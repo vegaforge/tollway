@@ -44,6 +44,12 @@ import {
   verifyReceipt,
 } from "@vegaforge/tollway-core";
 import {
+  type OfferChecks,
+  OfferRejectedError,
+  runOfferChecks,
+  validateOfferChecks,
+} from "./offer-checks.js";
+import {
   assertOfferForRequest,
   assertReceiptMatchesOffer,
   DEFAULT_RECEIPT_MAX_SKEW_MS,
@@ -240,6 +246,13 @@ export type TollwayClientOptions = {
   /** Optional router. When omitted, defaults to x402 unless `model` is on the request. */
   router?: ModelRouter;
   /**
+   * Per-offer sanity checks (#209): price ceilings per asset, payee and asset
+   * allowlists, and a zero-amount opt-in. They run in `pay()` before the
+   * policy engine and before the settler. The network and structural checks
+   * always run. See `offer-checks.ts`.
+   */
+  offerChecks?: OfferChecks;
+  /**
    * Optional quarantine store. When provided, `pay()` checks the
    * counterparty's standing before routing, emits `counterparty:quarantined`,
    * and passes `quarantined: true` to the router (failing closed on lookup
@@ -356,6 +369,10 @@ export function createClient(options: TollwayClientOptions): TollwayClient {
   const fallback = options.fallback;
   const cooldown = fallback ? createChannelCooldown(fallback) : undefined;
   const clientNow = (): number => (options.clock ?? Date.now)();
+  if (options.offerChecks) {
+    // A typo in a ceiling fails here, at startup, not on the first payment.
+    validateOfferChecks(options.offerChecks, options.network);
+  }
   // Settlements in progress, by purchase key. In process only: two workers
   // of the same agent do not see each other's entries.
   const inFlight = new Map<string, Promise<Settled>>();
@@ -727,6 +744,20 @@ export function createClient(options: TollwayClientOptions): TollwayClient {
           throw new OfferNetworkMismatchError(request.offer.network, options.network);
         }
         assertOfferForRequest(request.resource, request.offer);
+        // The offer is attacker-controlled input: check it before quarantine,
+        // routing, policy or any signature.
+        try {
+          runOfferChecks(request.offer, request.resource, options.network, options.offerChecks);
+        } catch (checkError) {
+          if (checkError instanceof OfferRejectedError) {
+            emit({
+              type: "skip",
+              resource: request.resource,
+              reason: `${checkError.checkName}: ${checkError.message}`,
+            });
+          }
+          throw checkError;
+        }
         let quarantined = false;
         if (options.quarantine) {
           let entry: QuarantineEntry | undefined;
@@ -1022,6 +1053,11 @@ function normalizeError(value: unknown): Error {
   return new Error(typeof value === "string" ? value : JSON.stringify(value));
 }
 
+export {
+  type OfferCheckName,
+  type OfferChecks,
+  OfferRejectedError,
+} from "./offer-checks.js";
 export {
   DEFAULT_RECEIPT_MAX_SKEW_MS,
   OfferNetworkMismatchError,

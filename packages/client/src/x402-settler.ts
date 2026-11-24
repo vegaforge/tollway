@@ -33,6 +33,7 @@ import type { PaymentPayload, PaymentRequired, PaymentRequirements } from "@x402
 import type { ClientStellarSigner } from "@x402/stellar";
 import { ExactStellarScheme } from "@x402/stellar/exact/client";
 import type { ClientSettler, SettleRequest } from "./index.js";
+import { type OfferChecks, passesAllowlists, validateOfferChecks } from "./offer-checks.js";
 import { SettlementOutcomeError, type SignedTerms } from "./retry.js";
 
 export const PAYMENT_REQUIRED_HEADER = "PAYMENT-REQUIRED";
@@ -53,6 +54,15 @@ export type X402SettlerOptions = {
   rpcUrl?: string;
   /** HTTP method for the paid request. Defaults to GET. */
   method?: string;
+  /**
+   * The same offer checks as `createClient` (#209). Only the payee and asset
+   * allowlists apply here: they are registered as an x402Client
+   * `PaymentPolicy` over the challenge's whole `accepts` list, so a
+   * multi-option challenge cannot steer the settler to an option outside
+   * them. The client checks the approved offer itself before the settler
+   * runs; this is the second layer, inside the challenge.
+   */
+  offerChecks?: OfferChecks;
 };
 
 const CAIP2: Record<StellarNetwork, "stellar:testnet" | "stellar:pubnet"> = {
@@ -74,6 +84,8 @@ export function createX402Settler(options: X402SettlerOptions): ClientSettler {
   const network = CAIP2[options.network];
   const doFetch = options.fetch ?? globalThis.fetch;
   const method = options.method ?? "GET";
+  if (options.offerChecks) validateOfferChecks(options.offerChecks, options.network);
+  const offerChecks = options.offerChecks;
   const scheme = new ExactStellarScheme(
     options.signer,
     options.rpcUrl ? { url: options.rpcUrl } : undefined,
@@ -96,13 +108,18 @@ export function createX402Settler(options: X402SettlerOptions): ClientSettler {
       }
       const paymentRequired = readPaymentRequired(challenge, resource);
 
+      // Options outside the allowlists are never candidates, even when they
+      // come first in the challenge.
       const requirements = paymentRequired.accepts.find(
-        (option) => option.scheme === "exact" && option.network === network,
+        (option) =>
+          option.scheme === "exact" &&
+          option.network === network &&
+          passesAllowlists(option, offerChecks),
       );
       if (!requirements) {
         throw new TollwayError(
           "payment-failed",
-          `the 402 from ${resource} has no Stellar exact option for ${network}`,
+          `the 402 from ${resource} has no Stellar exact option for ${network}${offerChecks ? " within the offer-check allowlists" : ""}`,
         );
       }
       assertMatchesOffer(requirements, offer, resource);
@@ -123,12 +140,21 @@ export function createX402Settler(options: X402SettlerOptions): ClientSettler {
           ],
         },
       });
+      // The x402Client sees the whole challenge. The first policy drops
+      // every option outside the allowlists (#209); the second keeps only the
+      // option checked against the approved offer above, so what is signed is
+      // exactly what was checked.
+      if (offerChecks) {
+        client.registerPolicy((_version, candidates) =>
+          candidates.filter((option) => passesAllowlists(option, offerChecks)),
+        );
+      }
+      client.registerPolicy((_version, candidates) =>
+        candidates.filter((option) => sameOption(option, requirements)),
+      );
       let payload: PaymentPayload;
       try {
-        payload = await client.createPaymentPayload({
-          ...paymentRequired,
-          accepts: [requirements],
-        });
+        payload = await client.createPaymentPayload(paymentRequired);
       } catch (error) {
         throw new TollwayError(
           "payment-failed",
@@ -328,4 +354,15 @@ function parseRetryAfterMs(header: string | null): number | undefined {
   const value = header?.trim();
   if (value === undefined || !/^[0-9]{1,6}$/.test(value)) return undefined;
   return Number(value) * 1000;
+}
+
+/** Whether two challenge options name the same payment terms. */
+function sameOption(a: PaymentRequirements, b: PaymentRequirements): boolean {
+  return (
+    a.scheme === b.scheme &&
+    a.network === b.network &&
+    a.amount === b.amount &&
+    a.asset === b.asset &&
+    a.payTo === b.payTo
+  );
 }

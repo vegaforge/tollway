@@ -423,3 +423,45 @@ describe("createX402Settler outcome classification (issue #203)", () => {
     expect(scheme.createPaymentPayload).not.toHaveBeenCalled();
   });
 });
+
+describe("createX402Settler offerChecks (#209)", () => {
+  const OTHER = Keypair.random().publicKey();
+
+  function checkedSettler(fetch: typeof globalThis.fetch, allowedPayees: string[]) {
+    return createX402Settler({
+      signer: createEd25519Signer(AGENT.secret(), "stellar:testnet"),
+      network: "testnet",
+      fetch,
+      offerChecks: { allowedPayees },
+    });
+  }
+
+  it("signs only the allowed option when a disallowed payee comes first", async () => {
+    const disallowed: PaymentRequirements = { ...stellarExact, payTo: OTHER };
+    const { fetch, calls } = scriptedFetch(
+      challenge(paymentRequired([disallowed, stellarExact])),
+      paid(),
+    );
+
+    await checkedSettler(fetch, [PAYEE]).settle({ resource: RESOURCE, offer, model: "x402" });
+
+    expect(scheme.createPaymentPayload).toHaveBeenCalledTimes(1);
+    expect(scheme.createPaymentPayload).toHaveBeenCalledWith(2, stellarExact);
+    const sent = (calls[1]?.init?.headers as Record<string, string>)[PAYMENT_SIGNATURE_HEADER];
+    expect(decodePaymentSignatureHeader(sent ?? "").accepted.payTo).toBe(PAYEE);
+  });
+
+  it("signs nothing when every option is outside the allowlist", async () => {
+    const { fetch, calls } = scriptedFetch(challenge(paymentRequired([stellarExact])));
+
+    await expect(
+      checkedSettler(fetch, [OTHER]).settle({ resource: RESOURCE, offer, model: "x402" }),
+    ).rejects.toThrow(/within the offer-check allowlists/);
+    expect(scheme.createPaymentPayload).not.toHaveBeenCalled();
+    expect(calls).toHaveLength(1);
+  });
+
+  it("refuses a malformed configuration when the settler is created", () => {
+    expect(() => checkedSettler(scriptedFetch().fetch, [""])).toThrow(TypeError);
+  });
+});
