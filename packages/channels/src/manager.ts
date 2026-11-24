@@ -3,17 +3,19 @@
  * "The channel lifecycle manager".
  *
  * Scope of this release: `open`, `commit`, `listChannels`, `shouldClose`,
- * `close`, and `resume` and `resumeAll` for closes a crash or an unknown
- * outcome left in `closing` (#176). `recover` is tracked under #38 and remains
- * a typed stub.
+ * `close`, `resume` and `resumeAll` for closes a crash or an unknown outcome
+ * left in `closing` (#176), and `recover` for the funder's close_start and
+ * refund path (#38). The funder-side contract calls behind the adapter's
+ * `startClose` and `refund` are the Stellar adapter's follow-up (#101).
  */
 
-import { type CounterpartyQuarantine, NotImplementedError } from "@vegaforge/tollway-core";
+import type { CounterpartyQuarantine } from "@vegaforge/tollway-core";
 import type {
   CloseAdapterResult,
   MppChannelAdapter,
   OpenAdapterResult,
   SignedCommitment,
+  StartCloseResult,
 } from "./adapter.js";
 import {
   ChannelAlreadyClosedError,
@@ -24,6 +26,7 @@ import {
   CommitmentExceedsDepositError,
   CounterpartyQuarantinedError,
   InvalidAmountError,
+  RecoveryNotYetEffectiveError,
   SettlementMismatchError,
   SettlementNotFoundError,
 } from "./errors.js";
@@ -39,6 +42,7 @@ import type {
   CloseResult,
   Commitment,
   OpenChannelInput,
+  RecoveryResult,
   ResumeAllResult,
   ResumeOutcome,
 } from "./types.js";
@@ -77,10 +81,11 @@ export type CreateChannelManagerOptions = {
   now?: () => string;
   /**
    * Receives lifecycle events (#187): `channel:opened`, `channel:closing`,
-   * `channel:closed` and `channel:close-failed`. Each is emitted after the
+   * `channel:closed` and `channel:close-failed`, plus `channel:recovering`
+   * and `channel:recovered` from `recover` (#38). Each is emitted after the
    * matching store write succeeds. The handler is not awaited, and a handler
-   * that throws or rejects never changes the result of `open` or `close`:
-   * the error goes to `onEventError`.
+   * that throws or rejects never changes the result of `open`, `close` or
+   * `recover`: the error goes to `onEventError`.
    */
   onEvent?: ChannelEventHandler;
   /** Receives an error thrown or rejected by `onEvent`, with the event it was handling. */
@@ -137,6 +142,8 @@ export function createChannelManager(options: CreateChannelManagerOptions): Chan
 
   /** Resumes in progress in this process, by channel id. */
   const resuming = new Map<string, Promise<ResumeOutcome>>();
+  /** Recoveries in progress, so concurrent calls cannot refund twice (#38). */
+  const recovering = new Map<string, Promise<RecoveryResult>>();
 
   /**
    * The last task queued for each channel that has work in flight (#175).
@@ -293,7 +300,15 @@ export function createChannelManager(options: CreateChannelManagerOptions): Chan
     if (parseAmount(chain.balance, "balance") > 0n) {
       // Closing with funds still in the contract is a funder-started close
       // or a dispute. That is the recovery path (#38), not a settlement.
-      await store.updateChannel(channelId, { status: "recovering" });
+      await store.updateChannel(channelId, {
+        status: "recovering",
+        closeEffectiveAtLedger: chain.closeEffectiveAtLedger,
+      });
+      emit({
+        type: "channel:recovering",
+        ...eventBase(current),
+        closeEffectiveAtLedger: chain.closeEffectiveAtLedger,
+      });
       return {
         kind: "recovering",
         channelId,
@@ -312,6 +327,141 @@ export function createChannelManager(options: CreateChannelManagerOptions): Chan
     const stream = await store.listCommitments(channelId);
     await settle(current, stream.at(-1)?.cumulativeAmount ?? "0", found);
     return { kind: "closed", channelId, ...settledFields(found) };
+  }
+
+  /**
+   * Moves a channel to `recovering` as a compare-and-set on the status it was
+   * read with. Commits are conditioned on `open`, so once this lands no
+   * commitment can follow, and a concurrent `close` or `recover` in another
+   * process loses here instead of acting on the same channel.
+   */
+  async function markRecovering(channel: Channel, patch: Partial<Channel>): Promise<void> {
+    try {
+      await store.transitionChannel(channel.id, channel.status, {
+        ...patch,
+        status: "recovering",
+      });
+    } catch (error) {
+      if (error instanceof CommitmentConflictError && error.field === "status") {
+        throw new ChannelAlreadyClosedError(channel.id, error.actual);
+      }
+      throw error;
+    }
+  }
+
+  /**
+   * Drives one recovery from the chain's point of view (#38). Ledger numbers
+   * come straight from the adapter; wall-clock time has no say in when a
+   * refund is permitted. See docs/design.md, "Open questions", item 1.
+   */
+  async function recoverOnce(channelId: string): Promise<RecoveryResult> {
+    const current = await store.getChannel(channelId);
+    if (!current) throw new ChannelNotFoundError(channelId);
+    if (
+      current.status !== "open" &&
+      current.status !== "closing" &&
+      current.status !== "recovering"
+    ) {
+      throw new ChannelAlreadyClosedError(channelId, current.status);
+    }
+
+    const state = await adapter.getState({ channelId, network: current.network });
+    const balance = parseAmount(state.balance, "balance");
+
+    if (state.closeEffectiveAtLedger === undefined) {
+      // Nothing is closing on chain, so the funder starts the close. The
+      // status moves first: a crash after close_start lands leaves the
+      // channel in `recovering`, and the next call reads the close back.
+      if (current.status !== "recovering") await markRecovering(current, {});
+      let started: StartCloseResult;
+      try {
+        started = await adapter.startClose({ channelId, network: current.network });
+      } catch (error) {
+        // Only an adapter that says nothing reached the chain hands the
+        // channel back. Any other failure may have submitted close_start.
+        if (error instanceof CloseNotSubmittedError) {
+          await store.transitionChannel(channelId, "recovering", {
+            status: current.status,
+            closeEffectiveAtLedger: undefined,
+          });
+        }
+        throw error;
+      }
+      await store.updateChannel(channelId, {
+        closeEffectiveAtLedger: started.closeEffectiveAtLedger,
+      });
+      emit({
+        type: "channel:recovering",
+        ...eventBase(current),
+        closeEffectiveAtLedger: started.closeEffectiveAtLedger,
+      });
+      return { channelId, recoveredAmount: "0", txHash: started.txHash };
+    }
+
+    if (balance === 0n) {
+      // A recipient close pays out and returns the remainder in one
+      // transaction, so an empty channel has already settled. Record that
+      // settlement rather than refunding a zero balance.
+      const startLedger = current.closeAttempt?.startedAtLedger ?? state.closeEffectiveAtLedger;
+      const found = await adapter.findChannelSettlement({
+        channelId,
+        network: current.network,
+        startLedger,
+      });
+      if (!found) throw new SettlementNotFoundError(channelId, startLedger);
+      const stream = await store.listCommitments(channelId);
+      await settle(current, stream.at(-1)?.cumulativeAmount ?? "0", found);
+      return {
+        channelId,
+        recoveredAmount: found.returnedRemainder,
+        txHash: found.settlementTxHash,
+      };
+    }
+
+    // A close with funds left in the contract is a funder close. Record it
+    // even when this process did not start it (a crash between close_start
+    // and the store write, or a close started elsewhere), so no commit
+    // follows and a later call knows the ledger to wait for.
+    if (current.status !== "recovering") {
+      await markRecovering(current, { closeEffectiveAtLedger: state.closeEffectiveAtLedger });
+      emit({
+        type: "channel:recovering",
+        ...eventBase(current),
+        closeEffectiveAtLedger: state.closeEffectiveAtLedger,
+      });
+    } else if (current.closeEffectiveAtLedger !== state.closeEffectiveAtLedger) {
+      await store.updateChannel(channelId, {
+        closeEffectiveAtLedger: state.closeEffectiveAtLedger,
+      });
+    }
+
+    if (state.currentLedger <= state.closeEffectiveAtLedger) {
+      throw new RecoveryNotYetEffectiveError(
+        channelId,
+        state.closeEffectiveAtLedger,
+        state.currentLedger,
+      );
+    }
+
+    const refunded = await adapter.refund({ channelId, network: current.network });
+    parseAmount(refunded.refundedAmount, "refundedAmount");
+    await store.transitionChannel(channelId, "recovering", {
+      status: "recovered",
+      closeEffectiveAtLedger: state.closeEffectiveAtLedger,
+      recoveredAmount: refunded.refundedAmount,
+      refundTxHash: refunded.txHash,
+    });
+    emit({
+      type: "channel:recovered",
+      ...eventBase(current),
+      recoveredAmount: refunded.refundedAmount,
+      refundTxHash: refunded.txHash,
+    });
+    return {
+      channelId,
+      recoveredAmount: refunded.refundedAmount,
+      txHash: refunded.txHash,
+    };
   }
 
   async function assertNotQuarantined(counterparty: string): Promise<void> {
@@ -529,11 +679,18 @@ export function createChannelManager(options: CreateChannelManagerOptions): Chan
       return { outcomes };
     },
 
-    async recover(_channelId: string) {
-      throw new NotImplementedError(
-        "ChannelManager.recover",
-        'docs/design.md, "The channel lifecycle manager"',
+    recover(channelId: string): Promise<RecoveryResult> {
+      // One run per channel: a second caller waits for the same refund
+      // instead of submitting its own. The run takes its turn behind any
+      // commit or close in flight on the channel (#343), so it reads the
+      // state they leave and cannot move the status under them.
+      const running = recovering.get(channelId);
+      if (running) return running;
+      const run = serialiseChannel(channelId, () => recoverOnce(channelId)).finally(() =>
+        recovering.delete(channelId),
       );
+      recovering.set(channelId, run);
+      return run;
     },
   };
   return manager;

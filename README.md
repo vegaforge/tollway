@@ -346,7 +346,7 @@ Implemented and tested:
 | `@vegaforge/tollway-adapter-express`, `-fastify`, `-next`, `-hono` | All four adapters wrap the gate, each with its own tests. |
 | `@vegaforge/tollway-client` | Agent-side orchestration: policy check, routing, receipt verification, and events, plus `createX402Settler`, a `ClientSettler` that pays x402 V2 routes on Stellar with `@x402/stellar`, and `createMppChargeSettler`, which pays MPP charge routes with `@stellar/mpp`. The `/mcp` subpath pays for MCP tool calls through the same client. |
 | `@vegaforge/tollway-ai-sdk` | A Vercel AI SDK `paid_fetch` tool with origin and method allowlists, a body cap, and structured policy results. |
-| `@vegaforge/tollway-channels` | Channel `open`, `commit`, `shouldClose`, and `close` against an injected `MppChannelAdapter`, and `createStellarMppChannelAdapter`, the adapter backed by `@stellar/mpp/channel`. |
+| `@vegaforge/tollway-channels` | Channel `open`, `commit`, `shouldClose`, `close`, `resume` and `recover` against an injected `MppChannelAdapter`, and `createStellarMppChannelAdapter`, the adapter backed by `@stellar/mpp/channel`. |
 | `@vegaforge/tollway-reconcile` | The reconciler and drift detection, with unit and property tests. |
 | `@vegaforge/tollway-observability` | Metric recording, spend summaries, JSON and CSV export, and webhook delivery with retry and timeout. |
 | `@vegaforge/tollway-theme` | Shared design tokens. |
@@ -355,11 +355,10 @@ Implemented and tested:
 
 Open work:
 
-- `ChannelManager.recover`, which throws `NotImplementedError` today ([#38](https://github.com/vegaforge/tollway/issues/38)).
-- Router promotion to `mpp-channel` under sustained traffic ([#105](https://github.com/vegaforge/tollway/issues/105)). The gate answers `501` if a router selects `mpp-channel`.
+- The funder-side `close_start` and `refund` contract calls in the Stellar channel adapter ([#101](https://github.com/vegaforge/tollway/issues/101)). `ChannelManager.recover` drives them through the adapter, and the Stellar adapter throws a typed not-implemented error until then.
+- The gate answers `501` if a router selects `mpp-channel`. Traffic promotion in `createDefaultRouter` is opt-in through `channelThreshold`.
 - x402 V2 wire compatibility for the gate's headers ([#43](https://github.com/vegaforge/tollway/issues/43)).
-- Feeding gate outcomes into `@vegaforge/tollway-observability` ([#106](https://github.com/vegaforge/tollway/issues/106)) and signing webhook deliveries ([#104](https://github.com/vegaforge/tollway/issues/104)).
-- A shared conformance suite for the four adapters ([#107](https://github.com/vegaforge/tollway/issues/107)).
+- Signing webhook deliveries ([#104](https://github.com/vegaforge/tollway/issues/104)).
 - Dashboard services and exports views ([#108](https://github.com/vegaforge/tollway/issues/108), [#109](https://github.com/vegaforge/tollway/issues/109)). The overview and anomalies pages are placeholders.
 
 Browse the [open issues](https://github.com/vegaforge/tollway/issues) for claimable work, especially the [good first issues](https://github.com/vegaforge/tollway/issues?q=is%3Aissue+is%3Aopen+label%3Adifficulty%3Agood-first-issue). The full design and the planned sequence of work are in [docs/design.md](docs/design.md).

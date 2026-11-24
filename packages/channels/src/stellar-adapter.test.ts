@@ -304,6 +304,69 @@ describe("closeChannel", () => {
   });
 });
 
+describe("chain state reads (#38)", () => {
+  const input = { channelId: CONTRACT, network: "testnet" as const };
+
+  it("maps getChannelState to integer strings and ledger numbers", async () => {
+    stub.getChannelState.mockResolvedValue(
+      state({ balance: 600_000n, closeEffectiveAtLedger: 120, currentLedger: 110 }),
+    );
+    const adapter = createStellarMppChannelAdapter(options());
+
+    await expect(adapter.getState(input)).resolves.toEqual({
+      balance: "600000",
+      closeEffectiveAtLedger: 120,
+      currentLedger: 110,
+      refundWaitingPeriod: 100,
+    });
+    await expect(adapter.getChannelState(input)).resolves.toEqual({
+      balance: "600000",
+      closeEffectiveAtLedger: 120,
+      currentLedger: 110,
+    });
+    expect(stub.getChannelState.mock.calls[0]?.[0]).toMatchObject({
+      channel: CONTRACT,
+      network: "stellar:testnet",
+    });
+  });
+
+  it("leaves closeEffectiveAtLedger out when no close has run", async () => {
+    stub.getChannelState.mockResolvedValue(state());
+    const adapter = createStellarMppChannelAdapter(options());
+
+    const read = await adapter.getState(input);
+    expect(read).not.toHaveProperty("closeEffectiveAtLedger");
+  });
+
+  it("refuses another channel before reading the chain", async () => {
+    const adapter = createStellarMppChannelAdapter(options());
+
+    await expect(adapter.getState({ ...input, channelId: OTHER_CONTRACT })).rejects.toMatchObject({
+      code: "channel-not-found",
+    });
+    expect(stub.getChannelState).not.toHaveBeenCalled();
+  });
+});
+
+describe("funder close_start and refund (#101 pending)", () => {
+  const input = { channelId: CONTRACT, network: "testnet" as const };
+
+  it("reports startClose as not submitted, so the manager hands the channel back", async () => {
+    const adapter = createStellarMppChannelAdapter(options());
+    const error = await adapter.startClose(input).catch((e: unknown) => e);
+
+    expect(error).toBeInstanceOf(CloseNotSubmittedError);
+    expect(error).toMatchObject({ code: "not-implemented" });
+    expect(String(error)).toMatch(/#101/);
+  });
+
+  it("refuses refund with a typed not-implemented error", async () => {
+    const adapter = createStellarMppChannelAdapter(options());
+
+    await expect(adapter.refund(input)).rejects.toMatchObject({ code: "not-implemented" });
+  });
+});
+
 describe("findChannelSettlement", () => {
   it("scans the bound contract's events on the configured RPC, refusing other channels", async () => {
     const health = vi.spyOn(rpc.Server.prototype, "getHealth").mockResolvedValue({
