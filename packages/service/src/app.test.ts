@@ -2,7 +2,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { z } from "zod";
 import type { ServiceModule } from "./app.js";
 import { createService } from "./app.js";
-import type { OpenApiDocument } from "./openapi.js";
+import { buildOpenApiDocument, type OpenApiDocument } from "./openapi.js";
 import { defineRoute } from "./routes.js";
 import { createMemoryReceiptStore } from "./stores.js";
 import { bearer, captureLogger, KEYS, testConfig, testService } from "./test-support.js";
@@ -302,5 +302,25 @@ describe("trust boundary", () => {
       expect(response.status).toBeLessThan(600);
     }
     expect(fetchStub).not.toHaveBeenCalled();
+  });
+});
+
+describe("buildOpenApiDocument", () => {
+  it("keeps a route path such as __proto__ an own property of the document", () => {
+    // Regression lock for a CodeQL prototype-polluting-assignment finding:
+    // paths were grouped by indexing a plain object with the route path.
+    const probe = defineRoute({
+      method: "get",
+      path: "__proto__",
+      summary: "Pollution probe",
+      responses: { 200: { description: "Unused.", schema: z.object({}) } },
+      handler: (c) => c.json({}),
+    });
+    const document = buildOpenApiDocument([probe], "0.0.0");
+
+    expect(Object.hasOwn(document.paths, "__proto__")).toBe(true);
+    expect(Object.keys(document.paths)).toEqual(["__proto__"]);
+    expect(({} as Record<string, unknown>).get).toBeUndefined();
+    expect(Object.getPrototypeOf(document.paths)).toBe(Object.prototype);
   });
 });

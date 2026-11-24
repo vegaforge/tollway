@@ -113,12 +113,18 @@ export function buildOpenApiDocument(
   routes: readonly ServiceRoute[],
   version: string,
 ): OpenApiDocument {
-  const paths: OpenApiDocument["paths"] = {};
+  // Grouped in a Map and converted with Object.fromEntries, which defines
+  // own properties. Indexing a plain object by route path would let a path
+  // such as "__proto__" write to Object.prototype.
+  const byPath = new Map<string, Map<string, unknown>>();
   for (const route of routes) {
-    const entry = paths[route.path] ?? {};
-    entry[route.method] = operation(route);
-    paths[route.path] = entry;
+    const entry = byPath.get(route.path) ?? new Map<string, unknown>();
+    entry.set(route.method, operation(route));
+    byPath.set(route.path, entry);
   }
+  const paths: OpenApiDocument["paths"] = Object.fromEntries(
+    [...byPath].map(([path, entry]) => [path, Object.fromEntries(entry)]),
+  );
   return {
     openapi: "3.1.0",
     info: {
