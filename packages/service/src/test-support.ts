@@ -9,6 +9,7 @@ export const KEYS = {
   reader: "test-reader-key-0123456789abcdef",
   admin: "test-admin-key-0123456789abcdef",
   revoked: "test-revoked-key-0123456789abcdef",
+  ingester: "test-ingester-key-0123456789abcdef",
 } as const;
 
 export type LogLine = { level: string; event: string; fields?: LogFields };
@@ -29,6 +30,7 @@ export async function testConfig(overrides?: Partial<ServiceConfig>): Promise<Se
       TOLLWAY_SERVICE_API_KEYS: JSON.stringify([
         { name: "reader", sha256: await hashApiKey(KEYS.reader), scopes: ["read"] },
         { name: "admin", sha256: await hashApiKey(KEYS.admin), scopes: ["read", "admin"] },
+        { name: "ingester", sha256: await hashApiKey(KEYS.ingester), scopes: ["ingest"] },
         {
           name: "old",
           sha256: await hashApiKey(KEYS.revoked),
