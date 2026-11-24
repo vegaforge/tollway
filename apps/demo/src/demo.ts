@@ -4,6 +4,7 @@ import {
   Ed25519Signer,
   Ed25519Verifier,
   type SignedReceipt,
+  type SponsorBalanceReading,
   type StellarNetwork,
   verifyReceipt,
 } from "@vegaforge/tollway-core";
@@ -13,6 +14,7 @@ import {
   createInMemorySettlementCache,
   createMockFacilitator,
   createPaywall,
+  createSponsorMonitor,
   decodeHeader,
   decodePaymentRequiredHeader,
   decodePaymentResponseHeader,
@@ -23,6 +25,7 @@ import {
   PAYMENT_RESPONSE_HEADER,
   PAYMENT_SIGNATURE_HEADER,
   type PaywallConfig,
+  type SponsorBalanceReader,
   TOLLWAY_RECEIPT_HEADER,
 } from "@vegaforge/tollway-server";
 import type { PaymentPayload, PaymentRequirements } from "@x402/core/types";
@@ -47,10 +50,15 @@ export type DemoOptions = {
   env?: DemoEnv;
   /** Overrides the live-mode payer. Tests use it to avoid Stellar RPC. */
   payer?: DemoPayer;
+  /** Overrides the Horizon reader. Mock mode defaults to an offline fake. */
+  sponsorBalanceReader?: SponsorBalanceReader;
+  /** Called before serving. Defaults to printing the reading to the console. */
+  onSponsorReading?: (reading: SponsorBalanceReading) => void;
 };
 
 export type DemoResult = {
   mock: boolean;
+  sponsorReadings: readonly SponsorBalanceReading[];
   challenge: { amount: string; asset: string; resource: string };
   receipt: SignedReceipt;
   receiptValid: boolean;
@@ -179,6 +187,33 @@ export async function runDemo(options: DemoOptions = {}): Promise<DemoResult> {
         [DEMO_ROUTE]: config,
       });
 
+  const env = options.env ?? process.env;
+  const explicitSponsors = env.FEE_SPONSOR_ACCOUNTS;
+  const sponsorReadings = await createSponsorMonitor({
+    network: paywall.network,
+    accounts:
+      explicitSponsors === undefined
+        ? mock
+          ? ["GAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAWHF"]
+          : undefined
+        : explicitSponsors.split(",").map((account) => account.trim()),
+    facilitator,
+    thresholdStroops: env.FEE_SPONSOR_THRESHOLD_STROOPS ?? "10000000",
+    readBalance: options.sponsorBalanceReader ?? (mock ? async () => "1000000000" : undefined),
+    sink: {
+      recordSponsorBalance(reading) {
+        if (options.onSponsorReading) options.onSponsorReading(reading);
+        else
+          console.log(
+            `Fee sponsor ${reading.account} (${reading.network}): ${reading.stale ? `stale: ${reading.error}` : `${reading.balanceStroops} stroops`}`,
+          );
+      },
+      emit(event) {
+        console.warn("Fee sponsor below threshold:", event.data);
+      },
+    },
+  }).poll();
+
   const gate = createPaywall(config, {
     signer,
     facilitator,
@@ -226,6 +261,7 @@ export async function runDemo(options: DemoOptions = {}): Promise<DemoResult> {
 
     return {
       mock,
+      sponsorReadings,
       challenge: {
         amount: requirements.amount,
         asset: requirements.asset,

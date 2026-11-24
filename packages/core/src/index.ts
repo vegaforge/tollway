@@ -127,6 +127,7 @@ export {
   type SmartAccountPolicyReader,
   type SmartAccountResidual,
 } from "./smart-account-policy.js";
+export type { SponsorBalanceReading, SponsorLowBalanceEvent } from "./sponsor.js";
 export {
   type MppChannelPayment,
   type MppChargePayment,
