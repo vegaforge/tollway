@@ -200,6 +200,268 @@ describe("createPolicyEngine", () => {
     });
   });
 
+  // Issue #197 coverage.
+  describe("rate-limit (#197) semantics", () => {
+    const T0 = Date.parse("2026-06-10T12:00:00Z");
+
+    function clockAt(start = T0) {
+      const clock = { now: start };
+      return { clock, opts: { clock: () => clock.now } };
+    }
+
+    function issuePaths(fn: () => unknown): string[] {
+      let thrown: unknown;
+      try {
+        fn();
+      } catch (error) {
+        thrown = error;
+      }
+      expect(thrown).toBeInstanceOf(PolicyValidationError);
+      return (thrown as PolicyValidationError).issues.map((issue) => issue.path.join("."));
+    }
+
+    it.each([
+      [
+        "both requestsPerMinute and windows",
+        { requestsPerMinute: 5, windows: [{ windowSeconds: 60, limit: 5 }] },
+        "rateLimit.windows",
+      ],
+      [
+        "a window of zero seconds",
+        { windows: [{ windowSeconds: 0, limit: 5 }] },
+        "rateLimit.windows.0.windowSeconds",
+      ],
+      [
+        "a fractional limit",
+        { windows: [{ windowSeconds: 60, limit: 2.5 }] },
+        "rateLimit.windows.0.limit",
+      ],
+      ["an empty windows list", { windows: [] }, "rateLimit.windows"],
+      [
+        "a key limit of zero",
+        { requestsPerMinute: 5, scope: "per-counterparty", perCounterpartyKeyLimit: 0 },
+        "rateLimit.perCounterpartyKeyLimit",
+      ],
+      [
+        "a negative key limit",
+        { requestsPerMinute: 5, scope: "per-counterparty", perCounterpartyKeyLimit: -1 },
+        "rateLimit.perCounterpartyKeyLimit",
+      ],
+      ["an unknown count", { requestsPerMinute: 5, count: "requests" }, "rateLimit.count"],
+    ])("refuses %s when the engine is created", (_name, rateLimit, path) => {
+      // Policies arrive as JSON, so the cases include values the type forbids.
+      const input = { rateLimit } as unknown as PolicyInput;
+      expect(issuePaths(() => createPolicyEngine(input))).toContain(path);
+    });
+
+    it("never changes state from evaluate or check, even when counting attempts", async () => {
+      const engine = createPolicyEngine({
+        rateLimit: { windows: [{ windowSeconds: 60, limit: 1 }], count: "attempts" },
+      });
+      // Shadow comparisons, dry runs and retries evaluate without paying.
+      for (let i = 0; i < 3; i += 1) {
+        expect((await engine.evaluate(intent())).allowed).toBe(true);
+        expect(await engine.check(intent())).toEqual({ allowed: true });
+      }
+    });
+
+    it("counts an attempt when admit allows it, and not when admit blocks it", async () => {
+      const engine = createPolicyEngine({
+        rateLimit: { windows: [{ windowSeconds: 60, limit: 2 }], count: "attempts" },
+      });
+      expect((await engine.admit?.(intent()))?.allowed).toBe(true);
+      expect((await engine.admit?.(intent()))?.allowed).toBe(true);
+      const third = await engine.admit?.(intent());
+      expect(third?.allowed).toBe(false);
+      expect(third?.blockedBy).toBe("rate-limit");
+      // The blocked attempt was not counted: one slot frees when the first
+      // two age out, not later.
+    });
+
+    it("lets only one of several concurrent attempts take the last slot", async () => {
+      const engine = createPolicyEngine({
+        rateLimit: { windows: [{ windowSeconds: 60, limit: 1 }], count: "attempts" },
+      });
+      const traces = await Promise.all(Array.from({ length: 8 }, () => engine.admit?.(intent())));
+      expect(traces.filter((trace) => trace?.allowed)).toHaveLength(1);
+    });
+
+    it("counts a shadow's attempts through recordAttempt", async () => {
+      const engine = createPolicyEngine({
+        rateLimit: { windows: [{ windowSeconds: 60, limit: 1 }], count: "attempts" },
+      });
+      await engine.recordAttempt?.(intent());
+      expect((await engine.check(intent())).allowed).toBe(false);
+    });
+
+    it("counts settlements on record only, never on admit", async () => {
+      const engine = createPolicyEngine({
+        rateLimit: { windows: [{ windowSeconds: 60, limit: 1 }] },
+      });
+      await engine.admit?.(intent());
+      await engine.recordAttempt?.(intent());
+      expect((await engine.check(intent())).allowed).toBe(true);
+      await engine.record(intent());
+      expect((await engine.check(intent())).allowed).toBe(false);
+    });
+
+    describe.each([
+      ["settlements", "global"],
+      ["settlements", "per-counterparty"],
+      ["attempts", "global"],
+      ["attempts", "per-counterparty"],
+    ] as const)("count %s, scope %s", (count, scope) => {
+      async function countOne(
+        engine: ReturnType<typeof createPolicyEngine>,
+        payee: string,
+      ): Promise<void> {
+        if (count === "settlements") await engine.record(intent({ payee }));
+        else expect((await engine.admit?.(intent({ payee })))?.allowed).toBe(true);
+      }
+
+      it("still counts an event exactly windowSeconds old, and drops it one millisecond later", async () => {
+        const { clock, opts } = clockAt();
+        const engine = createPolicyEngine(
+          { rateLimit: { windows: [{ windowSeconds: 60, limit: 1 }], count, scope } },
+          opts,
+        );
+        await countOne(engine, "GA");
+        clock.now = T0 + 60_000;
+        expect((await engine.check(intent({ payee: "GA" }))).allowed).toBe(false);
+        clock.now = T0 + 60_001;
+        expect((await engine.check(intent({ payee: "GA" }))).allowed).toBe(true);
+      });
+
+      it(
+        scope === "global" ? "shares one count across payees" : "keeps a count per payee",
+        async () => {
+          const engine = createPolicyEngine({
+            rateLimit: { windows: [{ windowSeconds: 60, limit: 1 }], count, scope },
+          });
+          await countOne(engine, "GA");
+          expect((await engine.check(intent({ payee: "GB" }))).allowed).toBe(scope !== "global");
+        },
+      );
+
+      it("names the scope, the counterparty and the count in the detail", async () => {
+        const engine = createPolicyEngine({
+          rateLimit: { windows: [{ windowSeconds: 60, limit: 1 }], count, scope },
+        });
+        await countOne(engine, "GSERVICE");
+        const trace = await engine.evaluate(intent({ payee: "GSERVICE" }));
+        const line = trace.entries.find((entry) => entry.id === "rate-limit");
+        const noun = count === "attempts" ? "1 attempts" : "1 settled payments";
+        expect(line?.detail).toBe(
+          scope === "global"
+            ? `global rate limit exceeded: ${noun} in the last 60 seconds, limit 1`
+            : `per-counterparty rate limit for GSERVICE exceeded: ${noun} in the last 60 seconds, limit 1`,
+        );
+        expect(line).toMatchObject({ limit: "1", current: "1", projected: "2" });
+      });
+    });
+
+    it("applies every window: a free minute does not hide a full hour", async () => {
+      const { clock, opts } = clockAt();
+      const engine = createPolicyEngine(
+        {
+          rateLimit: {
+            windows: [
+              { windowSeconds: 60, limit: 100 },
+              { windowSeconds: 3600, limit: 2 },
+            ],
+          },
+        },
+        opts,
+      );
+      await engine.record(intent());
+      await engine.record(intent());
+      clock.now = T0 + 70_000;
+      const trace = await engine.evaluate(intent());
+      const line = trace.entries.find((entry) => entry.id === "rate-limit");
+      expect(line).toMatchObject({ outcome: "fail", window: { kind: "sliding", seconds: 3600 } });
+    });
+
+    it("uses its own window, independent of the one-minute anomaly window", async () => {
+      const { clock, opts } = clockAt();
+      const engine = createPolicyEngine(
+        {
+          rateLimit: { windows: [{ windowSeconds: 600, limit: 1 }] },
+          anomaly: { maxSpendPerMinute: "150" },
+        },
+        opts,
+      );
+      await engine.record(intent({ amount: "100" }));
+      clock.now = T0 + 120_000;
+      const trace = await engine.evaluate(intent({ amount: "100" }));
+      const outcome = (id: string) => trace.entries.find((entry) => entry.id === id)?.outcome;
+      expect(outcome("anomaly")).toBe("pass");
+      expect(outcome("rate-limit")).toBe("fail");
+    });
+
+    it("stays exact after many more events than the limit", async () => {
+      const { clock, opts } = clockAt();
+      const engine = createPolicyEngine(
+        { mode: "dry-run", rateLimit: { windows: [{ windowSeconds: 60, limit: 3 }] } },
+        opts,
+      );
+      for (let i = 0; i < 500; i += 1) {
+        clock.now = T0 + i;
+        await engine.record(intent());
+      }
+      // Only the newest three events (at T0+497, +498, +499) matter. All
+      // three are in the window at T0+497+60s, and one has left it 1ms later.
+      clock.now = T0 + 497 + 60_000;
+      expect((await engine.evaluate(intent())).wouldBlock).toBe(true);
+      clock.now = T0 + 497 + 60_001;
+      expect((await engine.evaluate(intent())).wouldBlock).toBe(false);
+    });
+
+    describe("per-counterparty key limit", () => {
+      const policy: PolicyInput = {
+        rateLimit: {
+          windows: [{ windowSeconds: 60, limit: 1 }],
+          scope: "per-counterparty",
+          perCounterpartyKeyLimit: 2,
+        },
+      };
+
+      it("refuses a new counterparty while every tracked one is active", async () => {
+        const engine = createPolicyEngine(policy);
+        await engine.record(intent({ payee: "GA" }));
+        await engine.record(intent({ payee: "GB" }));
+        const trace = await engine.evaluate(intent({ payee: "GC" }));
+        const line = trace.entries.find((entry) => entry.id === "rate-limit");
+        expect(line?.outcome).toBe("fail");
+        expect(line?.detail).toContain("already tracking 2 active counterparties");
+      });
+
+      it("never forgets an active counterparty to make room, so its limit holds", async () => {
+        const engine = createPolicyEngine({ ...policy, mode: "dry-run" });
+        await engine.record(intent({ payee: "GA" }));
+        await engine.record(intent({ payee: "GB" }));
+        // A dry-run payment to a third payee is allowed and recorded, but
+        // there is no room to track it.
+        await engine.record(intent({ payee: "GC" }));
+        expect((await engine.evaluate(intent({ payee: "GA" }))).wouldBlock).toBe(true);
+        expect((await engine.evaluate(intent({ payee: "GB" }))).wouldBlock).toBe(true);
+        expect((await engine.evaluate(intent({ payee: "GC" }))).wouldBlock).toBe(true);
+      });
+
+      it("drops idle counterparties to make room for a new one", async () => {
+        const { clock, opts } = clockAt();
+        const engine = createPolicyEngine(policy, opts);
+        await engine.record(intent({ payee: "GA" }));
+        await engine.record(intent({ payee: "GB" }));
+        clock.now = T0 + 61_000;
+        expect((await engine.check(intent({ payee: "GC" }))).allowed).toBe(true);
+        await engine.record(intent({ payee: "GC" }));
+        await engine.record(intent({ payee: "GD" }));
+        expect((await engine.check(intent({ payee: "GC" }))).allowed).toBe(false);
+        expect((await engine.check(intent({ payee: "GD" }))).allowed).toBe(false);
+      });
+    });
+  });
+
   describe("anomaly stop", () => {
     it("allows spending within the anomaly threshold", async () => {
       const engine = createPolicyEngine({

@@ -229,6 +229,7 @@ const STATUS_PILL_CLASSES: Record<ChannelStatus, string> = {
   closed: "bg-surface-2 text-muted",
   recovering: "bg-danger/15 text-foreground",
   recovered: "bg-success/15 text-foreground",
+  "settlement-mismatched": "bg-danger/15 text-foreground",
 };
 
 function StatusPill({ status }: { status: ChannelStatus }) {
