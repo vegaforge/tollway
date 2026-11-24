@@ -96,13 +96,15 @@ The router reads four kinds of input: declared hints in the offer (such as `mppS
 
 For channel mode, the manager runs the full lifecycle the raw SDK leaves to the integrator.
 
-Open: deposit into the one-way channel contract, sized from the agent's budget and predicted demand. Commit: for each paid interaction, produce and store the next cumulative commitment, advancing the off-chain counter with no on-chain transaction. Close: decide timing from heuristics (budget nearly drawn down, idle timeout, end of session) and submit the single settlement, returning the remainder to the funder. Recover: if a counterparty stops responding mid-channel, follow the contract's dispute or timeout path to get committed funds back, and surface the event loudly.
+Open: deposit into the one-way channel contract, sized from the agent's budget and predicted demand. `sizeDeposit` (`packages/channels/src/sizing.ts`) does the sizing: predicted demand over a horizon, times a safety factor, clamped to the policy's minimum deposit and to the tighter of the caller's maximum and the headroom from `PolicyEngine.headroom`. It returns no deposit when there is no predicted demand or the headroom is below the minimum. The policy check for an open is `PolicyEngine.evaluateChannelOpen`, and it records no spend. Commit: for each paid interaction, produce and store the next cumulative commitment, advancing the off-chain counter with no on-chain transaction. Close: decide timing from heuristics (budget nearly drawn down, idle timeout, end of session) and submit the single settlement, returning the remainder to the funder. Recover: if a counterparty stops responding mid-channel, follow the contract's dispute or timeout path to get committed funds back, and surface the event loudly.
+
+The commitment stream and the channel record sit behind the `CommitmentStore` contract. Every write that depends on state is a compare-and-set, so two processes sharing a store cannot both advance one channel. The memory store is process-local. The PostgreSQL and Redis stores are shared, and their setup, isolation and failure modes are in `docs/channel-commitment-stores.md`.
 
 Recovery is a first-class feature here, not an afterthought. The edge cases live in that path, and so do the tests.
 
 ### Policy and budgets
 
-Policy is data, not code: a small declarative schema covering per-agent daily and total budgets, per-service caps, per-model constraints, rate limits, and anomaly stops for sudden spend spikes. Enforcement applies across all three models.
+Policy is data, not code: a small declarative schema covering per-agent daily and total budgets, per-service caps, per-model constraints, rate limits, and anomaly stops for sudden spend spikes. Enforcement applies across all three models. A channel's deposit is checked against the same budgets at open time through `headroom` and `evaluateChannelOpen`. A deposit is not spend, so an open records none, but sizing against headroom keeps an agent from locking more than the policy lets it spend with a payee.
 
 Where the agent uses an OpenZeppelin smart account, Tollway maps as many constraints as possible down to the on-chain smart-account policy, so the chain itself backs the limit. Where it does not, Tollway enforces at the application layer. Defense in depth, with the honest caveat that application-layer enforcement is only as strong as the process running it.
 

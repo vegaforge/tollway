@@ -10,9 +10,13 @@ export { base64UrlToBytes, bytesToBase64Url, utf8Bytes } from "./encoding.js";
 export { NotImplementedError, TollwayError, type TollwayErrorCode } from "./errors.js";
 export {
   type AdaptiveAnomalyEvent,
+  type ChannelOpenDecision,
+  type ChannelOpenIntent,
+  type ChannelOpenRule,
   createPolicyEngine,
   type PaymentIntent,
   type PolicyEngine,
+  type PolicyHeadroom,
 } from "./policy.js";
 export {
   formatPolicyIssues,

@@ -211,6 +211,15 @@ if (!decision.allowed) {
 
 After a settlement lands, the agent calls `engine.record(intent)` so daily and per-service totals advance.
 
+## Channel opens and headroom
+
+A channel locks its deposit when it opens, and the deposit is not spent until a payment draws it down. The policy engine checks the deposit at open time, through two calls:
+
+- `engine.headroom(asset, payee)` returns what the policy still allows for one asset and payee, as an integer string. It is the smallest remaining amount across the daily budget, the total budget and the per-service cap. `limitedBy` names the ceiling that sets it, and both fields are `null` when no ceiling applies.
+- `engine.evaluateChannelOpen({ payee, asset, deposit })` checks the deposit against `minChannelDeposit` and against that headroom. It returns `allowed`, `wouldBlock`, the `rule` that blocks (or `null`), and a `detail` for logs. It does not record spend. A deposit is not spend: unspent funds return to the funder when the channel closes.
+
+`minChannelDeposit` applies only to channel opens. A per-request channel payment is never compared with it. Earlier releases compared every channel payment's price with the minimum, which blocked each channel payment priced below it and never checked a deposit. `sizeDeposit` in `@vegaforge/tollway-channels` uses `headroom` to choose the deposit.
+
 ## Decision traces
 
 `engine.evaluate(intent)` returns a decision trace: one entry for every rule, whether it applied or not, with the numbers it compared. `engine.check(intent)` is built on it. It evaluates the trace and reports the first failing entry, so the decision and its explanation cannot disagree. The client uses the same derivation (`decisionFromTrace`, exported from `@vegaforge/tollway-core`).

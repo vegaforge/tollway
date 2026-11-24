@@ -38,6 +38,12 @@ export {
 } from "./errors.js";
 export { type CreateChannelManagerOptions, createChannelManager } from "./manager.js";
 export {
+  RATE_PRECISION,
+  type SizeDepositDecision,
+  type SizeDepositInput,
+  sizeDeposit,
+} from "./sizing.js";
+export {
   createPostgresCommitmentStore,
   type PostgresClient,
   type PostgresCommitmentStoreOptions,
