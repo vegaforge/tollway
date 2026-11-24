@@ -1,10 +1,30 @@
-import { readFileSync } from "node:fs";
+import { existsSync, readFileSync } from "node:fs";
+import { dirname, join } from "node:path";
+import { fileURLToPath } from "node:url";
 import { Ed25519Signer } from "@vegaforge/tollway-core";
 import { describe, expect, it } from "vitest";
 import { createInMemorySettlementCache } from "./cache.js";
 import { createMockFacilitator } from "./facilitator.js";
 import { createPaywall, type PaywallConfig } from "./gate.js";
 import { decodeHeader, encodePaymentSignatureHeader, PAYMENT_SIGNATURE_HEADER } from "./headers.js";
+
+/** This file's directory, so the paths below do not depend on the working directory. */
+const HERE = dirname(fileURLToPath(import.meta.url));
+
+/**
+ * The repository root, found by walking up to `pnpm-workspace.yaml`. Paths
+ * relative to the working directory break when the package runs from a
+ * copy, as Stryker's mutation sandbox does (issue #247).
+ */
+function repositoryRoot(): string {
+  let dir = HERE;
+  while (!existsSync(join(dir, "pnpm-workspace.yaml"))) {
+    const parent = dirname(dir);
+    if (parent === dir) throw new Error("pnpm-workspace.yaml not found above this test");
+    dir = parent;
+  }
+  return dir;
+}
 
 const config = {
   amount: "10000",
@@ -66,11 +86,12 @@ describe("TM-07 malformed payment header", () => {
 
 describe("threat model cross-check", () => {
   it("requires a matching test suite for every defended row", () => {
-    const model = readFileSync("../../docs/threat-model.md", "utf8");
+    const root = repositoryRoot();
+    const model = readFileSync(join(root, "docs/threat-model.md"), "utf8");
     const suites = [
-      readFileSync("src/gate.test.ts", "utf8"),
-      readFileSync("src/threat-model.test.ts", "utf8"),
-      readFileSync("../core/src/receipt/receipt.test.ts", "utf8"),
+      readFileSync(join(HERE, "gate.test.ts"), "utf8"),
+      readFileSync(join(HERE, "threat-model.test.ts"), "utf8"),
+      readFileSync(join(root, "packages/core/src/receipt/receipt.test.ts"), "utf8"),
     ].join("\n");
     const defended = [...model.matchAll(/^\| (TM-\d+) \|.*\| defended \|$/gm)].map(
       (match) => match[1],

@@ -1,4 +1,5 @@
-import { readFileSync } from "node:fs";
+import { existsSync, readFileSync } from "node:fs";
+import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { describe, expect, it } from "vitest";
 import { base64UrlToBytes, bytesToBase64Url, utf8Bytes } from "../encoding.js";
@@ -47,9 +48,22 @@ type VectorFile = {
   }>;
 };
 
-const VECTOR_PATH = fileURLToPath(
-  new URL("../../../../docs/receipt-vectors/canonical-and-ed25519.json", import.meta.url),
-);
+/**
+ * The repository root, found by walking up to `pnpm-workspace.yaml`. A fixed
+ * `../../../..` breaks when the package is copied elsewhere, as Stryker does
+ * with its mutation sandbox (issue #247).
+ */
+function repositoryRoot(): string {
+  let dir = dirname(fileURLToPath(import.meta.url));
+  while (!existsSync(join(dir, "pnpm-workspace.yaml"))) {
+    const parent = dirname(dir);
+    if (parent === dir) throw new Error("pnpm-workspace.yaml not found above this test");
+    dir = parent;
+  }
+  return dir;
+}
+
+const VECTOR_PATH = join(repositoryRoot(), "docs/receipt-vectors/canonical-and-ed25519.json");
 
 function readVectorText(): string {
   return readFileSync(VECTOR_PATH, "utf8");
