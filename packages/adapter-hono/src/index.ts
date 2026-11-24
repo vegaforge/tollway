@@ -18,6 +18,9 @@ import type { Context, MiddlewareHandler } from "hono";
 /** Where the verified receipt is stashed on the Hono context for downstream handlers. */
 export const RECEIPT_CONTEXT_KEY = "tollwayReceipt";
 
+/** The one body every adapter returns when the gate itself throws (#107). */
+const GATE_ERROR_BODY = { error: "payment backend unavailable" } as const;
+
 type SettledReceipt = Extract<GateOutcome, { kind: "settled" }>["receipt"];
 
 declare module "hono" {
@@ -37,11 +40,16 @@ type JsonStatus = Parameters<Context["json"]>[1];
  */
 export function honoPaywall(gate: Gate): MiddlewareHandler {
   return async (c, next) => {
-    const outcome = await gate({
-      method: c.req.method,
-      url: requestUrl(c),
-      headers: requestHeaders(c),
-    });
+    let outcome: GateOutcome;
+    try {
+      outcome = await gate({
+        method: c.req.method,
+        url: requestUrl(c),
+        headers: requestHeaders(c),
+      });
+    } catch {
+      return c.json(GATE_ERROR_BODY, 502);
+    }
 
     if (outcome.kind === "settled") {
       applyHeaders(c, outcome.headers);

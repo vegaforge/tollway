@@ -58,6 +58,7 @@ ENTRY_POINTS=(
   @vegaforge/tollway-reconcile
   @vegaforge/tollway-reconcile/stellar
   @vegaforge/tollway-server
+  @vegaforge/tollway-server/testing
   @vegaforge/tollway-service
   @vegaforge/tollway-theme
   @vegaforge/tollway-theme/preset

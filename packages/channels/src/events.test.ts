@@ -13,10 +13,24 @@ const OPEN = {
   network: "testnet" as const,
 };
 
+/** What the fake chain reports to `getState`, so a test can move the ledger. */
+type FakeChain = { currentLedger: number; closeEffectiveAtLedger?: number };
+
 function fakeAdapter(
   close?: (input: CloseAdapterInput) => CloseAdapterResult | Promise<CloseAdapterResult>,
+  chain: FakeChain = { currentLedger: 100 },
 ): MppChannelAdapter {
   return {
+    async getState() {
+      return { balance: "1000", refundWaitingPeriod: 50, ...chain };
+    },
+    async startClose() {
+      chain.closeEffectiveAtLedger = chain.currentLedger + 50;
+      return { txHash: "tx-close-start", closeEffectiveAtLedger: chain.closeEffectiveAtLedger };
+    },
+    async refund() {
+      return { txHash: "tx-refund", refundedAmount: "1000" };
+    },
     async openChannel() {
       return { channelId: "CCHAN1", openTxHash: "tx-open" };
     },
@@ -184,6 +198,53 @@ describe("channel lifecycle events (#187)", () => {
 
     await expect(manager.open(OPEN)).resolves.toMatchObject({ id: "CCHAN1" });
     await expect(errorReported).resolves.toEqual(new Error("webhook down"));
+  });
+});
+
+describe("channel recovery events (#38)", () => {
+  it("emits recovering then recovered with the channel fields, ledger and refund", async () => {
+    const { events, onEvent } = recorder();
+    const chain: FakeChain = { currentLedger: 100 };
+    const manager = createChannelManager({
+      adapter: fakeAdapter(undefined, chain),
+      onEvent,
+      now: () => NOW,
+    });
+    const channel = await manager.open(OPEN);
+
+    await manager.recover(channel.id);
+    chain.currentLedger = 151;
+    await manager.recover(channel.id);
+
+    const base = {
+      at: NOW,
+      channelId: "CCHAN1",
+      counterparty: "GSERVICE",
+      asset: "CUSDC",
+      network: "testnet",
+    };
+    expect(events.slice(1)).toEqual([
+      { type: "channel:recovering", ...base, closeEffectiveAtLedger: 150 },
+      { type: "channel:recovered", ...base, recoveredAmount: "1000", refundTxHash: "tx-refund" },
+    ]);
+  });
+
+  it("keeps the result of recover when the handler throws, and reports the error", async () => {
+    const reported: Array<{ error: Error; type: string }> = [];
+    const manager = createChannelManager({
+      adapter: fakeAdapter(),
+      onEvent: (event) => {
+        if (event.type === "channel:recovering") throw new Error("observer down");
+      },
+      onEventError: (error, event) => reported.push({ error, type: event.type }),
+    });
+    const channel = await manager.open(OPEN);
+
+    await expect(manager.recover(channel.id)).resolves.toMatchObject({
+      txHash: "tx-close-start",
+    });
+    expect(reported).toEqual([{ error: new Error("observer down"), type: "channel:recovering" }]);
+    await expect(manager.get(channel.id)).resolves.toMatchObject({ status: "recovering" });
   });
 });
 

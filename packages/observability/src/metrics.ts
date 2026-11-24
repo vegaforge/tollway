@@ -2,6 +2,10 @@ import type { SettlementModel } from "@vegaforge/tollway-core";
 
 /** A single measured payment, the unit metrics roll up from. */
 export type PaymentMetric = {
+  /**
+   * The verified payer's address. `""` only on a `failed` metric for a
+   * payment whose payer was never verified, such as a rejected verification.
+   */
   payer: string;
   payee: string;
   model: SettlementModel;

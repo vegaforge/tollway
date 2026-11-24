@@ -183,6 +183,28 @@ export class SettlementNotFoundError extends TollwayError {
   }
 }
 
+/**
+ * Thrown by `recover` when a close has started but the ledger has not reached
+ * the point at which the funder may refund. Both ledger numbers are carried so
+ * a caller can decide when to retry without parsing the message.
+ */
+export class RecoveryNotYetEffectiveError extends TollwayError {
+  readonly channelId: string;
+  readonly closeEffectiveAtLedger: number;
+  readonly currentLedger: number;
+
+  constructor(channelId: string, closeEffectiveAtLedger: number, currentLedger: number) {
+    super(
+      "recovery-not-effective",
+      `channel "${channelId}" closes at ledger ${closeEffectiveAtLedger}, but the current ledger is ${currentLedger}; refund is not yet permitted`,
+    );
+    this.name = "RecoveryNotYetEffectiveError";
+    this.channelId = channelId;
+    this.closeEffectiveAtLedger = closeEffectiveAtLedger;
+    this.currentLedger = currentLedger;
+  }
+}
+
 /** Thrown when open or commit is attempted for a quarantined counterparty. */
 export class CounterpartyQuarantinedError extends TollwayError {
   readonly counterparty: string;

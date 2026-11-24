@@ -172,8 +172,8 @@ export type ChannelSettlerOptions = {
     network: StellarNetwork;
     rpcUrl?: string;
     feePayer: {
-        envelopeSigner: StellarSigner$2;
-        feeBumpSigner?: StellarSigner$2;
+        envelopeSigner: StellarSigner_2;
+        feeBumpSigner?: StellarSigner_2;
     };
     feePayerKey: string;
     closeRateGuard: CloseRateGuard;
@@ -882,6 +882,32 @@ export const PAYMENT_RESPONSE_HEADER = "PAYMENT-RESPONSE";
 export const PAYMENT_SIGNATURE_HEADER = "PAYMENT-SIGNATURE";
 
 // @public
+export type PaymentObserver = {
+    record(metric: PaymentObserverMetric): void;
+    emit(event: PaymentObserverEvent): Promise<unknown>;
+};
+
+// @public
+export type PaymentObserverEvent = {
+    id?: string;
+    type: "receipt.created";
+    at: string;
+    data: Record<string, unknown>;
+};
+
+// @public
+export type PaymentObserverMetric = {
+    payer: string;
+    payee: string;
+    model: SettlementModel;
+    amount: string;
+    asset: string;
+    latencyMs: number;
+    outcome: "settled" | "failed" | "skipped";
+    at: string;
+};
+
+// @public
 export type PaymentOption = {
     amount: string;
     asset: string;
@@ -950,6 +976,8 @@ export type PaywallDeps = {
         facilitatorUnavailable?: number;
     };
     clock?: () => number;
+    observer?: PaymentObserver;
+    onObserverError?: (error: unknown) => void;
     receiptVersion?: 1 | 2;
 };
 
@@ -1354,12 +1382,12 @@ export type X402Terms = {
 
 // Warnings were encountered during analysis:
 //
-// dist/index.d.ts:306:9 - (ae-forgotten-export) The symbol "StellarSigner$2" needs to be exported by the entry point index.d.ts
-// dist/index.d.ts:428:9 - (ae-forgotten-export) The symbol "WatchtowerEvent" needs to be exported by the entry point index.d.ts
-// dist/index.d.ts:432:5 - (ae-forgotten-export) The symbol "ChannelState" needs to be exported by the entry point index.d.ts
-// dist/index.d.ts:470:5 - (ae-forgotten-export) The symbol "WatchtowerCursorStore" needs to be exported by the entry point index.d.ts
-// dist/index.d.ts:851:9 - (ae-forgotten-export) The symbol "StellarSigner$1" needs to be exported by the entry point index.d.ts
-// dist/index.d.ts:1022:9 - (ae-forgotten-export) The symbol "StellarSigner" needs to be exported by the entry point index.d.ts
+// dist/discovery-Dy0xE0Xt.d.ts:632:9 - (ae-forgotten-export) The symbol "StellarSigner$1" needs to be exported by the entry point index.d.ts
+// dist/discovery-Dy0xE0Xt.d.ts:803:9 - (ae-forgotten-export) The symbol "StellarSigner" needs to be exported by the entry point index.d.ts
+// dist/index.d.ts:50:9 - (ae-forgotten-export) The symbol "StellarSigner_2" needs to be exported by the entry point index.d.ts
+// dist/index.d.ts:172:9 - (ae-forgotten-export) The symbol "WatchtowerEvent" needs to be exported by the entry point index.d.ts
+// dist/index.d.ts:176:5 - (ae-forgotten-export) The symbol "ChannelState" needs to be exported by the entry point index.d.ts
+// dist/index.d.ts:214:5 - (ae-forgotten-export) The symbol "WatchtowerCursorStore" needs to be exported by the entry point index.d.ts
 
 // (No @packageDocumentation comment for this package)
 
