@@ -22,6 +22,10 @@ export function ThemeToggle() {
       onClick={() => setTheme(dark ? "light" : "dark")}
       aria-label="Toggle color theme"
       aria-pressed={dark}
+      // Until React mounts, the server's markup says "not pressed" whatever the
+      // theme is, and a click has no handler yet. This marks the moment the
+      // button tells the truth and responds, so tests can wait for it.
+      data-ready={mounted}
       className="grid h-[38px] w-[38px] place-items-center rounded-[9px] border border-border text-foreground transition-colors hover:border-border-strong hover:bg-surface-2 focus-visible:outline-2 focus-visible:outline-offset-[3px] focus-visible:outline-primary"
     >
       {/* moon (light mode) */}

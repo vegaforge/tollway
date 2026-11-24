@@ -1,6 +1,7 @@
-import type { MiddlewareHandler } from "hono";
-import type { ApiKeyConfig, ApiKeyScope } from "./config.js";
+import type { Context, MiddlewareHandler } from "hono";
+import type { ApiKeyConfig, ApiKeyScope, OperatorKeyConfig } from "./config.js";
 import { errorBody } from "./errors.js";
+import { constantTimeEqual, type TenantScope } from "./tenancy.js";
 import type { ServiceEnv } from "./types.js";
 
 /**
@@ -25,21 +26,36 @@ export async function hashApiKey(key: string): Promise<string> {
   return hex;
 }
 
-/** Compares two equal-length strings without an early exit. */
-function constantTimeEqual(left: string, right: string): boolean {
-  let difference = left.length ^ right.length;
-  const length = Math.max(left.length, right.length);
-  for (let index = 0; index < length; index += 1) {
-    difference |= (left.charCodeAt(index) | 0) ^ (right.charCodeAt(index) | 0);
-  }
-  return difference === 0;
-}
-
-/** The key a request authenticated with, as routes see it. Never the key itself. */
+/** The tenant key a request authenticated with, as routes see it. Never the key itself. */
 export type AuthenticatedKey = {
   name: string;
+  orgId: string;
+  projectId: string;
   scopes: readonly ApiKeyScope[];
 };
+
+/** The operator key an admin request authenticated with. Never the key itself. */
+export type AuthenticatedOperator = {
+  name: string;
+};
+
+/** Scope requirement for a `/v1/*` route. */
+export type RouteScope = ApiKeyScope | "operator" | null;
+
+/** Reads the verified tenant key on a tenant route, throwing if middleware was bypassed. */
+export function requireTenantKey(c: Context<ServiceEnv>): AuthenticatedKey {
+  const key = c.get("apiKey");
+  if (key === undefined) {
+    throw new Error("route expected an authenticated tenant API key");
+  }
+  return key;
+}
+
+/** Extracts the authenticated key's `{ orgId, projectId }` scope. */
+export function tenantOf(c: Context<ServiceEnv>): TenantScope {
+  const key = requireTenantKey(c);
+  return { orgId: key.orgId, projectId: key.projectId };
+}
 
 // RFC 6750 token characters. Anything else in the credential is malformed.
 const BEARER = /^Bearer +([A-Za-z0-9\-._~+/]+=*)$/;
@@ -50,11 +66,19 @@ function unauthorized(message: string) {
   return errorBody("unauthorized", message);
 }
 
+type MatchedCredential =
+  | { kind: "tenant"; entry: ApiKeyConfig }
+  | { kind: "operator"; entry: OperatorKeyConfig };
+
 /**
- * Requires a configured, unrevoked key on every request it guards, and
- * stores the key's name and scopes on the context as `apiKey`.
+ * Requires a configured, unrevoked key on every request it guards, and stores
+ * the key's metadata on the context (`apiKey` for tenant keys, `operatorKey`
+ * for cross-tenant operator keys).
  */
-export function authenticate(keys: readonly ApiKeyConfig[]): MiddlewareHandler<ServiceEnv> {
+export function authenticate(
+  keys: readonly ApiKeyConfig[],
+  operatorKeys: readonly OperatorKeyConfig[] = [],
+): MiddlewareHandler<ServiceEnv> {
   return async (c, next) => {
     const header = c.req.header("Authorization");
     if (header === undefined || header === "") {
@@ -71,28 +95,59 @@ export function authenticate(keys: readonly ApiKeyConfig[]): MiddlewareHandler<S
     }
 
     const presented = await hashApiKey(token);
-    let found: ApiKeyConfig | undefined;
+    let found: MatchedCredential | undefined;
     for (const key of keys) {
       // Every entry is compared, so the time taken does not depend on which
       // entry, if any, matches.
-      if (constantTimeEqual(key.sha256, presented) && found === undefined) found = key;
+      if (constantTimeEqual(key.sha256, presented) && found === undefined) {
+        found = { kind: "tenant", entry: key };
+      }
+    }
+    for (const key of operatorKeys) {
+      if (constantTimeEqual(key.sha256, presented) && found === undefined) {
+        found = { kind: "operator", entry: key };
+      }
     }
     if (found === undefined) {
       return c.json(unauthorized("the API key is not recognised"), 401, CHALLENGE);
     }
-    if (found.revoked === true) {
+    if (found.entry.revoked === true) {
       return c.json(unauthorized("the API key has been revoked"), 401, CHALLENGE);
     }
-    c.set("apiKey", { name: found.name, scopes: found.scopes });
+    if (found.kind === "tenant") {
+      c.set("apiKey", {
+        name: found.entry.name,
+        orgId: found.entry.orgId,
+        projectId: found.entry.projectId,
+        scopes: found.entry.scopes,
+      });
+    } else {
+      c.set("operatorKey", { name: found.entry.name });
+    }
     await next();
   };
 }
 
-/** Requires the authenticated key to carry `scope`; answers 403 when it does not. */
-export function requireScope(scope: ApiKeyScope): MiddlewareHandler<ServiceEnv> {
+/**
+ * Enforces the route's scope and separates tenant keys from operator keys:
+ * operator keys may only call `"operator"` routes, and tenant keys may never
+ * call `"operator"` routes even if they hold the `"admin"` scope.
+ */
+export function requireScope(scope: RouteScope): MiddlewareHandler<ServiceEnv> {
   return async (c, next) => {
+    if (scope === "operator") {
+      if (c.get("operatorKey") === undefined) {
+        return c.json(errorBody("forbidden", "this route requires an operator key"), 403);
+      }
+      await next();
+      return;
+    }
+
     const key = c.get("apiKey");
-    if (!key.scopes.includes(scope)) {
+    if (key === undefined) {
+      return c.json(errorBody("forbidden", "operator keys cannot access tenant routes"), 403);
+    }
+    if (scope !== null && !key.scopes.includes(scope)) {
       return c.json(errorBody("forbidden", `this API key does not have the ${scope} scope`), 403);
     }
     await next();
