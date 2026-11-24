@@ -79,6 +79,15 @@ export {
   type PaidResponse,
 } from "./paid-fetch.js";
 export {
+  type CachedPolicyEntry,
+  createMemoryPolicyCache,
+  type FetchedPolicy,
+  type FetchPolicyOptions,
+  fetchPolicy,
+  type PolicyCache,
+  PolicyFetchError,
+} from "./policy-fetcher.js";
+export {
   AmbiguousSettlementError,
   MAX_RETRY_AFTER_MS,
   type RetryOptions,

@@ -161,6 +161,12 @@ export type PolicyVersion = TenantScope & {
 export interface PolicyStore extends ServiceStore {
   current(tenant: TenantScope, agentId: string): Promise<PolicyVersion | undefined>;
   versions(tenant: TenantScope, agentId: string): Promise<readonly PolicyVersion[]>;
+  /** One stored version of the agent's policy in this tenant, or `undefined`. */
+  getVersion(
+    tenant: TenantScope,
+    agentId: string,
+    version: number,
+  ): Promise<PolicyVersion | undefined>;
   /**
    * Stores `policy` as the next version when the current version in this
    * tenant is `expectedVersion` (`null` when the agent has none yet). Returns
@@ -599,6 +605,12 @@ export function createMemoryPolicyStore(options?: { clock?: () => number }): Pol
     async versions(tenant, agentId) {
       const history = byScopedAgent.get(scopedRecordKey(tenant, agentId)) ?? [];
       return history.map((entry) => structuredClone(entry));
+    },
+    async getVersion(tenant, agentId, version) {
+      const history = byScopedAgent.get(scopedRecordKey(tenant, agentId)) ?? [];
+      // Versions start at 1 and never skip, so version n sits at index n - 1.
+      const found = history[version - 1];
+      return found === undefined ? undefined : structuredClone(found);
     },
     async append(tenant, agentId, policy, expectedVersion) {
       const key = scopedRecordKey(tenant, agentId);

@@ -765,12 +765,16 @@ export const paymentMetricSchema: z.ZodObject<{
 export function policiesModule(): ServiceModule;
 
 // @public
+export function policyEtag(version: number): string;
+
+// @public
 export interface PolicyStore extends ServiceStore {
     append(tenant: TenantScope, agentId: string, policy: Policy | null, expectedVersion: number | null): Promise<PolicyVersion | "version-conflict">;
     // (undocumented)
     count(tenant: TenantScope): Promise<number>;
     // (undocumented)
     current(tenant: TenantScope, agentId: string): Promise<PolicyVersion | undefined>;
+    getVersion(tenant: TenantScope, agentId: string, version: number): Promise<PolicyVersion | undefined>;
     // (undocumented)
     versions(tenant: TenantScope, agentId: string): Promise<readonly PolicyVersion[]>;
 }
@@ -876,76 +880,6 @@ export type PostgresQueryClient = {
 
 // @public
 export type PostgresSessionSource = PostgresPool | PostgresQueryClient;
-
-// @public
-export const putPolicyBodySchema: z.ZodObject<{
-    policy: z.ZodNullable<z.ZodObject<{
-        $schema: z.ZodOptional<z.ZodString>;
-        policyVersion: z.ZodLiteral<1>;
-        mode: z.ZodOptional<z.ZodEnum<_vegaforge_tollway_core.EnumShape<readonly ["enforce", "dry-run"]>>>;
-        budgets: z.ZodOptional<z.ZodObject<{
-            daily: z.ZodOptional<z.ZodString>;
-            weekly: z.ZodOptional<z.ZodString>;
-            monthly: z.ZodOptional<z.ZodString>;
-            rolling: z.ZodOptional<z.ZodObject<{
-                windowSeconds: z.ZodNumber;
-                cap: z.ZodString;
-            }, z.core.$strict>>;
-            timezone: z.ZodOptional<z.ZodString>;
-            weekStartsOn: z.ZodOptional<z.ZodEnum<_vegaforge_tollway_core.EnumShape<readonly ["monday", "sunday"]>>>;
-            total: z.ZodOptional<z.ZodString>;
-        }, z.core.$strict>>;
-        perService: z.ZodOptional<z.ZodRecord<z.ZodString, z.ZodObject<{
-            cap: z.ZodOptional<z.ZodString>;
-            dailyCap: z.ZodOptional<z.ZodString>;
-            window: z.ZodOptional<z.ZodObject<{
-                windowSeconds: z.ZodNumber;
-                cap: z.ZodString;
-            }, z.core.$strict>>;
-        }, z.core.$strict>>>;
-        perResource: z.ZodOptional<z.ZodRecord<z.ZodString, z.ZodObject<{
-            match: z.ZodOptional<z.ZodEnum<_vegaforge_tollway_core.EnumShape<readonly ["exact", "prefix"]>>>;
-            cap: z.ZodOptional<z.ZodString>;
-            dailyCap: z.ZodOptional<z.ZodString>;
-            window: z.ZodOptional<z.ZodObject<{
-                windowSeconds: z.ZodNumber;
-                cap: z.ZodString;
-            }, z.core.$strict>>;
-        }, z.core.$strict>>>;
-        perModel: z.ZodOptional<z.ZodRecord<z.ZodEnum<_vegaforge_tollway_core.EnumShape<readonly ["x402", "mpp-charge", "mpp-channel"]>> & z.core.$partial, z.ZodObject<{
-            enabled: z.ZodOptional<z.ZodBoolean>;
-            minChannelDeposit: z.ZodOptional<z.ZodString>;
-        }, z.core.$strict>>>;
-        rateLimit: z.ZodOptional<z.ZodObject<{
-            requestsPerMinute: z.ZodOptional<z.ZodNumber>;
-            windows: z.ZodOptional<z.ZodArray<z.ZodObject<{
-                windowSeconds: z.ZodNumber;
-                limit: z.ZodNumber;
-            }, z.core.$strict>>>;
-            count: z.ZodOptional<z.ZodEnum<_vegaforge_tollway_core.EnumShape<readonly ["settlements", "attempts"]>>>;
-            scope: z.ZodOptional<z.ZodEnum<_vegaforge_tollway_core.EnumShape<readonly ["global", "per-counterparty"]>>>;
-            perCounterpartyKeyLimit: z.ZodOptional<z.ZodNumber>;
-        }, z.core.$strict>>;
-        anomaly: z.ZodOptional<z.ZodObject<{
-            maxSpendPerMinute: z.ZodOptional<z.ZodString>;
-            adaptive: z.ZodOptional<z.ZodObject<{
-                kind: z.ZodLiteral<"ewma">;
-                smoothing: z.ZodObject<{
-                    numerator: z.ZodString;
-                    denominator: z.ZodString;
-                }, z.core.$strict>;
-                sensitivity: z.ZodObject<{
-                    numerator: z.ZodString;
-                    denominator: z.ZodString;
-                }, z.core.$strict>;
-                warmupPeriods: z.ZodNumber;
-                scope: z.ZodOptional<z.ZodEnum<_vegaforge_tollway_core.EnumShape<readonly ["asset", "asset-payee"]>>>;
-                maxBaselineGrowthPerMinute: z.ZodOptional<z.ZodString>;
-            }, z.core.$strict>>;
-        }, z.core.$strict>>;
-    }, z.core.$strict>>;
-    expectedVersion: z.ZodOptional<z.ZodNullable<z.ZodNumber>>;
-}, z.core.$strict>;
 
 // @public
 export type QuotaCheckOutcome = {
@@ -1329,7 +1263,7 @@ export type ServiceEnv = {
 export type ServiceErrorCode = (typeof serviceErrorCodes)[number];
 
 // @public
-export const serviceErrorCodes: readonly ["unauthorized", "forbidden", "tenant-mismatch", "invalid-request", "not-found", "payload-too-large", "rate-limited", "quota-exceeded", "not-ready", "conflict", "close-failed", "internal-error"];
+export const serviceErrorCodes: readonly ["unauthorized", "forbidden", "tenant-mismatch", "invalid-request", "invalid-policy", "precondition-failed", "not-found", "payload-too-large", "rate-limited", "quota-exceeded", "not-ready", "conflict", "close-failed", "internal-error"];
 
 // @public
 export interface ServiceLogger {
