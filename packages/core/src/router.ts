@@ -88,12 +88,15 @@ async function isCounterpartyQuarantined(
  * policy accept (excluding `mpp-channel` when quarantined), otherwise x402 for
  * an unknown counterparty.
  *
- * TODO: promote a counterparty to channel mode once traffic crosses the
- * threshold and @vegaforge/tollway-channels can run the lifecycle. The threshold is an
- * open question; see docs/design.md, "Open questions", item 5.
+ * Traffic-based demotion (#182): when traffic on an mpp-channel drops below the
+ * configured threshold, the router demotes the counterparty back to x402 to avoid
+ * the per-channel overhead on low-frequency traffic.
  */
 export function createDefaultRouter(options: DefaultRouterOptions = {}): ModelRouter {
   const { quarantine } = options;
+
+  // Minimum requests per minute to justify channel overhead (open + commit + close costs)
+  const channelThresholdRpm = 10;
 
   return {
     async decide(input: RouteInput): Promise<RouteDecision> {
@@ -126,7 +129,16 @@ export function createDefaultRouter(options: DefaultRouterOptions = {}): ModelRo
               : `offer for ${input.offer.resource} accepts [${input.offer.models.join(", ")}], policy allows [${effectiveAllowed.join(", ")}]`,
           );
         }
-        return { model: viable, reason: quarantined ? "quarantined" : "offer" };
+
+        // #182: Demote from mpp-channel to x402 when traffic drops below threshold
+        let model = viable;
+        if (model === "mpp-channel" && input.traffic && input.traffic.requestsPerMinute < channelThresholdRpm) {
+          // Traffic is too low to justify channel overhead; demote to x402
+          model = "x402";
+          return { model, reason: "traffic" };
+        }
+
+        return { model, reason: quarantined ? "quarantined" : "offer" };
       }
 
       if (!effectiveAllowed.includes("x402")) {

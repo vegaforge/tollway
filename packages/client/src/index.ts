@@ -644,3 +644,9 @@ export {
   TOLLWAY_RECEIPT_HEADER,
   type X402SettlerOptions,
 } from "./x402-settler.js";
+export {
+  createMppChannelSettler,
+  closeAllChannels,
+  type MppChannelSettlerOptions,
+  type MppChannelSettlerState,
+} from "./mpp-channel-settler.js";
