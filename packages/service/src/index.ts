@@ -103,8 +103,8 @@ export {
   auditQuerySchema,
   diffPolicyValues,
   policiesModule,
+  policyEtag,
   policyVersionResponseSchema,
-  putPolicyBodySchema,
 } from "./policies.js";
 export {
   type PostgresPool,

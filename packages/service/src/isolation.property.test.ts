@@ -291,11 +291,12 @@ describe("multi-tenant isolation property over random interleaved writes", () =>
         const daily = String(1000 * ((current?.version ?? 0) + 1) + tenantIdx);
         const res = await app.request(`/v1/agents/${agentId}/policy`, {
           method: "PUT",
-          headers: { ...bearer(tenant.token), "Content-Type": "application/json" },
-          body: JSON.stringify({
-            policy: { policyVersion: 1, budgets: { daily } },
-            expectedVersion: current?.version ?? null,
-          }),
+          headers: {
+            ...bearer(tenant.token),
+            "Content-Type": "application/json",
+            ...(current === undefined ? {} : { "If-Match": `"v${current.version}"` }),
+          },
+          body: JSON.stringify({ policyVersion: 1, budgets: { daily } }),
         });
         expect(res.status).toBe(200);
         model.policies.set(agentId, { version: (current?.version ?? 0) + 1, daily });

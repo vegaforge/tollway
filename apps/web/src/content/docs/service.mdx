@@ -173,9 +173,11 @@ Optional per-tenant quotas bound shared-instance usage and return `429` with a `
 | `GET /v1/channels/{id}` | `read` | One channel in the caller's tenant. |
 | `GET /v1/channels/{id}/commitments` | `read` | The channel's commitment stream (`include=blob` requires `admin`). |
 | `POST /v1/channels/{id}/close` | `admin` | Settles the channel on chain with its latest commitment. |
-| `PUT /v1/agents/{agentId}/policy` | `admin` | Appends an immutable policy version and audit entry for the agent. |
-| `GET /v1/agents/{agentId}/policy` | `read` | Current policy version for the agent in the caller's tenant. |
-| `GET /v1/agents/{agentId}/policy/versions` | `read` | Full policy history for the agent in the caller's tenant. |
+| `PUT /v1/agents/{agentId}/policy` | `admin` | Appends an immutable policy version and audit entry for the agent. Updates need `If-Match`. |
+| `GET /v1/agents/{agentId}/policy` | `read` | Active policy version for the agent in the caller's tenant, with an `ETag`; `304` on a matching `If-None-Match`. |
+| `GET /v1/agents/{agentId}/policy/versions` | `read` | Full policy history for the agent in the caller's tenant, including retirements. |
+| `GET /v1/agents/{agentId}/policy/versions/{version}` | `read` | One policy version by number. |
+| `DELETE /v1/agents/{agentId}/policy` | `admin` | Retires the policy by appending a tombstone version. Needs `If-Match`. |
 | `GET /v1/audit` | `read` | Tenant audit log, newest first, with signed cursor paging. |
 | `POST /v1/ingest` | `ingest` | Batch ingest for receipts, metrics and events with tenant verification and `idempotencyKey` deduplication. |
 | `GET /v1/admin/tenants` | `operator` | Per-tenant record counts from `AdminStore` (operator keys only). |
@@ -185,6 +187,33 @@ Optional per-tenant quotas bound shared-instance usage and return `429` with a `
 The OpenAPI document is generated from the zod schemas each route validates its path, query and body with, so it cannot drift from what the service accepts.
 
 The `tollway-service` CLI mounts `metricsModule()`, `policiesModule()`, `receiptsModule()`, `ingestModule()` and `adminModule()` by default. The CLI configures no `ReceiptVerifier`, so `POST /v1/receipts`, and `POST /v1/ingest` with receipts, answer `503 not-ready` there. Programmatic callers pass a `ReceiptVerifier` (`receiptsModule({ verifier })`, `ingestModule({ verifier })`) to accept signed receipt writes and `createChannelsModule()` with `channelManagers` to serve the channel endpoints.
+
+## Policy store
+
+The policy routes (`policiesModule()`) store and serve policy documents per agent. They do not enforce anything: enforcement still happens in each agent process, through `createPolicyEngine(policy)` from `@vegaforge/tollway-core`. The service gives operators one place to validate, version, distribute and audit a policy, so a budget change happens once instead of in every process's config.
+
+Each policy belongs to `(orgId, projectId, agentId)`. The agent id is an opaque string chosen by the operator: 1 to 64 letters, digits, dots, dashes or underscores. Two projects can use the same agent id without seeing each other's policies.
+
+- **Validation.** The body of `PUT /v1/agents/{agentId}/policy` is a policy document, checked with `parsePolicy` from `@vegaforge/tollway-core`. There is no second schema in the service. Amounts must be integer strings in the asset's smallest unit and unknown keys are refused. A failing document returns `422 invalid-policy`, with every failing path in `details.issues`.
+- **Versions.** Every accepted change appends an immutable version numbered `1, 2, 3, ...` per agent. The response carries the version's `ETag`, for example `"v2"`.
+- **Optimistic concurrency.** The first version is created without `If-Match`. Every later change, including a retirement or a new policy after one, must send `If-Match` with the current version's `ETag`. A missing or stale tag, `*`, or a list returns `412 precondition-failed` with `details.currentVersion`, and nothing is written. The store appends only when the expected version is still the latest (compare-and-set), so of two concurrent edits from the same version exactly one wins.
+- **Conditional reads.** `GET /v1/agents/{agentId}/policy` returns the active version with its `ETag`. When `If-None-Match` names that version (weak comparison, so `W/"v2"` matches too), the answer is `304` with no body.
+- **Retirement.** `DELETE /v1/agents/{agentId}/policy` appends a tombstone version with `policy: null`. History is never deleted: after a retirement, `GET .../policy` returns `404`, while `/versions` and `/versions/{version}` still serve every version.
+- **Audit trail.** Every accepted change appends one entry to the tenant's audit log, with the action (`policy.created`, `policy.updated` or `policy.retired`), the agent id, the version, the API key's name (`actorKey`, never the key), the time, and a structural diff from the previous version. The diff is a list of `{ path, before, after }` entries in sorted key order, where `path` is a dot-separated JSON path and `$` is the whole document. `GET /v1/audit?agentId=` lists entries newest first with a signed cursor. No route edits or deletes an audit entry.
+- **Agents.** `fetchPolicy(serviceUrl, agentId, apiKey)` from `@vegaforge/tollway-client` loads the active policy and validates it with `parsePolicy`. It caches each response per API key and sends `If-None-Match` on the next call, reusing its copy on `304`. The returned `policy` goes straight to `createPolicyEngine`.
+
+```ts
+import { fetchPolicy } from "@vegaforge/tollway-client";
+import { createPolicyEngine } from "@vegaforge/tollway-core";
+
+const apiKey = process.env.TOLLWAY_SERVICE_KEY;
+if (apiKey === undefined) throw new Error("TOLLWAY_SERVICE_KEY is not set");
+
+const { policy } = await fetchPolicy("https://tollway.internal.example", "agent-checkout", apiKey);
+const engine = createPolicyEngine(policy);
+```
+
+Each change writes the version first and the audit entry second. Writes within a tenant are serialised, so no other change can land between them, but the two are not one transaction: if the audit store fails after the version is stored, the version stands without its entry and the request returns `500`. A PostgreSQL store (#230) should write both in one transaction.
 
 ## Channels
 
@@ -324,7 +353,7 @@ Every error response has one shape:
 { "error": { "code": "invalid-request", "message": "the request did not match the schema", "details": [] } }
 ```
 
-`code` is stable and machine-readable: `unauthorized`, `forbidden`, `tenant-mismatch`, `invalid-request`, `not-found`, `payload-too-large`, `rate-limited`, `quota-exceeded`, `not-ready`, `conflict`, `close-failed` and `internal-error`, plus the metrics limits above. `details` carries structured context, such as each failing field with its location and path. An unexpected failure returns `internal-error`; its cause is logged, never returned.
+`code` is stable and machine-readable: `unauthorized`, `forbidden`, `tenant-mismatch`, `invalid-request`, `invalid-policy`, `precondition-failed`, `not-found`, `payload-too-large`, `rate-limited`, `quota-exceeded`, `not-ready`, `conflict`, `close-failed` and `internal-error`, plus the metrics limits above. `details` carries structured context, such as each failing field with its location and path. An unexpected failure returns `internal-error`; its cause is logged, never returned.
 
 ## Logs
 
