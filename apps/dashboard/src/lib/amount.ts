@@ -22,6 +22,17 @@ export function formatAssetAmount(amount: string, asset: string): string {
   return `${formatUnits(BigInt(amount))} ${asset}`;
 }
 
+/**
+ * `part` as a share of `total` in basis points, rounded half up to the
+ * nearest basis point. Plain bigint division truncates, so 93.4577% would
+ * read 93.45% and the shares of one asset could visibly undercount. Returns
+ * 0 for a zero total. Both values are non-negative base units or counts.
+ */
+export function shareBasisPoints(part: bigint, total: bigint): bigint {
+  if (total === 0n) return 0n;
+  return (part * 20_000n + total) / (total * 2n);
+}
+
 /** Basis points (1% = 100) as a percentage with two decimals, `12.34%`. */
 export function formatBasisPoints(basisPoints: bigint): string {
   const whole = basisPoints / 100n;

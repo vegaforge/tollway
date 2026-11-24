@@ -1672,6 +1672,32 @@ describe("ChannelManager concurrent writers (#175)", () => {
     expect(calls.closeChannel).toHaveLength(1);
   });
 
+  it("refuses a commit that starts after a close has begun", async () => {
+    // The close is queued first, so the commit runs after it and finds the
+    // channel no longer open. Its blob is never signed.
+    const { adapter, calls } = createFakeAdapter(slowSign(2));
+    const manager = createChannelManager({ adapter });
+    const channel = await manager.open({
+      counterparty: "GR",
+      asset: "USDC",
+      deposit: "100",
+      network: "testnet",
+    });
+    await manager.commit(channel.id, "40");
+    const signedBefore = calls.signCommitment.length;
+
+    const [closed, late] = await Promise.allSettled([
+      manager.close(channel.id),
+      manager.commit(channel.id, "10"),
+    ]);
+
+    expect(closed.status).toBe("fulfilled");
+    if (late?.status !== "rejected") throw new Error("the late commit was not refused");
+    expect(late.reason).toBeInstanceOf(ChannelNotOpenError);
+    expect(calls.signCommitment).toHaveLength(signedBefore);
+    expect(calls.closeChannel[0]?.cumulativeAmount).toBe("40");
+  });
+
   it("settles with the last recorded commitment when a commit races a close", async () => {
     // Whichever of the two wins, the close must settle the cumulative amount
     // that is in the stream at the time it was submitted, never an older one.

@@ -18,6 +18,7 @@ import {
   type PaymentMetric,
   type SpendSummary,
 } from "@vegaforge/tollway-observability";
+import { shareBasisPoints } from "@/lib/amount";
 import { fetchOpenChannels, type OpenChannelRow } from "./open-channels";
 import { fetchReceipts, type ReceiptRow } from "./receipts";
 
@@ -69,7 +70,7 @@ export async function fetchOverview(): Promise<OverviewSnapshot> {
 export function failureRateBasisPoints(byOutcome: OverviewSpend["byOutcome"]): bigint | null {
   const attempted = byOutcome.settled + byOutcome.failed;
   if (attempted === 0) return null;
-  return (BigInt(byOutcome.failed) * 10_000n) / BigInt(attempted);
+  return shareBasisPoints(BigInt(byOutcome.failed), BigInt(attempted));
 }
 
 /** Remaining budget per asset across the open channels, as integer strings. */

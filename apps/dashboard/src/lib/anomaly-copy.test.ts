@@ -5,8 +5,8 @@ import type { AnomalyEvent } from "@/data/anomalies";
 import { DRIFT_KINDS } from "@/data/channel-detail";
 import {
   anomalyLinks,
-  describeAnomaly,
   DRIFT_COPY,
+  describeAnomaly,
   KIND_LABEL,
   POLICY_RULE_COPY,
 } from "./anomaly-copy";

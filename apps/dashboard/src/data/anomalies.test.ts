@@ -2,8 +2,8 @@ import { policyRuleNames } from "@vegaforge/tollway-core";
 import { describe, expect, it } from "vitest";
 
 import {
-  anomalyCounterparties,
   type AnomalyEvent,
+  anomalyCounterparties,
   DEFAULT_ANOMALY_PAGE_SIZE,
   fetchAnomalies,
   severityOf,

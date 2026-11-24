@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 
-import { assetCode, formatAmount, sumByAsset } from "./amount";
+import { assetCode, formatAmount, shareBasisPoints, sumByAsset } from "./amount";
 
 describe("formatAmount", () => {
   it("shows zero with two places", () => {
@@ -63,5 +63,26 @@ describe("sumByAsset", () => {
 
   it("returns no entries for no rows, so no asset is invented", () => {
     expect(sumByAsset([], (row: { asset: string }) => row.asset)).toEqual([]);
+  });
+});
+
+describe("shareBasisPoints", () => {
+  it("rounds to the nearest basis point instead of truncating", () => {
+    // 126000000 of 134823000 is 93.4558...%, which reads 93.46%.
+    expect(shareBasisPoints(126_000_000n, 134_823_000n)).toBe(9346n);
+  });
+
+  it("rounds an exact half up", () => {
+    // 1 of 20000 is half a basis point.
+    expect(shareBasisPoints(1n, 20_000n)).toBe(1n);
+  });
+
+  it("keeps whole shares exact", () => {
+    expect(shareBasisPoints(1n, 4n)).toBe(2500n);
+    expect(shareBasisPoints(5n, 5n)).toBe(10_000n);
+  });
+
+  it("is zero for a zero total", () => {
+    expect(shareBasisPoints(0n, 0n)).toBe(0n);
   });
 });

@@ -15,7 +15,7 @@ import {
 } from "@/data/overview";
 import { useAnomalies } from "@/data/use-anomalies";
 import { useOverview } from "@/data/use-overview";
-import { assetCode, formatAmount, formatBasisPoints } from "@/lib/amount";
+import { assetCode, formatAmount, formatBasisPoints, shareBasisPoints } from "@/lib/amount";
 import { describeAnomaly, KIND_LABEL } from "@/lib/anomaly-copy";
 
 const MODEL_LABEL: Record<(typeof settlementModels)[number], string> = {
@@ -159,7 +159,7 @@ function ModelMix({ spend }: { spend: OverviewSpend }) {
                     );
                     const amount = entry?.amount ?? "0";
                     // A model with no spend shows a zero share, not a gap.
-                    const share = total === 0n ? 0n : (BigInt(amount) * 10_000n) / total;
+                    const share = shareBasisPoints(BigInt(amount), total);
                     return (
                       <li
                         key={model}
