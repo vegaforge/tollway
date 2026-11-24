@@ -128,6 +128,92 @@ const adaptiveAnomalySchema = z
     }
   });
 
+/** One sliding window of the rate limit. */
+const rateLimitWindowSchema = z.strictObject({
+  windowSeconds: z
+    .number()
+    .int()
+    .min(1)
+    .meta({ description: "Length of the sliding window, in whole seconds (at least 1)." }),
+  limit: z
+    .number()
+    .int()
+    .nonnegative()
+    .meta({ description: "Most counted events allowed inside any one window." }),
+});
+
+/**
+ * The rate limit (issue #197). `requestsPerMinute` is the original form and
+ * stays as shorthand for one 60 second window; `windows` sets one or more
+ * windows that all apply. Setting both is refused, because it is unclear
+ * which the operator meant.
+ */
+const rateLimitSchema = z
+  .strictObject({
+    /** Shorthand for `windows: [{ windowSeconds: 60, limit }]`. */
+    requestsPerMinute: z
+      .number()
+      .int()
+      .nonnegative()
+      .meta({
+        description:
+          "Most counted events in any sliding minute. Shorthand for one 60 second window; do not combine with windows.",
+      })
+      .optional(),
+    /** Every window applies: a payment passes only if it fits in all of them. */
+    windows: z
+      .array(rateLimitWindowSchema)
+      .min(1)
+      .meta({
+        description:
+          "One or more sliding windows, all applied together, for example 60 per minute and 1000 per hour.",
+      })
+      .optional(),
+    /**
+     * `settlements` (the default) counts payments recorded after they
+     * settle. `attempts` counts every payment the client sends, when it
+     * sends it, including ones that then fail.
+     */
+    count: z
+      .enum(["settlements", "attempts"])
+      .meta({
+        description:
+          "settlements (the default) counts settled payments. attempts counts every payment the client sends, including failed ones.",
+      })
+      .optional(),
+    /** `global` (the default) shares one count; `per-counterparty` keeps one per payee. */
+    scope: z
+      .enum(["global", "per-counterparty"])
+      .meta({
+        description:
+          "global (the default) shares one count across every payee. per-counterparty keeps a count per payee address.",
+      })
+      .optional(),
+    /**
+     * Most counterparties tracked at once under `per-counterparty` scope.
+     * Idle ones are dropped first; when every tracked one is active, a new
+     * counterparty is refused until one goes idle.
+     */
+    perCounterpartyKeyLimit: z
+      .number()
+      .int()
+      .min(1)
+      .meta({
+        description:
+          "Most payees tracked at once under per-counterparty scope (default 1024). When all are active, a new payee is refused until one goes idle.",
+      })
+      .optional(),
+  })
+  .superRefine((value, ctx) => {
+    if (value.requestsPerMinute !== undefined && value.windows !== undefined) {
+      ctx.addIssue({
+        code: "custom",
+        path: ["windows"],
+        message: "set either requestsPerMinute or windows, not both",
+      });
+    }
+  });
+
 const perModelSchema = z.strictObject({
   /** Allows or refuses this settlement model outright. */
   enabled: z.boolean().meta({ description: "Allows or refuses this settlement model." }).optional(),
@@ -197,15 +283,10 @@ export const policySchema = z.strictObject({
     .partialRecord(z.enum(settlementModels), perModelSchema)
     .meta({ description: "Rules per settlement model." })
     .optional(),
-  rateLimit: z
-    .strictObject({
-      /** Most payments allowed in any sliding minute. */
-      requestsPerMinute: z
-        .number()
-        .int()
-        .nonnegative()
-        .meta({ description: "Most payments allowed in any sliding minute." })
-        .optional(),
+  rateLimit: rateLimitSchema
+    .meta({
+      description:
+        "Agent-side rate limit: what is counted, over which sliding windows, and per which scope.",
     })
     .optional(),
   anomaly: z

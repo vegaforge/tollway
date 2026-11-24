@@ -230,6 +230,37 @@ const client = createClient({
 const { receipt } = await client.pay({ resource: "https://api.example.com/quotes/latest", offer });
 ```
 
+### Concurrent payments
+
+`pay()` is single-flight per purchase. Calls that are in flight at the same time for the same purchase share one settlement: one call signs and pays, and the others wait and resolve with the same receipt. An agent that fires the same request twice in parallel, as tool-calling models and retry loops do, pays once.
+
+Two calls are the same purchase when they have the same `resource`, the same settlement model after routing, and the same `amount`, `asset`, `payTo` and `network` in the offer. Pass `idempotencyKey` to decide for yourself:
+
+```ts
+// Shared, although the resource strings differ. The first call's offer is the one paid.
+await Promise.all([
+  client.pay({ resource: url, offer, idempotencyKey: "order-42" }),
+  client.pay({ resource: `${url}?retry=1`, offer, idempotencyKey: "order-42" }),
+]);
+
+// Never shared: two payments for the same offer.
+await Promise.all([
+  client.pay({ resource: url, offer, idempotencyKey: crypto.randomUUID() }),
+  client.pay({ resource: url, offer, idempotencyKey: crypto.randomUUID() }),
+]);
+```
+
+What each call sees:
+
+- The result carries `deduplicated`: `false` for the call that paid, `true` for a call that waited.
+- Only the call that paid checks the policy, records the spend and emits `payment`. A call that waited emits `payment:deduplicated` with the same receipt, so counting `payment` events counts payments.
+- If the shared settlement fails, every call rejects with the same error, no spend is recorded, and one `error` event is emitted.
+
+Known limits:
+
+- Only calls that overlap are shared. Receipts are not cached, so a call made after the settlement finished is a new purchase and pays again.
+- The in-flight table belongs to one `createClient()` instance in one process. Two workers of the same agent, or two clients in one process, do not see each other's payments and can both pay.
+
 For services with several priced endpoints, compile them in one route table and attach one adapter middleware:
 
 ```ts

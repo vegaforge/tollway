@@ -156,10 +156,51 @@
           "type": "integer",
           "minimum": 0,
           "maximum": 9007199254740991,
-          "description": "Most payments allowed in any sliding minute."
+          "description": "Most counted events in any sliding minute. Shorthand for one 60 second window; do not combine with windows."
+        },
+        "windows": {
+          "minItems": 1,
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "windowSeconds": {
+                "type": "integer",
+                "minimum": 1,
+                "maximum": 9007199254740991,
+                "description": "Length of the sliding window, in whole seconds (at least 1)."
+              },
+              "limit": {
+                "type": "integer",
+                "minimum": 0,
+                "maximum": 9007199254740991,
+                "description": "Most counted events allowed inside any one window."
+              }
+            },
+            "required": ["windowSeconds", "limit"],
+            "additionalProperties": false
+          },
+          "description": "One or more sliding windows, all applied together, for example 60 per minute and 1000 per hour."
+        },
+        "count": {
+          "type": "string",
+          "enum": ["settlements", "attempts"],
+          "description": "settlements (the default) counts settled payments. attempts counts every payment the client sends, including failed ones."
+        },
+        "scope": {
+          "type": "string",
+          "enum": ["global", "per-counterparty"],
+          "description": "global (the default) shares one count across every payee. per-counterparty keeps a count per payee address."
+        },
+        "perCounterpartyKeyLimit": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 9007199254740991,
+          "description": "Most payees tracked at once under per-counterparty scope (default 1024). When all are active, a new payee is refused until one goes idle."
         }
       },
-      "additionalProperties": false
+      "additionalProperties": false,
+      "description": "Agent-side rate limit: what is counted, over which sliding windows, and per which scope."
     },
     "anomaly": {
       "type": "object",

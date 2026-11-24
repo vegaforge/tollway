@@ -955,7 +955,14 @@ describe("TM-04 shared-lock duplicate settlement", () => {
     });
 
     const outcome = await gate({ ...baseRequest, headers });
-    expect(outcome).toEqual({ kind: "rejected", status: 409, reason: "settlement in progress" });
+    expect(outcome).toEqual({
+      kind: "rejected",
+      status: 409,
+      reason: "settlement in progress",
+      // Issue #203: Retry-After is what tells a client this 409 is the same
+      // payment still settling, safe to resend, unlike an offer mismatch.
+      headers: { "retry-after": "1" },
+    });
     expect(calls.settle).toBe(0);
   });
 
@@ -997,7 +1004,14 @@ describe("TM-04 shared-lock duplicate settlement", () => {
       // original TTL would have expired without renewal.
       await vi.advanceTimersByTimeAsync(1_800);
       const second = await processB({ ...baseRequest, headers });
-      expect(second).toEqual({ kind: "rejected", status: 409, reason: "settlement in progress" });
+      expect(second).toEqual({
+        kind: "rejected",
+        status: 409,
+        reason: "settlement in progress",
+        // Issue #203: Retry-After is what tells a client this 409 is the same
+        // payment still settling, safe to resend, unlike an offer mismatch.
+        headers: { "retry-after": "1" },
+      });
 
       await vi.advanceTimersByTimeAsync(1_500);
       expect((await first).kind).toBe("settled");
