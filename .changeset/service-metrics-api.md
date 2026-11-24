@@ -3,4 +3,6 @@
 "@vegaforge/tollway-observability": minor
 ---
 
-`@vegaforge/tollway-service` is new: a Hono app with API-key auth (scopes `ingest` and `read`), `POST /v1/metrics`, summary, bucketed time-series and JSON/CSV export routes, request limits and an OpenAPI 3.1 document. `@vegaforge/tollway-observability` now filters metrics by `asset` and `outcome`, counts only settled amounts as spend in `summarize`, reports `byOutcome` and settled per-asset breakdowns by model, payer and payee, and applies the new filters to time series and exports.
+`@vegaforge/tollway-service` gains `metricsModule()`, which adds `POST /v1/metrics`, `GET /v1/metrics/summary`, `GET /v1/metrics/series` and `GET /v1/metrics/export`, with request limits and OpenAPI entries generated from their schemas. The `tollway-service` binary mounts it. `MetricsStore` gains `timeseries` and `export`, which a custom store must now implement.
+
+`@vegaforge/tollway-observability`: `summarize` now adds only settled amounts and reports `byOutcome` and settled breakdowns per model, payer and payee in each asset. `MetricsQuery` gains `asset` and `outcome` filters, which `timeseries` and `export` apply too. The deprecated cross-asset fields keep their shape, but they now count settled amounts only.
