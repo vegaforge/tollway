@@ -3,10 +3,11 @@ import { createInMemorySettlementCache } from "./cache.js";
 import {
   createPaywallWithInFlight,
   type DynamicPriceFunction,
-  type Gate,
+  type GateOutcome,
   type InFlightSettlementResult,
   type PaywallConfig,
   type PaywallDeps,
+  type PaywallGate,
   type TollwayRequest,
 } from "./gate.js";
 import { createInMemoryServicePolicyStore } from "./service-policy.js";
@@ -29,7 +30,7 @@ interface CompiledRoute {
   pattern: string;
   segments: string[];
   config: PaywallConfig;
-  gate: Gate;
+  gate: PaywallGate;
   prefixLength: number;
   staticSegments: number;
 }
@@ -48,7 +49,7 @@ export interface RouteTableEntry {
 
 /** The gate for a matched request and the resource its receipt names. */
 export interface RouteTableMatch {
-  gate: Gate;
+  gate: PaywallGate;
   /** Canonical concrete path used as the default receipt resource. */
   resource: string;
 }
@@ -118,10 +119,17 @@ export function createRouteTable(
         (candidate) => candidate.method === canonicalMethod && matches(candidate, resource),
       );
       if (!entry) return undefined;
+      // Both entry points see the canonical resource, not the raw request URL.
+      const scoped = (request: TollwayRequest): TollwayRequest => ({
+        ...request,
+        url: entry.config.resource ?? resource,
+      });
+      const gate = (request: TollwayRequest) => entry.gate(scoped(request));
       return {
         resource,
-        gate: (request: TollwayRequest) =>
-          entry.gate({ ...request, url: entry.config.resource ?? resource }),
+        gate: Object.assign(gate, {
+          authorize: (request: TollwayRequest) => entry.gate.authorize(scoped(request)),
+        }),
       };
     },
     list() {
@@ -129,6 +137,12 @@ export function createRouteTable(
     },
   };
 }
+
+const NOT_INITIALIZED = {
+  kind: "rejected",
+  status: 500,
+  reason: "route table not initialized",
+} as const satisfies GateOutcome;
 
 function compileEntry(key: string, config: PaywallConfig): CompiledRoute {
   const separator = key.indexOf(" ");
@@ -163,7 +177,7 @@ function compileEntry(key: string, config: PaywallConfig): CompiledRoute {
     pattern,
     segments,
     config: { ...config, ...(config.models === undefined ? {} : { models: [...config.models] }) },
-    gate: async () => ({ kind: "rejected", status: 500, reason: "route table not initialized" }),
+    gate: Object.assign(async () => NOT_INITIALIZED, { authorize: async () => NOT_INITIALIZED }),
     prefixLength,
     staticSegments,
   };

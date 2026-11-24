@@ -5,14 +5,15 @@
 ```ts
 
 import { Gate } from '@vegaforge/tollway-server';
+import { PaywallOptions } from '@vegaforge/tollway-server';
 import { preHandlerHookHandler } from 'fastify';
 import { RouteTable } from '@vegaforge/tollway-server';
 
 // @public
-export function fastifyPaywall(gate: Gate): preHandlerHookHandler;
+export function fastifyPaywall(gate: Gate, options?: PaywallOptions): preHandlerHookHandler;
 
 // @public
-export function fastifyRouteTable(table: RouteTable): preHandlerHookHandler;
+export function fastifyRouteTable(table: RouteTable, options?: PaywallOptions): preHandlerHookHandler;
 
 // @public
 export const RECEIPT_REQUEST_KEY = "tollwayReceipt";

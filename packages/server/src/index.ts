@@ -74,13 +74,19 @@ export {
   type SettlementPinStore,
 } from "./failover-facilitator.js";
 export {
+  type AbandonReason,
+  type AuthorizedPayment,
+  type AuthorizeOutcome,
   createPaywall,
   type DynamicPriceFunction,
   type Gate,
   type GateOutcome,
   type PaywallConfig,
   type PaywallDeps,
+  type PaywallGate,
+  type SettleOutcome,
   type TollwayRequest,
+  type TwoPhaseConfig,
 } from "./gate.js";
 export {
   decodeHeader,
@@ -145,3 +151,15 @@ export {
   type SponsorMonitorOptions,
   type SponsorMonitorSink,
 } from "./sponsor-monitor.js";
+export {
+  type HeldNodeResponse,
+  type HoldableNodeResponse,
+  type HoldResult,
+  holdNodeResponse,
+  type PaywallOptions,
+  readBodyWithin,
+  responseTooLarge,
+  type SettlementTiming,
+  settlementTiming,
+  twoPhaseAuthorizer,
+} from "./two-phase.js";

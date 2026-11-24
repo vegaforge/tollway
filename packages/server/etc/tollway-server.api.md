@@ -31,6 +31,21 @@ import { TollwayError } from '@vegaforge/tollway-core';
 import { X402Payment } from '@vegaforge/tollway-core';
 import { z } from 'zod';
 
+// @public
+export type AbandonReason = "handler-threw" | "handler-failed" | "response-too-large" | "client-closed";
+
+// @public
+export type AuthorizedPayment = {
+    kind: "authorized";
+    maxResponseBytes: number;
+    isFailure(status: number): boolean;
+    settle(): Promise<SettleOutcome>;
+    abandon(reason: AbandonReason): Promise<void>;
+};
+
+// @public
+export type AuthorizeOutcome = GateOutcome | AuthorizedPayment;
+
 // @public (undocumented)
 export type ChannelDispute = {
     channelId: string;
@@ -144,7 +159,7 @@ export function createMockMppChargeHandler(): MppChargeHandler;
 export function createMppChargeHandler(options: MppChargeOptions): MppChargeHandler;
 
 // @public
-export function createPaywall(config: PaywallConfig, deps: PaywallDeps): Gate;
+export function createPaywall(config: PaywallConfig, deps: PaywallDeps): PaywallGate;
 
 // @public
 export function createRedisSettlementCache(options: RedisSettlementCacheOptions): LockingSettlementCache;
@@ -338,6 +353,34 @@ export type GateOutcome = {
     headers?: Record<string, string>;
 };
 
+// @public
+export type HeldNodeResponse = {
+    done: Promise<HoldResult>;
+    status(): number;
+    release(headers?: Record<string, string>): void;
+    replace(status: number, body: unknown, headers?: Record<string, string>): void;
+};
+
+// @public
+export type HoldableNodeResponse = {
+    statusCode: number;
+    write: (...args: never[]) => unknown;
+    end: (...args: never[]) => unknown;
+    writeHead: (...args: never[]) => unknown;
+    flushHeaders: (...args: never[]) => unknown;
+    setHeader(name: string, value: string | number | readonly string[]): unknown;
+    getHeaderNames(): string[];
+    removeHeader(name: string): void;
+    once(event: "close", listener: () => void): unknown;
+    readonly writableEnded: boolean;
+};
+
+// @public
+export function holdNodeResponse(res: HoldableNodeResponse, maxBytes: number): HeldNodeResponse;
+
+// @public
+export type HoldResult = "ended" | "too-large" | "closed";
+
 // @public (undocumented)
 export type InMemoryServicePolicyStoreOptions = {
     maxPayers?: number;
@@ -476,6 +519,10 @@ export type PaywallConfig = {
     maxTimeoutSeconds?: number;
     extra?: Record<string, unknown>;
     discovery?: DiscoveryDeclaration;
+    paymentIdentifier?: {
+        required?: boolean;
+    };
+    twoPhase?: TwoPhaseConfig;
 };
 
 // @public
@@ -498,11 +545,21 @@ export type PaywallDeps = {
 };
 
 // @public
+export type PaywallGate = Gate & {
+    authorize(request: TollwayRequest): Promise<AuthorizeOutcome>;
+};
+
+// @public
 export type PaywallMismatch = {
     route: string;
     field: "x402Version" | "scheme" | "network" | "extra.areFeesSponsored" | "asset" | "payTo";
     expected: string;
     advertised: string;
+};
+
+// @public
+export type PaywallOptions = {
+    settlement?: SettlementTiming;
 };
 
 // @public
@@ -518,6 +575,14 @@ export type PaywallValidation = {
     status: "not-applicable";
     reason: string;
 };
+
+// @public
+export function readBodyWithin(body: ReadableStream<Uint8Array> | null, maxBytes: number): Promise<{
+    ok: true;
+    bytes: Uint8Array<ArrayBuffer>;
+} | {
+    ok: false;
+}>;
 
 // @public
 export function readHeader(headers: Record<string, string | string[] | undefined>, name: string): string | undefined;
@@ -546,6 +611,11 @@ export type RedisSettlementCacheOptions = {
 
 // @public
 export function renderKeySetResponse(document: KeySetDocument, options?: KeySetResponseOptions): KeySetResponse;
+
+// @public
+export function responseTooLarge(maxBytes: number): Extract<GateOutcome, {
+    kind: "rejected";
+}>;
 
 // @public
 export interface RouteTable {
@@ -578,7 +648,7 @@ export interface RouteTableEntry {
 // @public
 export interface RouteTableMatch {
     // (undocumented)
-    gate: Gate;
+    gate: PaywallGate;
     resource: string;
 }
 
@@ -658,6 +728,7 @@ export interface SettlementCache {
     renew?(key: string, lock: SettlementLock, ttlMs: number): Promise<boolean>;
     // (undocumented)
     set(key: string, entry: SettlementEntry): Promise<void>;
+    setMany?(keys: readonly string[], entry: SettlementEntry): Promise<void>;
 }
 
 // @public
@@ -678,6 +749,17 @@ export interface SettlementPinStore {
     release(key: string, facilitatorId: string): Promise<boolean>;
     setIfAbsent(key: string, facilitatorId: string, ttlMs: number): Promise<string>;
 }
+
+// @public
+export type SettlementTiming = "before-handler" | "after-handler";
+
+// @public
+export function settlementTiming(options: PaywallOptions | undefined): SettlementTiming;
+
+// @public
+export type SettleOutcome = Extract<GateOutcome, {
+    kind: "settled" | "rejected";
+}>;
 
 // @public
 export type SettleResult = {
@@ -746,6 +828,15 @@ export type TollwayRequest = {
 export function toPaymentRequirements(offer: PaymentOffer, terms?: X402Terms): PaymentRequirements;
 
 // @public
+export function twoPhaseAuthorizer(gate: Gate, options: PaywallOptions | undefined): ((request: TollwayRequest) => Promise<AuthorizeOutcome>) | undefined;
+
+// @public
+export type TwoPhaseConfig = {
+    isFailureStatus?: (status: number) => boolean;
+    maxResponseBytes?: number;
+};
+
+// @public
 export function validatePaywall(route: string, paywall: PaywallTarget, capabilities: FacilitatorCapabilities): PaywallValidation;
 
 // @public
@@ -789,10 +880,10 @@ export type X402Terms = {
 
 // Warnings were encountered during analysis:
 //
-// dist/index.d.ts:176:9 - (ae-forgotten-export) The symbol "WatchtowerEvent" needs to be exported by the entry point index.d.ts
-// dist/index.d.ts:180:5 - (ae-forgotten-export) The symbol "ChannelState" needs to be exported by the entry point index.d.ts
-// dist/index.d.ts:218:5 - (ae-forgotten-export) The symbol "WatchtowerCursorStore" needs to be exported by the entry point index.d.ts
-// dist/index.d.ts:351:9 - (ae-forgotten-export) The symbol "StellarSigner" needs to be exported by the entry point index.d.ts
+// dist/index.d.ts:183:9 - (ae-forgotten-export) The symbol "WatchtowerEvent" needs to be exported by the entry point index.d.ts
+// dist/index.d.ts:187:5 - (ae-forgotten-export) The symbol "ChannelState" needs to be exported by the entry point index.d.ts
+// dist/index.d.ts:225:5 - (ae-forgotten-export) The symbol "WatchtowerCursorStore" needs to be exported by the entry point index.d.ts
+// dist/index.d.ts:358:9 - (ae-forgotten-export) The symbol "StellarSigner" needs to be exported by the entry point index.d.ts
 
 // (No @packageDocumentation comment for this package)
 
