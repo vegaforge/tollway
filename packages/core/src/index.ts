@@ -103,6 +103,25 @@ export {
   verifyReceipt,
 } from "./receipt/receipt.js";
 export {
+  type CheckpointVerification,
+  computeEntryHash,
+  computeReceiptHash,
+  createInMemoryReceiptLog,
+  type InMemoryReceiptLogOptions,
+  type ReceiptLog,
+  type ReceiptLogCheckpointBody,
+  type ReceiptLogEntry,
+  type ReceiptLogVerification,
+  receiptLogCheckpointBodySchema,
+  receiptLogEntrySchema,
+  type SignedReceiptLogCheckpoint,
+  signedReceiptLogCheckpointSchema,
+  signReceiptLogCheckpoint,
+  type VerifyReceiptLogOptions,
+  verifyReceiptLog,
+  verifyReceiptLogCheckpoint,
+} from "./receipt/receipt-log.js";
+export {
   type ReceiptBody,
   type ReceiptBodyV1,
   type ReceiptBodyV2,
