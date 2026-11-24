@@ -1,4 +1,10 @@
-import { Ed25519Signer } from "@vegaforge/tollway-core";
+import {
+  buildReceipt,
+  createKeySetVerifier,
+  Ed25519Signer,
+  signReceipt,
+  verifyReceipt,
+} from "@vegaforge/tollway-core";
 import {
   createInMemorySettlementCache,
   createMockFacilitator,
@@ -11,6 +17,7 @@ import {
   PAYMENT_REQUIRED_HEADER,
   PAYMENT_SIGNATURE_HEADER,
   type PaywallConfig,
+  renderKeySetResponse,
 } from "@vegaforge/tollway-server";
 import { Hono } from "hono";
 import { describe, expect, it } from "vitest";
@@ -239,5 +246,64 @@ describe("honoPaywall with a dynamic price", () => {
       headers: { [PAYMENT_SIGNATURE_HEADER]: paymentHeader("dynamic-hono-throws") },
     });
     expect(response.status).toBe(500);
+  });
+});
+
+describe("honoPaywall with a service policy", () => {
+  it("sends a 429 denial with Retry-After", async () => {
+    const signer = await Ed25519Signer.generate("policy-hono");
+    const gate = createPaywall(config, {
+      signer,
+      facilitator: createMockFacilitator(),
+      servicePolicy: { spendPerWindow: { limit: "0", windowSeconds: 60 } },
+      clock: () => 0,
+    });
+    const app = new Hono();
+    app.get("/quotes/latest", honoPaywall(gate), (c) => c.json({ quote: 42 }));
+
+    const response = await app.request("/quotes/latest", {
+      headers: { [PAYMENT_SIGNATURE_HEADER]: paymentHeader("policy-hono-payment") },
+    });
+    expect(response.status).toBe(429);
+    expect(response.headers.get("retry-after")).toBe("60");
+    expect(await response.json()).toEqual({ error: "service-policy:spend-exceeded" });
+  });
+});
+
+describe("serving the receipt key set (#167)", () => {
+  it("mounts renderKeySetResponse at the well-known path and a key-set verifier reads it", async () => {
+    const signer = await Ed25519Signer.generate("service-key-1");
+    const app = new Hono();
+    app.get("/.well-known/tollway-receipt-keys.jwks", (c) => {
+      const response = renderKeySetResponse(
+        { keys: [{ ...signer.publicJwk(), status: { state: "active" } }] },
+        { maxAgeSeconds: 120 },
+      );
+      return c.body(response.body, response.status, response.headers);
+    });
+
+    const served = await app.request("/.well-known/tollway-receipt-keys.jwks");
+    expect(served.status).toBe(200);
+    expect(served.headers.get("content-type")).toBe("application/jwk-set+json");
+    expect(served.headers.get("cache-control")).toBe("public, max-age=120");
+
+    const verifier = createKeySetVerifier({
+      url: "https://service.example/.well-known/tollway-receipt-keys.jwks",
+      fetch: async (url) => app.request(new URL(url).pathname),
+    });
+    const receipt = await signReceipt(
+      buildReceipt({
+        payer: "GPAYER",
+        payee: "GSERVICE",
+        amount: "10000",
+        asset: "USDC:GA5Z",
+        resource: "/quotes/latest",
+        model: "x402",
+        settlement: { kind: "transaction", txHash: "tx" },
+        network: "testnet",
+      }),
+      signer,
+    );
+    await expect(verifyReceipt(receipt, verifier)).resolves.toMatchObject({ valid: true });
   });
 });

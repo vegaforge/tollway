@@ -37,13 +37,37 @@ export {
   type SettleInput,
   type SettleResult,
   STELLAR_EXACT_SCHEME,
-  type SupportedResult,
   stellarCaip2,
   toPaymentRequirements,
   type VerifyInput,
   type VerifyResult,
   type X402Terms,
 } from "./facilitator.js";
+export {
+  createFacilitatorValidator,
+  describeMismatches,
+  type FacilitatorCapabilities,
+  FacilitatorCheckError,
+  type FacilitatorCheckReport,
+  type FacilitatorKind,
+  type FacilitatorValidator,
+  type FacilitatorValidatorOptions,
+  findMatchingKind,
+  type PaywallMismatch,
+  type PaywallTarget,
+  type PaywallValidation,
+  parseFacilitatorCapabilities,
+  type ValidationMode,
+  validatePaywall,
+} from "./facilitator-capabilities.js";
+export {
+  createFailoverFacilitator,
+  createMemoryPinStore,
+  type FailoverEvent,
+  type FailoverFacilitatorOptions,
+  type FailoverMember,
+  type SettlementPinStore,
+} from "./failover-facilitator.js";
 export {
   createPaywall,
   type DynamicPriceFunction,
@@ -72,6 +96,11 @@ export {
   TOLLWAY_RECEIPT_HEADER,
 } from "./headers.js";
 export {
+  type KeySetResponse,
+  type KeySetResponseOptions,
+  renderKeySetResponse,
+} from "./key-set-response.js";
+export {
   createMockMppChargeHandler,
   createMppChargeHandler,
   deriveMppChargeNonce,
@@ -90,3 +119,15 @@ export {
   type RouteTableEntry,
   type RouteTableMatch,
 } from "./route-table.js";
+export {
+  createInMemoryServicePolicyStore,
+  type InMemoryServicePolicyStoreOptions,
+  SERVICE_POLICY_DENIALS,
+  type ServicePolicy,
+  type ServicePolicyDecision,
+  type ServicePolicyDenialCode,
+  type ServicePolicyInput,
+  type ServicePolicyReservation,
+  type ServicePolicyStore,
+  validateServicePolicy,
+} from "./service-policy.js";

@@ -1,0 +1,164 @@
+{
+  "schema": {
+    "version": 2,
+    "specification": "https://www.rfc-editor.org/rfc/rfc8785.html",
+    "encoding": "Every non-ASCII character in this file is written as a \\u escape, so no editor can normalise it. Parse the file as JSON before use.",
+    "signingAlgorithm": "Ed25519",
+    "signingTestKey": {
+      "description": "RFC 8032 section 7.1 TEST 2 private key. Published, insecure, deterministic.",
+      "private": "TM0Imyj_ltqdtsNG7BFOD1uKMZ81q6Yk2oz27U-4pvs",
+      "public": "PUAXw-hDiVqStwqnTRt-vJyYLM8uxJaMwM1V8Sr0Zgw",
+      "publicHex": "3d4017c3e843895a92b70aa74d1b7ebc9c982ccf2ec4968cc0cd55f12af4660c"
+    },
+    "es256TestKey": {
+      "description": "RFC 6979 appendix A.2.5 P-256 private key. Published, insecure. ES256 signatures are randomised, so es256Vectors are verify-only: check the signature, do not expect to reproduce it.",
+      "kty": "EC",
+      "crv": "P-256",
+      "x": "YP7UuiVanTHJYet0xjVtaMBJuJI7Yfps5mliLmDyn7Y",
+      "y": "eQP-EAi4vJmkGunpVii8ZPLxsgwtfp9Rd6PClNRGIpk",
+      "d": "ya-p2EW6dRZrXCFXZ7HWk05Qw9s26JsSe4piKxIPZyE",
+      "kid": "rfc6979-a25",
+      "alg": "ES256",
+      "signatureEncoding": "IEEE P1363 r || s, base64url, s in the low half"
+    }
+  },
+  "vectors": [
+    {
+      "name": "empty-object",
+      "input": {},
+      "canonicalJson": "{}",
+      "canonicalHex": "7b7d",
+      "signatureBase64url": "CYajMS1ESyAIppAGnZ3gIWRAEbd34GyEr4dLR1Mi_7UjXbJicPdyEWkGl7fatzNEKa_JedxBSGqJA6-6ixQ_Bg"
+    },
+    {
+      "name": "nested-sorted",
+      "input": {
+        "b": 1,
+        "a": {
+          "d": 2,
+          "c": 3
+        }
+      },
+      "canonicalJson": "{\"a\":{\"c\":3,\"d\":2},\"b\":1}",
+      "canonicalHex": "7b2261223a7b2263223a332c2264223a327d2c2262223a317d",
+      "signatureBase64url": "qHRLpsGu-Mgs7cdUzcWwE3W9oIWaNGS3q7x0xtZHR81rPL4yMN_VmwKy9zF_xptksiiKv_eRrAnDKJTn-N-wAA"
+    },
+    {
+      "name": "nested-array",
+      "input": {
+        "items": [3, 1, 2],
+        "meta": {
+          "note": "ok"
+        }
+      },
+      "canonicalJson": "{\"items\":[3,1,2],\"meta\":{\"note\":\"ok\"}}",
+      "canonicalHex": "7b226974656d73223a5b332c312c325d2c226d657461223a7b226e6f7465223a226f6b227d7d",
+      "signatureBase64url": "hEpjkhdqO_3XKr1aSfAk1I7H495J6D0x4LZHbRS1ryWER514yDnLnPMIJ4zokxZ7bkGYGv0lvLoI0XTpMbMxCw"
+    },
+    {
+      "name": "unicode-smp",
+      "input": {
+        "greeting": "\ud83d\ude00 hello"
+      },
+      "canonicalJson": "{\"greeting\":\"\ud83d\ude00 hello\"}",
+      "canonicalHex": "7b226772656574696e67223a22f09f98802068656c6c6f227d",
+      "signatureBase64url": "1ol8fafxQura9fBNCLs77-x-EyPWqsb2dFWXiczfgxM7cDJl4sLvopQrZXriF_jO3JaIB6bGdw34rU4Z_2CtCQ"
+    },
+    {
+      "name": "utf16-key-order",
+      "input": {
+        "\u20ac": 1,
+        "\r": 2,
+        "\ud83d\ude02": 3,
+        "\ufb33": 4
+      },
+      "canonicalJson": "{\"\\r\":2,\"\u20ac\":1,\"\ud83d\ude02\":3,\"\ufb33\":4}",
+      "canonicalHex": "7b225c72223a322c22e282ac223a312c22f09f9882223a332c22efacb3223a347d",
+      "signatureBase64url": "2hb0IQU5Ka6jt2g8lCz2nC9UdsM_UnRxz4D-kkcjtikOhCw1kCr9nNE1TrF1GFF5FgvGP2STT5YHB6e2IayPDw"
+    },
+    {
+      "name": "receipt-body-v1",
+      "input": {
+        "version": 1,
+        "id": "rcpt-2026-11-23-0001",
+        "payer": "GPAYER4FQMHOXSP5XGSAK5JRTVLWJUJHLAI6NTGCIWBYLBH2F4QRAFXN",
+        "payee": "GPAYEESKFIBHLLNBWMG6YXZIJPUKETNUEPAUU5DGKUHX5F5V5NXHSXDM",
+        "amount": "10000000",
+        "asset": "CBIELTK6YBZJU5UP2WWQEUCYKLPU6AUNZ2BQ4WWFEIE3USCIHMXQDAMA",
+        "resource": "https://api.example.com/quotes/latest",
+        "model": "x402",
+        "settlement": {
+          "kind": "transaction",
+          "txHash": "e2b758c701e6c3b0d6c1b1b4c6a5f9c2e8b2d1a0f3e4c5b6a7d8e9f0a1b2c3d4"
+        },
+        "network": "testnet",
+        "issuedAt": "2026-11-19T14:03:12.000Z"
+      },
+      "canonicalJson": "{\"amount\":\"10000000\",\"asset\":\"CBIELTK6YBZJU5UP2WWQEUCYKLPU6AUNZ2BQ4WWFEIE3USCIHMXQDAMA\",\"id\":\"rcpt-2026-11-23-0001\",\"issuedAt\":\"2026-11-19T14:03:12.000Z\",\"model\":\"x402\",\"network\":\"testnet\",\"payee\":\"GPAYEESKFIBHLLNBWMG6YXZIJPUKETNUEPAUU5DGKUHX5F5V5NXHSXDM\",\"payer\":\"GPAYER4FQMHOXSP5XGSAK5JRTVLWJUJHLAI6NTGCIWBYLBH2F4QRAFXN\",\"resource\":\"https://api.example.com/quotes/latest\",\"settlement\":{\"kind\":\"transaction\",\"txHash\":\"e2b758c701e6c3b0d6c1b1b4c6a5f9c2e8b2d1a0f3e4c5b6a7d8e9f0a1b2c3d4\"},\"version\":1}",
+      "canonicalHex": "7b22616d6f756e74223a223130303030303030222c226173736574223a22434249454c544b3659425a4a5535555032575751455543594b4c50553641554e5a324251345757464549453355534349484d585144414d41222c226964223a22726370742d323032362d31312d32332d30303031222c226973737565644174223a22323032362d31312d31395431343a30333a31322e3030305a222c226d6f64656c223a2278343032222c226e6574776f726b223a22746573746e6574222c227061796565223a22475041594545534b464942484c4c4e42574d473659585a494a50554b45544e5545504155553544474b55485835463556354e58485358444d222c227061796572223a224750415945523446514d484f58535035584753414b354a5254564c574a554a484c4149364e544743495742594c424832463451524146584e222c227265736f75726365223a2268747470733a2f2f6170692e6578616d706c652e636f6d2f71756f7465732f6c6174657374222c22736574746c656d656e74223a7b226b696e64223a227472616e73616374696f6e222c22747848617368223a2265326237353863373031653663336230643663316231623463366135663963326538623264316130663365346335623661376438653966306131623263336434227d2c2276657273696f6e223a317d",
+      "signatureBase64url": "2quJ_Gcf4uqKs4_v4igN3nhOjxUWI7KadyerGqrCOdpcaZr2Wzu6JzXwueH94Owj42N47jqA136R3ulXuGFTAA"
+    },
+    {
+      "name": "rfc-8785-section-3.2.3-example",
+      "input": {
+        "1": "One",
+        "\u20ac": "Euro Sign",
+        "\r": "Carriage Return",
+        "\ufb33": "Hebrew Letter Dalet With Dagesh",
+        "\ud83d\ude00": "Emoji: Grinning Face",
+        "\u0080": "Control",
+        "\u00f6": "Latin Small Letter O With Diaeresis"
+      },
+      "canonicalJson": "{\"\\r\":\"Carriage Return\",\"1\":\"One\",\"\u0080\":\"Control\",\"\u00f6\":\"Latin Small Letter O With Diaeresis\",\"\u20ac\":\"Euro Sign\",\"\ud83d\ude00\":\"Emoji: Grinning Face\",\"\ufb33\":\"Hebrew Letter Dalet With Dagesh\"}",
+      "canonicalHex": "7b225c72223a2243617272696167652052657475726e222c2231223a224f6e65222c22c280223a22436f6e74726f6c222c22c3b6223a224c6174696e20536d616c6c204c6574746572204f205769746820446961657265736973222c22e282ac223a224575726f205369676e222c22f09f9880223a22456d6f6a693a204772696e6e696e672046616365222c22efacb3223a22486562726577204c65747465722044616c6574205769746820446167657368227d",
+      "signatureBase64url": "bPeRve3NtiD2xW8T5mRt3u3Z9isFH80ApO7DWaT4IrFL1rYLWZBkGX04GT2EfCyMLU6onb55T_-XwI-oFVTiDQ"
+    },
+    {
+      "name": "rfc-8785-section-3.2.2.2-string-escaping",
+      "input": {
+        "string": "\u20ac$\u000f\nA'B\"\\\\\"/"
+      },
+      "canonicalJson": "{\"string\":\"\u20ac$\\u000f\\nA'B\\\"\\\\\\\\\\\"/\"}",
+      "canonicalHex": "7b22737472696e67223a22e282ac245c75303030665c6e4127425c225c5c5c5c5c222f227d",
+      "signatureBase64url": "gGWs6akdO_zd8ty02L0hKqDMhp0rZc-oZgSLYr7JLyHFdBg3cQ4WwJ9Xb5HvtTDcEl3dQsMRMmRzKe1ejYVYDw"
+    }
+  ],
+  "es256Vectors": [
+    {
+      "name": "receipt-body-v2",
+      "input": {
+        "version": 2,
+        "id": "rcpt-2026-11-23-0002",
+        "payer": "GPAYER4FQMHOXSP5XGSAK5JRTVLWJUJHLAI6NTGCIWBYLBH2F4QRAFXN",
+        "payee": "GPAYEESKFIBHLLNBWMG6YXZIJPUKETNUEPAUU5DGKUHX5F5V5NXHSXDM",
+        "amount": "10000000",
+        "asset": "CBIELTK6YBZJU5UP2WWQEUCYKLPU6AUNZ2BQ4WWFEIE3USCIHMXQDAMA",
+        "resource": "https://api.example.com/quotes/latest",
+        "model": "x402",
+        "settlement": {
+          "kind": "transaction",
+          "txHash": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+        },
+        "network": "testnet",
+        "issuedAt": "2026-11-23T00:00:00.000Z",
+        "offerHash": "47DEQpj8HBSa-_TImW-5JCeuQeRkm5NMpJWZG3hSuFU",
+        "method": "GET",
+        "expiresAt": "2026-11-24T00:00:00.000Z"
+      },
+      "canonicalHex": "7b22616d6f756e74223a223130303030303030222c226173736574223a22434249454c544b3659425a4a5535555032575751455543594b4c50553641554e5a324251345757464549453355534349484d585144414d41222c22657870697265734174223a22323032362d31312d32345430303a30303a30302e3030305a222c226964223a22726370742d323032362d31312d32332d30303032222c226973737565644174223a22323032362d31312d32335430303a30303a30302e3030305a222c226d6574686f64223a22474554222c226d6f64656c223a2278343032222c226e6574776f726b223a22746573746e6574222c226f6666657248617368223a223437444551706a38484253612d5f54496d572d354a4365755165526b6d354e4d704a575a47336853754655222c227061796565223a22475041594545534b464942484c4c4e42574d473659585a494a50554b45544e5545504155553544474b55485835463556354e58485358444d222c227061796572223a224750415945523446514d484f58535035584753414b354a5254564c574a554a484c4149364e544743495742594c424832463451524146584e222c227265736f75726365223a2268747470733a2f2f6170692e6578616d706c652e636f6d2f71756f7465732f6c6174657374222c22736574746c656d656e74223a7b226b696e64223a227472616e73616374696f6e222c22747848617368223a2261616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161227d2c2276657273696f6e223a327d",
+      "signatureBase64url": "HROiU64edAHVmwoI0US6pjXs789Dp566tAUd5Pfp8HkqXbI1uLGDlVVL6xo0U2fWJPf-fMjiHAXe3iaH7G354Q"
+    },
+    {
+      "name": "nested-sorted",
+      "input": {
+        "b": 1,
+        "a": {
+          "d": 2,
+          "c": 3
+        }
+      },
+      "canonicalHex": "7b2261223a7b2263223a332c2264223a327d2c2262223a317d",
+      "signatureBase64url": "6HzLg2HfbU43YfxQ853g0CW1iaHtF3UArBXjOCcG4gRl61wYvpFvs2NUWXOKySbbA-g87lJUxffrNfsiNjmoAA"
+    }
+  ]
+}

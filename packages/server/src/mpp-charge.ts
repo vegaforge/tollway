@@ -4,6 +4,7 @@ import type { MppChargePayment, PaymentOffer, StellarNetwork } from "@vegaforge/
 import { bytesToBase64Url, TollwayError, utf8Bytes } from "@vegaforge/tollway-core";
 import { Challenge, Credential, Errors } from "mppx";
 import { mockAccount, mockHex } from "./hash.js";
+import { mppSourceProofFailure } from "./mpp-payer.js";
 
 /**
  * MPP charge handler. Unlike x402, MPP charge does not use a facilitator.
@@ -260,6 +261,17 @@ export function createMppChargeHandler(options: MppChargeOptions): MppChargeHand
       const payer = payerFromSource(credential.source, network);
       if (!payer) {
         return { valid: false, reason: "mpp credential source is not a Stellar account" };
+      }
+      // The payer is only a name until the credential proves that account
+      // signed for this payment. The gate acts on the payer before settlement
+      // (service policy), so the proof cannot wait for @stellar/mpp's checks.
+      const unproven = mppSourceProofFailure(credential.payload, {
+        challengeId: challenge.id,
+        payer,
+        network: options.network,
+      });
+      if (unproven) {
+        return { valid: false, reason: unproven };
       }
       return { valid: true, payer, nonce: await deriveMppChargeNonce(payment.payload) };
     },
