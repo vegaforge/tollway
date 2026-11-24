@@ -65,6 +65,15 @@ for pkg in "${PUBLISHABLE[@]}"; do
     # Check mode: fail if the report would change.
     if ! pnpm exec api-extractor run --config "$pkg/api-extractor.json"; then
       echo "✗ $pkg: API Extractor check failed (the API changed; run scripts/check-api-reports.sh --update)" >&2
+      # Print what changed, so a failure in CI can be diagnosed from the log
+      # alone. API Extractor writes the new report to temp/ and only says
+      # that it differs. A missing temp report means the extractor failed
+      # before writing one, and its own error above is the diagnosis.
+      for report in "$pkg"/temp/*.api.md; do
+        [ -f "$report" ] || continue
+        echo "Difference between the committed report and this build's report:" >&2
+        diff -u "$pkg/etc/$(basename "$report")" "$report" >&2 || true
+      done
       FAILED=1
     else
       echo "✓ $pkg"
