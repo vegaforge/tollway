@@ -6,6 +6,7 @@
  * schema. The architecture this implements is described in docs/design.md.
  */
 
+export { BODY_DIGEST_SEPARATOR, bindBodyToResource, bodyDigest } from "./body-binding.js";
 export { base64UrlToBytes, bytesToBase64Url, utf8Bytes } from "./encoding.js";
 export {
   ChannelOpenFailedError,

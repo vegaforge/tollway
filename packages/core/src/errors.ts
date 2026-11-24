@@ -9,6 +9,7 @@ export type TollwayErrorCode =
   | "invalid-receipt"
   | "invalid-signing-key"
   | "signer-failed"
+  | "body-too-large"
   | "invalid-amount"
   | "invalid-quote"
   | "invalid-discovery"
