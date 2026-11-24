@@ -2,6 +2,7 @@ import fc from "fast-check";
 import { describe, expect, it } from "vitest";
 
 import {
+  type ChannelDriftKind,
   type CommitmentRecord,
   createReconciler,
   type DriftKind,
@@ -395,8 +396,8 @@ describe("reconcileChannel property: stream integrity", () => {
 // point.
 
 describe("reconcileChannel property: taxonomy", () => {
-  it("the DriftKind union has the nine members the property suite covers", () => {
-    const covered: Record<DriftKind, true> = {
+  it("the ChannelDriftKind union has the nine members the property suite covers", () => {
+    const covered: Record<ChannelDriftKind, true> = {
       "under-settled": true,
       "over-settled": true,
       "missing-commitment": true,

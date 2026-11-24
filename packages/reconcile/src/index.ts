@@ -7,7 +7,37 @@
  * and matches its receipt. See docs/design.md, "Reconciliation".
  */
 
-import { type SignedReceipt, signedReceiptSchema } from "@vegaforge/tollway-core";
+import { rpc as stellarRpc } from "@stellar/stellar-sdk";
+import { type SignedReceipt, type StellarNetwork, signedReceiptSchema } from "@vegaforge/tollway-core";
+import { type ChargeDriftKind, type ChargeRpcSource, confirmChargeOnChain } from "./charge.js";
+import {
+  checkOpenChannelDrift,
+  type OpenChannelDriftKind,
+  type OpenChannelRecord,
+  type ReconcileOpenChannelOptions,
+} from "./open-channel.js";
+
+export {
+  type ChargeDrift,
+  type ChargeDriftKind,
+  type ChargeRpcSource,
+  confirmChargeOnChain,
+  NETWORK_PASSPHRASE,
+  resolveAssetContractId,
+} from "./charge.js";
+export {
+  type ChannelStateReader,
+  type ChannelWatchEvent,
+  checkOpenChannelDrift,
+  MPP_NETWORK_ID,
+  type MppNetworkId,
+  type OnChainChannelState,
+  type OpenChannelDriftKind,
+  type OpenChannelRecord,
+  type ReconcileOpenChannelOptions,
+  startOpenChannelWatcher,
+  type WatchOpenChannelOptions,
+} from "./open-channel.js";
 
 export {
   type AlertDeliveryReport,
@@ -57,7 +87,7 @@ export type SettlementRecord = {
   txHash: string;
 };
 
-export type DriftKind =
+export type ChannelDriftKind =
   | "under-settled"
   | "over-settled"
   | "missing-commitment"
@@ -70,6 +100,8 @@ export type DriftKind =
   | "foreign-commitment"
   /** Two or more commitments share one sequence. */
   | "duplicate-sequence";
+
+export type DriftKind = ChannelDriftKind | ChargeDriftKind | OpenChannelDriftKind;
 
 export type Drift = {
   kind: DriftKind;
@@ -87,9 +119,18 @@ export interface Reconciler {
     settlement: SettlementRecord,
   ): Promise<ReconciliationResult>;
   /**
-   * Validates a single x402 or MPP charge receipt structurally.
-   * On-chain settlement confirmation requires chain access and is tracked
-   * separately.
+   * Reconciles a live open channel's commitment stream and local record
+   * against its current on-chain contract state (#212).
+   */
+  reconcileOpenChannel(
+    channel: OpenChannelRecord,
+    commitments: CommitmentRecord[],
+    options?: ReconcileOpenChannelOptions,
+  ): Promise<ReconciliationResult>;
+  /**
+   * Validates an x402 or MPP charge receipt structurally and, when an RPC
+   * source or URL is configured, confirms the settlement transaction on chain
+   * via Soroban RPC `getTransaction` (#211).
    */
   reconcileCharge(receipt: SignedReceipt): Promise<ReconciliationResult>;
 }
@@ -101,6 +142,13 @@ export type ReconcilerOptions = {
    * result is ok: true. Use to filter known-acceptable divergences.
    */
   suppress?: (drift: Drift, channelId: string) => boolean;
+  /**
+   * Soroban RPC source(s) for on-chain charge confirmation (#211). Pass a
+   * single `ChargeRpcSource` or a per-network map.
+   */
+  rpc?: ChargeRpcSource | Partial<Record<StellarNetwork, ChargeRpcSource>>;
+  /** Soroban RPC URL(s) used to construct `rpc.Server` when `rpc` is omitted. */
+  rpcUrl?: string | Partial<Record<StellarNetwork, string>>;
 };
 
 /** Non-negative integer string as produced by the channel manager. */
@@ -131,6 +179,26 @@ function buildResult(
 
   if (active.length === 0) return { ok: true, channelId };
   return { ok: false, channelId, drift: active };
+}
+
+function resolveRpcSource(
+  options: ReconcilerOptions,
+  network: StellarNetwork,
+): ChargeRpcSource | undefined {
+  if (options.rpc) {
+    if ("getTransaction" in options.rpc) {
+      return options.rpc;
+    }
+    const perNet = options.rpc[network];
+    if (perNet) return perNet;
+  }
+  if (options.rpcUrl) {
+    const url = typeof options.rpcUrl === "string" ? options.rpcUrl : options.rpcUrl[network];
+    if (url) {
+      return new stellarRpc.Server(url);
+    }
+  }
+  return undefined;
 }
 
 export function createReconciler(options: ReconcilerOptions = {}): Reconciler {
@@ -271,14 +339,31 @@ export function createReconciler(options: ReconcilerOptions = {}): Reconciler {
       return buildResult(channelId, drifts, suppress);
     },
 
+    async reconcileOpenChannel(
+      channel: OpenChannelRecord,
+      commitments: CommitmentRecord[],
+      openOptions?: ReconcileOpenChannelOptions,
+    ): Promise<ReconciliationResult> {
+      const mergedOptions: ReconcileOpenChannelOptions = {
+        ...openOptions,
+        ...(openOptions?.rpcUrl === undefined && typeof options.rpcUrl === "string"
+          ? { rpcUrl: options.rpcUrl }
+          : openOptions?.rpcUrl === undefined &&
+              typeof options.rpcUrl === "object" &&
+              options.rpcUrl[channel.network] !== undefined
+            ? { rpcUrl: options.rpcUrl[channel.network] }
+            : {}),
+      };
+      const drifts = await checkOpenChannelDrift(channel, commitments, mergedOptions);
+      return buildResult(channel.id, drifts, suppress);
+    },
+
     async reconcileCharge(receipt: SignedReceipt): Promise<ReconciliationResult> {
       const ref = receipt.receipt.settlement;
       const channelId = ref.kind === "channel-commitment" ? ref.channelId : ref.txHash;
 
       const drifts: Drift[] = [];
 
-      // Structural validation only — on-chain settlement confirmation requires
-      // chain access and is out of scope here.
       const parsed = signedReceiptSchema.safeParse(receipt);
       if (!parsed.success) {
         for (const issue of parsed.error.issues) {
@@ -287,6 +372,13 @@ export function createReconciler(options: ReconcilerOptions = {}): Reconciler {
             detail: `receipt structural error at ${issue.path.join(".")}: ${issue.message}`,
           });
         }
+        return buildResult(channelId, drifts, suppress);
+      }
+
+      const rpcSource = resolveRpcSource(options, parsed.data.receipt.network);
+      if (rpcSource && parsed.data.receipt.settlement.kind === "transaction") {
+        const chainDrifts = await confirmChargeOnChain(parsed.data, rpcSource);
+        drifts.push(...chainDrifts);
       }
 
       return buildResult(channelId, drifts, suppress);

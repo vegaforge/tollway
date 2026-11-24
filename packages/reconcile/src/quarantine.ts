@@ -19,6 +19,12 @@ export const DEFAULT_DRIFT_ACTIONS: Record<DriftKind, DriftAction> & Record<stri
   "non-monotonic-cumulative": "warn",
   "foreign-commitment": "warn",
   "duplicate-sequence": "warn",
+  "transaction-not-found": "warn",
+  "transaction-failed": "warn",
+  "network-mismatch": "warn",
+  "transfer-mismatch": "quarantine",
+  "unexpected-close": "warn",
+  "balance-mismatch": "warn",
   "recipient-mismatch": "quarantine",
   "token-mismatch": "quarantine",
 };
