@@ -34,7 +34,7 @@ const series = hub.timeseries({
   to: "2026-11-20T00:00:00Z",
   bucket: "1h", // "1m" | "5m" | "1h" | "1d"
   groupBy: "payee", // optional: "model" (default), "payee" or "payer"
-  model: "x402", // optional filters, as in summarize: payer, payee, model
+  model: "x402", // optional filters: payer, payee, model, asset, outcome
 });
 
 for (const bucket of series.buckets) {
@@ -86,9 +86,15 @@ There is no SQL store in `@vegaforge/tollway-observability` yet; it is tracked i
 
 ## Spend summaries
 
-`hub.summarize(query?)` returns one flat summary over the whole window. Use `byAsset` for amounts: it holds the amount per asset and never adds different assets together.
+`hub.summarize(query?)` returns totals over the whole window. The filters are `payer`, `payee`, `model`, `asset`, `outcome`, `from` and `to`.
 
-`totalAmount`, `byModel`, `byPayer` and `byPayee` are **deprecated**. They add amounts across assets, so they only make sense when the window holds a single asset, and like `byAsset` they include failed and skipped metrics. They keep their values for existing callers. For settled-only amounts, per-model or per-counterparty amounts in one asset, an outcome split, or latency, use `timeseries` and add up the rows you need.
+- `count` is every matched metric, whatever its outcome.
+- `byOutcome` splits those counts into `settled`, `failed` and `skipped`, so a failure rate is `failed / count`.
+- `byAsset` holds the settled amount per asset, and `byModelAsset`, `byPayerAsset` and `byPayeeAsset` hold the settled amount and the settled count per group, always keyed by asset.
+- Only settled metrics add to an amount. A failed or skipped payment moves no money, so it never inflates a spend total.
+- Amounts in different assets are never added together, and no cross-asset total is offered.
+
+`totalAmount`, `byModel`, `byPayer` and `byPayee` are **deprecated**. They add settled amounts across assets, so they only make sense when the window holds a single asset. They keep their shape for existing callers; new code should read `byAsset` and the per-asset breakdowns. For latency, use `timeseries`.
 
 ## Exports and webhooks
 
@@ -140,6 +146,40 @@ Pass an `outbox` to `createObservabilityHub` to persist each delivery instead of
 Delivery is **at-least-once**, and ordering is not guaranteed. Receivers dedupe on `Tollway-Event-Id`. `Tollway-Delivery-Id` names the delivery row: it is the same across retries of that row and new only when the row is enqueued or replayed. A delivery that exhausts `maxAttempts` (16 by default, retried over about 2 to 4 hours) moves to a dead-letter state: list it with `outbox.listDeadLetters()` and re-enqueue it once with `outbox.replay(deliveryId)`, which resets attempts and issues a fresh delivery id. Delivered rows are purged after `dispatcher.deliveredRetentionMs` (24 hours by default). Rows store the subscription id, never the secret, so the same subscriptions must be registered again after a restart.
 
 The full workflow, including the header format, leases, retention and a receiver example, is in [`docs/webhook-delivery.md`](https://github.com/vegaforge/tollway/blob/dev/docs/webhook-delivery.md).
+
+## Receipt archive
+
+A receipt archive keeps every signed receipt a service issued and lets you search them. `createMemoryReceiptArchive()` keeps them in process; `createSqliteReceiptArchive({ filename })` keeps them in a file through the built-in `node:sqlite` (Node 22.13 or later). Both pass the same conformance suite.
+
+```ts
+import { Ed25519Verifier } from "@vegaforge/tollway-core";
+import { createSqliteReceiptArchive } from "@vegaforge/tollway-observability";
+
+const archive = createSqliteReceiptArchive({
+  filename: "./receipts.db",
+  verifier: new Ed25519Verifier({ "service-key-2026": publicKey }),
+});
+
+await archive.append(signedReceipt); // "appended", or "duplicate" for a repeat
+
+let cursor: string | undefined;
+do {
+  const page = await archive.search(
+    { payee: "G...SERVICE", from: "2026-11-01T00:00:00Z" },
+    cursor === undefined ? { limit: 100 } : { limit: 100, cursor },
+  );
+  for (const receipt of page.items) console.log(receipt.receipt.id);
+  cursor = page.nextCursor ?? undefined;
+} while (cursor !== undefined);
+```
+
+- **Idempotent by id.** Appending the same receipt again returns `duplicate`. A different body under an id that is already stored throws `receipt-conflict`, and the stored receipt is kept.
+- **Checked on the way in and out.** Every receipt is parsed with `signedReceiptSchema` on append and again on read. With a `verifier`, a receipt whose signature does not verify is never stored (`invalid-receipt`). A stored row that no longer parses throws `corrupt-receipt`.
+- **Stored as given.** The archive keeps the canonical JSON of the receipt, so a later receipt version is stored exactly.
+- **Filters.** `payer`, `payee`, `model`, `network`, `asset`, `resource` (exact) or `resourcePrefix` (compared character by character), `from` and `to` on `issuedAt` (inclusive), `txHash`, and `channelId` with an optional `sequence`. SQLite indexes every one of them.
+- **Pages.** Results are newest first by `(issuedAt, id)`, up to 500 a page (50 by default). Pass `nextCursor` back as `cursor`. Paging is stable: receipts appended while you page never make you skip or repeat one that was already there. A cursor the archive did not produce is rejected with `invalid-cursor`.
+
+The archive never adds amounts together; spend totals come from the metrics store.
 
 ## Reference
 

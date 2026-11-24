@@ -14,7 +14,7 @@
  * The settler is the seam between this orchestrator and the protocol-
  * specific dance (Soroban auth entry signing for x402, MPP channel
  * commitments, etc.). Tests inject a mock settler; production wires a
- * settler backed by @x402/stellar (and later @stellar/mpp). Keeping the
+ * settler backed by @x402/stellar or @stellar/mpp. Keeping the
  * settler injected means the client itself stays pure orchestration and
  * the test surface is small.
  */
@@ -1053,6 +1053,13 @@ function normalizeError(value: unknown): Error {
   return new Error(typeof value === "string" ? value : JSON.stringify(value));
 }
 
+export {
+  createMppChargeSettler,
+  MPP_NETWORK_ID,
+  type MppChargeMode,
+  type MppChargeSettlerOptions,
+  offerAssetContract,
+} from "./mpp-charge-settler.js";
 export {
   type OfferCheckName,
   type OfferChecks,

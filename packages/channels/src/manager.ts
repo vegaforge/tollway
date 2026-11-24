@@ -2,9 +2,10 @@
  * The MPP channel lifecycle manager. See docs/design.md,
  * "The channel lifecycle manager".
  *
- * Scope of this release: `open`, `commit`, `shouldClose`, `close`, and
- * `resume` and `resumeAll` for closes a crash or an unknown outcome left in
- * `closing` (#176). `recover` is tracked under #38 and remains a typed stub.
+ * Scope of this release: `open`, `commit`, `listChannels`, `shouldClose`,
+ * `close`, and `resume` and `resumeAll` for closes a crash or an unknown
+ * outcome left in `closing` (#176). `recover` is tracked under #38 and remains
+ * a typed stub.
  */
 
 import { type CounterpartyQuarantine, NotImplementedError } from "@vegaforge/tollway-core";
@@ -29,7 +30,9 @@ import type { ChannelEventHandler, ChannelLifecycleEvent } from "./events.js";
 import { type CommitmentStore, createMemoryCommitmentStore } from "./store.js";
 import type {
   Channel,
+  ChannelListFilter,
   ChannelManager,
+  ChannelPage,
   ClosePolicy,
   CloseResult,
   Commitment,
@@ -374,6 +377,10 @@ export function createChannelManager(options: CreateChannelManagerOptions): Chan
       const channel = await store.getChannel(channelId);
       if (!channel) throw new ChannelNotFoundError(channelId);
       return store.listCommitments(channelId);
+    },
+
+    async listChannels(filter?: ChannelListFilter): Promise<ChannelPage> {
+      return store.listChannels(filter);
     },
 
     async shouldClose(channelId: string): Promise<boolean> {

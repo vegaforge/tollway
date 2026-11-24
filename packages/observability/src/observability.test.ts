@@ -374,10 +374,14 @@ describe("observability hub: record + summarize", () => {
     expect(summary).toEqual({
       totalAmount: "0",
       count: 0,
+      byOutcome: { settled: 0, failed: 0, skipped: 0 },
       byAsset: {},
       byModel: {},
       byPayer: {},
       byPayee: {},
+      byModelAsset: [],
+      byPayerAsset: [],
+      byPayeeAsset: [],
     });
   });
 
