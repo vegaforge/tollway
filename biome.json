@@ -7,7 +7,14 @@
   },
   "files": {
     "ignoreUnknown": true,
-    "includes": ["**", "!**/globals.css", "!**/global.css", "!.github/semgrep"]
+    "includes": [
+      "**",
+      "!**/globals.css",
+      "!**/global.css",
+      "!.github/semgrep",
+      "!**/.stryker-tmp",
+      "!packages/*/reports"
+    ]
   },
   "formatter": {
     "enabled": true,
