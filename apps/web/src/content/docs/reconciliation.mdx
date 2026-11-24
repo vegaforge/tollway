@@ -25,7 +25,25 @@ The reconciliation engine therefore gets property tests against randomly generat
 
 ## What it does when drift fires
 
-A flagged drift event surfaces through the observability hub (`anomaly.detected`) so the operator sees it immediately, and the engine can block further commitments to a counterparty that is behaving inconsistently. Closing the channel and recovering what is reflected on chain becomes the next step.
+A flagged drift event surfaces through the observability hub (`anomaly.detected`) so the operator sees it immediately, and `createQuarantineEnforcer` in `@vegaforge/tollway-reconcile` maps each drift kind to an action (`quarantine`, `warn`, or `ignore`) against a `CounterpartyQuarantine` store.
+
+By default, proven counterparty cheating (`under-settled`, `recipient-mismatch`, and `token-mismatch`) triggers `quarantine`, while other drift kinds default to `warn` and unknown or transient outcomes do not quarantine.
+
+Once a counterparty is quarantined:
+
+- `ChannelManager.open` and `ChannelManager.commit` refuse new commitments with a `counterparty-quarantined` error (`CounterpartyQuarantinedError`).
+- `createDefaultRouter` excludes `mpp-channel` for that counterparty and records `reason: "quarantined"` (failing closed if quarantine lookup fails).
+- `TollwayClient` emits a `counterparty:quarantined` event so callers and monitoring pipelines can react.
+- A `pay()` call that names `model: "mpp-channel"` for a quarantined counterparty is refused with `counterparty-quarantined`, the same as the router's rule. An explicit model skips the router, so the client checks it itself.
+- `createQuarantineEnforcer` remembers the last 10000 processed results (`maxRememberedResults`) so a result processed twice acts once. A result older than that runs its actions again; quarantining an already active counterparty is a no-op, so the only cost is a repeated `onWarn` or `onQuarantine` call.
+
+## Operator workflow: inspect, close and recover, release
+
+Quarantine blocks future commitments without stranding funds already locked in open channels:
+
+1. **Inspect drift**: read the `QuarantineEntry` from `quarantine.lookup(counterparty)` or `quarantine.history(counterparty)` to review `drift.kind`, `drift.detail`, `drift.channelId`, `reason`, and `quarantinedAt`.
+2. **Close and recover**: `ChannelManager.close` stays allowed for quarantined counterparties so open channels can settle on chain and return any uncommitted remainder.
+3. **Release**: after verifying the root cause, explicitly lift the quarantine with `quarantine.release({ counterparty, releasedBy })`. Release is manual by default and audited with `releasedBy` and `releasedAt` (automatic expiry only runs if `autoReleaseAfterMs` is configured).
 
 Use `createDriftAlertBridge({ emitter, store, severity })` to forward `ReconciliationResult[]` into an `ObservabilityHub` (or any compatible `emit` target):
 

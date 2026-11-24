@@ -20,6 +20,7 @@
  */
 
 import {
+  type CounterpartyQuarantine,
   canonicalJson,
   comparePolicyTraces,
   createPolicyEngine,
@@ -30,7 +31,9 @@ import {
   type PolicyEngine,
   type PolicyTrace,
   type PolicyTraceComparison,
+  type QuarantineEntry,
   type ReceiptVerifier,
+  type RouteDecision,
   type SettlementModel,
   type SignedReceipt,
   type StellarNetwork,
@@ -84,7 +87,14 @@ export type ClientEvent =
   | { type: "error"; resource: string; error: Error }
   | { type: "budget:warning"; remaining: string }
   | { type: "channel:opened"; channelId: string }
-  | { type: "channel:closed"; channelId: string };
+  | { type: "channel:closed"; channelId: string }
+  | {
+      type: "counterparty:quarantined";
+      counterparty: string;
+      resource: string;
+      reason: string;
+      entry?: QuarantineEntry;
+    };
 
 export type ClientEventHandler = (event: ClientEvent) => void;
 
@@ -129,6 +139,13 @@ export type TollwayClientOptions = {
   logger?: { warn(message: string): void };
   /** Optional router. When omitted, defaults to x402 unless `model` is on the request. */
   router?: ModelRouter;
+  /**
+   * Optional quarantine store. When provided, `pay()` checks the
+   * counterparty's standing before routing, emits `counterparty:quarantined`,
+   * and passes `quarantined: true` to the router (failing closed on lookup
+   * error).
+   */
+  quarantine?: CounterpartyQuarantine;
   /**
    * Optional verifier. When provided, the returned receipt is checked
    * against the verifier's trusted public keys before `pay()` resolves;
@@ -396,6 +413,7 @@ export function createClient(options: TollwayClientOptions): TollwayClient {
     },
     async pay(request): Promise<PayResult> {
       let model: SettlementModel;
+      let emittedQuarantine = false;
       try {
         // Refused before any policy check or signature: paying on the wrong
         // network is never what the agent configured.
@@ -403,9 +421,53 @@ export function createClient(options: TollwayClientOptions): TollwayClient {
           throw new OfferNetworkMismatchError(request.offer.network, options.network);
         }
         assertOfferForRequest(request.resource, request.offer);
-        model = await decideModel(options.router, request);
+        let quarantined = false;
+        if (options.quarantine) {
+          let entry: QuarantineEntry | undefined;
+          let lookupFailed = false;
+          try {
+            entry = await options.quarantine.lookup(request.offer.payTo);
+          } catch {
+            lookupFailed = true;
+          }
+          if (entry || lookupFailed) {
+            quarantined = true;
+            emittedQuarantine = true;
+            emit({
+              type: "counterparty:quarantined",
+              counterparty: request.offer.payTo,
+              resource: request.resource,
+              reason: entry ? entry.reason : "quarantine lookup failed; failing closed",
+              ...(entry ? { entry } : {}),
+            });
+          }
+        }
+
+        const decision = await decideModel(options.router, request, quarantined);
+        if (decision.reason === "quarantined" && !emittedQuarantine) {
+          emittedQuarantine = true;
+          emit({
+            type: "counterparty:quarantined",
+            counterparty: request.offer.payTo,
+            resource: request.resource,
+            reason: "router excluded mpp-channel for quarantined counterparty",
+          });
+        }
+        model = decision.model;
       } catch (rawError) {
         const error = normalizeError(rawError);
+        if (
+          error instanceof TollwayError &&
+          error.code === "counterparty-quarantined" &&
+          !emittedQuarantine
+        ) {
+          emit({
+            type: "counterparty:quarantined",
+            counterparty: request.offer.payTo,
+            resource: request.resource,
+            reason: error.message,
+          });
+        }
         emit({ type: "error", resource: request.resource, error });
         throw error;
       }
@@ -525,15 +587,27 @@ async function checkedReceipt(
 async function decideModel(
   router: ModelRouter | undefined,
   request: PayRequest,
-): Promise<SettlementModel> {
-  if (request.model) return request.model;
-  if (!router) return "x402";
-  const decision = await router.decide({
+  quarantined: boolean,
+): Promise<RouteDecision> {
+  if (request.model) {
+    // An explicit model skips the router, so the quarantine rule the router
+    // applies has to be applied here too: a quarantined counterparty never
+    // gets a new channel commitment.
+    if (request.model === "mpp-channel" && quarantined) {
+      throw new TollwayError(
+        "counterparty-quarantined",
+        `counterparty "${request.offer.payTo}" is quarantined; cannot pay it through mpp-channel`,
+      );
+    }
+    return { model: request.model, reason: "override" };
+  }
+  if (!router) return { model: "x402", reason: "default" };
+  return router.decide({
     counterparty: request.offer.payTo,
     resource: request.resource,
     offer: request.offer,
+    ...(quarantined ? { quarantined: true } : {}),
   });
-  return decision.model;
 }
 
 function normalizeError(value: unknown): Error {
