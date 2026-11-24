@@ -1,16 +1,17 @@
+import { enumSchema } from "@vegaforge/tollway-core";
 import { z } from "zod";
 import { describeError, type ServiceLogger } from "./logger.js";
 import type { ServiceStore } from "./stores.js";
 
 /** One store's readiness. The cause of a failure is logged, never returned. */
 const storeStatusSchema = z.object({
-  status: z.enum(["ok", "failing"]),
+  status: enumSchema(["ok", "failing"]),
   /** `timeout` when the check outlived the budget, `error` when it rejected. */
-  reason: z.enum(["timeout", "error"]).optional(),
+  reason: enumSchema(["timeout", "error"]).optional(),
 });
 
 export const readinessReportSchema = z.object({
-  status: z.enum(["ready", "not-ready"]),
+  status: enumSchema(["ready", "not-ready"]),
   stores: z.record(z.string(), storeStatusSchema),
 });
 

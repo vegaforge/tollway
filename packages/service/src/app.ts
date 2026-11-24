@@ -1,4 +1,5 @@
 import type { ChannelManager } from "@vegaforge/tollway-channels";
+import { enumSchema } from "@vegaforge/tollway-core";
 import type { ObservabilityHub } from "@vegaforge/tollway-observability";
 import { Hono } from "hono";
 import { bodyLimit } from "hono/body-limit";
@@ -184,7 +185,7 @@ export function createService(options: CreateServiceOptions): Hono<ServiceEnv> {
       responses: {
         200: {
           description: "The key's name and scopes.",
-          schema: z.object({ name: z.string(), scopes: z.array(z.enum(apiKeyScopes)) }),
+          schema: z.object({ name: z.string(), scopes: z.array(enumSchema(apiKeyScopes)) }),
         },
       },
       handler: (c) => {

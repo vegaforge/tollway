@@ -1,4 +1,5 @@
 import { z } from "zod";
+import { enumSchema } from "../enum-shape.js";
 import { settlementModels, stellarNetworks } from "../types.js";
 
 /**
@@ -46,9 +47,9 @@ const commonBodyFields = {
   amount: z.string().regex(/^[0-9]+$/, "amount must be an integer string"),
   asset: z.string().min(1),
   resource: z.string().min(1),
-  model: z.enum(settlementModels),
+  model: enumSchema(settlementModels),
   settlement: settlementRefSchema,
-  network: z.enum(stellarNetworks),
+  network: enumSchema(stellarNetworks),
   issuedAt: z.iso.datetime(),
 } as const;
 
