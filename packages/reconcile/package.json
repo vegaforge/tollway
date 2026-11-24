@@ -35,6 +35,8 @@
     "typecheck": "tsc --noEmit"
   },
   "dependencies": {
+    "@stellar/mpp": "0.7.1",
+    "@stellar/stellar-sdk": "16.4.1",
     "@vegaforge/tollway-core": "workspace:*"
   },
   "devDependencies": {
