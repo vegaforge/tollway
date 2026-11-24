@@ -167,7 +167,7 @@ function ModelMix({ spend }: { spend: OverviewSpend }) {
                         className="rounded-lg border border-border bg-surface-2 p-4"
                       >
                         <p className="text-xs font-medium">{MODEL_LABEL[model]}</p>
-                        <p className="mt-2 text-xl font-semibold text-accent">
+                        <p className="mt-2 text-xl font-semibold text-foreground">
                           {formatBasisPoints(share)}
                         </p>
                         <p className="mt-1 font-mono text-xs text-muted">
