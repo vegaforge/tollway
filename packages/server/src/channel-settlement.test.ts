@@ -1,172 +1,430 @@
-import { describe, expect, it, vi } from "vitest";
+import type * as ChannelServer from "@stellar/mpp/channel/server";
+import { Keypair } from "@stellar/stellar-sdk";
+import { beforeEach, describe, expect, it, vi } from "vitest";
+import type * as ChannelChain from "./channel-chain.js";
 import {
-  createChannelSettlementScheduler,
-  createInMemoryChannelSettlementStore,
-  createStellarChannelSettler,
-  decodeCommitmentSignature,
-  isAmbiguousCloseError,
+  type ChannelSettlerOptions,
+  createChannelSettler,
+  hexSignatureBytes,
+  validateSettlementTriggers,
 } from "./channel-settlement.js";
-import { createInMemoryVoucherStore } from "./mpp-channel.js";
+import {
+  type ChannelRecord,
+  type ChannelStore,
+  createInMemoryChannelStore,
+  createInMemoryCloseRateGuard,
+} from "./channel-store.js";
 
-const CHANNEL_1 = "CDLZFC3SYJYDZT7K67VZ75HPJVIEUVNIXF47ZG2FB2RMQQVU2HHGCYSC";
-const CHANNEL_2 = "CBIELTK6YBZJU5UP2WWQEUCYKLPU6AUNZ2BQ4WWFEIE3USCIHMXQDAMA";
-const ENVELOPE_SIGNER = "SAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAD2KM";
-const SIG_HEX = "ab".repeat(64);
-const TX_HASH = "f".repeat(64);
+// `close` from @stellar/mpp and every chain read are stubbed at the module
+// boundary, so nothing here reaches a network.
+const stub = vi.hoisted(() => ({
+  close: vi.fn(),
+  readChannelBalanceState: vi.fn(),
+}));
 
-describe("on-chain channel settlement and scheduler (#174)", () => {
-  it("closes a channel with maxFeeBumpStroops, derives remainder, and records settled marker", async () => {
-    const settlementStore = createInMemoryChannelSettlementStore({
-      now: () => "2026-11-24T12:00:00.000Z",
-    });
-    const closeChannel = vi.fn(async () => TX_HASH);
-    const settler = createStellarChannelSettler({
-      network: "testnet",
-      rpcUrl: "https://soroban-testnet.stellar.org",
-      feePayer: { envelopeSigner: ENVELOPE_SIGNER },
+vi.mock("@stellar/mpp/channel/server", async (importOriginal) => {
+  const actual = await importOriginal<typeof ChannelServer>();
+  return { ...actual, close: stub.close };
+});
+
+vi.mock("./channel-chain.js", async (importOriginal) => {
+  const actual = await importOriginal<typeof ChannelChain>();
+  return { ...actual, readChannelBalanceState: stub.readChannelBalanceState };
+});
+
+const NOW = 1_700_000_000_000;
+const CHANNEL_A = "CDLZFC3SYJYDZT7K67VZ75HPJVIEUVNIXF47ZG2FB2RMQQVU2HHGCYSC";
+const CHANNEL_B = "CBIELTK6YBZJU5UP2WWQEUCYKLPU6AUNZ2BQ4WWFEIE3USCIHMXQDAMA";
+const FEE_PAYER = Keypair.random();
+const SIG = "ab".repeat(64);
+const TX = "f".repeat(64);
+
+function record(channelId: string, overrides: Partial<ChannelRecord> = {}): ChannelRecord {
+  return {
+    channelId,
+    network: "testnet",
+    payer: "GFUNDER",
+    payTo: "GRECIPIENT",
+    asset: "CTOKEN",
+    commitmentKey: "GKEY",
+    refundWaitingPeriod: 20_000,
+    registeredAt: NOW - 1_000,
+    status: "open",
+    version: 1,
+    latest: { sequence: 3, cumulativeAmount: "3000", signature: SIG, acceptedAt: NOW - 500 },
+    ...overrides,
+  };
+}
+
+async function seed(store: ChannelStore, ...records: ChannelRecord[]): Promise<void> {
+  for (const entry of records) {
+    await store.compareAndSet(entry.channelId, 0, entry);
+  }
+}
+
+function settlerOptions(channels: ChannelStore, overrides: Partial<ChannelSettlerOptions> = {}) {
+  return {
+    channels,
+    network: "testnet" as const,
+    feePayer: { envelopeSigner: FEE_PAYER },
+    feePayerKey: FEE_PAYER.publicKey(),
+    closeRateGuard: createInMemoryCloseRateGuard({ maxCloses: 100, windowMs: 60_000 }),
+    clock: () => NOW,
+    ...overrides,
+  };
+}
+
+function chainState(balance: string, closeEffectiveAtLedger: number | null) {
+  return { balance, closeEffectiveAtLedger, currentLedger: 200 };
+}
+
+beforeEach(() => {
+  vi.clearAllMocks();
+  stub.close.mockResolvedValue(TX);
+  stub.readChannelBalanceState
+    .mockResolvedValueOnce(chainState("10000", null))
+    .mockResolvedValue(chainState("0", 200));
+});
+
+describe("createChannelSettler.settle (#174)", () => {
+  it("closes with the latest voucher and records the settlement for reconciliation", async () => {
+    const channels = createInMemoryChannelStore();
+    await seed(channels, record(CHANNEL_A));
+    const onClosed = vi.fn();
+    const settler = createChannelSettler(
+      settlerOptions(channels, { maxFeeBumpStroops: 50_000, onClosed }),
+    );
+
+    const outcome = await settler.settle(CHANNEL_A);
+
+    const expected = {
+      channelId: CHANNEL_A,
+      settledAmount: "3000",
+      returnedRemainder: "7000",
+      txHash: TX,
+    };
+    expect(outcome).toEqual({ status: "closed", record: expected });
+    expect(stub.close).toHaveBeenCalledWith({
+      channel: CHANNEL_A,
+      amount: 3000n,
+      signature: hexSignatureBytes(SIG),
+      feePayer: { envelopeSigner: FEE_PAYER },
+      network: "stellar:testnet",
       maxFeeBumpStroops: 50_000,
-      settlementStore,
-      readChannelState: async () => ({ balance: "5000" }),
-      closeChannel,
     });
-
-    const record = await settler.settle({
-      channelId: CHANNEL_1,
-      cumulativeAmount: "3200",
-      commitment: SIG_HEX,
+    const stored = await channels.get(CHANNEL_A);
+    expect(stored?.status).toBe("closed");
+    expect(stored?.settlement).toMatchObject({
+      trigger: "service",
+      balanceBefore: "10000",
+      record: expected,
     });
-
-    expect(record).toEqual({
-      channelId: CHANNEL_1,
-      settledAmount: "3200",
-      returnedRemainder: "1800",
-      txHash: TX_HASH,
-    });
-    expect(closeChannel).toHaveBeenCalledWith({
-      channel: CHANNEL_1,
-      amount: 3200n,
-      signature: decodeCommitmentSignature(SIG_HEX),
-      maxFeeBumpStroops: 50_000,
-    });
-
-    const marker = await settlementStore.getMarker(CHANNEL_1);
-    expect(marker?.status).toBe("settled");
-    expect(marker?.txHash).toBe(TX_HASH);
-    expect(marker?.returnedRemainder).toBe("1800");
+    expect(onClosed).toHaveBeenCalledWith(expected);
   });
 
-  it("leaves a fail-closed unknown marker on PollTimeoutError and clears on definite pre-send failure", async () => {
-    const settlementStore = createInMemoryChannelSettlementStore({
-      now: () => "2026-11-24T12:00:00.000Z",
-    });
-
-    const pollErr = new Error("Transaction polling timed out");
-    pollErr.name = "PollTimeoutError";
-    expect(isAmbiguousCloseError(pollErr)).toBe(true);
-
-    const ambiguousSettler = createStellarChannelSettler({
-      network: "testnet",
-      rpcUrl: "https://soroban-testnet.stellar.org",
-      feePayer: { envelopeSigner: ENVELOPE_SIGNER },
-      settlementStore,
-      readChannelState: async () => ({ balance: "5000" }),
-      closeChannel: async () => {
-        throw pollErr;
-      },
-    });
-
-    await expect(
-      ambiguousSettler.settle({
-        channelId: CHANNEL_1,
-        cumulativeAmount: "1000",
-        commitment: SIG_HEX,
-      }),
-    ).rejects.toThrow("Transaction polling timed out");
-
-    // Marker stays in place as "unknown" so no retry double-submits before reconciliation.
-    const marker = await settlementStore.getMarker(CHANNEL_1);
-    expect(marker?.status).toBe("unknown");
-
-    // Definite failure clears the marker so a later run can retry.
-    const definiteSettler = createStellarChannelSettler({
-      network: "testnet",
-      rpcUrl: "https://soroban-testnet.stellar.org",
-      feePayer: { envelopeSigner: ENVELOPE_SIGNER },
-      settlementStore,
-      readChannelState: async () => ({ balance: "5000" }),
-      closeChannel: async () => {
-        throw new Error("network unreachable");
-      },
-    });
-
-    await expect(
-      definiteSettler.settle({
-        channelId: CHANNEL_2,
-        cumulativeAmount: "1000",
-        commitment: SIG_HEX,
-      }),
-    ).rejects.toThrow("network unreachable");
-    expect(await settlementStore.getMarker(CHANNEL_2)).toBeUndefined();
+  it("never submits a channel that has no accepted voucher", async () => {
+    const channels = createInMemoryChannelStore();
+    const { latest: _none, ...empty } = record(CHANNEL_A);
+    await seed(channels, empty);
+    const outcome = await createChannelSettler(settlerOptions(channels)).settle(CHANNEL_A);
+    expect(outcome).toEqual({ status: "skipped", reason: "no-accepted-voucher" });
+    expect(stub.close).not.toHaveBeenCalled();
+    expect((await channels.get(CHANNEL_A))?.status).toBe("open");
   });
 
-  it("runs scheduled settlement sweeps and reports stale markers", async () => {
-    const voucherStore = createInMemoryVoucherStore();
-    await voucherStore.record({
-      channelId: CHANNEL_1,
-      sequence: 2,
-      cumulativeAmount: "2000",
-      commitment: SIG_HEX,
-      payer: "GAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAWHF",
-      acceptedAt: "2026-11-24T11:00:00.000Z",
-    });
-    await voucherStore.record({
-      channelId: CHANNEL_2,
-      sequence: 1,
-      cumulativeAmount: "500",
-      commitment: SIG_HEX,
-      payer: "GAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAWHF",
-      acceptedAt: "2026-11-24T11:59:30.000Z",
-    });
+  it("keeps the channel settling when close throws, and never reopens it", async () => {
+    const channels = createInMemoryChannelStore();
+    await seed(channels, record(CHANNEL_A));
+    stub.close.mockRejectedValue(new Error("Transaction polling timed out"));
+    const onCloseFailed = vi.fn();
+    const settler = createChannelSettler(settlerOptions(channels, { onCloseFailed }));
 
-    const settlementStore = createInMemoryChannelSettlementStore({
-      now: () => "2026-11-24T12:00:00.000Z",
+    expect(await settler.settle(CHANNEL_A)).toEqual({
+      status: "failed",
+      error: "Transaction polling timed out",
     });
-    const settler = createStellarChannelSettler({
-      network: "testnet",
-      rpcUrl: "https://soroban-testnet.stellar.org",
-      feePayer: { envelopeSigner: ENVELOPE_SIGNER },
-      settlementStore,
-      readChannelState: async () => ({ balance: "5000" }),
-      closeChannel: async () => TX_HASH,
+    const stored = await channels.get(CHANNEL_A);
+    expect(stored?.status).toBe("settling");
+    expect(stored?.settlement).toMatchObject({
+      retryable: false,
+      lastError: "Transaction polling timed out",
     });
+    expect(onCloseFailed).toHaveBeenCalledTimes(1);
 
-    const onSettled = vi.fn();
-    const scheduler = createChannelSettlementScheduler({
-      voucherStore,
-      settler,
-      settlementStore,
-      intervalMs: 60_000,
-      minSettleAmount: "1000",
-      onSettled,
-      now: () => Date.parse("2026-11-24T12:00:00.000Z"),
-    });
+    // A second attempt does nothing until resolve() has read the chain.
+    expect(await settler.settle(CHANNEL_A)).toEqual({ status: "skipped", reason: "in-progress" });
+    expect(stub.close).toHaveBeenCalledTimes(1);
+  });
 
-    const report = await scheduler.runOnce();
-    expect(report.settled).toEqual([
-      {
-        channelId: CHANNEL_1,
-        settledAmount: "2000",
-        returnedRemainder: "3000",
-        txHash: TX_HASH,
-      },
+  it("does not leak the fee payer secret into an error", async () => {
+    const channels = createInMemoryChannelStore();
+    await seed(channels, record(CHANNEL_A));
+    stub.close.mockRejectedValue(new Error("send failed"));
+    const outcome = await createChannelSettler(settlerOptions(channels)).settle(CHANNEL_A);
+    expect(JSON.stringify(outcome)).not.toContain(FEE_PAYER.secret());
+  });
+
+  it("produces one close when two settlers race over a shared store", async () => {
+    const channels = createInMemoryChannelStore();
+    await seed(channels, record(CHANNEL_A));
+    stub.readChannelBalanceState.mockReset();
+    stub.readChannelBalanceState.mockResolvedValue(chainState("10000", null));
+    let release = (): void => {};
+    stub.close.mockImplementation(
+      () =>
+        new Promise<string>((resolve) => {
+          release = () => resolve(TX);
+        }),
+    );
+    const first = createChannelSettler(settlerOptions(channels));
+    const second = createChannelSettler(settlerOptions(channels));
+
+    const running = Promise.all([first.settle(CHANNEL_A), second.settle(CHANNEL_A)]);
+    await vi.waitFor(() => expect(stub.close).toHaveBeenCalledTimes(1));
+    release();
+    const outcomes = await running;
+
+    expect(stub.close).toHaveBeenCalledTimes(1);
+    expect(outcomes.map((outcome) => outcome.status).sort()).toEqual(["closed", "skipped"]);
+  });
+
+  it("caps closes per fee payer per window", async () => {
+    const channels = createInMemoryChannelStore();
+    await seed(channels, record(CHANNEL_A), record(CHANNEL_B));
+    const settler = createChannelSettler(
+      settlerOptions(channels, {
+        closeRateGuard: createInMemoryCloseRateGuard({ maxCloses: 1, windowMs: 60_000 }),
+      }),
+    );
+    expect((await settler.settle(CHANNEL_A)).status).toBe("closed");
+    expect(await settler.settle(CHANNEL_B)).toEqual({ status: "rate-limited" });
+    expect(stub.close).toHaveBeenCalledTimes(1);
+    expect((await channels.get(CHANNEL_B))?.status).toBe("open");
+  });
+
+  it("reports an already closed channel without sending anything", async () => {
+    const channels = createInMemoryChannelStore();
+    const settler = createChannelSettler(settlerOptions(channels));
+    await seed(channels, record(CHANNEL_A));
+    await settler.settle(CHANNEL_A);
+    const again = await settler.settle(CHANNEL_A);
+    expect(again.status).toBe("already-closed");
+    expect(stub.close).toHaveBeenCalledTimes(1);
+  });
+
+  it("reports a chain that does not look closed afterwards", async () => {
+    const channels = createInMemoryChannelStore();
+    await seed(channels, record(CHANNEL_A));
+    stub.readChannelBalanceState.mockReset();
+    stub.readChannelBalanceState.mockResolvedValue(chainState("10000", null));
+    const onCloseAnomaly = vi.fn();
+    await createChannelSettler(settlerOptions(channels, { onCloseAnomaly })).settle(CHANNEL_A);
+    expect(onCloseAnomaly).toHaveBeenCalledWith(expect.objectContaining({ channelId: CHANNEL_A }));
+  });
+});
+
+describe("createChannelSettler.resolve (#174)", () => {
+  async function failedClose(): Promise<{
+    channels: ChannelStore;
+    settler: ReturnType<typeof createChannelSettler>;
+  }> {
+    const channels = createInMemoryChannelStore();
+    await seed(channels, record(CHANNEL_A));
+    stub.close.mockRejectedValueOnce(new Error("timed out"));
+    const settler = createChannelSettler(settlerOptions(channels));
+    await settler.settle(CHANNEL_A);
+    stub.readChannelBalanceState.mockReset();
+    return { channels, settler };
+  }
+
+  it("marks the channel closed when the chain shows it closed and empty", async () => {
+    const { channels, settler } = await failedClose();
+    stub.readChannelBalanceState.mockResolvedValue(chainState("0", 150));
+    expect(await settler.resolve(CHANNEL_A)).toEqual({ status: "closed" });
+    expect((await channels.get(CHANNEL_A))?.status).toBe("closed");
+  });
+
+  it("allows a retry when the close never reached the chain, and the retry closes", async () => {
+    const { channels, settler } = await failedClose();
+    stub.readChannelBalanceState.mockResolvedValue(chainState("10000", null));
+    expect(await settler.resolve(CHANNEL_A)).toEqual({
+      status: "retryable",
+      reason: "close-not-on-chain",
+    });
+    expect((await channels.get(CHANNEL_A))?.status).toBe("settling");
+
+    stub.close.mockResolvedValueOnce(TX);
+    expect((await settler.settle(CHANNEL_A)).status).toBe("closed");
+  });
+
+  it("allows a retry during a funder dispute", async () => {
+    const { settler } = await failedClose();
+    stub.readChannelBalanceState.mockResolvedValue(chainState("10000", 300));
+    expect(await settler.resolve(CHANNEL_A)).toEqual({
+      status: "retryable",
+      reason: "funder-dispute",
+    });
+  });
+
+  it("does nothing for a channel that is not settling", async () => {
+    const channels = createInMemoryChannelStore();
+    await seed(channels, record(CHANNEL_A));
+    expect(await createChannelSettler(settlerOptions(channels)).resolve(CHANNEL_A)).toEqual({
+      status: "not-settling",
+    });
+  });
+});
+
+describe("createChannelSettler.evaluate triggers (#174)", () => {
+  async function evaluateWith(triggers: ChannelSettlerOptions["triggers"], entry: ChannelRecord) {
+    const channels = createInMemoryChannelStore();
+    await seed(channels, entry);
+    return createChannelSettler(settlerOptions(channels, { triggers })).evaluate();
+  }
+
+  it("closes when the accrued cumulative reaches the amount", async () => {
+    const report = await evaluateWith({ minCumulative: "3000" }, record(CHANNEL_A));
+    expect(report.results).toEqual([
+      { channelId: CHANNEL_A, outcome: expect.objectContaining({ status: "closed" }) },
     ]);
-    expect(report.skipped).toEqual([CHANNEL_2]);
-    expect(report.failed).toEqual([]);
-    expect(onSettled).toHaveBeenCalledTimes(1);
+  });
 
-    // Second sweep skips CHANNEL_1 because it is already settled.
-    const report2 = await scheduler.runOnce();
-    expect(report2.settled).toEqual([]);
-    expect(report2.skipped).toEqual([CHANNEL_1, CHANNEL_2]);
+  it("leaves a channel below the amount alone", async () => {
+    const report = await evaluateWith({ minCumulative: "3001" }, record(CHANNEL_A));
+    expect(report.results).toEqual([]);
+    expect(stub.close).not.toHaveBeenCalled();
+  });
+
+  it("closes at a fraction of the on-chain balance using integer arithmetic", async () => {
+    stub.readChannelBalanceState.mockReset();
+    stub.readChannelBalanceState.mockResolvedValue(chainState("10000", null));
+    // 3000 * 10 >= 10000 * 3 fires; at 3001 tenths it would not.
+    expect(
+      (
+        await evaluateWith(
+          { balanceFraction: { numerator: 3, denominator: 10 } },
+          record(CHANNEL_A),
+        )
+      ).results,
+    ).toHaveLength(1);
+    vi.clearAllMocks();
+    stub.readChannelBalanceState.mockResolvedValue(chainState("10001", null));
+    expect(
+      (
+        await evaluateWith(
+          { balanceFraction: { numerator: 3, denominator: 10 } },
+          record(CHANNEL_A),
+        )
+      ).results,
+    ).toHaveLength(0);
+  });
+
+  it("closes an idle channel", async () => {
+    expect((await evaluateWith({ idleMs: 500 }, record(CHANNEL_A))).results).toHaveLength(1);
+    vi.clearAllMocks();
+    expect((await evaluateWith({ idleMs: 501 }, record(CHANNEL_A))).results).toHaveLength(0);
+  });
+
+  it("closes a channel past its maximum age", async () => {
+    expect(
+      (await evaluateWith({ maxChannelAgeMs: 1_000 }, record(CHANNEL_A))).results,
+    ).toHaveLength(1);
+    vi.clearAllMocks();
+    expect(
+      (await evaluateWith({ maxChannelAgeMs: 1_001 }, record(CHANNEL_A))).results,
+    ).toHaveLength(0);
+  });
+
+  it("skips channels with no voucher, a pending voucher, or not open", async () => {
+    const channels = createInMemoryChannelStore();
+    const { latest: _none, ...empty } = record(CHANNEL_A);
+    await seed(
+      channels,
+      empty,
+      record(CHANNEL_B, {
+        pending: {
+          sequence: 4,
+          cumulativeAmount: "4000",
+          signature: SIG,
+          acceptedAt: NOW,
+          action: "voucher",
+        },
+      }),
+    );
+    const report = await createChannelSettler(
+      settlerOptions(channels, { triggers: { idleMs: 1 } }),
+    ).evaluate();
+    expect(report).toEqual({ results: [], errors: [] });
+    expect(stub.close).not.toHaveBeenCalled();
+  });
+
+  it("reports a channel whose trigger could not be checked", async () => {
+    stub.readChannelBalanceState.mockReset();
+    stub.readChannelBalanceState.mockRejectedValue(new Error("rpc down"));
+    const report = await evaluateWith(
+      { balanceFraction: { numerator: 1, denominator: 2 } },
+      record(CHANNEL_A),
+    );
+    expect(report.errors).toEqual([{ channelId: CHANNEL_A, error: "rpc down" }]);
+  });
+
+  it.each([
+    [{ minCumulative: "0" }],
+    [{ minCumulative: "1.5" }],
+    [{ balanceFraction: { numerator: 0, denominator: 10 } }],
+    [{ balanceFraction: { numerator: 11, denominator: 10 } }],
+    [{ balanceFraction: { numerator: 1.5, denominator: 10 } }],
+    [{ idleMs: -1 }],
+    [{ maxChannelAgeMs: 0 }],
+  ])("throws at construction for invalid triggers %j", (triggers) => {
+    expect(() => validateSettlementTriggers(triggers)).toThrow(TypeError);
+    expect(() =>
+      createChannelSettler(settlerOptions(createInMemoryChannelStore(), { triggers })),
+    ).toThrow(TypeError);
+  });
+});
+
+describe("createChannelSettler.start and stop", () => {
+  it("runs passes on a timer and waits for a running pass on stop", async () => {
+    vi.useFakeTimers();
+    try {
+      const channels = createInMemoryChannelStore();
+      await seed(channels, record(CHANNEL_A));
+      const settler = createChannelSettler(
+        settlerOptions(channels, { triggers: { minCumulative: "1" } }),
+      );
+      settler.start({ intervalMs: 1_000 });
+      await vi.advanceTimersByTimeAsync(1_000);
+      await settler.stop();
+      expect(stub.close).toHaveBeenCalledTimes(1);
+      expect(() => settler.start({ intervalMs: 0 })).toThrow(TypeError);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+});
+
+describe("in-memory channel store and close rate guard", () => {
+  it("writes only on the expected version", async () => {
+    const store = createInMemoryChannelStore();
+    const entry = record(CHANNEL_A);
+    expect(await store.compareAndSet(CHANNEL_A, 0, entry)).toBe(true);
+    expect(await store.compareAndSet(CHANNEL_A, 0, entry)).toBe(false);
+    expect(await store.compareAndSet(CHANNEL_A, 1, { ...entry, version: 3 })).toBe(false);
+    expect(
+      await store.compareAndSet(CHANNEL_A, 1, { ...entry, version: 2, status: "settling" }),
+    ).toBe(true);
+    const read = await store.get(CHANNEL_A);
+    if (read) read.status = "closed";
+    expect((await store.get(CHANNEL_A))?.status).toBe("settling");
+  });
+
+  it("frees the guard once the window has passed", async () => {
+    const guard = createInMemoryCloseRateGuard({ maxCloses: 1, windowMs: 100 });
+    expect(await guard.tryAcquire("fee", 0)).toBe(true);
+    expect(await guard.tryAcquire("fee", 99)).toBe(false);
+    expect(await guard.tryAcquire("other", 99)).toBe(true);
+    expect(await guard.tryAcquire("fee", 100)).toBe(true);
+    expect(() => createInMemoryCloseRateGuard({ maxCloses: 0, windowMs: 1 })).toThrow();
   });
 });

@@ -22,6 +22,12 @@ export const TOLLWAY_RECEIPT_HEADER = "TOLLWAY-RECEIPT";
  */
 export const TOLLWAY_QUOTE_HEADER = "TOLLWAY-QUOTE";
 
+/**
+ * Names the one-way channel contract (C...) an agent pays from with
+ * mpp-channel. The gate checks that channel on chain and challenges it (#173).
+ */
+export const TOLLWAY_CHANNEL_HEADER = "TOLLWAY-CHANNEL";
+
 /** MPP sends its credential as `Authorization: Payment <credential>`. */
 export const MPP_AUTHORIZATION_HEADER = "Authorization";
 

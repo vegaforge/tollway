@@ -1,443 +1,243 @@
-import { fromBaseUnits, StellarMppError } from "@stellar/mpp";
-import { getChannelState, Mppx, type Store, stellar } from "@stellar/mpp/channel/server";
-import type {
-  MppChannelPayment,
-  PaymentOffer,
-  SettlementRef,
-  StellarNetwork,
+import { StellarMppError } from "@stellar/mpp";
+import { Mppx, type Store, stellar } from "@stellar/mpp/channel/server";
+import {
+  bytesToBase64Url,
+  type MppChannelPayment,
+  type PaymentOffer,
+  type SettlementRef,
+  type StellarNetwork,
+  TollwayError,
+  utf8Bytes,
 } from "@vegaforge/tollway-core";
 import { Challenge, Credential, Errors } from "mppx";
-import { mockAccount, mockHex } from "./hash.js";
+import { z } from "zod";
+import {
+  MPP_NETWORK,
+  type OnChainChannel,
+  readChannelBalanceState,
+  readOnChainChannel,
+} from "./channel-chain.js";
+import {
+  type AcceptedVoucher,
+  type ChannelRecord,
+  type ChannelSettlementRecord,
+  type ChannelStore,
+  type CloseRateGuard,
+  readChannelRecord,
+} from "./channel-store.js";
 
 /**
- * MPP channel handler (#173). Accepts off-chain cumulative commitments
- * (vouchers) from an agent's one-way Stellar channel, verifies them with
- * `@stellar/mpp/channel/server` and on-chain channel checks, and returns a
- * canonical receipt anchored at `{ kind: "channel-commitment", channelId,
- * sequence }`.
+ * MPP channel handler (#173, #174). Accepts off-chain cumulative commitments
+ * (vouchers) on an agent's one-way Stellar channel, verifies each one with
+ * `@stellar/mpp/channel/server`, and anchors the receipt at
+ * `{ kind: "channel-commitment", channelId, sequence }`. See docs/design.md,
+ * "Build plan", Phase 2, and docs/mpp-channels.md.
  *
- * Unlike `mpp-charge`, a `stellar.channel` method instance in `mppx` is
- * bound to a single channel contract address, so the handler maintains one
- * `Mppx` instance per registered channel.
+ * A channel is registered before it is challenged: the agent names it in the
+ * TOLLWAY-CHANNEL header, and the handler checks the contract on chain (payout
+ * address, token, not closing, refund window) and reads the commitment key
+ * from the contract itself, never from the request.
+ *
+ * Every rejection reason starts with a stable code followed by a colon, for
+ * example `channel-settling: ...`. The codes are listed in
+ * docs/mpp-channels.md so a client can act on them.
  */
 
-const MPP_NETWORK: Record<StellarNetwork, "stellar:testnet" | "stellar:pubnet"> = {
-  testnet: "stellar:testnet",
-  mainnet: "stellar:pubnet",
-};
+/** The wire shape of an MPP channel credential payload, as `@stellar/mpp` 0.7 defines it. */
+const channelPayloadSchema = z.strictObject({
+  action: z.enum(["voucher", "close"]),
+  amount: z.string().regex(/^[1-9][0-9]*$/, "amount must be a positive integer string"),
+  signature: z.string().regex(/^[0-9a-fA-F]{128}$/, "signature must be 128 hex characters"),
+});
 
-const INTEGER_AMOUNT = /^[0-9]+$/;
+const CONTRACT_ADDRESS = /^C[A-Z2-7]{55}$/;
 
-/** A registered one-way payment channel known to the service. */
-export type RegisteredChannel = {
-  channelId: string;
-  /**
-   * Funder's Ed25519 commitment public key (from chain/deployment, never
-   * from the client request).
-   */
-  commitmentKey: string;
-  /** Funder's Stellar account (`G...`). */
-  payer: string;
-  network: StellarNetwork;
-  /** SEP-41 token contract (`C...`). */
-  asset: string;
-  /** Service recipient (`G...` or `C...`). */
-  recipient: string;
-  refundWaitingPeriod?: number;
-};
+/** What `@stellar/mpp` keeps per channel. Read only, never written by Tollway. */
+const sdkCumulativeSchema = z.object({ amount: z.string().regex(/^[0-9]+$/) });
 
-/** Lookup and registration for channels the gate accepts vouchers from. */
-export interface ChannelRegistry {
-  get(channelId: string): Promise<RegisteredChannel | undefined>;
-  list(): Promise<readonly RegisteredChannel[]>;
-  register?(channel: RegisteredChannel): Promise<void>;
-}
-
-export function createInMemoryChannelRegistry(
-  initial: readonly RegisteredChannel[] = [],
-): ChannelRegistry & { register(channel: RegisteredChannel): Promise<void> } {
-  const channels = new Map<string, RegisteredChannel>();
-  for (const ch of initial) {
-    channels.set(ch.channelId, ch);
+/**
+ * Decodes an `Authorization: Payment ...` credential for the `stellar/channel`
+ * method into an {@link MppChannelPayment}. Nothing is trusted yet: the
+ * handler's `verify` checks that this server issued the challenge.
+ */
+export function parseMppChannelCredential(
+  credential: string,
+): { ok: true; payment: MppChannelPayment } | { ok: false; reason: string } {
+  let decoded: Credential.Credential;
+  try {
+    decoded = Credential.deserialize(credential);
+  } catch (error) {
+    return { ok: false, reason: `malformed mpp credential: ${errorMessage(error)}` };
+  }
+  const { challenge } = decoded;
+  if (challenge.method !== "stellar" || challenge.intent !== "channel") {
+    return {
+      ok: false,
+      reason: `mpp credential is for ${challenge.method}/${challenge.intent}, not stellar/channel`,
+    };
+  }
+  const channelId = challenge.request.channel;
+  if (typeof channelId !== "string" || !CONTRACT_ADDRESS.test(channelId)) {
+    return { ok: false, reason: "mpp channel challenge does not name a channel contract" };
+  }
+  const payload = channelPayloadSchema.safeParse(decoded.payload);
+  if (!payload.success) {
+    return {
+      ok: false,
+      reason: `invalid mpp channel payload: ${payload.error.issues.map((issue) => issue.message).join("; ")}`,
+    };
   }
   return {
-    async get(channelId) {
-      return channels.get(channelId);
-    },
-    async list() {
-      return [...channels.values()];
-    },
-    async register(channel) {
-      channels.set(channel.channelId, channel);
-    },
-  };
-}
-
-/** An accepted off-chain cumulative voucher persisted by the service. */
-export type AcceptedVoucher = {
-  channelId: string;
-  sequence: number;
-  cumulativeAmount: string;
-  commitment: string;
-  payer: string;
-  acceptedAt: string;
-};
-
-/** Durable store for accepted channel vouchers (used for replay, monotonicity, and #174 settlement). */
-export interface VoucherStore {
-  getLatest(channelId: string): Promise<AcceptedVoucher | undefined>;
-  getBySequence(channelId: string, sequence: number): Promise<AcceptedVoucher | undefined>;
-  record(voucher: AcceptedVoucher): Promise<void>;
-  listLatest(): Promise<readonly AcceptedVoucher[]>;
-}
-
-export function createInMemoryVoucherStore(options: { now?: () => string } = {}): VoucherStore {
-  const now = options.now ?? (() => new Date().toISOString());
-  const byChannel = new Map<string, Map<number, AcceptedVoucher>>();
-  const latestByChannel = new Map<string, AcceptedVoucher>();
-
-  return {
-    async getLatest(channelId) {
-      return latestByChannel.get(channelId);
-    },
-    async getBySequence(channelId, sequence) {
-      return byChannel.get(channelId)?.get(sequence);
-    },
-    async record(voucher) {
-      let seqMap = byChannel.get(voucher.channelId);
-      if (!seqMap) {
-        seqMap = new Map<number, AcceptedVoucher>();
-        byChannel.set(voucher.channelId, seqMap);
-      }
-      const normalized: AcceptedVoucher = {
-        ...voucher,
-        acceptedAt: voucher.acceptedAt || now(),
-      };
-      seqMap.set(voucher.sequence, normalized);
-      const current = latestByChannel.get(voucher.channelId);
-      if (!current || voucher.sequence >= current.sequence) {
-        latestByChannel.set(voucher.channelId, normalized);
-      }
-    },
-    async listLatest() {
-      return [...latestByChannel.values()];
+    ok: true,
+    payment: {
+      model: "mpp-channel",
+      channelId,
+      cumulativeAmount: payload.data.amount,
+      signature: payload.data.signature.toLowerCase(),
+      action: payload.data.action,
+      credential,
     },
   };
 }
 
-/** An MPP channel payment carrying the optional raw `Authorization: Payment ...` credential. */
-export type MppChannelGatePayment = MppChannelPayment & {
-  credential?: string;
-  action?: "voucher" | "close";
-};
+/** The method and intent of an MPP credential, or undefined when it does not decode. */
+export function mppCredentialIntent(credential: string): string | undefined {
+  try {
+    const { challenge } = Credential.deserialize(credential);
+    return `${challenge.method}/${challenge.intent}`;
+  } catch {
+    // An undecodable credential has no intent; the caller rejects it.
+    return undefined;
+  }
+}
 
-export type MppChannelVerifyInput = {
-  payment: MppChannelGatePayment;
-  offer: PaymentOffer;
-};
+export type MppChannelVerifyInput = { payment: MppChannelPayment; offer: PaymentOffer };
 
 export type MppChannelVerifyResult =
   | { valid: true; payer: string; nonce: string }
   | { valid: false; reason: string };
 
 export type MppChannelSettleInput = {
-  payment: MppChannelGatePayment;
+  payment: MppChannelPayment;
   offer: PaymentOffer;
   payer: string;
   nonce: string;
 };
 
+/**
+ * A settled voucher is anchored at its channel and sequence. A close also
+ * carries the close transaction hash. A rejection carries the HTTP status the
+ * gate answers with.
+ */
 export type MppChannelSettleResult =
   | { settled: true; settlement: SettlementRef; txHash?: string }
-  | { settled: false; reason: string };
+  | { settled: false; status: 402 | 409 | 429 | 503; reason: string };
 
 export type MppChannelChallengeInput = {
   offer: PaymentOffer;
-  request: { method: string; url: string; headers?: Record<string, string | string[] | undefined> };
-  channelId?: string;
+  request: { method: string; url: string };
+  /** The channel the agent named in TOLLWAY-CHANNEL. */
+  channelId: string;
 };
 
-export type MppChannelChallenge = {
-  status: number;
-  headers: Record<string, string>;
-  body: string | null;
-};
+/** The MPP challenge for a registered channel, or why the channel was refused. */
+export type MppChannelChallengeResult =
+  | { ok: true; headers: Record<string, string> }
+  | { ok: false; status: 402 | 429 | 503; reason: string };
 
+/** What {@link MppChannelHandler.reconcile} found and did. */
+export type MppChannelReconcileOutcome =
+  | { outcome: "nothing-pending" }
+  | { outcome: "committed"; sequence: number }
+  | { outcome: "discarded"; sequence: number };
+
+/** Handles mpp-channel payments for the gate. */
 export interface MppChannelHandler {
-  idempotencyKey?(input: { payment: MppChannelGatePayment }): Promise<string | undefined>;
-  challenge?(input: MppChannelChallengeInput): Promise<MppChannelChallenge>;
+  /** Derived from the voucher itself: channel, cumulative amount and signature. */
+  idempotencyKey(input: { payment: MppChannelPayment }): Promise<string>;
+  /** Registers the channel on first sight, then builds the MPP challenge for it. */
+  challenge(input: MppChannelChallengeInput): Promise<MppChannelChallengeResult>;
+  /** Offline checks: provenance, binding to the offer, channel status, increment. */
   verify(input: MppChannelVerifyInput): Promise<MppChannelVerifyResult>;
+  /** Hands the voucher to `@stellar/mpp` and records it. Serialised per channel. */
   settle(input: MppChannelSettleInput): Promise<MppChannelSettleResult>;
+  /**
+   * Resolves a voucher left pending by a crash between `@stellar/mpp`
+   * accepting it and Tollway recording it, by reading what `@stellar/mpp`
+   * stored. Until then the channel accepts nothing.
+   */
+  reconcile(channelId: string): Promise<MppChannelReconcileOutcome>;
 }
 
-/** On-chain channel state needed to validate a voucher before accepting it. */
-export type OnChainChannelSnapshot = {
-  balance: string;
-  token: string;
-  to: string;
-  closeEffectiveAtLedger: number | null;
-  currentLedger: number;
-};
+type StellarSigner = NonNullable<stellar.Parameters["feePayer"]>["envelopeSigner"];
 
-export type ChannelStateReader = (input: {
-  channel: string;
-  network: StellarNetwork;
-  rpcUrl?: string;
-}) => Promise<OnChainChannelSnapshot>;
-
+/** Configuration for {@link createMppChannelHandler}. */
 export type MppChannelOptions = {
+  /** Account (G...) the channels must pay out to. Equals the routes' `payTo`. */
   recipient: string;
+  /** Token contract (C...) the channels must pay in. Equals the routes' `asset`. */
   currency: string;
   network: StellarNetwork;
+  /** HMAC key `mppx` binds challenges to. At least 32 bytes, secret and stable. */
   secretKey: string;
+  /**
+   * `@stellar/mpp`'s store. Its `update()` must be a linearizable
+   * compare-and-set; `Store.memory()` is correct in one process only.
+   */
   store: Store.AtomicStore;
-  registry: ChannelRegistry;
-  voucherStore: VoucherStore;
-  /** Token decimals used by `fromBaseUnits` when building challenges. Defaults to 7 (Stellar SAC). */
-  decimals?: number;
+  /** Tollway's channel records, shared with the settlement module. */
+  channels: ChannelStore;
+  /**
+   * Shortest refund waiting period, in ledgers, a channel may have. A short one
+   * lets a funder dispute and refund before the service can close. Defaults to
+   * 17280 (about a day at 5 s ledgers).
+   */
+  minRefundWaitingPeriod?: number;
+  /**
+   * Pays for closes the agent asks for with a `close` credential. Without it a
+   * close credential is rejected with `close-not-supported`.
+   */
+  feePayer?: { envelopeSigner: StellarSigner; feeBumpSigner?: StellarSigner };
+  /** Public key of the account that pays close fees, for `closeRateGuard`. Required with `feePayer`. */
+  feePayerKey?: string;
+  /** Caps agent-initiated closes per fee payer. Share it with the settlement module. */
+  closeRateGuard?: CloseRateGuard;
+  /** Cap on the fee bump of an agent-initiated close, in stroops. */
+  maxFeeBumpStroops?: number;
   rpcUrl?: string;
   realm?: string;
-  feePayer?: {
-    envelopeSigner: NonNullable<stellar.Parameters["feePayer"]>["envelopeSigner"];
-    feeBumpSigner?: NonNullable<stellar.Parameters["feePayer"]>["feeBumpSigner"];
-  };
-  /** Optional custom on-chain state reader (defaults to `@stellar/mpp/channel/server` `getChannelState`). */
-  readChannelState?: ChannelStateReader;
-  onDisputeDetected?: (info: { channelId: string; closeEffectiveAtLedger: number }) => void | Promise<void>;
-  /** Optional hook for `action: "close"` credentials settled on chain (#174). */
-  onCloseCredential?: (input: {
-    channelId: string;
-    sequence: number;
-    cumulativeAmount: string;
-    commitment: string;
-    payer: string;
-  }) => Promise<{ txHash: string }>;
-  now?: () => string;
+  /** Most channels with a live `mppx` method at once. Defaults to 1000. */
+  maxActiveChannels?: number;
+  /** A channel's `mppx` method is dropped after this long unused. Defaults to 15 minutes. */
+  channelIdleMs?: number;
+  /**
+   * Cap on on-chain registration checks (each costs several RPC simulations),
+   * across all callers. Defaults to 60 per minute.
+   */
+  registrationLimit?: { max: number; windowMs: number };
+  /** Called when a voucher the SDK accepted could not be recorded; see `reconcile`. */
+  onStoreError?: (error: Error, channelId: string) => void;
+  /** Called when the chain after an agent-initiated close does not look closed. */
+  onCloseAnomaly?: (info: { channelId: string; detail: string }) => void;
+  clock?: () => number;
 };
 
-/**
- * Parses an `Authorization: Payment ...` credential into an {@link MppChannelGatePayment}
- * when the credential is for the `channel` intent, or returns `undefined` otherwise.
- */
-export function parseMppChannelCredential(authorizationValue: string): MppChannelGatePayment | undefined {
-  let credential: ReturnType<typeof Credential.deserialize>;
-  try {
-    credential = Credential.deserialize(authorizationValue);
-  } catch {
-    return undefined;
-  }
-  const challenge = credential.challenge as { intent?: string; request?: Record<string, unknown> };
-  if (challenge?.intent !== "channel") {
-    return undefined;
-  }
-  const payload = (credential.payload ?? {}) as Record<string, unknown>;
-  const channelId =
-    typeof payload.channel === "string"
-      ? payload.channel
-      : typeof challenge.request?.channel === "string"
-        ? challenge.request.channel
-        : "";
-  const cumulativeAmount =
-    typeof payload.amount === "string"
-      ? payload.amount
-      : typeof payload.cumulativeAmount === "string"
-        ? payload.cumulativeAmount
-        : "";
-  const commitment =
-    typeof payload.signature === "string"
-      ? payload.signature
-      : typeof payload.commitment === "string"
-        ? payload.commitment
-        : "";
-  const sequence =
-    typeof payload.sequence === "number" && Number.isInteger(payload.sequence)
-      ? payload.sequence
-      : 0;
-  const action = payload.action === "close" ? "close" : "voucher";
-
-  return {
-    model: "mpp-channel",
-    channelId,
-    sequence,
-    cumulativeAmount,
-    commitment,
-    credential: authorizationValue,
-    action,
-  };
-}
-
-/** Returns true when an `Authorization: Payment ...` credential carries `intent === "channel"`. */
-export function isMppChannelCredential(authorizationValue: string): boolean {
-  try {
-    const credential = Credential.deserialize(authorizationValue);
-    return (credential.challenge as { intent?: string })?.intent === "channel";
-  } catch {
-    return false;
-  }
-}
-
-function channelNonce(channelId: string, sequence: number): string {
-  return `${channelId}:${sequence}`;
-}
-
-function validateVoucherShape(payment: MppChannelGatePayment): string | null {
-  if (!payment.channelId) return "missing channelId";
-  if (!Number.isInteger(payment.sequence) || payment.sequence < 0) {
-    return "sequence must be a non-negative integer";
-  }
-  if (!INTEGER_AMOUNT.test(payment.cumulativeAmount)) {
-    return "cumulativeAmount must be a non-negative integer string";
-  }
-  if (!payment.commitment) return "missing commitment signature";
-  return null;
-}
+const DEFAULT_MIN_REFUND_WAITING_PERIOD = 17_280;
+const DEFAULT_MAX_ACTIVE_CHANNELS = 1000;
+const DEFAULT_CHANNEL_IDLE_MS = 15 * 60_000;
+const DEFAULT_REGISTRATION_LIMIT = { max: 60, windowMs: 60_000 };
 
 /**
- * Offline MPP channel handler for tests and demos. Enforces channel
- * registration, sequence monotonicity, idempotent replay of identical
- * vouchers, conflict detection, and optional mock on-chain checks.
- */
-export function createMockMppChannelHandler(
-  options: {
-    registry?: ChannelRegistry;
-    voucherStore?: VoucherStore;
-    readChannelState?: ChannelStateReader;
-    now?: () => string;
-  } = {},
-): MppChannelHandler {
-  const voucherStore = options.voucherStore ?? createInMemoryVoucherStore({ now: options.now });
-  const now = options.now ?? (() => new Date().toISOString());
-
-  return {
-    async idempotencyKey({ payment }) {
-      if (!payment.channelId || !Number.isInteger(payment.sequence)) return undefined;
-      return channelNonce(payment.channelId, payment.sequence);
-    },
-
-    async verify({ payment, offer }) {
-      const shapeError = validateVoucherShape(payment);
-      if (shapeError) {
-        return { valid: false, reason: shapeError };
-      }
-
-      const registered = options.registry ? await options.registry.get(payment.channelId) : undefined;
-      if (options.registry && !registered) {
-        return { valid: false, reason: `channel-not-found: channel ${payment.channelId} is not registered` };
-      }
-      if (registered) {
-        if (registered.network !== offer.network) {
-          return {
-            valid: false,
-            reason: `channel ${payment.channelId} is on ${registered.network}, not ${offer.network}`,
-          };
-        }
-        if (registered.asset !== offer.asset) {
-          return { valid: false, reason: "channel asset does not match offer asset" };
-        }
-        if (registered.recipient !== offer.payTo) {
-          return { valid: false, reason: "channel recipient does not match offer payTo" };
-        }
-      }
-
-      const existingAtSeq = await voucherStore.getBySequence(payment.channelId, payment.sequence);
-      if (existingAtSeq) {
-        if (
-          existingAtSeq.cumulativeAmount === payment.cumulativeAmount &&
-          existingAtSeq.commitment === payment.commitment
-        ) {
-          return {
-            valid: true,
-            payer: existingAtSeq.payer,
-            nonce: channelNonce(payment.channelId, payment.sequence),
-          };
-        }
-        return {
-          valid: false,
-          reason: `commitment-conflict: sequence ${payment.sequence} already accepted with a different commitment`,
-        };
-      }
-
-      const latest = await voucherStore.getLatest(payment.channelId);
-      if (latest) {
-        if (payment.sequence <= latest.sequence) {
-          return {
-            valid: false,
-            reason: `stale sequence ${payment.sequence}; latest accepted is ${latest.sequence}`,
-          };
-        }
-        if (BigInt(payment.cumulativeAmount) <= BigInt(latest.cumulativeAmount)) {
-          return {
-            valid: false,
-            reason: `non-monotonic cumulativeAmount ${payment.cumulativeAmount} <= ${latest.cumulativeAmount}`,
-          };
-        }
-      }
-
-      const previousAmount = BigInt(latest?.cumulativeAmount ?? "0");
-      const increment = BigInt(payment.cumulativeAmount) - previousAmount;
-      if (increment < BigInt(offer.amount)) {
-        return {
-          valid: false,
-          reason: `voucher increment ${increment.toString()} is below offer amount ${offer.amount}`,
-        };
-      }
-
-      if (options.readChannelState) {
-        const state = await options.readChannelState({
-          channel: payment.channelId,
-          network: offer.network,
-        });
-        if (state.closeEffectiveAtLedger !== null) {
-          return { valid: false, reason: "channel is closing or closed on chain" };
-        }
-        if (state.token !== offer.asset || state.to !== offer.payTo) {
-          return { valid: false, reason: "on-chain channel token or recipient mismatch" };
-        }
-        if (BigInt(state.balance) < BigInt(payment.cumulativeAmount)) {
-          return { valid: false, reason: "on-chain channel balance is below cumulativeAmount" };
-        }
-      }
-
-      const payer = registered?.payer ?? mockAccount(payment.channelId);
-      return {
-        valid: true,
-        payer,
-        nonce: channelNonce(payment.channelId, payment.sequence),
-      };
-    },
-
-    async settle({ payment, payer }) {
-      const existingAtSeq = await voucherStore.getBySequence(payment.channelId, payment.sequence);
-      if (!existingAtSeq) {
-        await voucherStore.record({
-          channelId: payment.channelId,
-          sequence: payment.sequence,
-          cumulativeAmount: payment.cumulativeAmount,
-          commitment: payment.commitment,
-          payer,
-          acceptedAt: now(),
-        });
-      }
-      return {
-        settled: true,
-        settlement: {
-          kind: "channel-commitment",
-          channelId: payment.channelId,
-          sequence: payment.sequence,
-        },
-        ...(payment.action === "close"
-          ? { txHash: mockHex(`${payment.channelId}:${payment.sequence}:close`) }
-          : {}),
-      };
-    },
-  };
-}
-
-/**
- * Real MPP channel handler backed by `@stellar/mpp/channel/server` and `mppx`.
- * Maintains one `Mppx` / `stellar.channel` instance per registered channel
- * because `mppx` keys methods by `${name}/${intent}` and each `stellar.channel`
- * is bound to a single channel contract.
+ * The real channel handler, on `mppx` and `@stellar/mpp/channel/server`.
+ *
+ * Amounts stay integer base units end to end: each channel method is created
+ * with `decimals: 0`, so the challenge carries the offer amount unchanged.
+ *
+ * Order of writes per voucher: Tollway marks the voucher pending, then
+ * `@stellar/mpp` verifies it and advances its own cumulative, then Tollway
+ * records it as accepted and the gate signs the receipt. A failure in the
+ * middle leaves the channel blocked rather than issuing a receipt for a
+ * voucher the SDK did not accept.
  */
 export function createMppChannelHandler(options: MppChannelOptions): MppChannelHandler {
   if (!options.secretKey) {
@@ -446,242 +246,646 @@ export function createMppChannelHandler(options: MppChannelOptions): MppChannelH
   if (typeof options.store?.update !== "function") {
     throw new TypeError("createMppChannelHandler: store must be an atomic mppx store");
   }
-  const decimals = options.decimals ?? 7;
-  const network = MPP_NETWORK[options.network];
+  if (options.feePayer && !options.feePayerKey) {
+    throw new TypeError("createMppChannelHandler: feePayerKey is required with feePayer");
+  }
+  const minRefundWaitingPeriod =
+    options.minRefundWaitingPeriod ?? DEFAULT_MIN_REFUND_WAITING_PERIOD;
+  const maxActive = options.maxActiveChannels ?? DEFAULT_MAX_ACTIVE_CHANNELS;
+  const idleMs = options.channelIdleMs ?? DEFAULT_CHANNEL_IDLE_MS;
+  const registrationLimit = options.registrationLimit ?? DEFAULT_REGISTRATION_LIMIT;
+  for (const [name, value] of [
+    ["minRefundWaitingPeriod", minRefundWaitingPeriod],
+    ["maxActiveChannels", maxActive],
+    ["channelIdleMs", idleMs],
+    ["registrationLimit.max", registrationLimit.max],
+    ["registrationLimit.windowMs", registrationLimit.windowMs],
+  ] as const) {
+    if (!Number.isSafeInteger(value) || value < (name === "minRefundWaitingPeriod" ? 0 : 1)) {
+      throw new TypeError(`createMppChannelHandler: ${name} must be a positive integer`);
+    }
+  }
+  const clock = options.clock ?? Date.now;
   const realm = options.realm ?? "tollway";
-  const now = options.now ?? (() => new Date().toISOString());
-  const readChannelState: ChannelStateReader =
-    options.readChannelState ??
-    (async ({ channel, network: net, rpcUrl }) => {
-      const state = await getChannelState({
-        channel,
-        network: MPP_NETWORK[net],
-        rpcUrl: rpcUrl ?? options.rpcUrl,
-      });
-      return {
-        balance: String(state.balance),
-        token: state.token,
-        to: state.to,
-        closeEffectiveAtLedger: state.closeEffectiveAtLedger ?? null,
-        currentLedger: state.currentLedger,
-      };
-    });
+  const chain = {
+    network: options.network,
+    ...(options.rpcUrl ? { rpcUrl: options.rpcUrl } : {}),
+  };
 
-  const channelInstances = new Map<string, ReturnType<typeof Mppx.create>>();
-
-  function getMppxForChannel(registered: RegisteredChannel): ReturnType<typeof Mppx.create> {
-    const existing = channelInstances.get(registered.channelId);
-    if (existing) return existing;
-
-    const instance = Mppx.create({
+  function createMethod(record: ChannelRecord) {
+    return Mppx.create({
       secretKey: options.secretKey,
       realm,
       methods: [
         stellar.channel({
-          channel: registered.channelId,
-          commitmentKey: registered.commitmentKey,
+          channel: record.channelId,
+          commitmentKey: record.commitmentKey,
           store: options.store,
-          network,
+          network: MPP_NETWORK[options.network],
           recipient: options.recipient,
           currency: options.currency,
+          decimals: 0,
           checkOnChainState: true,
-          rpcUrl: options.rpcUrl,
-          feePayer: options.feePayer,
-          onDisputeDetected: (event: { effectiveAtLedger?: number }) => {
-            if (options.onDisputeDetected && event.effectiveAtLedger !== undefined) {
-              void options.onDisputeDetected({
-                channelId: registered.channelId,
-                closeEffectiveAtLedger: event.effectiveAtLedger,
-              });
-            }
-          },
+          ...(options.rpcUrl ? { rpcUrl: options.rpcUrl } : {}),
+          ...(options.feePayer ? { feePayer: options.feePayer } : {}),
+          ...(options.maxFeeBumpStroops ? { maxFeeBumpStroops: options.maxFeeBumpStroops } : {}),
         }),
       ],
     });
-    channelInstances.set(registered.channelId, instance);
-    return instance;
+  }
+  type ChannelMethod = ReturnType<typeof createMethod>;
+
+  // One mppx method per channel, because a stellar.channel method is bound to
+  // one contract. Bounded by count and idle time so unauthenticated traffic
+  // cannot grow it without limit.
+  const methods = new Map<string, { method: ChannelMethod; lastUsed: number }>();
+  function methodFor(record: ChannelRecord): ChannelMethod {
+    const now = clock();
+    for (const [id, entry] of methods) {
+      if (now - entry.lastUsed >= idleMs) methods.delete(id);
+    }
+    const existing = methods.get(record.channelId);
+    if (existing) {
+      // Re-inserting keeps the map in least-recently-used order.
+      methods.delete(record.channelId);
+      methods.set(record.channelId, { method: existing.method, lastUsed: now });
+      return existing.method;
+    }
+    while (methods.size >= maxActive) {
+      const oldest = methods.keys().next();
+      if (oldest.done) break;
+      methods.delete(oldest.value);
+    }
+    const method = createMethod(record);
+    methods.set(record.channelId, { method, lastUsed: now });
+    return method;
   }
 
-  return {
-    async idempotencyKey({ payment }) {
-      if (!payment.channelId || !Number.isInteger(payment.sequence)) return undefined;
-      return channelNonce(payment.channelId, payment.sequence);
-    },
+  const registrations: number[] = [];
+  function registrationAllowed(): boolean {
+    const now = clock();
+    while (
+      registrations.length > 0 &&
+      now - (registrations[0] ?? now) >= registrationLimit.windowMs
+    ) {
+      registrations.shift();
+    }
+    if (registrations.length >= registrationLimit.max) return false;
+    registrations.push(now);
+    return true;
+  }
 
-    async challenge({ offer, request, channelId }) {
-      const targetId =
-        channelId ??
-        (request.headers?.["x-tollway-channel"] as string | undefined);
-      const registered = targetId
-        ? await options.registry.get(targetId)
-        : (await options.registry.list()).find(
-            (ch) =>
-              ch.network === offer.network &&
-              ch.asset === offer.asset &&
-              ch.recipient === offer.payTo,
-          );
-      if (!registered) {
-        return { status: 402, headers: {}, body: null };
-      }
-      const mppx = getMppxForChannel(registered);
-      const humanAmount = fromBaseUnits(BigInt(offer.amount), decimals);
-      const webRequest = new Request(request.url, { method: request.method });
-      const channelMethod = (mppx as unknown as Record<string, (req: unknown) => (r: Request) => Promise<Response>>)[
-        "stellar/channel"
-      ];
-      if (!channelMethod) {
-        return { status: 402, headers: {}, body: null };
-      }
-      const result = await channelMethod({
-        amount: humanAmount,
-        channel: registered.channelId,
-      })(webRequest);
-      const headers: Record<string, string> = {};
-      result.headers.forEach((value, key) => {
-        headers[key] = value;
-      });
+  // Vouchers on one channel are settled one at a time in this process; across
+  // processes the version compare-and-set on the record does the same job.
+  const channelLocks = new Map<string, Promise<void>>();
+  async function withChannelLock<T>(channelId: string, work: () => Promise<T>): Promise<T> {
+    const previous = channelLocks.get(channelId) ?? Promise.resolve();
+    let release = (): void => {};
+    const done = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const tail = previous.then(() => done);
+    channelLocks.set(channelId, tail);
+    await previous;
+    try {
+      return await work();
+    } finally {
+      release();
+      if (channelLocks.get(channelId) === tail) channelLocks.delete(channelId);
+    }
+  }
+
+  function offerMismatch(offer: PaymentOffer): string | null {
+    if (offer.network !== options.network) {
+      return `mpp channel handler is configured for ${options.network}, not ${offer.network}`;
+    }
+    if (offer.payTo !== options.recipient) {
+      return "mpp channel handler recipient does not match the offer payTo";
+    }
+    if (offer.asset !== options.currency) {
+      return "mpp channel handler currency does not match the offer asset";
+    }
+    return null;
+  }
+
+  async function register(
+    channelId: string,
+    offer: PaymentOffer,
+  ): Promise<
+    { ok: true; record: ChannelRecord } | { ok: false; status: 402 | 429 | 503; reason: string }
+  > {
+    const existing = await readChannelRecord(options.channels, channelId);
+    if (existing) {
+      const problem = statusProblem(existing);
+      return problem ? { ok: false, status: 402, reason: problem } : { ok: true, record: existing };
+    }
+    if (!registrationAllowed()) {
       return {
-        status: result.status,
-        headers,
-        body: result.body ? await result.text() : null,
+        ok: false,
+        status: 429,
+        reason: "registration-rate-limited: too many channel registrations, retry later",
       };
-    },
+    }
+    let onChain: OnChainChannel;
+    try {
+      onChain = await readOnChainChannel(channelId, chain);
+    } catch (error) {
+      // Fail closed: a channel that cannot be checked is not challenged.
+      return {
+        ok: false,
+        status: 503,
+        reason: `channel-state-unavailable: could not read channel ${channelId} on chain (${errorMessage(error)})`,
+      };
+    }
+    const refused = registrationProblem(onChain, offer, minRefundWaitingPeriod);
+    if (refused) return { ok: false, status: 402, reason: refused };
+    const record: ChannelRecord = {
+      channelId,
+      network: offer.network,
+      payer: onChain.from,
+      payTo: onChain.to,
+      asset: onChain.token,
+      commitmentKey: onChain.commitmentKey,
+      refundWaitingPeriod: onChain.refundWaitingPeriod,
+      registeredAt: clock(),
+      status: "open",
+      version: 1,
+    };
+    if (await options.channels.compareAndSet(channelId, 0, record)) {
+      return { ok: true, record };
+    }
+    // Another request registered it first; use what it stored.
+    const raced = await readChannelRecord(options.channels, channelId);
+    if (!raced) {
+      return {
+        ok: false,
+        status: 503,
+        reason: "channel-state-unavailable: channel registration did not persist",
+      };
+    }
+    return { ok: true, record: raced };
+  }
 
-    async verify({ payment, offer }) {
-      const shapeError = validateVoucherShape(payment);
-      if (shapeError) {
-        return { valid: false, reason: shapeError };
-      }
-      if (offer.network !== options.network || offer.asset !== options.currency || offer.payTo !== options.recipient) {
-        return { valid: false, reason: "offer does not match mpp-channel handler configuration" };
-      }
+  async function idempotencyKey(payment: MppChannelPayment): Promise<string> {
+    const material = `${payment.channelId}\n${payment.cumulativeAmount}\n${payment.signature.toLowerCase()}`;
+    const digest = await crypto.subtle.digest("SHA-256", new Uint8Array(utf8Bytes(material)));
+    return bytesToBase64Url(new Uint8Array(digest));
+  }
 
-      const registered = await options.registry.get(payment.channelId);
-      if (!registered) {
-        return { valid: false, reason: `channel-not-found: channel ${payment.channelId} is not registered` };
-      }
+  async function sdkCumulative(channelId: string): Promise<bigint> {
+    const raw = await options.store.get(`stellar:channel:cumulative:${channelId}`);
+    if (raw === null || raw === undefined) return 0n;
+    const parsed = sdkCumulativeSchema.safeParse(raw);
+    if (!parsed.success) {
+      throw new TollwayError(
+        "corrupt-channel-record",
+        `@stellar/mpp cumulative record for channel ${channelId} is not in the expected shape`,
+      );
+    }
+    return BigInt(parsed.data.amount);
+  }
 
-      // Idempotent replay before touching @stellar/mpp (which rejects reused challenge IDs).
-      const existingAtSeq = await options.voucherStore.getBySequence(payment.channelId, payment.sequence);
-      if (existingAtSeq) {
-        if (
-          existingAtSeq.cumulativeAmount === payment.cumulativeAmount &&
-          existingAtSeq.commitment === payment.commitment
-        ) {
-          return {
-            valid: true,
-            payer: existingAtSeq.payer,
-            nonce: channelNonce(payment.channelId, payment.sequence),
-          };
-        }
+  /** Writes `next` over `current`, bumping the version. */
+  async function write(
+    current: ChannelRecord,
+    next: Omit<ChannelRecord, "version">,
+  ): Promise<ChannelRecord | null> {
+    const record: ChannelRecord = { ...next, version: current.version + 1 };
+    return (await options.channels.compareAndSet(current.channelId, current.version, record))
+      ? record
+      : null;
+  }
+
+  async function commitPending(
+    current: ChannelRecord,
+    settlementPatch?: Partial<NonNullable<ChannelRecord["settlement"]>>,
+    status?: ChannelRecord["status"],
+  ): Promise<ChannelRecord | null> {
+    const { pending, ...rest } = current;
+    if (!pending) return current;
+    const { action: _action, ...voucher } = pending;
+    return write(current, {
+      ...rest,
+      latest: voucher,
+      ...(status ? { status } : {}),
+      ...(settlementPatch && current.settlement
+        ? { settlement: { ...current.settlement, ...settlementPatch } }
+        : {}),
+    });
+  }
+
+  async function dropPending(
+    current: ChannelRecord,
+    lastError?: string,
+  ): Promise<ChannelRecord | null> {
+    const { pending: _pending, ...rest } = current;
+    return write(current, {
+      ...rest,
+      ...(lastError && current.settlement
+        ? { settlement: { ...current.settlement, lastError } }
+        : {}),
+    });
+  }
+
+  async function settleVoucher(input: MppChannelSettleInput): Promise<MppChannelSettleResult> {
+    const { payment, offer } = input;
+    const record = await readChannelRecord(options.channels, payment.channelId);
+    const problem = acceptanceProblem(record, payment, offer);
+    if (problem || !record) {
+      return { settled: false, status: 402, reason: problem ?? "channel-not-registered" };
+    }
+    const isClose = payment.action === "close";
+    const sequence = (record.latest?.sequence ?? 0) + 1;
+    const pendingVoucher: NonNullable<ChannelRecord["pending"]> = {
+      sequence,
+      cumulativeAmount: payment.cumulativeAmount,
+      signature: payment.signature,
+      acceptedAt: clock(),
+      action: payment.action,
+    };
+
+    let balanceBefore: string | undefined;
+    if (isClose) {
+      if (!options.feePayerKey) {
+        return { settled: false, status: 402, reason: closeNotSupported() };
+      }
+      if (
+        options.closeRateGuard &&
+        !(await options.closeRateGuard.tryAcquire(options.feePayerKey, clock()))
+      ) {
         return {
-          valid: false,
-          reason: `commitment-conflict: sequence ${payment.sequence} already accepted with a different commitment`,
+          settled: false,
+          status: 429,
+          reason: "close-rate-limited: the close budget for this fee payer is spent, retry later",
         };
       }
-
-      const latest = await options.voucherStore.getLatest(payment.channelId);
-      if (latest) {
-        if (payment.sequence <= latest.sequence) {
-          return {
-            valid: false,
-            reason: `stale sequence ${payment.sequence}; latest accepted is ${latest.sequence}`,
-          };
-        }
-        if (BigInt(payment.cumulativeAmount) <= BigInt(latest.cumulativeAmount)) {
-          return {
-            valid: false,
-            reason: `non-monotonic cumulativeAmount ${payment.cumulativeAmount} <= ${latest.cumulativeAmount}`,
-          };
-        }
-      }
-
-      const previousAmount = BigInt(latest?.cumulativeAmount ?? "0");
-      if (BigInt(payment.cumulativeAmount) - previousAmount < BigInt(offer.amount)) {
+      try {
+        balanceBefore = (await readChannelBalanceState(payment.channelId, chain)).balance;
+      } catch (error) {
         return {
-          valid: false,
-          reason: "voucher increment does not cover offer amount",
+          settled: false,
+          status: 503,
+          reason: `channel-state-unavailable: could not read the balance before closing (${errorMessage(error)})`,
         };
       }
+    }
 
-      const state = await readChannelState({
-        channel: payment.channelId,
-        network: offer.network,
-        rpcUrl: options.rpcUrl,
-      });
-      if (state.closeEffectiveAtLedger !== null) {
-        return { valid: false, reason: "channel is closing or closed on chain" };
-      }
-      if (state.token !== offer.asset || state.to !== offer.payTo) {
-        return { valid: false, reason: "on-chain channel token or recipient mismatch" };
-      }
-      if (BigInt(state.balance) < BigInt(payment.cumulativeAmount)) {
-        return { valid: false, reason: "on-chain channel balance is below cumulativeAmount" };
-      }
-
-      if (payment.credential) {
-        try {
-          const mppx = getMppxForChannel(registered);
-          const credential = Credential.deserialize(payment.credential);
-          const humanAmount = fromBaseUnits(BigInt(offer.amount), decimals);
-          await (mppx as unknown as {
-            verifyCredential: (c: unknown, opts: unknown) => Promise<unknown>;
-          }).verifyCredential(credential, {
-            amount: humanAmount,
-            channel: registered.channelId,
-          });
-        } catch (error) {
-          if (error instanceof StellarMppError || error instanceof Errors.PaymentError) {
-            return { valid: false, reason: error.message };
+    const claimed = await write(record, {
+      ...record,
+      pending: pendingVoucher,
+      ...(isClose
+        ? {
+            status: "settling" as const,
+            settlement: {
+              startedAt: clock(),
+              trigger: "agent" as const,
+              retryable: false,
+              ...(balanceBefore !== undefined ? { balanceBefore } : {}),
+            },
           }
-          return {
-            valid: false,
-            reason: error instanceof Error ? error.message : "mpp-channel credential verification failed",
-          };
-        }
-      }
-
+        : {}),
+    });
+    if (!claimed) {
       return {
-        valid: true,
-        payer: registered.payer,
-        nonce: channelNonce(payment.channelId, payment.sequence),
+        settled: false,
+        status: 409,
+        reason: "channel-busy: the channel changed while this voucher was checked, retry",
       };
-    },
+    }
 
-    async settle({ payment, payer }) {
-      const existingAtSeq = await options.voucherStore.getBySequence(payment.channelId, payment.sequence);
-      if (!existingAtSeq) {
-        await options.voucherStore.record({
-          channelId: payment.channelId,
-          sequence: payment.sequence,
-          cumulativeAmount: payment.cumulativeAmount,
-          commitment: payment.commitment,
-          payer,
-          acceptedAt: now(),
-        });
+    let reference: string;
+    try {
+      const receipt = await methodFor(claimed).verifyCredential(payment.credential, {
+        request: { amount: offer.amount },
+        scope: offer.resource,
+      });
+      reference = receipt.reference;
+    } catch (error) {
+      return settleFailure(claimed, payment, error);
+    }
+
+    if (!isClose) {
+      const committed = await commitPending(claimed);
+      if (!committed) {
+        options.onStoreError?.(
+          new Error(
+            "accepted voucher could not be recorded; the channel is blocked until reconcile",
+          ),
+          payment.channelId,
+        );
       }
+      return {
+        settled: true,
+        settlement: { kind: "channel-commitment", channelId: payment.channelId, sequence },
+      };
+    }
 
-      let txHash: string | undefined;
-      if (payment.action === "close" && options.onCloseCredential) {
-        const closed = await options.onCloseCredential({
-          channelId: payment.channelId,
-          sequence: payment.sequence,
-          cumulativeAmount: payment.cumulativeAmount,
-          commitment: payment.commitment,
-          payer,
-        });
-        txHash = closed.txHash;
+    const amount = BigInt(payment.cumulativeAmount);
+    const before = BigInt(balanceBefore ?? "0");
+    const record_: ChannelSettlementRecord = {
+      channelId: payment.channelId,
+      settledAmount: payment.cumulativeAmount,
+      returnedRemainder: (before > amount ? before - amount : 0n).toString(),
+      txHash: reference,
+    };
+    const closed = await commitPending(claimed, { record: record_, closedAt: clock() }, "closed");
+    if (!closed) {
+      options.onStoreError?.(
+        new Error("closed channel could not be recorded; the channel is blocked until reconcile"),
+        payment.channelId,
+      );
+    }
+    await checkClosedOnChain(payment.channelId);
+    return {
+      settled: true,
+      settlement: { kind: "channel-commitment", channelId: payment.channelId, sequence },
+      txHash: reference,
+    };
+  }
+
+  /**
+   * `@stellar/mpp` refused or failed. For a voucher, what the SDK stored
+   * decides: if its cumulative moved to this voucher the SDK accepted it
+   * after all, otherwise the pending mark is dropped and the voucher is
+   * rejected. A close that failed may still have been broadcast, so the
+   * channel stays settling for the settlement module's `resolve`.
+   */
+  async function settleFailure(
+    claimed: ChannelRecord,
+    payment: MppChannelPayment,
+    error: unknown,
+  ): Promise<MppChannelSettleResult> {
+    const accepted = (await sdkCumulative(payment.channelId)) === BigInt(payment.cumulativeAmount);
+    if (payment.action === "close") {
+      const message = errorMessage(error);
+      const next = accepted
+        ? await commitPending(claimed, { lastError: message })
+        : await dropPending(claimed, message);
+      if (!next) {
+        options.onStoreError?.(new Error("failed close could not be recorded"), payment.channelId);
       }
-
+      throw new TollwayError(
+        "outcome-unknown",
+        `mpp channel close for ${payment.channelId} failed and may have reached the chain; the channel stays settling until resolved: ${message}`,
+        { cause: error },
+      );
+    }
+    if (accepted) {
+      const committed = await commitPending(claimed);
+      if (!committed) {
+        options.onStoreError?.(
+          new Error("accepted voucher could not be recorded"),
+          payment.channelId,
+        );
+      }
       return {
         settled: true,
         settlement: {
           kind: "channel-commitment",
           channelId: payment.channelId,
-          sequence: payment.sequence,
+          sequence: claimed.pending?.sequence ?? 0,
         },
-        ...(txHash ? { txHash } : {}),
       };
+    }
+    const released = await dropPending(claimed);
+    if (!released) {
+      options.onStoreError?.(
+        new Error("rejected voucher's pending mark could not be cleared"),
+        payment.channelId,
+      );
+    }
+    return {
+      settled: false,
+      status: 402,
+      reason: `mpp-channel-rejected: ${rejectionMessage(error)}`,
+    };
+  }
+
+  async function checkClosedOnChain(channelId: string): Promise<void> {
+    try {
+      const after = await readChannelBalanceState(channelId, chain);
+      if (after.closeEffectiveAtLedger === null || after.balance !== "0") {
+        options.onCloseAnomaly?.({
+          channelId,
+          detail: `after close: balance ${after.balance}, closeEffectiveAtLedger ${String(after.closeEffectiveAtLedger)}`,
+        });
+      }
+    } catch (error) {
+      options.onCloseAnomaly?.({
+        channelId,
+        detail: `could not read state after close: ${errorMessage(error)}`,
+      });
+    }
+  }
+
+  return {
+    async idempotencyKey({ payment }) {
+      return idempotencyKey(payment);
+    },
+
+    async challenge({ offer, request, channelId }) {
+      const mismatch = offerMismatch(offer);
+      if (mismatch) throw new TollwayError("payment-failed", mismatch);
+      if (!CONTRACT_ADDRESS.test(channelId)) {
+        return {
+          ok: false,
+          status: 402,
+          reason: "channel-invalid: TOLLWAY-CHANNEL is not a contract address",
+        };
+      }
+      const registered = await register(channelId, offer);
+      if (!registered.ok) return registered;
+      const url = new URL(request.url, `https://${realm}`);
+      const result = await methodFor(registered.record).channel({
+        amount: offer.amount,
+        scope: offer.resource,
+      })(new Request(url, { method: request.method }));
+      if (result.status !== 402) {
+        throw new TollwayError(
+          "payment-failed",
+          "mppx accepted a request that carried no credential",
+        );
+      }
+      const headers: Record<string, string> = {};
+      result.challenge.headers.forEach((value, name) => {
+        headers[name] = value;
+      });
+      return { ok: true, headers };
+    },
+
+    async verify({ payment, offer }) {
+      const mismatch = offerMismatch(offer);
+      if (mismatch) return { valid: false, reason: mismatch };
+      let credential: Credential.Credential;
+      try {
+        credential = Credential.deserialize(payment.credential);
+      } catch (error) {
+        return { valid: false, reason: `malformed mpp credential: ${errorMessage(error)}` };
+      }
+      const { challenge } = credential;
+      if (!Challenge.verify(challenge, { secretKey: options.secretKey })) {
+        return { valid: false, reason: "mpp challenge was not issued by this server" };
+      }
+      if (challenge.request.channel !== payment.channelId) {
+        return {
+          valid: false,
+          reason: "mpp channel credential names a different channel than its challenge",
+        };
+      }
+      if (challenge.request.amount !== offer.amount) {
+        return { valid: false, reason: "mpp credential amount does not match the offer" };
+      }
+      const record = await readChannelRecord(options.channels, payment.channelId);
+      const problem = acceptanceProblem(record, payment, offer);
+      if (problem || !record) return { valid: false, reason: problem ?? "channel-not-registered" };
+      if (payment.action === "close" && !options.feePayer) {
+        return { valid: false, reason: closeNotSupported() };
+      }
+      return { valid: true, payer: record.payer, nonce: await idempotencyKey(payment) };
+    },
+
+    async settle(input) {
+      return withChannelLock(input.payment.channelId, () => settleVoucher(input));
+    },
+
+    async reconcile(channelId) {
+      return withChannelLock(channelId, async () => {
+        const record = await readChannelRecord(options.channels, channelId);
+        if (!record?.pending) return { outcome: "nothing-pending" as const };
+        const { sequence } = record.pending;
+        const stored = await sdkCumulative(channelId);
+        if (stored === BigInt(record.pending.cumulativeAmount)) {
+          if (!(await commitPending(record))) {
+            throw new TollwayError(
+              "corrupt-channel-record",
+              `channel ${channelId} changed during reconcile`,
+            );
+          }
+          return { outcome: "committed" as const, sequence };
+        }
+        if (stored === BigInt(record.latest?.cumulativeAmount ?? "0")) {
+          if (!(await dropPending(record))) {
+            throw new TollwayError(
+              "corrupt-channel-record",
+              `channel ${channelId} changed during reconcile`,
+            );
+          }
+          return { outcome: "discarded" as const, sequence };
+        }
+        throw new TollwayError(
+          "settlement-mismatch",
+          `@stellar/mpp holds cumulative ${stored} for channel ${channelId}, which matches neither the pending nor the accepted voucher`,
+        );
+      });
     },
   };
+}
+
+function closeNotSupported(): string {
+  return "close-not-supported: this service does not accept close credentials; send a voucher";
+}
+
+/** Null when the channel can take vouchers, otherwise the coded reason. */
+function statusProblem(record: ChannelRecord): string | null {
+  switch (record.status) {
+    case "settling":
+      return `channel-settling: channel ${record.channelId} is being closed; open a new channel`;
+    case "closed":
+      return `channel-closed: channel ${record.channelId} is closed; open a new channel`;
+    case "open":
+      return record.pending
+        ? `channel-pending-reconciliation: channel ${record.channelId} has an unrecorded voucher; retry later`
+        : null;
+  }
+}
+
+/** The on-chain checks a channel must pass before it is challenged. */
+export function registrationProblem(
+  onChain: OnChainChannel,
+  offer: PaymentOffer,
+  minRefundWaitingPeriod: number,
+): string | null {
+  if (onChain.to !== offer.payTo) {
+    return "channel-recipient-mismatch: the channel does not pay out to this service's payTo";
+  }
+  if (onChain.token !== offer.asset) {
+    return "channel-token-mismatch: the channel pays in a different token than the offer asset";
+  }
+  if (onChain.closeEffectiveAtLedger !== null) {
+    return "channel-closing: the channel is closing or closed on chain";
+  }
+  if (onChain.refundWaitingPeriod < minRefundWaitingPeriod) {
+    return `channel-refund-period-too-short: refund waiting period ${onChain.refundWaitingPeriod} is below the required ${minRefundWaitingPeriod} ledgers`;
+  }
+  return null;
+}
+
+/**
+ * Null when `payment` may be accepted on `record` against `offer`, otherwise
+ * the coded reason. The increment must equal the offer amount exactly, so
+ * each receipt answers exactly one paid request.
+ */
+export function acceptanceProblem(
+  record: ChannelRecord | undefined,
+  payment: MppChannelPayment,
+  offer: PaymentOffer,
+): string | null {
+  if (!record) {
+    return `channel-not-registered: channel ${payment.channelId} is not registered; send TOLLWAY-CHANNEL to get a challenge`;
+  }
+  if (
+    record.network !== offer.network ||
+    record.payTo !== offer.payTo ||
+    record.asset !== offer.asset
+  ) {
+    return "channel-offer-mismatch: the channel was registered for a different network, payee or asset";
+  }
+  const status = statusProblem(record);
+  if (status) return status;
+  const amount = BigInt(payment.cumulativeAmount);
+  const latest: AcceptedVoucher | undefined = record.latest;
+  if (latest) {
+    const previous = BigInt(latest.cumulativeAmount);
+    if (amount === previous) {
+      return latest.signature === payment.signature.toLowerCase()
+        ? "voucher-already-accepted: this voucher was already paid for; send the next cumulative amount"
+        : "commitment-conflict: a different signature was already accepted at this cumulative amount";
+    }
+    if (amount < previous) {
+      return `stale-cumulative: cumulative ${amount} is below the accepted ${previous}`;
+    }
+  }
+  const increment = amount - BigInt(latest?.cumulativeAmount ?? "0");
+  if (increment !== BigInt(offer.amount)) {
+    return `wrong-increment: the voucher adds ${increment}, the offer costs ${offer.amount}`;
+  }
+  return null;
+}
+
+const TRANSPORT_ERROR_CODES = new Set([
+  "ECONNREFUSED",
+  "ECONNRESET",
+  "ENOTFOUND",
+  "EAI_AGAIN",
+  "ETIMEDOUT",
+  "EPIPE",
+  "UND_ERR_CONNECT_TIMEOUT",
+  "UND_ERR_SOCKET",
+]);
+
+function rejectionMessage(error: unknown): string {
+  if (error instanceof Errors.PaymentError || error instanceof StellarMppError) {
+    return error.message;
+  }
+  if (error instanceof Error) {
+    const code = "code" in error ? error.code : undefined;
+    if (typeof code === "string" && TRANSPORT_ERROR_CODES.has(code)) {
+      return `network failure while verifying (${error.message})`;
+    }
+  }
+  return `invalid payment: ${errorMessage(error)}`;
+}
+
+function errorMessage(error: unknown): string {
+  return error instanceof Error ? error.message : String(error);
 }

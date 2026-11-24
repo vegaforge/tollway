@@ -37,12 +37,13 @@ import {
   PAYMENT_SIGNATURE_HEADER,
   readHeader,
   readMppCredential,
+  TOLLWAY_CHANNEL_HEADER,
   TOLLWAY_QUOTE_HEADER,
   TOLLWAY_RECEIPT_HEADER,
 } from "./headers.js";
 import {
-  isMppChannelCredential,
   type MppChannelHandler,
+  mppCredentialIntent,
   parseMppChannelCredential,
 } from "./mpp-channel.js";
 import type { MppChargeHandler } from "./mpp-charge.js";
@@ -267,10 +268,16 @@ export type PaywallDeps = {
   receiptVersion?: 1 | 2;
 };
 
+/**
+ * What a handler's settle returns. x402 and mpp-charge settle a transaction;
+ * mpp-channel anchors the receipt at a channel commitment instead. A
+ * rejection may name its status (a stale voucher is the payer's problem, a
+ * 402); without one it is a 502, the upstream refusing.
+ */
 type HandlerSettlement =
   | { settled: true; txHash: string }
   | { settled: true; settlement: SettlementRef; txHash?: string }
-  | { settled: false; reason: string };
+  | { settled: false; reason: string; status?: number };
 
 type Handler<TPayment> = {
   idempotencyKey?(input: { payment: TPayment }): Promise<string | undefined>;
@@ -1270,10 +1277,20 @@ async function settleAndRecord<TPayment>(
   hold.end();
 
   if (!settlement.settled) {
-    return { ok: false, outcome: { kind: "rejected", status: 502, reason: settlement.reason } };
+    return {
+      ok: false,
+      outcome: { kind: "rejected", status: settlement.status ?? 502, reason: settlement.reason },
+    };
   }
 
-  const receipt = await receiptFor(settlementRef(settlement), offer, model, method, verification, context);
+  const receipt = await receiptFor(
+    settlementRef(settlement),
+    offer,
+    model,
+    method,
+    verification,
+    context,
+  );
 
   if (!context.cache) {
     return { ok: true, receipt, method, replayed: false };
@@ -1440,13 +1457,27 @@ async function paymentRequired(
       }
     }
   }
-  if (acceptedModels.includes("mpp-channel") && mppChannelHandler?.challenge) {
+  // A channel challenge names one channel contract, so it is only issued to
+  // an agent that says which channel it pays from (#173). The channel is
+  // checked on chain first; a channel that fails is refused, not challenged.
+  const channelId = readHeader(request.headers, TOLLWAY_CHANNEL_HEADER);
+  if (acceptedModels.includes("mpp-channel") && mppChannelHandler && channelId) {
     const mppChannel = await mppChannelHandler.challenge({
       offer,
-      request: { method: request.method, url: request.url, headers: request.headers },
+      request: { method: request.method, url: request.url },
+      channelId: channelId.trim(),
     });
+    if (!mppChannel.ok) {
+      return { kind: "rejected", status: mppChannel.status, reason: mppChannel.reason };
+    }
     for (const [name, value] of Object.entries(mppChannel.headers)) {
-      if (!BODY_HEADERS.has(name.toLowerCase())) {
+      if (BODY_HEADERS.has(name.toLowerCase())) continue;
+      // Both MPP methods answer in WWW-Authenticate; HTTP allows several
+      // challenges in one header, separated by commas.
+      const existing = Object.keys(headers).find((key) => key.toLowerCase() === name.toLowerCase());
+      if (existing && name.toLowerCase() === "www-authenticate") {
+        headers[existing] = `${headers[existing]}, ${value}`;
+      } else {
         headers[name] = value;
       }
     }
@@ -1455,9 +1486,9 @@ async function paymentRequired(
 }
 
 /**
- * Builds the gate from a paywall config. It settles x402 per-request and
- * mpp-charge; a routing decision for another model is rejected rather than
- * mishandled. See docs/design.md, "Build plan", Phase 1.
+ * Builds the gate from a paywall config. It settles x402 per-request,
+ * mpp-charge, and mpp-channel vouchers. See docs/design.md, "Build plan",
+ * Phases 1 and 2.
  */
 export function createPaywall(config: PaywallConfig, deps: PaywallDeps): Gate {
   return createPaywallWithInFlight(config, deps, new Map());
@@ -1601,13 +1632,18 @@ export function createPaywallWithInFlight(
     }
 
     // An MPP credential answers an MPP challenge, so the agent has already
-    // chosen the model; the router is not asked again.
+    // chosen the model; the router is not asked again. The credential's
+    // challenge says which MPP method it is for.
     if (mppCredential) {
-      const useChannel =
-        acceptedModels.includes("mpp-channel") &&
-        (!acceptedModels.includes("mpp-charge") || isMppChannelCredential(mppCredential));
-
-      if (useChannel) {
+      const intent = mppCredentialIntent(mppCredential);
+      if (intent === "stellar/channel") {
+        if (!acceptedModels.includes("mpp-channel")) {
+          return {
+            kind: "rejected",
+            status: 400,
+            reason: "this route does not accept mpp-channel payments",
+          };
+        }
         if (!deps.mppChannelHandler) {
           return {
             kind: "rejected",
@@ -1615,22 +1651,26 @@ export function createPaywallWithInFlight(
             reason: "mpp-channel handler not configured",
           };
         }
-        const channelPayment = parseMppChannelCredential(mppCredential);
-        if (!channelPayment) {
-          return {
-            kind: "rejected",
-            status: 400,
-            reason: "Authorization: Payment credential is not a valid mpp-channel voucher",
-          };
+        const parsed = parseMppChannelCredential(mppCredential);
+        if (!parsed.ok) {
+          return { kind: "rejected", status: 400, reason: parsed.reason };
         }
         return settleWithHandler(
-          channelPayment,
+          parsed.payment,
           offer,
           "mpp-channel",
           method,
           deps.mppChannelHandler,
           context,
         );
+      }
+      if (!acceptedModels.includes("mpp-charge")) {
+        return {
+          kind: "rejected",
+          status: 400,
+          reason:
+            "Authorization: Payment credential is not for a payment method this route accepts",
+        };
       }
 
       if (!deps.mppChargeHandler) {
@@ -1704,18 +1744,11 @@ export function createPaywallWithInFlight(
       );
     }
 
-    if (decision.model === "mpp-charge" || decision.model === "mpp-channel") {
-      return {
-        kind: "rejected",
-        status: 400,
-        reason: `${decision.model} payments carry an Authorization: Payment credential, not PAYMENT-SIGNATURE`,
-      };
-    }
-
+    // Both MPP models answer with an Authorization: Payment credential.
     return {
       kind: "rejected",
-      status: 501,
-      reason: `model "${decision.model}" routing is selected but settlement is not implemented yet`,
+      status: 400,
+      reason: `${decision.model} payments carry an Authorization: Payment credential, not PAYMENT-SIGNATURE`,
     };
   };
 }
