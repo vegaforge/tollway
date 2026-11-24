@@ -18,6 +18,21 @@ export {
   type SettlementLock,
 } from "./cache.js";
 export {
+  type ChannelSettlementRecord,
+  type ChannelSettlementRunReport,
+  type ChannelSettlementScheduler,
+  type ChannelSettlementSchedulerOptions,
+  type ChannelSettlementStore,
+  type ChannelSettler,
+  createChannelSettlementScheduler,
+  createInMemoryChannelSettlementStore,
+  createStellarChannelSettler,
+  decodeCommitmentSignature,
+  isAmbiguousCloseError,
+  type SettlingMarker,
+  type StellarChannelSettlerOptions,
+} from "./channel-settlement.js";
+export {
   type ChannelDispute,
   type ChannelLoss,
   type ChannelWatchRegistry,
