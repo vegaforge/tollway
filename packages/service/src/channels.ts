@@ -4,7 +4,7 @@ import {
   type ChannelManager,
   type Commitment,
 } from "@vegaforge/tollway-channels";
-import { base64UrlToBytes, bytesToBase64Url, utf8Bytes } from "@vegaforge/tollway-core";
+import { base64UrlToBytes, bytesToBase64Url, enumSchema, utf8Bytes } from "@vegaforge/tollway-core";
 import { z } from "zod";
 import type { ServiceContext, ServiceModule } from "./app.js";
 import { errorBody, errorBodySchema } from "./errors.js";
@@ -53,7 +53,7 @@ const channelViewSchema = z.object({
   /** `deposit - committed`, computed as a bigint. */
   remaining: integerString,
   sequence: z.number().int(),
-  status: z.enum(channelStatuses),
+  status: enumSchema(channelStatuses),
   network: z.string(),
   openTxHash: z.string(),
   openedAt: z.string(),
@@ -175,7 +175,7 @@ function channelRoutes(context: ServiceContext, now: () => string): readonly Ser
       scope: "read",
       request: {
         query: z.object({
-          status: z.enum(channelStatuses).optional(),
+          status: enumSchema(channelStatuses).optional(),
           counterparty: z.string().min(1).optional(),
           asset: z.string().min(1).optional(),
           cursor: z.string().min(1).optional(),
@@ -243,7 +243,7 @@ function channelRoutes(context: ServiceContext, now: () => string): readonly Ser
       request: {
         params: channelIdParams,
         query: z.object({
-          include: z.enum(["blob"]).optional(),
+          include: enumSchema(["blob"]).optional(),
           cursor: z.string().min(1).optional(),
           limit: pageLimit,
         }),

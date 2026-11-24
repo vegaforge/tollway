@@ -26,7 +26,9 @@ export type EnumShape<Values extends readonly string[]> = { [Key in Values[numbe
  * `z.enum` for a list of string values, with a declared type that prints in
  * source order; see {@link EnumShape}. Every enum schema in this package
  * goes through it, so no public declaration depends on the checker's
- * internal ordering.
+ * internal ordering. It is exported so packages that publish their own Zod
+ * schemas, such as `@vegaforge/tollway-service`, get the same stable
+ * declarations.
  */
 export function enumSchema<const Values extends readonly string[]>(
   values: Values,

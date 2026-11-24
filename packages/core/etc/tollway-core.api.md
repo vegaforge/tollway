@@ -214,6 +214,9 @@ export class Ed25519Verifier implements ReceiptVerifier {
 }
 
 // @public
+export function enumSchema<const Values extends readonly string[]>(values: Values): z.ZodEnum<EnumShape<Values>>;
+
+// @public
 export type EnumShape<Values extends readonly string[]> = {
     [Key in Values[number]]: Key;
 };

@@ -8,7 +8,7 @@
 
 export { BODY_DIGEST_SEPARATOR, bindBodyToResource, bodyDigest } from "./body-binding.js";
 export { base64UrlToBytes, bytesToBase64Url, utf8Bytes } from "./encoding.js";
-export type { EnumShape } from "./enum-shape.js";
+export { type EnumShape, enumSchema } from "./enum-shape.js";
 export {
   ChannelOpenFailedError,
   type ChannelOpenSubmission,
