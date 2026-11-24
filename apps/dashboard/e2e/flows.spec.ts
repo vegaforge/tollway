@@ -39,14 +39,10 @@ test("a channel-commitment receipt links to its channel", async ({ page }) => {
 test("the theme choice survives a reload", async ({ page }) => {
   await page.goto("/");
   const toggle = page.getByRole("button", { name: "Toggle color theme" });
-  // next-themes sets the class on <html> before paint, so it is the theme the
-  // page starts in. The button renders aria-pressed="false" until React has
-  // hydrated it, whatever the theme, so reading the button here, or clicking
-  // before it reflects the theme, races hydration.
-  const startsDark = /(^|\s)dark(\s|$)/.test(
-    (await page.locator("html").getAttribute("class")) ?? "",
-  );
-  await expect(toggle).toHaveAttribute("aria-pressed", startsDark ? "true" : "false");
+  // Before hydration the toggle reports "not pressed" in dark mode too, and a
+  // click is lost. Read its state and click only once it has mounted.
+  await expect(toggle).toHaveAttribute("data-ready", "true");
+  const startsDark = (await toggle.getAttribute("aria-pressed")) === "true";
 
   await toggle.click();
   const expected = startsDark ? "false" : "true";
@@ -55,10 +51,9 @@ test("the theme choice survives a reload", async ({ page }) => {
 
   await page.reload();
 
-  await expect(page.getByRole("button", { name: "Toggle color theme" })).toHaveAttribute(
-    "aria-pressed",
-    expected,
-  );
+  const reloaded = page.getByRole("button", { name: "Toggle color theme" });
+  await expect(reloaded).toHaveAttribute("data-ready", "true");
+  await expect(reloaded).toHaveAttribute("aria-pressed", expected);
   await expect(page.locator("html")).toHaveClass(startsDark ? /light/ : /dark/);
 });
 
