@@ -205,6 +205,14 @@ export class Ed25519Verifier implements ReceiptVerifier {
 }
 
 // @public
+export function enumSchema<const Values extends readonly string[]>(values: Values): z.ZodEnum<EnumShape<Values>>;
+
+// @public
+export type EnumShape<Values extends readonly string[]> = {
+    [Key in Values[number]]: Key;
+};
+
+// @public
 export function formatPolicyIssues(issues: readonly PolicyIssue[]): string;
 
 // @public
@@ -525,10 +533,7 @@ export const policyRuleNames: readonly ["per-model-disabled", "min-channel-depos
 export const policySchema: z.ZodObject<{
     $schema: z.ZodOptional<z.ZodString>;
     policyVersion: z.ZodLiteral<1>;
-    mode: z.ZodOptional<z.ZodEnum<{
-        enforce: "enforce";
-        "dry-run": "dry-run";
-    }>>;
+    mode: z.ZodOptional<z.ZodEnum<EnumShape<readonly ["enforce", "dry-run"]>>>;
     budgets: z.ZodOptional<z.ZodObject<{
         daily: z.ZodOptional<z.ZodString>;
         weekly: z.ZodOptional<z.ZodString>;
@@ -538,10 +543,7 @@ export const policySchema: z.ZodObject<{
             cap: z.ZodString;
         }, z.core.$strict>>;
         timezone: z.ZodOptional<z.ZodString>;
-        weekStartsOn: z.ZodOptional<z.ZodEnum<{
-            monday: "monday";
-            sunday: "sunday";
-        }>>;
+        weekStartsOn: z.ZodOptional<z.ZodEnum<EnumShape<readonly ["monday", "sunday"]>>>;
         total: z.ZodOptional<z.ZodString>;
     }, z.core.$strict>>;
     perService: z.ZodOptional<z.ZodRecord<z.ZodString, z.ZodObject<{
@@ -553,10 +555,7 @@ export const policySchema: z.ZodObject<{
         }, z.core.$strict>>;
     }, z.core.$strict>>>;
     perResource: z.ZodOptional<z.ZodRecord<z.ZodString, z.ZodObject<{
-        match: z.ZodOptional<z.ZodEnum<{
-            exact: "exact";
-            prefix: "prefix";
-        }>>;
+        match: z.ZodOptional<z.ZodEnum<EnumShape<readonly ["exact", "prefix"]>>>;
         cap: z.ZodOptional<z.ZodString>;
         dailyCap: z.ZodOptional<z.ZodString>;
         window: z.ZodOptional<z.ZodObject<{
@@ -564,11 +563,7 @@ export const policySchema: z.ZodObject<{
             cap: z.ZodString;
         }, z.core.$strict>>;
     }, z.core.$strict>>>;
-    perModel: z.ZodOptional<z.ZodRecord<z.ZodEnum<{
-        x402: "x402";
-        "mpp-charge": "mpp-charge";
-        "mpp-channel": "mpp-channel";
-    }> & z.core.$partial, z.ZodObject<{
+    perModel: z.ZodOptional<z.ZodRecord<z.ZodEnum<EnumShape<readonly ["x402", "mpp-charge", "mpp-channel"]>> & z.core.$partial, z.ZodObject<{
         enabled: z.ZodOptional<z.ZodBoolean>;
         minChannelDeposit: z.ZodOptional<z.ZodString>;
     }, z.core.$strict>>>;
@@ -578,14 +573,8 @@ export const policySchema: z.ZodObject<{
             windowSeconds: z.ZodNumber;
             limit: z.ZodNumber;
         }, z.core.$strict>>>;
-        count: z.ZodOptional<z.ZodEnum<{
-            settlements: "settlements";
-            attempts: "attempts";
-        }>>;
-        scope: z.ZodOptional<z.ZodEnum<{
-            global: "global";
-            "per-counterparty": "per-counterparty";
-        }>>;
+        count: z.ZodOptional<z.ZodEnum<EnumShape<readonly ["settlements", "attempts"]>>>;
+        scope: z.ZodOptional<z.ZodEnum<EnumShape<readonly ["global", "per-counterparty"]>>>;
         perCounterpartyKeyLimit: z.ZodOptional<z.ZodNumber>;
     }, z.core.$strict>>;
     anomaly: z.ZodOptional<z.ZodObject<{
@@ -601,10 +590,7 @@ export const policySchema: z.ZodObject<{
                 denominator: z.ZodString;
             }, z.core.$strict>;
             warmupPeriods: z.ZodNumber;
-            scope: z.ZodOptional<z.ZodEnum<{
-                asset: "asset";
-                "asset-payee": "asset-payee";
-            }>>;
+            scope: z.ZodOptional<z.ZodEnum<EnumShape<readonly ["asset", "asset-payee"]>>>;
             maxBaselineGrowthPerMinute: z.ZodOptional<z.ZodString>;
         }, z.core.$strict>>;
     }, z.core.$strict>>;
@@ -633,44 +619,10 @@ export type PolicyTraceEntry = z.infer<typeof policyTraceEntrySchema>;
 
 // @public
 export const policyTraceEntrySchema: z.ZodObject<{
-    id: z.ZodEnum<{
-        anomaly: "anomaly";
-        "per-model-disabled": "per-model-disabled";
-        "min-channel-deposit": "min-channel-deposit";
-        "budget-daily": "budget-daily";
-        "budget-weekly": "budget-weekly";
-        "budget-monthly": "budget-monthly";
-        "budget-rolling": "budget-rolling";
-        "budget-total": "budget-total";
-        "per-service": "per-service";
-        "per-service-daily": "per-service-daily";
-        "per-service-window": "per-service-window";
-        "per-resource": "per-resource";
-        "per-resource-daily": "per-resource-daily";
-        "per-resource-window": "per-resource-window";
-        "rate-limit": "rate-limit";
-        "anomaly-adaptive": "anomaly-adaptive";
-    }>;
-    rule: z.ZodEnum<{
-        anomaly: "anomaly";
-        "per-model-disabled": "per-model-disabled";
-        "min-channel-deposit": "min-channel-deposit";
-        "per-service": "per-service";
-        "per-service-daily": "per-service-daily";
-        "per-service-window": "per-service-window";
-        "per-resource": "per-resource";
-        "per-resource-daily": "per-resource-daily";
-        "per-resource-window": "per-resource-window";
-        "rate-limit": "rate-limit";
-        "anomaly-adaptive": "anomaly-adaptive";
-        budget: "budget";
-    }>;
+    id: z.ZodEnum<EnumShape<readonly ["per-model-disabled", "min-channel-deposit", "budget-daily", "budget-weekly", "budget-monthly", "budget-rolling", "budget-total", "per-service", "per-service-daily", "per-service-window", "per-resource", "per-resource-daily", "per-resource-window", "rate-limit", "anomaly", "anomaly-adaptive"]>>;
+    rule: z.ZodEnum<EnumShape<readonly ["per-model-disabled", "min-channel-deposit", "budget", "per-service", "per-service-daily", "per-service-window", "per-resource", "per-resource-daily", "per-resource-window", "rate-limit", "anomaly", "anomaly-adaptive"]>>;
     configured: z.ZodBoolean;
-    outcome: z.ZodEnum<{
-        pass: "pass";
-        fail: "fail";
-        "not-applicable": "not-applicable";
-    }>;
+    outcome: z.ZodEnum<EnumShape<readonly ["pass", "fail", "not-applicable"]>>;
     limit: z.ZodNullable<z.ZodString>;
     current: z.ZodNullable<z.ZodString>;
     projected: z.ZodNullable<z.ZodString>;
@@ -701,81 +653,23 @@ export const policyTraceEntrySchema: z.ZodObject<{
 // @public
 export const policyTraceSchema: z.ZodObject<{
     version: z.ZodLiteral<1>;
-    mode: z.ZodEnum<{
-        enforce: "enforce";
-        "dry-run": "dry-run";
-    }>;
+    mode: z.ZodEnum<EnumShape<readonly ["enforce", "dry-run"]>>;
     evaluatedAt: z.ZodISODateTime;
     intent: z.ZodObject<{
         payee: z.ZodString;
         resource: z.ZodString;
         amount: z.ZodString;
         asset: z.ZodString;
-        model: z.ZodEnum<{
-            x402: "x402";
-            "mpp-charge": "mpp-charge";
-            "mpp-channel": "mpp-channel";
-        }>;
+        model: z.ZodEnum<EnumShape<readonly ["x402", "mpp-charge", "mpp-channel"]>>;
     }, z.core.$strict>;
     allowed: z.ZodBoolean;
     wouldBlock: z.ZodBoolean;
-    blockedBy: z.ZodNullable<z.ZodEnum<{
-        anomaly: "anomaly";
-        "per-model-disabled": "per-model-disabled";
-        "min-channel-deposit": "min-channel-deposit";
-        "budget-daily": "budget-daily";
-        "budget-weekly": "budget-weekly";
-        "budget-monthly": "budget-monthly";
-        "budget-rolling": "budget-rolling";
-        "budget-total": "budget-total";
-        "per-service": "per-service";
-        "per-service-daily": "per-service-daily";
-        "per-service-window": "per-service-window";
-        "per-resource": "per-resource";
-        "per-resource-daily": "per-resource-daily";
-        "per-resource-window": "per-resource-window";
-        "rate-limit": "rate-limit";
-        "anomaly-adaptive": "anomaly-adaptive";
-    }>>;
+    blockedBy: z.ZodNullable<z.ZodEnum<EnumShape<readonly ["per-model-disabled", "min-channel-deposit", "budget-daily", "budget-weekly", "budget-monthly", "budget-rolling", "budget-total", "per-service", "per-service-daily", "per-service-window", "per-resource", "per-resource-daily", "per-resource-window", "rate-limit", "anomaly", "anomaly-adaptive"]>>>;
     entries: z.ZodArray<z.ZodObject<{
-        id: z.ZodEnum<{
-            anomaly: "anomaly";
-            "per-model-disabled": "per-model-disabled";
-            "min-channel-deposit": "min-channel-deposit";
-            "budget-daily": "budget-daily";
-            "budget-weekly": "budget-weekly";
-            "budget-monthly": "budget-monthly";
-            "budget-rolling": "budget-rolling";
-            "budget-total": "budget-total";
-            "per-service": "per-service";
-            "per-service-daily": "per-service-daily";
-            "per-service-window": "per-service-window";
-            "per-resource": "per-resource";
-            "per-resource-daily": "per-resource-daily";
-            "per-resource-window": "per-resource-window";
-            "rate-limit": "rate-limit";
-            "anomaly-adaptive": "anomaly-adaptive";
-        }>;
-        rule: z.ZodEnum<{
-            anomaly: "anomaly";
-            "per-model-disabled": "per-model-disabled";
-            "min-channel-deposit": "min-channel-deposit";
-            "per-service": "per-service";
-            "per-service-daily": "per-service-daily";
-            "per-service-window": "per-service-window";
-            "per-resource": "per-resource";
-            "per-resource-daily": "per-resource-daily";
-            "per-resource-window": "per-resource-window";
-            "rate-limit": "rate-limit";
-            "anomaly-adaptive": "anomaly-adaptive";
-            budget: "budget";
-        }>;
+        id: z.ZodEnum<EnumShape<readonly ["per-model-disabled", "min-channel-deposit", "budget-daily", "budget-weekly", "budget-monthly", "budget-rolling", "budget-total", "per-service", "per-service-daily", "per-service-window", "per-resource", "per-resource-daily", "per-resource-window", "rate-limit", "anomaly", "anomaly-adaptive"]>>;
+        rule: z.ZodEnum<EnumShape<readonly ["per-model-disabled", "min-channel-deposit", "budget", "per-service", "per-service-daily", "per-service-window", "per-resource", "per-resource-daily", "per-resource-window", "rate-limit", "anomaly", "anomaly-adaptive"]>>;
         configured: z.ZodBoolean;
-        outcome: z.ZodEnum<{
-            pass: "pass";
-            fail: "fail";
-            "not-applicable": "not-applicable";
-        }>;
+        outcome: z.ZodEnum<EnumShape<readonly ["pass", "fail", "not-applicable"]>>;
         limit: z.ZodNullable<z.ZodString>;
         current: z.ZodNullable<z.ZodString>;
         projected: z.ZodNullable<z.ZodString>;
@@ -888,11 +782,7 @@ export const receiptBodySchema: z.ZodDiscriminatedUnion<[z.ZodObject<{
     amount: z.ZodString;
     asset: z.ZodString;
     resource: z.ZodString;
-    model: z.ZodEnum<{
-        x402: "x402";
-        "mpp-charge": "mpp-charge";
-        "mpp-channel": "mpp-channel";
-    }>;
+    model: z.ZodEnum<EnumShape<readonly ["x402", "mpp-charge", "mpp-channel"]>>;
     settlement: z.ZodDiscriminatedUnion<[z.ZodObject<{
         kind: z.ZodLiteral<"transaction">;
         txHash: z.ZodString;
@@ -901,10 +791,7 @@ export const receiptBodySchema: z.ZodDiscriminatedUnion<[z.ZodObject<{
         channelId: z.ZodString;
         sequence: z.ZodNumber;
     }, z.core.$strict>], "kind">;
-    network: z.ZodEnum<{
-        testnet: "testnet";
-        mainnet: "mainnet";
-    }>;
+    network: z.ZodEnum<EnumShape<readonly ["testnet", "mainnet"]>>;
     issuedAt: z.ZodISODateTime;
     version: z.ZodLiteral<1>;
 }, z.core.$strict>, z.ZodObject<{
@@ -917,11 +804,7 @@ export const receiptBodySchema: z.ZodDiscriminatedUnion<[z.ZodObject<{
     amount: z.ZodString;
     asset: z.ZodString;
     resource: z.ZodString;
-    model: z.ZodEnum<{
-        x402: "x402";
-        "mpp-charge": "mpp-charge";
-        "mpp-channel": "mpp-channel";
-    }>;
+    model: z.ZodEnum<EnumShape<readonly ["x402", "mpp-charge", "mpp-channel"]>>;
     settlement: z.ZodDiscriminatedUnion<[z.ZodObject<{
         kind: z.ZodLiteral<"transaction">;
         txHash: z.ZodString;
@@ -930,10 +813,7 @@ export const receiptBodySchema: z.ZodDiscriminatedUnion<[z.ZodObject<{
         channelId: z.ZodString;
         sequence: z.ZodNumber;
     }, z.core.$strict>], "kind">;
-    network: z.ZodEnum<{
-        testnet: "testnet";
-        mainnet: "mainnet";
-    }>;
+    network: z.ZodEnum<EnumShape<readonly ["testnet", "mainnet"]>>;
     issuedAt: z.ZodISODateTime;
     version: z.ZodLiteral<2>;
 }, z.core.$strict>], "version">;
@@ -949,11 +829,7 @@ export const receiptBodyV1Schema: z.ZodObject<{
     amount: z.ZodString;
     asset: z.ZodString;
     resource: z.ZodString;
-    model: z.ZodEnum<{
-        x402: "x402";
-        "mpp-charge": "mpp-charge";
-        "mpp-channel": "mpp-channel";
-    }>;
+    model: z.ZodEnum<EnumShape<readonly ["x402", "mpp-charge", "mpp-channel"]>>;
     settlement: z.ZodDiscriminatedUnion<[z.ZodObject<{
         kind: z.ZodLiteral<"transaction">;
         txHash: z.ZodString;
@@ -962,10 +838,7 @@ export const receiptBodyV1Schema: z.ZodObject<{
         channelId: z.ZodString;
         sequence: z.ZodNumber;
     }, z.core.$strict>], "kind">;
-    network: z.ZodEnum<{
-        testnet: "testnet";
-        mainnet: "mainnet";
-    }>;
+    network: z.ZodEnum<EnumShape<readonly ["testnet", "mainnet"]>>;
     issuedAt: z.ZodISODateTime;
     version: z.ZodLiteral<1>;
 }, z.core.$strict>;
@@ -984,11 +857,7 @@ export const receiptBodyV2Schema: z.ZodObject<{
     amount: z.ZodString;
     asset: z.ZodString;
     resource: z.ZodString;
-    model: z.ZodEnum<{
-        x402: "x402";
-        "mpp-charge": "mpp-charge";
-        "mpp-channel": "mpp-channel";
-    }>;
+    model: z.ZodEnum<EnumShape<readonly ["x402", "mpp-charge", "mpp-channel"]>>;
     settlement: z.ZodDiscriminatedUnion<[z.ZodObject<{
         kind: z.ZodLiteral<"transaction">;
         txHash: z.ZodString;
@@ -997,10 +866,7 @@ export const receiptBodyV2Schema: z.ZodObject<{
         channelId: z.ZodString;
         sequence: z.ZodNumber;
     }, z.core.$strict>], "kind">;
-    network: z.ZodEnum<{
-        testnet: "testnet";
-        mainnet: "mainnet";
-    }>;
+    network: z.ZodEnum<EnumShape<readonly ["testnet", "mainnet"]>>;
     issuedAt: z.ZodISODateTime;
     version: z.ZodLiteral<2>;
 }, z.core.$strict>;
@@ -1135,11 +1001,7 @@ export const signedReceiptSchema: z.ZodObject<{
         amount: z.ZodString;
         asset: z.ZodString;
         resource: z.ZodString;
-        model: z.ZodEnum<{
-            x402: "x402";
-            "mpp-charge": "mpp-charge";
-            "mpp-channel": "mpp-channel";
-        }>;
+        model: z.ZodEnum<EnumShape<readonly ["x402", "mpp-charge", "mpp-channel"]>>;
         settlement: z.ZodDiscriminatedUnion<[z.ZodObject<{
             kind: z.ZodLiteral<"transaction">;
             txHash: z.ZodString;
@@ -1148,10 +1010,7 @@ export const signedReceiptSchema: z.ZodObject<{
             channelId: z.ZodString;
             sequence: z.ZodNumber;
         }, z.core.$strict>], "kind">;
-        network: z.ZodEnum<{
-            testnet: "testnet";
-            mainnet: "mainnet";
-        }>;
+        network: z.ZodEnum<EnumShape<readonly ["testnet", "mainnet"]>>;
         issuedAt: z.ZodISODateTime;
         version: z.ZodLiteral<1>;
     }, z.core.$strict>, z.ZodObject<{
@@ -1164,11 +1023,7 @@ export const signedReceiptSchema: z.ZodObject<{
         amount: z.ZodString;
         asset: z.ZodString;
         resource: z.ZodString;
-        model: z.ZodEnum<{
-            x402: "x402";
-            "mpp-charge": "mpp-charge";
-            "mpp-channel": "mpp-channel";
-        }>;
+        model: z.ZodEnum<EnumShape<readonly ["x402", "mpp-charge", "mpp-channel"]>>;
         settlement: z.ZodDiscriminatedUnion<[z.ZodObject<{
             kind: z.ZodLiteral<"transaction">;
             txHash: z.ZodString;
@@ -1177,10 +1032,7 @@ export const signedReceiptSchema: z.ZodObject<{
             channelId: z.ZodString;
             sequence: z.ZodNumber;
         }, z.core.$strict>], "kind">;
-        network: z.ZodEnum<{
-            testnet: "testnet";
-            mainnet: "mainnet";
-        }>;
+        network: z.ZodEnum<EnumShape<readonly ["testnet", "mainnet"]>>;
         issuedAt: z.ZodISODateTime;
         version: z.ZodLiteral<2>;
     }, z.core.$strict>], "version">;

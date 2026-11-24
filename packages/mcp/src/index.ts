@@ -279,8 +279,10 @@ function isCaip2(value: string): value is Network {
 
 /** The rejection reason, with the wait the gate asked for when it gave one. */
 function rejectionReason(outcome: Extract<GateOutcome, { kind: "rejected" }>): string {
+  // The gate keeps the facilitator's or validator's own words in
+  // `upstreamReason` and a generic sentence in `reason`. An MCP client has
+  // no separate field for them, so the specific one goes in the message.
+  const reason = outcome.upstreamReason ?? outcome.reason;
   const retryAfter = outcome.headers?.["retry-after"];
-  return retryAfter === undefined
-    ? outcome.reason
-    : `${outcome.reason} (retry after ${retryAfter}s)`;
+  return retryAfter === undefined ? reason : `${reason} (retry after ${retryAfter}s)`;
 }

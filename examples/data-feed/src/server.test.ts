@@ -1,6 +1,16 @@
 import type { Server } from "node:http";
 import type { AddressInfo } from "node:net";
-import { Keypair, StrKey } from "@stellar/stellar-sdk";
+import {
+  Account,
+  Address,
+  Keypair,
+  Networks,
+  nativeToScVal,
+  Operation,
+  StrKey,
+  TransactionBuilder,
+  xdr,
+} from "@stellar/stellar-sdk";
 import { Ed25519Verifier, type SignedReceipt, verifyReceipt } from "@vegaforge/tollway-core";
 import {
   decodeHeader,
@@ -39,6 +49,51 @@ beforeAll(async () => {
 afterAll(async () => {
   await new Promise((resolve) => server.close(resolve));
 });
+
+/**
+ * The transfer a Stellar client would sign for these requirements, built
+ * without RPC. The gate checks the envelope locally before calling the
+ * facilitator (#159), so a stand-in string would be refused with a 402.
+ */
+function transferEnvelope(requirements: { asset: string; payTo: string; amount: string }): string {
+  const from = Keypair.random().publicKey();
+  const invocation = new xdr.InvokeContractArgs({
+    contractAddress: Address.fromString(requirements.asset).toScAddress(),
+    functionName: "transfer",
+    args: [
+      nativeToScVal(from, { type: "address" }),
+      nativeToScVal(requirements.payTo, { type: "address" }),
+      nativeToScVal(BigInt(requirements.amount), { type: "i128" }),
+    ],
+  });
+  const auth = new xdr.SorobanAuthorizationEntry({
+    credentials: xdr.SorobanCredentials.sorobanCredentialsAddress(
+      new xdr.SorobanAddressCredentials({
+        address: Address.fromString(from).toScAddress(),
+        nonce: xdr.Int64.fromString("1"),
+        signatureExpirationLedger: 1_000,
+        signature: xdr.ScVal.scvVoid(),
+      }),
+    ),
+    rootInvocation: new xdr.SorobanAuthorizedInvocation({
+      function: xdr.SorobanAuthorizedFunction.sorobanAuthorizedFunctionTypeContractFn(invocation),
+      subInvocations: [],
+    }),
+  });
+  return new TransactionBuilder(new Account(from, "1"), {
+    fee: "100",
+    networkPassphrase: Networks.TESTNET,
+  })
+    .addOperation(
+      Operation.invokeHostFunction({
+        func: xdr.HostFunction.hostFunctionTypeInvokeContract(invocation),
+        auth: [auth],
+      }),
+    )
+    .setTimeout(60)
+    .build()
+    .toXDR();
+}
 
 describe("GET /feed", () => {
   it("answers an unpaid request with 402 and the challenge header", async () => {
@@ -139,7 +194,7 @@ describe("defaults", () => {
           [PAYMENT_SIGNATURE_HEADER]: encodePaymentSignatureHeader({
             x402Version: 2,
             accepted: requirements,
-            payload: { transaction: "AAAAAgAAAAB0ZXN0LXRyYW5zYWN0aW9u" },
+            payload: { transaction: transferEnvelope(requirements) },
           }),
         },
       });

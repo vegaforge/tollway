@@ -70,6 +70,6 @@ describe("runCli", () => {
   it("names the valid scenarios for an unknown one", async () => {
     const run = deps();
     expect(await runCli(["mpp-channel"], run)).toBe(1);
-    expect(run.errors.join("\n")).toMatch(/x402, mpp-charge, all-models/);
+    expect(run.errors.join("\n")).toMatch(/x402, mpp-charge, payment-options, all-models/);
   });
 });

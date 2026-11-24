@@ -1,11 +1,9 @@
-import type { AuthenticatedKey } from "./auth.js";
+import type { AuthenticatedKey, AuthenticatedOperator } from "./auth.js";
 
-/**
- * The Hono environment every service route runs in. `apiKey` is set by the
- * authentication middleware on `/v1/*` before any route handler runs.
- */
+/** Hono context variables set by the service's authentication middleware. */
 export type ServiceEnv = {
   Variables: {
-    apiKey: AuthenticatedKey;
+    apiKey?: AuthenticatedKey;
+    operatorKey?: AuthenticatedOperator;
   };
 };

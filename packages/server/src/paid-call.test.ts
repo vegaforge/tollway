@@ -125,7 +125,7 @@ describe("createPaidCall (#206)", () => {
       method: "tools/call",
       beforeSettle: async () => false,
     });
-    expect(failed).toMatchObject({ kind: "rejected", status: 424 });
+    expect(failed).toMatchObject({ kind: "rejected", status: 424, code: "work-failed" });
     expect(facilitator.settle).not.toHaveBeenCalled();
 
     const retried = await call.settle({

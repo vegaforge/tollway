@@ -6,6 +6,7 @@
  */
 export type LogFields = Readonly<Record<string, string | number | boolean | null>>;
 
+/** Structured logger interface used across the service and its modules. */
 export interface ServiceLogger {
   info(event: string, fields?: LogFields): void;
   warn(event: string, fields?: LogFields): void;

@@ -9,6 +9,7 @@ import { isAuthenticatedPath, type ServiceRoute } from "./routes.js";
  * there is no second, hand-written copy to fall out of date.
  */
 
+/** Serialized OpenAPI 3.1 document generated from the mounted service routes. */
 export type OpenApiDocument = {
   openapi: "3.1.0";
   info: { title: string; version: string; description: string };
@@ -68,7 +69,9 @@ function operation(route: ServiceRoute): Record<string, unknown> {
   }
   if (authenticated) {
     responses["401"] ??= errorResponse("No valid API key.");
-    if (typeof route.scope === "string") {
+    if (route.scope === "operator") {
+      responses["403"] ??= errorResponse("The route requires an operator key.");
+    } else if (typeof route.scope === "string") {
       responses["403"] ??= errorResponse(`The API key lacks the ${route.scope} scope.`);
     }
   }
@@ -109,6 +112,7 @@ function operation(route: ServiceRoute): Record<string, unknown> {
   };
 }
 
+/** Generates an OpenAPI 3.1 document from the service's route declarations. */
 export function buildOpenApiDocument(
   routes: readonly ServiceRoute[],
   version: string,
@@ -131,7 +135,7 @@ export function buildOpenApiDocument(
       title: "Tollway service",
       version,
       description:
-        "The optional self-hosted Tollway service. Routes under /v1 require Authorization: Bearer <key>; each names the scope its key needs.",
+        "The optional self-hosted Tollway service. Routes under /v1 require Authorization: Bearer <key>; each names the scope its key needs, and every tenant key is scoped to one orgId and projectId.",
     },
     paths,
     components: {
@@ -139,7 +143,8 @@ export function buildOpenApiDocument(
         apiKey: {
           type: "http",
           scheme: "bearer",
-          description: "A service API key. The service stores only its SHA-256.",
+          description:
+            "A service API key bound to one orgId and projectId (or an operator key for /v1/admin/*). The service stores only its SHA-256.",
         },
       },
       schemas: { Error: jsonSchema(errorBodySchema, "output") },
