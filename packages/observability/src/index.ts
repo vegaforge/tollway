@@ -7,6 +7,9 @@
  */
 
 import type { SettlementModel } from "@vegaforge/tollway-core";
+import { createWebhookDispatcher, type WebhookDispatcherTuning } from "./dispatcher.js";
+import type { TollwayEvent, TollwayEventInput, WebhookEvent } from "./events.js";
+import type { WebhookOutbox } from "./outbox.js";
 import {
   assertTimeseriesLimits,
   computeTimeseries,
@@ -15,7 +18,35 @@ import {
   type TimeseriesQuery,
   type TimeseriesResult,
 } from "./timeseries.js";
+import { assertWebhookSecret, buildWebhookRequest, postWebhook } from "./webhook-http.js";
 
+export {
+  createWebhookDispatcher,
+  type WebhookDispatcher,
+  type WebhookDispatcherOptions,
+  type WebhookDispatcherTuning,
+  WebhookLeaseLostError,
+} from "./dispatcher.js";
+export {
+  isWebhookEvent,
+  type TollwayEvent,
+  type TollwayEventInput,
+  WEBHOOK_DELIVERY_ID_HEADER,
+  WEBHOOK_EVENT_ID_HEADER,
+  type WebhookEvent,
+  webhookEvents,
+} from "./events.js";
+export {
+  createMemoryWebhookOutbox,
+  createSqliteWebhookOutbox,
+  type NewWebhookDelivery,
+  type SqliteWebhookOutbox,
+  type SqliteWebhookOutboxOptions,
+  type WebhookDelivery,
+  type WebhookDeliveryStatus,
+  type WebhookLease,
+  type WebhookOutbox,
+} from "./outbox.js";
 export {
   DEFAULT_MAX_TIMESERIES_BUCKETS,
   DEFAULT_MAX_TIMESERIES_ROWS,
@@ -31,25 +62,13 @@ export {
   type TimeseriesRow,
   timeseriesBuckets,
 } from "./timeseries.js";
-
-/** Webhook event names, matching docs/design.md, "Observability". */
-export const webhookEvents = [
-  "receipt.created",
-  "channel.opened",
-  "channel.closed",
-  "budget.warning",
-  "anomaly.detected",
-] as const;
-
-export type WebhookEvent = (typeof webhookEvents)[number];
-
-export type TollwayEvent = {
-  type: WebhookEvent;
-  /** ISO 8601 timestamp. */
-  at: string;
-  /** Event-specific fields; shape depends on the event type. */
-  data: Record<string, unknown>;
-};
+export {
+  type SignatureFailureReason,
+  type SignatureVerification,
+  signWebhookPayload,
+  verifyWebhookSignature,
+  WEBHOOK_SIGNATURE_HEADER,
+} from "./webhook-signature.js";
 
 /** A single measured payment, the unit metrics roll up from. */
 export type PaymentMetric = {
@@ -164,10 +183,21 @@ export type WebhookHandler = (event: TollwayEvent) => void | Promise<void>;
  * the listed event types are POSTed to `url`.
  */
 export type WebhookSubscription = {
+  /**
+   * Stable id stored on outbox rows. Defaults to `url`, so give an explicit
+   * id when the same URL is subscribed more than once.
+   */
+  id?: string;
   url: string;
   events?: WebhookEvent[];
   /** Additional headers to merge into the request. */
   headers?: Record<string, string>;
+  /**
+   * When set, every attempt carries a `Tollway-Signature` header over the
+   * exact body sent. The secret stays in memory and is never written to an
+   * outbox row. An empty string is refused: omit the field to send unsigned.
+   */
+  secret?: string;
 };
 
 /** Retry policy applied per target (handler or webhook URL). */
@@ -233,6 +263,21 @@ export type ObservabilityHubOptions = {
    * 200000.
    */
   maxTimeseriesRows?: number;
+  /**
+   * When set, `emit` persists one delivery row per matching webhook instead
+   * of POSTing inline, and deliveries need a dispatcher
+   * ({@link ObservabilityHub.startDispatcher}). Local handlers keep the
+   * inline behaviour either way. With an outbox, `requestTimeoutMs` must be
+   * at least 1 and shorter than the dispatcher's `leaseMs`.
+   */
+  outbox?: WebhookOutbox;
+  /**
+   * Outbox dispatcher settings; ignored without an `outbox`. The outbox does
+   * not inherit `retry`: that policy is sized for retries inside one `emit`
+   * call, and the dispatcher's defaults are sized for an outage (see
+   * {@link WebhookDispatcherTuning}).
+   */
+  dispatcher?: Partial<WebhookDispatcherTuning>;
 };
 
 export interface ObservabilityHub {
@@ -243,13 +288,27 @@ export interface ObservabilityHub {
    * Resolves with a {@link DeliveryReport} describing which targets succeeded
    * and which exhausted their retry budget; the promise itself does not
    * reject so callers can record full delivery telemetry rather than the
-   * first failure that bubbles up.
+   * first failure that bubbles up. With an outbox, a webhook delivery that
+   * could not be written to it (for example `database is locked` after the
+   * SQLite busy timeout) is listed in `failures` with `attempts: 0` instead
+   * of rejecting. The hub assigns the event id when the input does not carry
+   * one.
    */
-  emit(event: TollwayEvent): Promise<DeliveryReport>;
+  emit(event: TollwayEventInput): Promise<DeliveryReport>;
   /** Register a local handler invoked synchronously during {@link emit}. */
   on(event: WebhookEvent, handler: WebhookHandler): void;
   /** Register an HTTP webhook subscription after construction. */
   addWebhook(subscription: WebhookSubscription): void;
+  /**
+   * Starts delivering outbox rows on a timer. Throws when the hub was built
+   * without an `outbox`.
+   */
+  startDispatcher(): void;
+  /**
+   * Stops the dispatcher and waits for in-flight deliveries, up to the
+   * configured `stopTimeoutMs`. A no-op when the dispatcher was not started.
+   */
+  stop(): Promise<void>;
   /** Roll payment metrics into a spend summary. Implementation tracked in #31. */
   summarize(query?: MetricsQuery): SpendSummary;
   /**
@@ -533,39 +592,12 @@ async function deliverWebhook(
   event: TollwayEvent,
   timeoutMs: number,
 ): Promise<void> {
-  const controller = typeof AbortController !== "undefined" ? new AbortController() : null;
-  const timer =
-    controller && timeoutMs > 0
-      ? setTimeout(() => {
-          controller.abort();
-        }, timeoutMs)
-      : null;
+  const request = await buildWebhookRequest({ subscription, event });
+  await postWebhook({ fetcher, url: subscription.url, request, timeoutMs });
+}
 
-  let response: Response;
-  try {
-    response = await fetcher(subscription.url, {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        ...(subscription.headers ?? {}),
-      },
-      body: JSON.stringify(event),
-      signal: controller?.signal,
-    });
-  } catch (cause) {
-    if (controller?.signal.aborted) {
-      throw new Error(`webhook ${subscription.url} timed out after ${timeoutMs}ms`);
-    }
-    throw cause;
-  } finally {
-    if (timer) clearTimeout(timer);
-  }
-
-  if (!response.ok) {
-    throw new Error(
-      `webhook ${subscription.url} responded with ${response.status} ${response.statusText}`.trim(),
-    );
-  }
+function subscriptionKey(subscription: WebhookSubscription): string {
+  return subscription.id ?? subscription.url;
 }
 
 /**
@@ -579,6 +611,12 @@ async function deliverWebhook(
  * the configured {@link RetryPolicy}; surviving failures are surfaced via the
  * returned {@link DeliveryReport} and the optional `onDeliveryFailure`
  * callback rather than being swallowed.
+ *
+ * With an `outbox`, webhook deliveries are persisted instead: `emit` writes
+ * one row per matching subscription and resolves, and
+ * {@link ObservabilityHub.startDispatcher} delivers rows with backoff across
+ * restarts. The secret is resolved from the in-memory subscription at send
+ * time, so it is signed fresh on every attempt and never persisted.
  *
  * Metric collection (`record`, `summarize`, `timeseries`, `export`) keeps an in-memory
  * array of `PaymentMetric` values. The hub holds the rollup primitives a
@@ -594,6 +632,7 @@ export function createObservabilityHub(options: ObservabilityHubOptions = {}): O
 
   if (options.webhooks) {
     for (const sub of options.webhooks) {
+      assertWebhookSecret(sub.secret);
       subscriptions.push({ ...sub, events: sub.events ? [...sub.events] : undefined });
     }
   }
@@ -613,6 +652,28 @@ export function createObservabilityHub(options: ObservabilityHubOptions = {}): O
   };
   // Checked here so a bad limit fails at startup, not on the first query.
   assertTimeseriesLimits(timeseriesLimits);
+
+  const outbox = options.outbox;
+  const dispatcher = outbox
+    ? createWebhookDispatcher({
+        ...options.dispatcher,
+        outbox,
+        resolveSubscription: (subscriptionId) =>
+          subscriptions.find((sub) => subscriptionKey(sub) === subscriptionId),
+        fetch: fetcher,
+        requestTimeoutMs,
+        onDeliveryFailure: (failure) => {
+          onDeliveryFailure?.({
+            // A row whose subscription is gone has no URL left; name it by
+            // the subscription id so the failure is still identifiable.
+            target: { kind: "webhook", url: failure.url ?? failure.subscriptionId },
+            event: failure.delivery.event,
+            error: failure.error,
+            attempts: failure.attempts,
+          });
+        },
+      })
+    : null;
 
   return {
     record(metric) {
@@ -646,12 +707,26 @@ export function createObservabilityHub(options: ObservabilityHubOptions = {}): O
       }
     },
     addWebhook(subscription) {
+      assertWebhookSecret(subscription.secret);
       subscriptions.push({
         ...subscription,
         events: subscription.events ? [...subscription.events] : undefined,
       });
     },
-    async emit(event) {
+    startDispatcher() {
+      if (!dispatcher) {
+        throw new Error("startDispatcher requires an outbox");
+      }
+      dispatcher.start();
+    },
+    async stop() {
+      if (dispatcher) await dispatcher.stop();
+    },
+    async emit(input) {
+      const event: TollwayEvent = {
+        ...input,
+        id: input.id ?? globalThis.crypto.randomUUID(),
+      };
       const failures: DeliveryFailure[] = [];
 
       const matchingHandlers = handlers.get(event.type) ?? [];
@@ -675,6 +750,43 @@ export function createObservabilityHub(options: ObservabilityHubOptions = {}): O
       }
 
       const matchingSubs = subscriptions.filter((sub) => subscriptionMatches(sub, event.type));
+
+      if (outbox) {
+        const deliveries = matchingSubs.map((sub) => ({
+          subscriptionId: subscriptionKey(sub),
+          event,
+        }));
+        try {
+          await outbox.enqueue(deliveries);
+        } catch (cause) {
+          // The rows were not written, so nothing will deliver them. Report
+          // each one instead of rejecting: emit never rejects, and a caller
+          // that does not await it would otherwise crash the process.
+          const error = normalizeError(cause);
+          for (const sub of matchingSubs) {
+            const failure: DeliveryFailure = {
+              target: { kind: "webhook", url: sub.url },
+              event,
+              error,
+              attempts: 0,
+            };
+            failures.push(failure);
+            onDeliveryFailure?.(failure);
+          }
+          return {
+            event,
+            handlersDispatched: matchingHandlers.length,
+            webhooksDispatched: 0,
+            failures,
+          };
+        }
+        return {
+          event,
+          handlersDispatched: matchingHandlers.length,
+          webhooksDispatched: deliveries.length,
+          failures,
+        };
+      }
 
       if (!fetcher && matchingSubs.length > 0) {
         for (const sub of matchingSubs) {

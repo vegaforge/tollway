@@ -1,4 +1,10 @@
-import { Ed25519Signer } from "@vegaforge/tollway-core";
+import {
+  buildReceipt,
+  createKeySetVerifier,
+  Ed25519Signer,
+  signReceipt,
+  verifyReceipt,
+} from "@vegaforge/tollway-core";
 import {
   createInMemorySettlementCache,
   createMockFacilitator,
@@ -11,6 +17,7 @@ import {
   PAYMENT_REQUIRED_HEADER,
   PAYMENT_SIGNATURE_HEADER,
   type PaywallConfig,
+  renderKeySetResponse,
 } from "@vegaforge/tollway-server";
 import { Hono } from "hono";
 import { describe, expect, it } from "vitest";
@@ -260,5 +267,43 @@ describe("honoPaywall with a service policy", () => {
     expect(response.status).toBe(429);
     expect(response.headers.get("retry-after")).toBe("60");
     expect(await response.json()).toEqual({ error: "service-policy:spend-exceeded" });
+  });
+});
+
+describe("serving the receipt key set (#167)", () => {
+  it("mounts renderKeySetResponse at the well-known path and a key-set verifier reads it", async () => {
+    const signer = await Ed25519Signer.generate("service-key-1");
+    const app = new Hono();
+    app.get("/.well-known/tollway-receipt-keys.jwks", (c) => {
+      const response = renderKeySetResponse(
+        { keys: [{ ...signer.publicJwk(), status: { state: "active" } }] },
+        { maxAgeSeconds: 120 },
+      );
+      return c.body(response.body, response.status, response.headers);
+    });
+
+    const served = await app.request("/.well-known/tollway-receipt-keys.jwks");
+    expect(served.status).toBe(200);
+    expect(served.headers.get("content-type")).toBe("application/jwk-set+json");
+    expect(served.headers.get("cache-control")).toBe("public, max-age=120");
+
+    const verifier = createKeySetVerifier({
+      url: "https://service.example/.well-known/tollway-receipt-keys.jwks",
+      fetch: async (url) => app.request(new URL(url).pathname),
+    });
+    const receipt = await signReceipt(
+      buildReceipt({
+        payer: "GPAYER",
+        payee: "GSERVICE",
+        amount: "10000",
+        asset: "USDC:GA5Z",
+        resource: "/quotes/latest",
+        model: "x402",
+        settlement: { kind: "transaction", txHash: "tx" },
+        network: "testnet",
+      }),
+      signer,
+    );
+    await expect(verifyReceipt(receipt, verifier)).resolves.toMatchObject({ valid: true });
   });
 });

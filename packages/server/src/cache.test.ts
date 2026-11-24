@@ -151,6 +151,40 @@ describe("createRedisSettlementCache", () => {
     expect(hit).toEqual(entry);
   });
 
+  it("keeps serving a v1 entry written before the switch to v2, and round-trips a v2 entry", async () => {
+    // Issue #166 migration window: one process wrote a v1 receipt; after the
+    // switch, the same Redis holds v1 and v2 entries side by side and both
+    // must parse, or a retry of the v1 payment would settle a second time.
+    const client = new RedisMock() as unknown as RedisLikeClient;
+    const beforeSwitch = createRedisSettlementCache({ client });
+    const afterSwitch = createRedisSettlementCache({ client });
+    await beforeSwitch.set("nonce-v1", entry);
+
+    const signer = await Ed25519Signer.generate("cache-test-key-v2");
+    const v2: SettlementEntry = {
+      receipt: await signReceipt(
+        buildReceipt({
+          payer: "GPAYER",
+          payee: "GPAYEE",
+          amount: "10000",
+          asset: "USDC:GA5Z",
+          resource: "/quotes/latest",
+          model: "x402",
+          settlement: { kind: "transaction", txHash: "def456" },
+          network: "testnet",
+          offerHash: "A".repeat(43),
+          method: "GET",
+        }),
+        signer,
+      ),
+      method: "GET",
+    };
+    await afterSwitch.set("nonce-v2", v2);
+
+    await expect(afterSwitch.get("nonce-v1")).resolves.toEqual(entry);
+    await expect(afterSwitch.get("nonce-v2")).resolves.toEqual(v2);
+  });
+
   it("shares cached receipts across two cache instances pointing at the same Redis", async () => {
     // Two cache instances sharing one Redis backend stand in for two gate
     // processes serving the same nonce; this is the cross-instance idempotency

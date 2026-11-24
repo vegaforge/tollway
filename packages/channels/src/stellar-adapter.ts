@@ -1,7 +1,8 @@
 /**
  * The real `MppChannelAdapter`, backed by `@stellar/mpp/channel` and the
  * one-way-channel contract on Stellar. Every @stellar/mpp and stellar-sdk
- * import in this package lives in this file, so the manager stays SDK-free.
+ * import in this package lives in this file and stellar-settlement.ts, so the
+ * manager stays SDK-free.
  *
  * The adapter does not deploy the channel contract. `@stellar/mpp` 0.7 has
  * no deploy or open call: the funder deploys and funds the contract out of
@@ -9,20 +10,25 @@
  * the deployed contract against the requested channel and reports it.
  */
 
+import { SOROBAN_RPC_URLS } from "@stellar/mpp";
 import { channel as channelClient } from "@stellar/mpp/channel/client";
 import { close, getChannelState } from "@stellar/mpp/channel/server";
-import { Keypair, StrKey } from "@stellar/stellar-sdk";
+import { Keypair, rpc, StrKey } from "@stellar/stellar-sdk";
 import { type StellarNetwork, TollwayError } from "@vegaforge/tollway-core";
 import { Credential, Store } from "mppx";
 import type {
+  ChannelChainState,
   CloseAdapterInput,
   CloseAdapterResult,
+  FoundChannelSettlement,
   MppChannelAdapter,
   OpenAdapterInput,
   OpenAdapterResult,
   SignCommitmentInput,
   SignedCommitment,
 } from "./adapter.js";
+import { CloseNotSubmittedError } from "./errors.js";
+import { findSettlementInEvents } from "./stellar-settlement.js";
 
 export type StellarMppChannelAdapterOptions = {
   /** The deployed, funded one-way-channel contract (C...). */
@@ -132,6 +138,32 @@ export function createStellarMppChannelAdapter(
     }
   }
 
+  /** The close checks that run before anything is sent to the network. */
+  function checkClose(input: CloseAdapterInput): { amount: bigint } {
+    assertChannel(input.channelId, input.network);
+    const amount = toBigInt(input.cumulativeAmount, "cumulativeAmount");
+    const deposit = toBigInt(input.deposit, "deposit");
+    if (amount > deposit) {
+      throw new TollwayError(
+        "commitment-exceeds-deposit",
+        `cumulative ${input.cumulativeAmount} exceeds the deposit of ${input.deposit}`,
+      );
+    }
+    if (input.commitment === "") {
+      throw new TollwayError(
+        "payment-failed",
+        "a channel with no commitments has nothing to settle; the funder reclaims the deposit through the contract's refund path (see #38)",
+      );
+    }
+    if (!SIGNATURE.test(input.commitment)) {
+      throw new TollwayError(
+        "payment-failed",
+        "commitment must be a 128-character hex ed25519 signature",
+      );
+    }
+    return { amount };
+  }
+
   return {
     async openChannel(input: OpenAdapterInput): Promise<OpenAdapterResult> {
       assertChannel(channelContract, input.network);
@@ -201,27 +233,15 @@ export function createStellarMppChannelAdapter(
     },
 
     async closeChannel(input: CloseAdapterInput): Promise<CloseAdapterResult> {
-      assertChannel(input.channelId, input.network);
-      const amount = toBigInt(input.cumulativeAmount, "cumulativeAmount");
+      // Everything up to the call into @stellar/mpp happens before any
+      // submission, so a failure here is reported as not submitted.
+      let amount: bigint;
+      try {
+        ({ amount } = checkClose(input));
+      } catch (error) {
+        throw new CloseNotSubmittedError(input.channelId, error);
+      }
       const deposit = toBigInt(input.deposit, "deposit");
-      if (amount > deposit) {
-        throw new TollwayError(
-          "commitment-exceeds-deposit",
-          `cumulative ${input.cumulativeAmount} exceeds the deposit of ${input.deposit}`,
-        );
-      }
-      if (input.commitment === "") {
-        throw new TollwayError(
-          "payment-failed",
-          "a channel with no commitments has nothing to settle; the funder reclaims the deposit through the contract's refund path (see #38)",
-        );
-      }
-      if (!SIGNATURE.test(input.commitment)) {
-        throw new TollwayError(
-          "payment-failed",
-          "commitment must be a 128-character hex ed25519 signature",
-        );
-      }
       const settlementTxHash = await close({
         channel: channelContract,
         amount,
@@ -235,6 +255,33 @@ export function createStellarMppChannelAdapter(
         settledAmount: amount.toString(),
         returnedRemainder: (deposit - amount).toString(),
       };
+    },
+
+    async getChannelState(input): Promise<ChannelChainState> {
+      assertChannel(input.channelId, input.network);
+      const state = await getChannelState({
+        channel: channelContract,
+        network,
+        rpcUrl,
+        simulationTimeoutMs,
+      });
+      const chainState: ChannelChainState = {
+        balance: state.balance.toString(),
+        currentLedger: state.currentLedger,
+      };
+      if (state.closeEffectiveAtLedger != null) {
+        chainState.closeEffectiveAtLedger = state.closeEffectiveAtLedger;
+      }
+      return chainState;
+    },
+
+    async findChannelSettlement(input): Promise<FoundChannelSettlement | null> {
+      assertChannel(input.channelId, input.network);
+      return findSettlementInEvents({
+        source: new rpc.Server(rpcUrl ?? SOROBAN_RPC_URLS[network]),
+        channelId: channelContract,
+        startLedger: input.startLedger,
+      });
     },
   };
 }
