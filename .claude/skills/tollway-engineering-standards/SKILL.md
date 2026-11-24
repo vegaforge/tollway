@@ -31,7 +31,7 @@ What each layer may import:
 | ------- | ------------- | ------------------ |
 | `@vegaforge/tollway-core` | `zod` only | any other `@vegaforge/tollway-*` package |
 | `@vegaforge/tollway-theme` | nothing | any other `@vegaforge/tollway-*` package |
-| `@vegaforge/tollway-server` | `core`, `@x402/core`, `@x402/stellar` | adapters, `client`, apps |
+| `@vegaforge/tollway-server` | `core`, `@x402/core`, `@x402/stellar`, `@x402/extensions` | adapters, `client`, apps |
 | `@vegaforge/tollway-client`, `channels`, `reconcile`, `observability` | `core` | each other, `server`, adapters, apps |
 | `@vegaforge/tollway-adapter-*` | `server` (runtime), `core` (types), its own framework as a peer | another adapter, apps |
 | `apps/*` | any package | another app |

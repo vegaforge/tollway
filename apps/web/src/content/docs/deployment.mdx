@@ -29,7 +29,7 @@ Run at least two processes behind a load balancer that keeps a client on the sam
 
 ## Settlement cache and locks
 
-The cache is the duplicate-payment defence. The gate derives an idempotency key from the signed payment (`<model>:<nonce>`), looks it up before verification, and returns the cached receipt for the same offer instead of settling again.
+The cache is the duplicate-payment defence. The gate derives an idempotency key from the signed payment (`<model>:<nonce>`), looks it up before verification, and returns the cached receipt for the same offer instead of settling again. When a payment carries an x402 `payment-identifier` id, the entry is also stored under `<model>:payment-id:<payer>:<id>`, written together with the digest key (one Lua script on Redis), so a client that re-signs the same payment gets its first receipt back.
 
 ### The in-memory cache is single-process only
 

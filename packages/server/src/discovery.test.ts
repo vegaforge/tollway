@@ -78,7 +78,9 @@ async function challengeFor(
 describe("publishing a route through Bazaar discovery", () => {
   it("publishes nothing for a route without a discovery block", async () => {
     const challenge = await challengeFor(undefined, request("GET", "https://api.example.com/q"));
-    expect(challenge.extensions).toBeUndefined();
+    // Every 402 declares payment-identifier (#153); nothing is published to bazaar.
+    expect(Object.keys(challenge.extensions ?? {})).toEqual(["payment-identifier"]);
+    expect(challenge.extensions?.bazaar).toBeUndefined();
     expect(challenge.resource).toEqual({ url: "https://api.example.com/q" });
   });
 
