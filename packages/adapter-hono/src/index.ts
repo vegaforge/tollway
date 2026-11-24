@@ -14,6 +14,7 @@ import {
   type PaywallOptions,
   type RouteTable,
   readBodyWithin,
+  renderGateRejection,
   responseTooLarge,
   settlementTiming,
   type TollwayRequest,
@@ -84,8 +85,11 @@ async function answer(
     return c.json(outcome.challenge, outcome.status);
   }
 
-  if (outcome.headers) applyHeaders(c, outcome.headers);
-  return c.json({ error: outcome.reason }, outcome.status as JsonStatus);
+  // The body and headers come from the server's one renderer, so every
+  // adapter answers each error code the same way (#161).
+  const rejection = renderGateRejection(outcome);
+  applyHeaders(c, rejection.headers);
+  return c.json(rejection.body, rejection.status as JsonStatus);
 }
 
 /**
@@ -114,8 +118,11 @@ async function settleAfterHandler(
   const body = await readBodyWithin(response.body, payment.maxResponseBytes);
   if (!body.ok) {
     await payment.abandon("response-too-large");
-    const rejection = responseTooLarge(payment.maxResponseBytes);
-    replaceResponse(c, Response.json({ error: rejection.reason }, { status: rejection.status }));
+    const rejection = renderGateRejection(responseTooLarge(payment.maxResponseBytes));
+    replaceResponse(
+      c,
+      Response.json(rejection.body, { status: rejection.status, headers: rejection.headers }),
+    );
     return;
   }
   if (payment.isFailure(response.status)) {
@@ -128,12 +135,10 @@ async function settleAfterHandler(
     replaceResponse(c, rebuild(response, body.bytes, settled.headers));
     return;
   }
+  const rejection = renderGateRejection(settled);
   replaceResponse(
     c,
-    Response.json(
-      { error: settled.reason },
-      { status: settled.status, headers: settled.headers ?? {} },
-    ),
+    Response.json(rejection.body, { status: rejection.status, headers: rejection.headers }),
   );
 }
 

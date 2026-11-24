@@ -35,6 +35,7 @@ import {
   PAYMENT_REQUIRED_HEADER,
   PAYMENT_SIGNATURE_HEADER,
 } from "./headers.js";
+import { createInMemoryPaymentReceiptArchive } from "./payment-receipt-archive.js";
 
 const config = {
   amount: "10000",
@@ -227,11 +228,7 @@ describe("payment-identifier as the idempotency key", () => {
 
     const outcome = await pricier(await pay(pricier, `${ALICE}|envelope-2`, PAYMENT_ID));
 
-    expect(outcome).toEqual({
-      kind: "rejected",
-      status: 409,
-      reason: "payment already settled for a different offer",
-    });
+    expect(outcome).toMatchObject({ kind: "rejected", status: 409, code: "offer-mismatch" });
     expect(calls.settle).toBe(1);
   });
 
@@ -269,6 +266,28 @@ describe("payment-identifier as the idempotency key", () => {
   });
 });
 
+describe("payment-identifier with the receipt archive", () => {
+  it("replays a re-signed payment from the archive after its cache entry expired", async () => {
+    let now = 1_800_000_000_000;
+    const clock = () => now;
+    const { client, calls } = facilitator();
+    const gate = createPaywall(config, {
+      signer,
+      facilitator: client,
+      cache: createInMemorySettlementCache(30_000, { now: clock }),
+      receiptArchive: createInMemoryPaymentReceiptArchive({ now: clock }),
+    });
+    const first = settled(await gate(await pay(gate, `${ALICE}|envelope-1`, PAYMENT_ID)));
+
+    now += 60_000;
+    const retry = settled(await gate(await pay(gate, `${ALICE}|envelope-2`, PAYMENT_ID)));
+
+    expect(retry.receipt).toEqual(first.receipt);
+    expect(retry.replayed).toBe(true);
+    expect(calls.settle).toBe(1);
+  });
+});
+
 describe("payment-identifier validation", () => {
   it("rejects an invalid id with 400 before verifying", async () => {
     const { client, calls } = facilitator();
@@ -278,7 +297,7 @@ describe("payment-identifier validation", () => {
       rawPayment(`${ALICE}|envelope-1`, { info: { required: false, id: "short" } }),
     );
 
-    expect(outcome).toMatchObject({ kind: "rejected", status: 400 });
+    expect(outcome).toMatchObject({ kind: "rejected", status: 400, code: "payment-malformed" });
     if (outcome.kind !== "rejected") return;
     expect(outcome.reason).toMatch(/^invalid-payment-identifier: /);
     expect(calls.verify).toBe(0);

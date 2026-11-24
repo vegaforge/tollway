@@ -37,10 +37,16 @@ In two-phase mode:
   first attempt was abandoned.
 - A route that outlives the payment's validity window (`maxTimeoutSeconds`)
   is abandoned with 504 `handler-timeout`. A lock lost while the route runs
-  ends in 503 `payment-not-settled: lock-lost`. The lock is renewed, not
+  ends in 503 `payment-not-settled`. The lock is renewed, not
   lengthened: `settlementLockTtlMs` is unchanged.
 - A replay of a settled payment runs the route as the single-shot gate does,
   and nothing settles again.
+
+Three codes join the gate error table from #161 (docs/gate-errors.md):
+`payment-not-settled` (503, the same payment may be sent again after
+`Retry-After`), `handler-timeout` (504) and `response-too-large` (500). Every
+adapter renders them, like every other rejection, through
+`renderGateRejection`.
 
 Technical shape: `createPaywall` and route tables return a `PaywallGate`
 (the single-shot function plus `authorize`). The payment logic stays in the

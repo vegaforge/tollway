@@ -62,6 +62,7 @@ export {
   type PaywallTarget,
   type PaywallValidation,
   parseFacilitatorCapabilities,
+  paymentTargets,
   type ValidationMode,
   validatePaywall,
 } from "./facilitator-capabilities.js";
@@ -81,13 +82,28 @@ export {
   type DynamicPriceFunction,
   type Gate,
   type GateOutcome,
+  type PaymentOption,
+  type PaymentOptionsConfig,
+  type PaymentPrevalidationOptions,
   type PaywallConfig,
   type PaywallDeps,
   type PaywallGate,
+  type PrevalidationRejection,
   type SettleOutcome,
+  type SinglePaymentOptionConfig,
   type TollwayRequest,
   type TwoPhaseConfig,
 } from "./gate.js";
+export {
+  GATE_ERROR_CODES,
+  GATE_ERRORS,
+  type GateErrorBody,
+  type GateErrorCode,
+  type GateErrorSpec,
+  type GateRejection,
+  type RenderedGateRejection,
+  renderGateRejection,
+} from "./gate-errors.js";
 export {
   decodeHeader,
   decodePaymentRequiredHeader,
@@ -125,10 +141,19 @@ export {
   type MppChargeVerifyResult,
 } from "./mpp-charge.js";
 export {
+  createInMemoryPaymentReceiptArchive,
+  createRedisPaymentReceiptArchive,
+  type InMemoryPaymentReceiptArchiveOptions,
+  type PaymentReceiptArchive,
+  type RedisArchiveClient,
+  type RedisPaymentReceiptArchiveOptions,
+} from "./payment-receipt-archive.js";
+export {
   createRouteTable,
   type RouteTable,
   type RouteTableEntry,
   type RouteTableMatch,
+  type RouteTableOption,
 } from "./route-table.js";
 export {
   createInMemoryServicePolicyStore,
@@ -151,6 +176,17 @@ export {
   type SponsorMonitorOptions,
   type SponsorMonitorSink,
 } from "./sponsor-monitor.js";
+export {
+  checkStellarExactPayment,
+  createLatestLedgerSource,
+  DEFAULT_MAX_PAYMENT_SIGNATURE_LENGTH,
+  type LatestLedgerSource,
+  type LatestLedgerSourceOptions,
+  type PrevalidationReason,
+  type PrevalidationResult,
+  type StellarExactCheckOptions,
+  type StellarExactTerms,
+} from "./stellar-static-validation.js";
 export {
   type HeldNodeResponse,
   type HoldableNodeResponse,

@@ -47,16 +47,16 @@ the type `AfterHandlerPaidHandler`, whose `receipt` is optional.
 | The route | /settle | The client gets |
 | --------- | ------- | --------------- |
 | answers 2xx, 3xx or 4xx | succeeds | the route's response with `PAYMENT-RESPONSE` and `TOLLWAY-RECEIPT` added |
-| answers 2xx, 3xx or 4xx | refuses | the rejection (502 with the facilitator's reason); the route's response and headers are discarded |
+| answers 2xx, 3xx or 4xx | refuses | 502 `settlement-failed`, with the facilitator's reason in `upstreamReason`; the route's response and headers are discarded |
 | answers a failure status (any 5xx by default) | never called | the route's response, unchanged, with no payment headers |
 | throws | never called | the framework's error response; Next rethrows the error |
 | writes more than `maxResponseBytes` | never called | 500 `response-too-large`; the route's response is discarded |
 | outlives the payment's validity window | never called | 504 `handler-timeout` |
-| holds the lock past a lost renewal | never called | 503 `payment-not-settled: lock-lost`, `Retry-After: 1` |
+| holds the lock past a lost renewal | never called | 503 `payment-not-settled` (message starting `lock-lost`), `Retry-After: 1` |
 
 A request that duplicates a payment while its route is still running waits
 for it. If that payment settles, the duplicate gets a replay. If it does not,
-the duplicate gets 503 `payment-not-settled: <reason>` with `Retry-After: 1`,
+the duplicate gets 503 `payment-not-settled` with `Retry-After: 1`,
 because the payment is still unspent and may be sent again.
 
 A replay of a payment that already settled runs the route like the
@@ -96,7 +96,7 @@ abandoned with 504 instead of being settled late.
   the handler's time plus the settlement's.
 - The settlement lock is held, and renewed every third of
   `settlementLockTtlMs`, for the handler's whole run. If a renewal fails, the
-  payment is not settled (503 `lock-lost`) because another process may have
+  payment is not settled (503 `payment-not-settled`) because another process may have
   taken it over.
 
 ## Calling it without an adapter

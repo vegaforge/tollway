@@ -20,6 +20,7 @@ import {
   type PaywallConfig,
   type PaywallDeps,
   type TollwayRequest,
+  type TwoPhaseConfig,
 } from "./gate.js";
 import {
   encodePaymentSignatureHeader,
@@ -35,7 +36,7 @@ const config = {
   network: "testnet",
 } satisfies PaywallConfig;
 
-function paid(transaction = "mock-signed-auth-entry"): TollwayRequest {
+function paid(transaction = "mock-signed-auth-entry", maxTimeoutSeconds = 60): TollwayRequest {
   return {
     method: "GET",
     url: "/quotes/latest",
@@ -48,7 +49,7 @@ function paid(transaction = "mock-signed-auth-entry"): TollwayRequest {
           asset: config.asset,
           amount: config.amount,
           payTo: config.payTo,
-          maxTimeoutSeconds: 60,
+          maxTimeoutSeconds,
           extra: {},
         },
         payload: { transaction },
@@ -82,7 +83,7 @@ function facilitator(settleResult?: { settled: false; reason: string }) {
 
 function makeGate(
   options: {
-    config?: Partial<PaywallConfig>;
+    config?: { maxTimeoutSeconds?: number; twoPhase?: TwoPhaseConfig };
     deps?: Partial<PaywallDeps>;
     settleResult?: { settled: false; reason: string };
   } = {},
@@ -202,7 +203,12 @@ describe("gate.authorize", () => {
 
     const outcome = await authorized(await gate.authorize(paid())).settle();
 
-    expect(outcome).toEqual({ kind: "rejected", status: 502, reason: "tx failed" });
+    expect(outcome).toMatchObject({
+      kind: "rejected",
+      status: 502,
+      code: "settlement-failed",
+      upstreamReason: "tx failed",
+    });
     expect(calls.settle).toBe(1);
   });
 
@@ -245,6 +251,7 @@ describe("gate.authorize", () => {
     expect(await duplicate).toMatchObject({
       kind: "rejected",
       status: 503,
+      code: "payment-not-settled",
       headers: { "retry-after": "1" },
     });
     expect(calls.settle).toBe(0);
@@ -253,21 +260,19 @@ describe("gate.authorize", () => {
   it("abandons a handler that outlives the payment's validity window", async () => {
     vi.useFakeTimers();
     const { gate, calls } = makeGate({ config: { maxTimeoutSeconds: 5 } });
-    const authorization = authorized(await gate.authorize(paid()));
+    const authorization = authorized(await gate.authorize(paid("mock-signed-auth-entry", 5)));
 
     await vi.advanceTimersByTimeAsync(5_000);
     const outcome = await authorization.settle();
 
-    expect(outcome).toMatchObject({ kind: "rejected", status: 504 });
-    if (outcome.kind !== "rejected") return;
-    expect(outcome.reason).toMatch(/^handler-timeout: /);
+    expect(outcome).toMatchObject({ kind: "rejected", status: 504, code: "handler-timeout" });
     expect(calls.settle).toBe(0);
   });
 
   it("settles a handler that finishes inside the validity window", async () => {
     vi.useFakeTimers();
     const { gate, calls } = makeGate({ config: { maxTimeoutSeconds: 5 } });
-    const authorization = authorized(await gate.authorize(paid()));
+    const authorization = authorized(await gate.authorize(paid("mock-signed-auth-entry", 5)));
 
     await vi.advanceTimersByTimeAsync(4_999);
     const outcome = await authorization.settle();
@@ -416,9 +421,9 @@ describe("gate.authorize across processes", () => {
     await new Promise((resolve) => setTimeout(resolve, 60));
     const outcome = await authorization.settle();
 
-    expect(outcome).toMatchObject({ kind: "rejected", status: 503 });
+    expect(outcome).toMatchObject({ kind: "rejected", status: 503, code: "payment-not-settled" });
     if (outcome.kind !== "rejected") return;
-    expect(outcome.reason).toMatch(/^payment-not-settled: lock-lost/);
+    expect(outcome.reason).toMatch(/^lock-lost: /);
     expect(calls.settle).toBe(0);
   });
 });

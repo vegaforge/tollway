@@ -17,6 +17,7 @@ import {
   type PaywallOptions,
   type RouteTable,
   readBodyWithin,
+  renderGateRejection,
   responseTooLarge,
   settlementTiming,
   type TollwayRequest,
@@ -44,7 +45,7 @@ export type AfterHandlerPaidHandler = (
  * only on a settled payment, receives the verified receipt via the second
  * argument, and has the PAYMENT-RESPONSE and TOLLWAY-RECEIPT headers added to its response.
  * Otherwise the wrapper answers the request itself (402 with the challenge,
- * or the rejection status with `{ error: reason }`).
+ * or the rejection status with `{ error: { code, message } }`).
  *
  * Usage:
  *
@@ -108,7 +109,10 @@ export function withPaywall(
       return jsonResponse(outcome.challenge, outcome.status, outcome.headers);
     }
 
-    return jsonResponse({ error: outcome.reason }, outcome.status, outcome.headers);
+    // The body and headers come from the server's one renderer, so every
+    // adapter answers each error code the same way (#161).
+    const rejection = renderGateRejection(outcome);
+    return jsonResponse(rejection.body, rejection.status, rejection.headers);
   };
 }
 
@@ -144,8 +148,8 @@ async function settleAfterHandler(
   const body = await readBodyWithin(response.body, payment.maxResponseBytes);
   if (!body.ok) {
     await payment.abandon("response-too-large");
-    const rejection = responseTooLarge(payment.maxResponseBytes);
-    return jsonResponse({ error: rejection.reason }, rejection.status);
+    const rejection = renderGateRejection(responseTooLarge(payment.maxResponseBytes));
+    return jsonResponse(rejection.body, rejection.status, rejection.headers);
   }
   if (payment.isFailure(response.status)) {
     await payment.abandon("handler-failed");
@@ -155,7 +159,8 @@ async function settleAfterHandler(
   if (settled.kind === "settled") {
     return rebuild(response, body.bytes, settled.headers);
   }
-  return jsonResponse({ error: settled.reason }, settled.status, settled.headers);
+  const rejection = renderGateRejection(settled);
+  return jsonResponse(rejection.body, rejection.status, rejection.headers);
 }
 
 function rebuild(

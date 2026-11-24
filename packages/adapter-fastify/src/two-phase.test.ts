@@ -145,7 +145,13 @@ describe("fastifyPaywall with settlement: after-handler", () => {
       const response = await fetch(app.url, paid);
 
       expect(response.status).toBe(502);
-      expect(await response.json()).toEqual({ error: "tx failed" });
+      expect(await response.json()).toEqual({
+        error: {
+          code: "settlement-failed",
+          message: "the facilitator refused to settle the payment",
+          upstreamReason: "tx failed",
+        },
+      });
       expect(response.headers.get("x-secret-data")).toBeNull();
       expect(response.headers.get("payment-response")).toBeNull();
       expect(app.calls.settle).toBe(1);
@@ -163,8 +169,8 @@ describe("fastifyPaywall with settlement: after-handler", () => {
       const response = await fetch(app.url, paid);
 
       expect(response.status).toBe(500);
-      const body = (await response.json()) as { error: string };
-      expect(body.error).toMatch(/^response-too-large: /);
+      const body = (await response.json()) as { error: { code: string } };
+      expect(body.error.code).toBe("response-too-large");
       expect(app.calls.settle).toBe(0);
     } finally {
       await app.close();
@@ -224,7 +230,12 @@ describe("fastifyPaywall with settlement: after-handler", () => {
   });
 
   it("refuses a gate that cannot settle after the handler", () => {
-    const handWritten: Gate = async () => ({ kind: "rejected", status: 500, reason: "x" });
+    const handWritten: Gate = async () => ({
+      kind: "rejected",
+      status: 500,
+      code: "handler-not-configured",
+      reason: "x",
+    });
 
     expect(() => fastifyPaywall(handWritten, { settlement: "after-handler" })).toThrow(TypeError);
   });

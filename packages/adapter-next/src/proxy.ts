@@ -10,6 +10,7 @@ import {
   PAYMENT_REQUIRED_HEADER,
   PAYMENT_RESPONSE_HEADER,
   PAYMENT_SIGNATURE_HEADER,
+  renderGateRejection,
 } from "@vegaforge/tollway-server";
 // The explicit `.js` lets plain Node ESM resolve it: `next` publishes no
 // export map, so `next/server` alone only resolves under a bundler.
@@ -104,7 +105,10 @@ export function paywallProxy(
       return jsonResponse(outcome.challenge, outcome.status, outcome.headers);
     }
     if (outcome.kind === "rejected") {
-      return jsonResponse({ error: outcome.reason }, outcome.status);
+      // Same renderer as every adapter, headers included: a Retry-After
+      // dropped here would hide when the same payment may be resent (#161).
+      const rejection = renderGateRejection(outcome);
+      return jsonResponse(rejection.body, rejection.status, rejection.headers);
     }
 
     const forwardedHeaders = new Headers(sanitizedHeaders);

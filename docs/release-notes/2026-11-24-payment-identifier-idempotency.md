@@ -28,7 +28,7 @@ What changes for a service:
 - The same id on a different offer (resource, amount, asset, payee, network,
   model or method) is a 409, exactly like a reused envelope.
 - An invalid id, a malformed extension, or a missing id on a route that
-  requires one is a 400 before `/verify`. The client's own `schema` in the
+  requires one is a 400 with code `payment-malformed`, before `/verify`. The client's own `schema` in the
   extension is ignored, so a request cannot change the id rules.
 - Without an id nothing changes: the envelope digest from `deriveNonce`
   remains the key.

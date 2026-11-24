@@ -5,7 +5,8 @@
  * the same way. See docs/design.md, "Design notes" (failure semantics).
  */
 
-import type { AuthorizeOutcome, Gate, GateOutcome, PaywallGate, TollwayRequest } from "./gate.js";
+import type { AuthorizeOutcome, Gate, PaywallGate, TollwayRequest } from "./gate.js";
+import { type GateRejection, gateRejection } from "./gate-errors.js";
 
 /**
  * When an adapter settles a payment. `"before-handler"` (the default) settles
@@ -53,12 +54,11 @@ function isPaywallGate(gate: Gate): gate is PaywallGate {
 }
 
 /** The answer when a route's response is larger than the gate holds. */
-export function responseTooLarge(maxBytes: number): Extract<GateOutcome, { kind: "rejected" }> {
-  return {
-    kind: "rejected",
-    status: 500,
-    reason: `response-too-large: the route's response is larger than the ${maxBytes} bytes held while a payment settles, so the payment was not settled`,
-  };
+export function responseTooLarge(maxBytes: number): GateRejection {
+  return gateRejection(
+    "response-too-large",
+    `the route's response is larger than the ${maxBytes} bytes held while a payment settles, so the payment was not settled`,
+  );
 }
 
 /**

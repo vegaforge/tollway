@@ -210,13 +210,15 @@ end
 return #KEYS`;
 
 /**
- * Reads a stored settlement. The current shape is exactly
+ * Reads a stored settlement; the payment receipt archive reads with it too,
+ * so both shared stores validate at the boundary the same way. The current
+ * shape is exactly
  * `{ receipt, method }`. A bare receipt is what an older version stored; it
  * is returned with `method: null` so the gate refuses it rather than
  * treating it as a miss and settling the payment again. Anything else is a
  * miss.
  */
-function parseStoredEntry(candidate: unknown): SettlementEntry | undefined {
+export function parseStoredEntry(candidate: unknown): SettlementEntry | undefined {
   if (isRecord(candidate) && Object.keys(candidate).sort().join(",") === "method,receipt") {
     const receipt = signedReceiptSchema.safeParse(candidate.receipt);
     const { method } = candidate;

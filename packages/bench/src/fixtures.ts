@@ -170,5 +170,7 @@ export function expectStatus(actual: number, expected: number, adapter: string):
 }
 
 function describe(outcome: GateOutcome): string {
-  return outcome.kind === "rejected" ? `${outcome.status} ${outcome.reason}` : `${outcome.status}`;
+  return outcome.kind === "rejected"
+    ? `${outcome.status} ${outcome.code} ${outcome.reason}`
+    : `${outcome.status}`;
 }

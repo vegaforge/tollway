@@ -1,6 +1,7 @@
 import { createServer, type ServerResponse } from "node:http";
 import { describe, expect, it } from "vitest";
 import type { Gate } from "./gate.js";
+import { gateRejection } from "./gate-errors.js";
 import {
   type HoldResult,
   holdNodeResponse,
@@ -53,7 +54,7 @@ describe("readBodyWithin", () => {
 });
 
 describe("settlementTiming and twoPhaseAuthorizer", () => {
-  const handWritten: Gate = async () => ({ kind: "rejected", status: 500, reason: "x" });
+  const handWritten: Gate = async () => gateRejection("handler-not-configured", "x");
 
   it("defaults to settling before the handler", () => {
     expect(settlementTiming(undefined)).toBe("before-handler");
@@ -73,7 +74,11 @@ describe("settlementTiming and twoPhaseAuthorizer", () => {
   });
 
   it("names the limit in the too-large rejection", () => {
-    expect(responseTooLarge(64)).toMatchObject({ kind: "rejected", status: 500 });
+    expect(responseTooLarge(64)).toMatchObject({
+      kind: "rejected",
+      status: 500,
+      code: "response-too-large",
+    });
     expect(responseTooLarge(64).reason).toContain("64 bytes");
   });
 });

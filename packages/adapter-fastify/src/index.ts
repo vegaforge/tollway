@@ -15,6 +15,7 @@ import {
   holdNodeResponse,
   type PaywallOptions,
   type RouteTable,
+  renderGateRejection,
   responseTooLarge,
   settlementTiming,
   type TollwayRequest,
@@ -111,8 +112,11 @@ async function answer(
     return;
   }
 
-  applyHeaders(reply, outcome.headers ?? {});
-  await reply.status(outcome.status).send({ error: outcome.reason });
+  // The body and headers come from the server's one renderer, so every
+  // adapter answers each error code the same way (#161).
+  const rejection = renderGateRejection(outcome);
+  applyHeaders(reply, rejection.headers);
+  await reply.status(rejection.status).send(rejection.body);
 }
 
 /**
@@ -135,8 +139,8 @@ async function settleAfterHandler(
     }
     if (result === "too-large") {
       await payment.abandon("response-too-large");
-      const rejection = responseTooLarge(payment.maxResponseBytes);
-      held.replace(rejection.status, { error: rejection.reason });
+      const rejection = renderGateRejection(responseTooLarge(payment.maxResponseBytes));
+      held.replace(rejection.status, rejection.body, rejection.headers);
       return;
     }
     if (payment.isFailure(held.status())) {
@@ -149,7 +153,8 @@ async function settleAfterHandler(
       held.release(settled.headers);
       return;
     }
-    held.replace(settled.status, { error: settled.reason }, settled.headers);
+    const rejection = renderGateRejection(settled);
+    held.replace(rejection.status, rejection.body, rejection.headers);
   } catch (error) {
     request.log.error({ err: error }, "tollway: two-phase settlement failed");
     held.replace(500, { error: "settlement-error" });
