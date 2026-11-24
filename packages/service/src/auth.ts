@@ -1,76 +1,100 @@
+import type { MiddlewareHandler } from "hono";
+import type { ApiKeyConfig, ApiKeyScope } from "./config.js";
+import { errorBody } from "./errors.js";
+import type { ServiceEnv } from "./types.js";
+
 /**
- * API-key authentication. Keys are stored as SHA-256 hex digests, never as
- * the secret itself, so a leaked configuration or process dump does not hand
- * over a working key. Verification hashes the presented key with WebCrypto,
- * which every runtime Hono runs on provides, and compares digests without an
- * early return.
+ * API-key authentication for `/v1/*`.
+ *
+ * A key is presented as `Authorization: Bearer <key>`. The service hashes it
+ * with SHA-256 through Web Crypto, so the same code runs on Node and edge
+ * runtimes, and compares the digest with every configured hash in constant
+ * time. The comparison never stops early, neither inside a digest nor across
+ * the key list, so response time does not reveal how close a guess came or
+ * which entry matched. Neither the key nor its hash appears in a response or
+ * a log line.
  */
 
-import type { Context, Next } from "hono";
-import { apiError } from "./http.js";
+const encoder = new TextEncoder();
 
-/** What a key may do: send metrics, or read them. */
-export const serviceScopes = ["ingest", "read"] as const;
-
-export type ServiceScope = (typeof serviceScopes)[number];
-
-export type ServiceApiKey = {
-  /** A name for this key, used in your own logs and rotation runbook. */
-  id: string;
-  /** Lowercase hex SHA-256 of the secret; see {@link hashApiKey}. */
-  keyHash: string;
-  scopes: ServiceScope[];
-};
-
-/** The SHA-256 hex digest to store in a {@link ServiceApiKey}. */
+/** Lowercase hex SHA-256 of an API key: the value to configure as `sha256`. */
 export async function hashApiKey(key: string): Promise<string> {
-  const digest = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(key));
-  return [...new Uint8Array(digest)].map((byte) => byte.toString(16).padStart(2, "0")).join("");
+  const digest = new Uint8Array(await crypto.subtle.digest("SHA-256", encoder.encode(key)));
+  let hex = "";
+  for (const byte of digest) hex += byte.toString(16).padStart(2, "0");
+  return hex;
 }
 
-/** Compare two hex digests without stopping at the first different character. */
-function timingSafeEqualHex(left: string, right: string): boolean {
-  if (left.length !== right.length) return false;
-  let difference = 0;
-  for (let index = 0; index < left.length; index += 1) {
-    difference |= left.charCodeAt(index) ^ right.charCodeAt(index);
+/** Compares two equal-length strings without an early exit. */
+function constantTimeEqual(left: string, right: string): boolean {
+  let difference = left.length ^ right.length;
+  const length = Math.max(left.length, right.length);
+  for (let index = 0; index < length; index += 1) {
+    difference |= (left.charCodeAt(index) | 0) ^ (right.charCodeAt(index) | 0);
   }
   return difference === 0;
 }
 
-function bearerToken(header: string | undefined): string | null {
-  if (!header) return null;
-  const match = /^Bearer[ ]+(\S+)$/i.exec(header.trim());
-  return match?.[1] ?? null;
+/** The key a request authenticated with, as routes see it. Never the key itself. */
+export type AuthenticatedKey = {
+  name: string;
+  scopes: readonly ApiKeyScope[];
+};
+
+// RFC 6750 token characters. Anything else in the credential is malformed.
+const BEARER = /^Bearer +([A-Za-z0-9\-._~+/]+=*)$/;
+
+const CHALLENGE = { "WWW-Authenticate": 'Bearer realm="tollway-service"' };
+
+function unauthorized(message: string) {
+  return errorBody("unauthorized", message);
 }
 
 /**
- * Middleware that requires a valid bearer key with `scope`. A missing or
- * unknown key is 401; a known key without the scope is 403. The response
- * never says whether the key exists but is unprivileged in a way that helps
- * guess another, beyond the scope the caller asked for.
+ * Requires a configured, unrevoked key on every request it guards, and
+ * stores the key's name and scopes on the context as `apiKey`.
  */
-export function requireScope(keys: readonly ServiceApiKey[], scope: ServiceScope) {
-  return async (context: Context, next: Next): Promise<Response | undefined> => {
-    const presented = bearerToken(context.req.header("Authorization"));
-    if (!presented) {
-      return context.json(
-        apiError("unauthorized", "send the API key as Authorization: Bearer <key>"),
+export function authenticate(keys: readonly ApiKeyConfig[]): MiddlewareHandler<ServiceEnv> {
+  return async (c, next) => {
+    const header = c.req.header("Authorization");
+    if (header === undefined || header === "") {
+      return c.json(
+        unauthorized("send the API key as Authorization: Bearer <key>"),
         401,
+        CHALLENGE,
       );
     }
-    const presentedHash = await hashApiKey(presented);
-    const key = keys.find((candidate) => timingSafeEqualHex(candidate.keyHash, presentedHash));
-    if (!key) {
-      return context.json(apiError("unauthorized", "the API key is not valid"), 401);
+    const match = BEARER.exec(header.trim());
+    const token = match?.[1];
+    if (token === undefined) {
+      return c.json(unauthorized("expected Authorization: Bearer <key>"), 401, CHALLENGE);
     }
+
+    const presented = await hashApiKey(token);
+    let found: ApiKeyConfig | undefined;
+    for (const key of keys) {
+      // Every entry is compared, so the time taken does not depend on which
+      // entry, if any, matches.
+      if (constantTimeEqual(key.sha256, presented) && found === undefined) found = key;
+    }
+    if (found === undefined) {
+      return c.json(unauthorized("the API key is not recognised"), 401, CHALLENGE);
+    }
+    if (found.revoked === true) {
+      return c.json(unauthorized("the API key has been revoked"), 401, CHALLENGE);
+    }
+    c.set("apiKey", { name: found.name, scopes: found.scopes });
+    await next();
+  };
+}
+
+/** Requires the authenticated key to carry `scope`; answers 403 when it does not. */
+export function requireScope(scope: ApiKeyScope): MiddlewareHandler<ServiceEnv> {
+  return async (c, next) => {
+    const key = c.get("apiKey");
     if (!key.scopes.includes(scope)) {
-      return context.json(
-        apiError("forbidden", `this API key does not have the ${scope} scope`),
-        403,
-      );
+      return c.json(errorBody("forbidden", `this API key does not have the ${scope} scope`), 403);
     }
     await next();
-    return undefined;
   };
 }

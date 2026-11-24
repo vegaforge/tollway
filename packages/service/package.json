@@ -1,7 +1,7 @@
 {
   "name": "@vegaforge/tollway-service",
-  "version": "0.0.1",
-  "description": "Optional shared HTTP service for Tollway metrics, with API-key auth and OpenAPI",
+  "version": "0.0.0",
+  "description": "Optional self-hosted Tollway shared service: a Hono HTTP API with typed configuration, API-key authentication, health and readiness endpoints, and a generated OpenAPI document",
   "license": "Apache-2.0",
   "repository": {
     "type": "git",
@@ -13,6 +13,9 @@
   "main": "./dist/index.cjs",
   "module": "./dist/index.js",
   "types": "./dist/index.d.ts",
+  "bin": {
+    "tollway-service": "./dist/bin.js"
+  },
   "exports": {
     ".": {
       "types": "./dist/index.d.ts",
@@ -21,7 +24,8 @@
     }
   },
   "files": [
-    "dist"
+    "dist",
+    "README.md"
   ],
   "scripts": {
     "build": "tsup",
@@ -30,6 +34,8 @@
     "typecheck": "tsc --noEmit"
   },
   "dependencies": {
+    "@hono/node-server": "2.1.9",
+    "@vegaforge/tollway-channels": "workspace:*",
     "@vegaforge/tollway-core": "workspace:*",
     "@vegaforge/tollway-observability": "workspace:*",
     "hono": "^4.13.19",
@@ -37,11 +43,11 @@
   },
   "devDependencies": {
     "@types/node": "^22.20.5",
-    "tsup": "^8.5.1",
+    "tsup": "^9.0.0",
     "typescript": "^5.9.3",
     "vitest": "^4.1.12"
   },
-  "publishConfig": {
-    "access": "public"
+  "engines": {
+    "node": ">=20"
   }
 }

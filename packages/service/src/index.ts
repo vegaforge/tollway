@@ -1,41 +1,73 @@
 /**
  * @vegaforge/tollway-service
  *
- * An optional shared HTTP service over Tollway telemetry. `createService`
- * returns a Hono app: ingest payment metrics from many gates and clients, and
- * serve spend summaries, bucketed time series and JSON or CSV exports for a
- * dashboard. See apps/web/src/content/docs/service.mdx.
+ * The optional, self-hosted Tollway service: a Hono app with typed
+ * configuration, API-key authentication, health and readiness endpoints, and
+ * an OpenAPI document generated from the same zod schemas that validate each
+ * request. Later issues mount their routes on it as modules. See
+ * apps/web/src/content/docs/service.mdx.
+ *
+ * This entry imports nothing Node-only. The `tollway-service` binary adds the
+ * Node listener and config-file loading.
  */
 
 export {
+  type CreateServiceOptions,
   createService,
-  DEFAULT_METRICS_LIMITS,
-  type MetricsLimits,
-  type ServiceConfig,
+  SERVICE_API_VERSION,
+  type ServiceContext,
+  type ServiceModule,
 } from "./app.js";
+export { type AuthenticatedKey, hashApiKey } from "./auth.js";
 export {
-  hashApiKey,
-  requireScope,
-  type ServiceApiKey,
-  type ServiceScope,
-  serviceScopes,
-} from "./auth.js";
-export { type ApiErrorBody, apiError } from "./http.js";
+  type ApiKeyConfig,
+  type ApiKeyScope,
+  apiKeyConfigSchema,
+  apiKeyScopes,
+  type ConfigIssue,
+  type ConfigSources,
+  parseServiceConfig,
+  SERVICE_CONFIG_FILE_ENV,
+  SERVICE_ENV,
+  type ServiceConfig,
+  ServiceConfigError,
+  serviceConfigSchema,
+} from "./config.js";
 export {
-  type AssetSummary,
-  type ExportQuery,
-  exportQuerySchema,
-  type IngestBody,
-  ingestBodySchema,
-  MAX_METRIC_BATCH,
-  paymentMetricSchema,
-  type SeriesQuery,
-  type SeriesResponse,
-  type SummaryQuery,
-  type SummaryResponse,
-  seriesQuerySchema,
-  summaryQuerySchema,
-  toSummaryResponse,
-} from "./metrics.js";
-export { openApiDocument } from "./openapi.js";
-export { createInMemoryMetricsStore, type MetricsStore } from "./store.js";
+  type ErrorBody,
+  errorBody,
+  errorBodySchema,
+  type ServiceErrorCode,
+  serviceErrorCodes,
+} from "./errors.js";
+export {
+  createConsoleLogger,
+  type LogFields,
+  type ServiceLogger,
+} from "./logger.js";
+export { buildOpenApiDocument, type OpenApiDocument } from "./openapi.js";
+export { type ReadinessReport, readinessReportSchema } from "./readiness.js";
+export {
+  defineRoute,
+  type HttpMethod,
+  type RouteDefinition,
+  type RouteInput,
+  type RouteResponse,
+  type ServiceRoute,
+} from "./routes.js";
+export {
+  type ChannelStore,
+  createMemoryChannelStore,
+  createMemoryMetricsStore,
+  createMemoryPolicyStore,
+  createMemoryReceiptStore,
+  createMemoryStores,
+  type MetricsStore,
+  type PolicyStore,
+  type PolicyVersion,
+  type ReceiptPutResult,
+  type ReceiptStore,
+  type ServiceStore,
+  type ServiceStores,
+} from "./stores.js";
+export type { ServiceEnv } from "./types.js";
