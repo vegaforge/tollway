@@ -63,9 +63,8 @@ describe("CommitmentStore.appendCommitment (compare-and-set)", () => {
     const store = createMemoryCommitmentStore();
     await store.putChannel(channel());
 
-    await expect(store.appendCommitment(commitment(5, "40"), expectation(-1))).rejects.toMatchObject(
-      { field: "sequence", expected: "0", actual: "5" },
-    );
+    const attempt = store.appendCommitment(commitment(5, "40"), expectation(-1));
+    await expect(attempt).rejects.toMatchObject({ field: "sequence", expected: "0", actual: "5" });
     expect(await store.listCommitments("CCHAN")).toEqual([]);
   });
 
@@ -83,9 +82,8 @@ describe("CommitmentStore.appendCommitment (compare-and-set)", () => {
 
   it("reports an unknown channel as not found", async () => {
     const store = createMemoryCommitmentStore();
-    await expect(store.appendCommitment(commitment(0, "1"), expectation(-1))).rejects.toBeInstanceOf(
-      ChannelNotFoundError,
-    );
+    const attempt = store.appendCommitment(commitment(0, "1"), expectation(-1));
+    await expect(attempt).rejects.toBeInstanceOf(ChannelNotFoundError);
   });
 
   it("lets exactly one of N concurrent appends at the same expected sequence succeed", async () => {
@@ -122,7 +120,11 @@ describe("CommitmentStore.transitionChannel (compare-and-set)", () => {
 
     const attempt = store.transitionChannel("CCHAN", "open", { status: "closed" });
 
-    await expect(attempt).rejects.toMatchObject({ field: "status", expected: "open", actual: "closing" });
+    await expect(attempt).rejects.toMatchObject({
+      field: "status",
+      expected: "open",
+      actual: "closing",
+    });
     expect((await store.getChannel("CCHAN"))?.status).toBe("closing");
   });
 

@@ -48,6 +48,9 @@ export {
 } from "./store.js";
 export type {
   Channel,
+  ChannelFilter,
+  ChannelListPage,
+  ChannelListRequest,
   ChannelManager,
   ChannelStatus,
   ClosePolicy,

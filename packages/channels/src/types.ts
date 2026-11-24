@@ -164,3 +164,30 @@ export type ResumeOutcome =
 export type ResumeAllResult = {
   outcomes: ReadonlyArray<ResumeOutcome | { kind: "error"; channelId: string; error: Error }>;
 };
+
+/**
+ * Exact-match filters for `CommitmentStore.listChannels` (#179). An absent
+ * field matches every channel.
+ */
+export type ChannelFilter = {
+  status?: ChannelStatus;
+  counterparty?: string;
+  asset?: string;
+  network?: StellarNetwork;
+};
+
+/** One page request. `cursor` is the `nextCursor` of the previous page. */
+export type ChannelListRequest = {
+  /** Integer from 1 to 500. Defaults to 50. */
+  limit?: number;
+  cursor?: string;
+};
+
+/**
+ * One page of channels, ordered by channel id. `nextCursor` is set when more
+ * channels follow, and is passed back as the next request's `cursor`.
+ */
+export type ChannelListPage = {
+  channels: readonly Channel[];
+  nextCursor?: string;
+};

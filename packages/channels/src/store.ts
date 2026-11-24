@@ -14,7 +14,15 @@
  */
 
 import { ChannelNotFoundError, CommitmentConflictError } from "./errors.js";
-import type { Channel, ChannelStatus, Commitment } from "./types.js";
+import { pageChannels } from "./store-query.js";
+import type {
+  Channel,
+  ChannelFilter,
+  ChannelListPage,
+  ChannelListRequest,
+  ChannelStatus,
+  Commitment,
+} from "./types.js";
 
 /**
  * What a caller read before it appended a commitment. The append is applied
@@ -74,6 +82,15 @@ export interface CommitmentStore {
    * endpoints need is `listChannels` (#179, #227).
    */
   listChannelsByStatus(status: Channel["status"]): Promise<readonly Channel[]>;
+  /**
+   * The paged, filtered listing of tracked channels (#179), ordered by
+   * channel id. Filters are exact matches, and an absent filter matches every
+   * channel. `limit` defaults to 50 and must be an integer from 1 to 500,
+   * otherwise the call throws `invalid-channel-query`. Pass the previous
+   * page's `nextCursor` to continue. Every store returns the same pages for
+   * the same data.
+   */
+  listChannels(filter: ChannelFilter, request?: ChannelListRequest): Promise<ChannelListPage>;
 }
 
 export function createMemoryCommitmentStore(): CommitmentStore {
@@ -153,6 +170,9 @@ export function createMemoryCommitmentStore(): CommitmentStore {
     },
     async listChannelsByStatus(status) {
       return [...channels.values()].filter((channel) => channel.status === status);
+    },
+    async listChannels(filter, request) {
+      return pageChannels(channels.values(), filter, request);
     },
   };
 }
