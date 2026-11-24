@@ -78,8 +78,10 @@ export {
   type DynamicPriceFunction,
   type Gate,
   type GateOutcome,
+  type PaymentPrevalidationOptions,
   type PaywallConfig,
   type PaywallDeps,
+  type PrevalidationRejection,
   type TollwayRequest,
 } from "./gate.js";
 export {
@@ -155,3 +157,14 @@ export {
   type SponsorMonitorOptions,
   type SponsorMonitorSink,
 } from "./sponsor-monitor.js";
+export {
+  checkStellarExactPayment,
+  createLatestLedgerSource,
+  DEFAULT_MAX_PAYMENT_SIGNATURE_LENGTH,
+  type LatestLedgerSource,
+  type LatestLedgerSourceOptions,
+  type PrevalidationReason,
+  type PrevalidationResult,
+  type StellarExactCheckOptions,
+  type StellarExactTerms,
+} from "./stellar-static-validation.js";

@@ -76,6 +76,8 @@ export function scriptedFacilitator(
 
   return {
     calls,
+    // A wrapper around the mock still speaks the mock's payments (#159).
+    ...(inner.acceptsMockPayments ? { acceptsMockPayments: true as const } : {}),
     ...(inner.idempotencyKey ? { idempotencyKey: inner.idempotencyKey.bind(inner) } : {}),
     verify(input) {
       calls.verify += 1;
@@ -112,6 +114,7 @@ export function createRecordingFacilitator(inner: FacilitatorClient): RecordingF
     settleCalls,
     settledNonces,
     client: {
+      ...(inner.acceptsMockPayments ? { acceptsMockPayments: true as const } : {}),
       ...(idempotencyKey ? { idempotencyKey } : {}),
       verify: (input) => inner.verify(input),
       async settle(input) {

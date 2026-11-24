@@ -25,6 +25,7 @@ import {
   PAYMENT_REQUIRED_HEADER,
   PAYMENT_SIGNATURE_HEADER,
 } from "./headers.js";
+import { envelope, PAY_TO } from "./testing/stellar-envelopes.js";
 
 const STELLAR_USDC = "CBIELTK6YBZJU5UP2WWQEUCYKLPU6AUNZ2BQ4WWFEIE3USCIHMXQDAMA";
 const PAYEE = "GCKFBEIYTKP5RDBQMUTAPDCAIVMOLKZYNYKRJHAEWHJDYUGSA3FDQQ3V";
@@ -176,7 +177,11 @@ describe("publishing a route through Bazaar discovery", () => {
       }),
     );
     const facilitator = createHttpFacilitator(FACILITATOR);
-    const gate = createPaywall(config({ discovery: weather }), { signer, facilitator });
+    // A payee with a valid key, so a real envelope can name it.
+    const gate = createPaywall(config({ discovery: weather, payTo: PAY_TO }), {
+      signer,
+      facilitator,
+    });
     const url = "https://api.example.com/weather/paris";
 
     const unpaid = await gate(request("GET", url));
@@ -190,7 +195,9 @@ describe("publishing a route through Bazaar discovery", () => {
           client: {
             scheme: "exact",
             async createPaymentPayload(x402Version: number) {
-              return { x402Version, payload: { transaction: "signed-transaction" } };
+              // A real envelope to the payee, so the gate's local
+              // pre-validation (#159) lets it reach /verify.
+              return { x402Version, payload: { transaction: envelope() } };
             },
           },
         },

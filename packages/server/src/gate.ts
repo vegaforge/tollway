@@ -56,6 +56,12 @@ import {
   type ServicePolicyStore,
   validateServicePolicy,
 } from "./service-policy.js";
+import {
+  checkStellarExactPayment,
+  DEFAULT_MAX_PAYMENT_SIGNATURE_LENGTH,
+  type LatestLedgerSource,
+  type PrevalidationReason,
+} from "./stellar-static-validation.js";
 import { isPreSendFailure } from "./transport-errors.js";
 
 /**
@@ -154,6 +160,39 @@ export type GateOutcome =
    */
   | GateRejection;
 
+/**
+ * Local checks an x402 payment passes before the gate spends a `/verify` on
+ * it (#159). They run for every facilitator client except the offline mock,
+ * whose payments are not Stellar transactions.
+ */
+export type PaymentPrevalidationOptions = {
+  /**
+   * Longest `PAYMENT-SIGNATURE` header accepted, in characters, checked
+   * before anything is decoded. Defaults to 16 384. Applies to every client,
+   * the mock included.
+   */
+  maxPaymentSignatureLength?: number;
+  /**
+   * Source of the latest closed ledger. With one, an authorization whose
+   * `signatureExpirationLedger` is already behind it is refused locally;
+   * when the ledger is unavailable the check is skipped, never failed. See
+   * `createLatestLedgerSource`.
+   */
+  latestLedger?: LatestLedgerSource;
+  /**
+   * Called for every payment refused before `/verify`, so operators can see
+   * flood volume. `rejectedTotal` counts this gate's local refusals so far.
+   */
+  onRejected?: (event: PrevalidationRejection) => void;
+};
+
+/** One payment refused locally, as `PaymentPrevalidationOptions.onRejected` sees it. */
+export type PrevalidationRejection = {
+  reason: PrevalidationReason;
+  resource: string;
+  rejectedTotal: number;
+};
+
 /** A payment gate for one paid resource, built by {@link createPaywall}. */
 export type Gate = (request: TollwayRequest) => Promise<GateOutcome>;
 
@@ -232,6 +271,12 @@ export type PaywallDeps = {
    * `settlementLockTtlMs`.
    */
   ambiguousSettlementHoldMs?: number;
+  /**
+   * Local checks before `/verify` for x402 payments (#159). They are on by
+   * default for every facilitator client except `createMockFacilitator`;
+   * this only tunes them. See `PaymentPrevalidationOptions`.
+   */
+  paymentPrevalidation?: PaymentPrevalidationOptions;
   /**
    * `Retry-After`, in whole seconds, for rejections a client should answer
    * by sending the same payment again (#161). `settlementInProgress` defaults
@@ -748,6 +793,16 @@ function asError(value: unknown, message: string): Error {
   return value instanceof Error ? value : new Error(message, { cause: value });
 }
 
+/** What the request-level code hands the settlement path besides the payment. */
+type SettlementSteps = {
+  /** The headers of a fresh 402, for a refused payment to carry. */
+  freshChallengeHeaders: () => Promise<Record<string, string>>;
+  /** Set when only a replay is allowed (an expired quote); returns the answer otherwise. */
+  replayOnly?: () => Promise<GateOutcome>;
+  /** Local checks before `/verify`: a rejection, or undefined to go on. */
+  prevalidate?: () => Promise<RejectedOutcome | undefined>;
+};
+
 async function settleWithHandler<TPayment>(
   payment: TPayment,
   offer: PaymentOffer,
@@ -755,9 +810,9 @@ async function settleWithHandler<TPayment>(
   method: string,
   handler: Handler<TPayment>,
   context: SettlementContext,
-  freshChallengeHeaders: () => Promise<Record<string, string>>,
-  replayOnly?: () => Promise<GateOutcome>,
+  steps: SettlementSteps,
 ): Promise<GateOutcome> {
+  const { freshChallengeHeaders, replayOnly, prevalidate } = steps;
   // A payment that already settled is answered from the cache before it is
   // verified again: on chain its authorization nonce is spent, so a second
   // verify fails and the retry would get a 402 instead of its receipt (#284).
@@ -785,6 +840,11 @@ async function settleWithHandler<TPayment>(
   if (replayOnly) {
     return replayOnly();
   }
+  // Local checks run after the replay lookup, so a settled payment whose
+  // authorization has since expired still gets its receipt, and before
+  // /verify, so a payment that cannot pass costs no facilitator call (#159).
+  const refused = await prevalidate?.();
+  if (refused) return refused;
 
   let verification:
     | { valid: true; payer: string; nonce: string }
@@ -1475,6 +1535,29 @@ export function createPaywallWithInFlight(
     deps.retryAfterSeconds?.settlementInProgress,
     "retryAfterSeconds.settlementInProgress",
   );
+  const prevalidation = deps.paymentPrevalidation ?? {};
+  const maxSignatureLength =
+    prevalidation.maxPaymentSignatureLength ?? DEFAULT_MAX_PAYMENT_SIGNATURE_LENGTH;
+  if (!Number.isSafeInteger(maxSignatureLength) || maxSignatureLength < 1) {
+    throw new TypeError(
+      "paymentPrevalidation.maxPaymentSignatureLength must be a positive integer",
+    );
+  }
+  // The mock's payments are not Stellar envelopes; it says so explicitly.
+  const prevalidates = deps.facilitator.acceptsMockPayments !== true;
+  let rejectedTotal = 0;
+  const localRejection = async (
+    reason: PrevalidationReason,
+    resource: string,
+    challengeHeaders: () => Promise<Record<string, string>>,
+  ): Promise<RejectedOutcome> => {
+    rejectedTotal += 1;
+    prevalidation.onRejected?.({ reason, resource, rejectedTotal });
+    return gateRejection("payment-invalid", "the payment failed local validation", {
+      upstreamReason: reason,
+      headers: await challengeHeaders(),
+    });
+  };
   const unavailableSeconds = positiveSeconds(
     deps.retryAfterSeconds?.facilitatorUnavailable,
     "retryAfterSeconds.facilitatorUnavailable",
@@ -1507,7 +1590,12 @@ export function createPaywallWithInFlight(
     // The x402 payment is decoded before pricing, because a dynamic-price
     // quote comes back inside it, in `accepted.extra.tollwayQuote`.
     let x402Payment: X402Payload | undefined;
-    if (signatureHeader && !mppCredential) {
+    let oversized = false;
+    if (signatureHeader && !mppCredential && signatureHeader.length > maxSignatureLength) {
+      // Refused before any decoding: a flood of huge headers costs a length
+      // comparison each. The 402 still needs the offer, built below.
+      oversized = true;
+    } else if (signatureHeader && !mppCredential) {
       try {
         x402Payment = decodePaymentSignatureHeader(signatureHeader);
       } catch (error) {
@@ -1576,6 +1664,10 @@ export function createPaywallWithInFlight(
       (await paymentRequired(offer, request, acceptedModels, deps.mppChargeHandler, config, quote))
         .headers;
 
+    if (oversized) {
+      return localRejection("payment_signature_too_large", resource, challengeHeaders);
+    }
+
     // A dynamic price is only paid against a quote this gate issued: a
     // missing, expired, tampered or mismatched one gets a fresh 402.
     if (typeof config.amount === "function" && candidateQuote !== quote) {
@@ -1596,7 +1688,7 @@ export function createPaywallWithInFlight(
         method,
         deps.mppChargeHandler,
         context,
-        challengeHeaders,
+        { freshChallengeHeaders: challengeHeaders },
       );
     }
 
@@ -1631,16 +1723,35 @@ export function createPaywallWithInFlight(
           fresh,
         );
       };
-      return settleWithHandler(
-        payment,
-        offer,
-        "x402",
-        method,
-        deps.facilitator,
-        context,
-        challengeHeaders,
-        quoteExpired ? freshChallenge : undefined,
-      );
+      const payload = x402Payment;
+      const prevalidate = async (): Promise<RejectedOutcome | undefined> => {
+        const transaction = payload.payload.transaction;
+        const terms = toPaymentRequirements(offer, {
+          maxTimeoutSeconds: config.maxTimeoutSeconds,
+          extra: config.extra,
+        });
+        const check = (latestLedger?: number) =>
+          typeof transaction === "string"
+            ? checkStellarExactPayment(transaction, terms, {
+                accepted: payload.accepted,
+                maxTransactionLength: maxSignatureLength,
+                ...(latestLedger === undefined ? {} : { latestLedger }),
+              })
+            : ({ valid: false, reason: "invalid_exact_stellar_payload_malformed" } as const);
+        let result = check();
+        // The ledger is only fetched for a payment that passed everything
+        // else, so junk traffic never reaches Stellar RPC.
+        if (result.valid && prevalidation.latestLedger) {
+          const latest = await prevalidation.latestLedger.latest();
+          if (latest !== undefined) result = check(latest);
+        }
+        return result.valid ? undefined : localRejection(result.reason, resource, challengeHeaders);
+      };
+      return settleWithHandler(payment, offer, "x402", method, deps.facilitator, context, {
+        freshChallengeHeaders: challengeHeaders,
+        ...(quoteExpired ? { replayOnly: freshChallenge } : {}),
+        ...(prevalidates ? { prevalidate } : {}),
+      });
     }
 
     if (decision.model === "mpp-charge") {

@@ -41,6 +41,7 @@ import {
   scriptedRedis,
   watchUnhandledRejections,
 } from "./testing/faults.js";
+import { AMOUNT, ASSET, envelope, PAY_TO } from "./testing/stellar-envelopes.js";
 
 /**
  * Failure injection for the gate. Each scenario scripts one upstream fault,
@@ -51,10 +52,12 @@ import {
  * docs/failure-modes.md.
  */
 
+// A real Soroban asset, payee and signed envelope, so the HTTP facilitator
+// scenarios pass the gate's local pre-validation (#159) and reach the fault.
 const config = {
-  amount: "10000",
-  asset: "USDC:GA5ZSEJYB37JRC5AVCIA5MOP4RHTM335X2KGX3IHOJAPP5RE34K4KZVN",
-  payTo: "GSERVICEXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX",
+  amount: AMOUNT,
+  asset: ASSET,
+  payTo: PAY_TO,
   network: "testnet",
 } satisfies PaywallConfig;
 
@@ -64,7 +67,7 @@ const baseRequest: TollwayRequest = {
   headers: {},
 };
 
-const transaction = "mock-signed-auth-entry-failure";
+const transaction = envelope();
 
 const headers: Record<string, string> = {
   [PAYMENT_SIGNATURE_HEADER]: encodePaymentSignatureHeader({

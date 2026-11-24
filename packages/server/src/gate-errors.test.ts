@@ -26,6 +26,7 @@ import {
   PAYMENT_SIGNATURE_HEADER,
 } from "./headers.js";
 import { SERVICE_POLICY_DENIALS } from "./service-policy.js";
+import { envelope, PAY_TO } from "./testing/stellar-envelopes.js";
 
 /**
  * Issue #161: every rejection the gate can return carries a stable `code`
@@ -36,7 +37,7 @@ import { SERVICE_POLICY_DENIALS } from "./service-policy.js";
 const config = {
   amount: "10000",
   asset: "CBIELTK6YBZJU5UP2WWQEUCYKLPU6AUNZ2BQ4WWFEIE3USCIHMXQDAMA",
-  payTo: "GSERVICEXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX",
+  payTo: PAY_TO,
   network: "testnet",
 } satisfies PaywallConfig;
 
@@ -210,7 +211,10 @@ describe("gate error codes", () => {
     vi.stubGlobal("fetch", async () => {
       throw new TypeError("fetch failed");
     });
-    const outcome = await gateWith(createHttpFacilitator("https://facilitator.test"))(paid());
+    // A real envelope, so the local pre-validation (#159) lets it reach the network.
+    const outcome = await gateWith(createHttpFacilitator("https://facilitator.test"))(
+      paid(envelope()),
+    );
     expectRejection(outcome, "facilitator-unavailable");
   });
 

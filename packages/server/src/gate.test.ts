@@ -320,6 +320,9 @@ describe("createPaywall", () => {
     let calls = 0;
     const seenAmounts: string[] = [];
     const facilitator: FacilitatorClient = {
+      // A stub that, like the mock, takes non-Stellar test payments, so the
+      // gate's local Stellar pre-validation (#159) is not what this tests.
+      acceptsMockPayments: true,
       async verify({ offer }) {
         seenAmounts.push(offer.amount);
         return { valid: true, payer: "GPAYER", nonce: "NONCE-DYNAMIC" };

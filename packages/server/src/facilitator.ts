@@ -59,6 +59,13 @@ export type SettleResult = { settled: true; txHash: string } | { settled: false;
  */
 export interface FacilitatorClient {
   /**
+   * Set only by {@link createMockFacilitator}. Its payments are not Stellar
+   * transactions, so the gate skips its local pre-validation (#159) for this
+   * client. Never set it on a client that talks to a real facilitator: the
+   * gate would then spend a `/verify` on every junk payment.
+   */
+  readonly acceptsMockPayments?: true;
+  /**
    * The nonce `verify` would return for this payment, derived without a
    * network call, or undefined when it cannot be. The gate uses it to find a
    * settled payment in its cache before verifying: once a payment settles on
@@ -87,6 +94,7 @@ function transactionOf(payment: X402Payment): string | undefined {
  */
 export function createMockFacilitator(): FacilitatorClient {
   return {
+    acceptsMockPayments: true,
     async idempotencyKey({ payment }) {
       const transaction = transactionOf(payment);
       return transaction ? mockHex(transaction, 32) : undefined;

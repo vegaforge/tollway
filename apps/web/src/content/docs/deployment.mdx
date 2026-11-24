@@ -173,6 +173,12 @@ x402 `/supported` does not advertise assets. It lists versions, schemes and netw
 - Each facilitator HTTP request has its own timeout of 90 seconds from `@x402/core`. Tollway's `createHttpFacilitator` does not expose a knob for it today.
 - A settlement lock lives 30 seconds by default and is renewed while the request runs, so a facilitator call slower than that does not lose its lock; it keeps renewing.
 
+### Local payment pre-validation
+
+Before calling `/verify`, the gate decodes the Stellar transaction in an x402 payment and runs the static checks the facilitator would run first: one `transfer` call on the offer's asset contract, to the offer's payee, for the offer's amount, with address-credential auth entries. A payment that fails is refused with `402 payment-invalid` and the reason in `upstreamReason`, at no facilitator cost. A payment that passes still goes to `/verify`. Headers longer than 16 384 characters are refused before decoding.
+
+This is on for every facilitator client except `createMockFacilitator`. Tune it with `paymentPrevalidation`: `maxPaymentSignatureLength`, an optional `latestLedger` source (`createLatestLedgerSource({ rpcUrl })`) that refuses authorizations already past their expiry ledger, and `onRejected` to count refusals. A ledger lookup that fails skips the expiry check; it never refuses payments.
+
 ### What the gate returns when the facilitator fails
 
 | Situation | Gate outcome |
