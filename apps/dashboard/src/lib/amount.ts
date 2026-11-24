@@ -28,3 +28,44 @@ export function formatBasisPoints(basisPoints: bigint): string {
   const fraction = basisPoints % 100n;
   return `${whole}.${fraction.toString().padStart(2, "0")}%`;
 }
+
+/** The asset code without its issuer: `USDC:GA5Z...` shows as `USDC`. */
+export function assetCode(asset: string): string {
+  return asset.split(":")[0] ?? asset;
+}
+
+/**
+ * The shared display form for table cells and headline totals: `1,234.5 USDC`.
+ * The fraction keeps every digit the amount has, padded to at least two places,
+ * so nothing is rounded or truncated. A value that is not a non-negative integer
+ * string is shown as received, so a bad value stays visible.
+ */
+export function formatAmount(
+  amount: string,
+  asset: string,
+  decimals = DEFAULT_ASSET_DECIMALS,
+): string {
+  const code = assetCode(asset);
+  if (!/^[0-9]+$/.test(amount)) return `${amount} ${code}`;
+  const text = formatUnits(BigInt(amount), decimals);
+  if (decimals === 0) return `${text} ${code}`;
+  const [whole = "0", fraction = ""] = text.split(".");
+  return `${whole}.${fraction.padEnd(2, "0")} ${code}`;
+}
+
+export type AssetTotal = { asset: string; amount: string };
+
+/**
+ * Sums `pick(row)` for each asset. Amounts in different assets are never added
+ * together, so a headline total names every asset it covers.
+ */
+export function sumByAsset<T extends { asset: string }>(
+  rows: readonly T[],
+  pick: (row: T) => string,
+): AssetTotal[] {
+  const totals = new Map<string, bigint>();
+  for (const row of rows) {
+    totals.set(row.asset, (totals.get(row.asset) ?? 0n) + BigInt(pick(row)));
+  }
+  return [...totals.entries()].map(([asset, amount]) => ({ asset, amount: amount.toString() }));
+}
