@@ -139,6 +139,8 @@ export function metricMatches(
   if (query?.payer !== undefined && metric.payer !== query.payer) return false;
   if (query?.payee !== undefined && metric.payee !== query.payee) return false;
   if (query?.model !== undefined && metric.model !== query.model) return false;
+  if (query?.asset !== undefined && metric.asset !== query.asset) return false;
+  if (query?.outcome !== undefined && metric.outcome !== query.outcome) return false;
   if (bounds.from !== null && time < bounds.from) return false;
   if (bounds.to !== null && time > bounds.to) return false;
   return true;
@@ -171,47 +173,6 @@ export function decodeCursor(cursor: string | undefined): number {
     throw new TollwayError("invalid-metrics-query", "page cursor is not one this store issued");
   }
   return position;
-}
-
-/** Sums metrics into a {@link SpendSummary} with bigint arithmetic. */
-export class SummaryAccumulator {
-  private total = 0n;
-  private count = 0;
-  private readonly byAsset = new Map<string, bigint>();
-  private readonly byModel = new Map<string, bigint>();
-  private readonly byPayer = new Map<string, bigint>();
-  private readonly byPayee = new Map<string, bigint>();
-
-  add(metric: Pick<PaymentMetric, "amount" | "asset" | "model" | "payer" | "payee">): void {
-    const amount = BigInt(metric.amount);
-    this.total += amount;
-    this.count += 1;
-    add(this.byAsset, metric.asset, amount);
-    add(this.byModel, metric.model, amount);
-    add(this.byPayer, metric.payer, amount);
-    add(this.byPayee, metric.payee, amount);
-  }
-
-  result(): SpendSummary {
-    return {
-      totalAmount: this.total.toString(),
-      count: this.count,
-      byAsset: record(this.byAsset),
-      byModel: record(this.byModel) as Partial<Record<SettlementModel, string>>,
-      byPayer: record(this.byPayer),
-      byPayee: record(this.byPayee),
-    };
-  }
-}
-
-function add(map: Map<string, bigint>, key: string, amount: bigint): void {
-  map.set(key, (map.get(key) ?? 0n) + amount);
-}
-
-function record(map: Map<string, bigint>): Record<string, string> {
-  const out: Record<string, string> = {};
-  for (const [key, value] of map) out[key] = value.toString();
-  return out;
 }
 
 /** Throws the error every store uses once it has been closed. */

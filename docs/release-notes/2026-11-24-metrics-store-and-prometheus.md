@@ -18,8 +18,13 @@ synchronous: it validates the metric, rejecting a non-integer amount with
 `flush()` and `close()` drain it, and a failed write reaches the required
 `onStoreError`. Stored metrics are read with `queryMetrics` (paged),
 `summarizeAsync` and `exportAsync`. Every store returns the same summaries for
-the same data, with amounts summed exactly. Without a store the hub behaves as
-before. (#217)
+the same data, following the summary rules from #321: only settled payments add
+to an amount, `count` and `byOutcome` cover every outcome, and the per-asset
+breakdowns never add different assets. Amounts are summed exactly, and
+queries filter by asset and outcome as well. The hub and the stores share one
+implementation of those rules. It sums only plain integer strings, so a
+malformed in-memory amount such as `-5` is skipped like any other non-integer
+instead of reducing spend. Without a store the hub behaves as before. (#217)
 
 `createPrometheusExporter({ hub })` serves the hub's counters in the text
 exposition format 0.0.4: payments, settled amounts, a latency histogram, and

@@ -42,6 +42,8 @@ export function whereClause(
   if (query?.payer !== undefined) conditions.push(`payer = ${next(query.payer)}`);
   if (query?.payee !== undefined) conditions.push(`payee = ${next(query.payee)}`);
   if (query?.model !== undefined) conditions.push(`model = ${next(query.model)}`);
+  if (query?.asset !== undefined) conditions.push(`asset = ${next(query.asset)}`);
+  if (query?.outcome !== undefined) conditions.push(`outcome = ${next(query.outcome)}`);
   if (bounds.from !== null) conditions.push(`at_ms >= ${next(bounds.from)}`);
   if (bounds.to !== null) conditions.push(`at_ms <= ${next(bounds.to)}`);
   return { sql: conditions.length === 0 ? "" : `WHERE ${conditions.join(" AND ")}`, params };

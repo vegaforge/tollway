@@ -80,6 +80,8 @@ describe.each(factories)("MetricsStore conformance: $name", (factory) => {
     // Bounds are inclusive and compare instants, so the +01:00 row is 10:04Z.
     [{ from: "2026-11-20T10:01:00.000Z", to: "2026-11-20T10:03:00.000Z" }, [1, 2, 3]],
     [{ from: "2026-11-20T10:04:00Z" }, [4]],
+    [{ asset: "XLM" }, [3]],
+    [{ outcome: "failed" as const }, [3]],
   ])("filters by %o", async (query, indexes) => {
     const store = await seeded(factory);
     const page = await store.query(query);
@@ -135,6 +137,27 @@ describe.each(factories)("MetricsStore conformance: $name", (factory) => {
     expect(await store.summarize({ payee: "GSERVICE" })).toEqual(
       hub.summarize({ payee: "GSERVICE" }),
     );
+    expect(await store.summarize({ outcome: "failed" })).toEqual(
+      hub.summarize({ outcome: "failed" }),
+    );
+    expect(await store.summarize({ asset: "XLM" })).toEqual(hub.summarize({ asset: "XLM" }));
+  });
+
+  it("adds only settled amounts, but counts every outcome", async () => {
+    const store = await seeded(factory);
+    const summary = await store.summarize();
+    // FIXTURE[3] failed with 3 XLM: it is an attempt, not spend.
+    expect(summary.count).toBe(5);
+    expect(summary.byOutcome).toEqual({ settled: 4, failed: 1, skipped: 0 });
+    expect(summary.byAsset).toEqual({ "USDC:GA5Z": "397" });
+    expect(summary.byModelAsset).toEqual([
+      { model: "mpp-charge", asset: "USDC:GA5Z", amount: "7", count: 1 },
+      { model: "x402", asset: "USDC:GA5Z", amount: "390", count: 3 },
+    ]);
+    expect(summary.byPayerAsset).toEqual([
+      { payer: "GOTHER", asset: "USDC:GA5Z", amount: "250", count: 1 },
+      { payer: "GPAYER", asset: "USDC:GA5Z", amount: "147", count: 3 },
+    ]);
   });
 
   it("sums amounts beyond 2^53 exactly", async () => {
@@ -150,10 +173,14 @@ describe.each(factories)("MetricsStore conformance: $name", (factory) => {
     expect(await store.summarize()).toEqual({
       totalAmount: "0",
       count: 0,
+      byOutcome: { settled: 0, failed: 0, skipped: 0 },
       byAsset: {},
       byModel: {},
       byPayer: {},
       byPayee: {},
+      byModelAsset: [],
+      byPayerAsset: [],
+      byPayeeAsset: [],
     });
   });
 

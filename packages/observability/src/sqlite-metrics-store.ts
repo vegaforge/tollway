@@ -18,8 +18,8 @@ import {
   metricTime,
   queryBounds,
   resolvePageLimit,
-  SummaryAccumulator,
 } from "./metrics-store.js";
+import { SummaryAccumulator } from "./summary.js";
 
 export type SqliteMetricsStoreOptions = {
   /** Database file, or `:memory:`. */

@@ -10,8 +10,8 @@ import {
   metricTime,
   queryBounds,
   resolvePageLimit,
-  SummaryAccumulator,
 } from "./metrics-store.js";
+import { SummaryAccumulator } from "./summary.js";
 
 type Row = { position: number; time: number; metric: PaymentMetric };
 

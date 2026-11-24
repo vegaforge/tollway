@@ -1,5 +1,11 @@
 import { TollwayError } from "@vegaforge/tollway-core";
-import type { MetricsQuery, SpendSummary } from "./metrics.js";
+import type {
+  MetricsQuery,
+  ModelAssetSpend,
+  PayeeAssetSpend,
+  PayerAssetSpend,
+  SpendSummary,
+} from "./metrics.js";
 import {
   METRIC_COLUMNS,
   type MetricRow,
@@ -92,21 +98,45 @@ export async function migratePostgresMetricsStore(
   }
 }
 
-/** The dimensions of a summary, in the order the UNION query returns them. */
-const DIMENSIONS = ["asset", "model", "payer", "payee"] as const;
+/** Settled-amount breakdowns: the dimension name and the columns it groups by. */
+const BREAKDOWNS = [
+  ["asset", ["asset"]],
+  ["model", ["model"]],
+  ["payer", ["payer"]],
+  ["payee", ["payee"]],
+  ["model_asset", ["model", "asset"]],
+  ["payer_asset", ["payer", "asset"]],
+  ["payee_asset", ["payee", "asset"]],
+] as const;
 
 function summaryQuery(table: string, where: { sql: string }): string {
-  // One statement, so Postgres computes every total from the same snapshot.
-  // NUMERIC sums are exact; the result is read back as text, never as a
-  // JavaScript number.
+  // One statement, so Postgres computes every figure from the same snapshot.
+  // Outcome counts cover every matched metric; amounts cover settled ones
+  // only, because a failed or skipped payment moved no money. NUMERIC sums
+  // are exact and are read back as text, never as a JavaScript number.
+  const settled =
+    where.sql === "" ? "WHERE outcome = 'settled'" : `${where.sql} AND outcome = 'settled'`;
   const parts = [
-    `SELECT 'total' AS dimension, '' AS key, SUM(amount)::text AS total, COUNT(*) AS n FROM ${table} ${where.sql}`,
-    ...DIMENSIONS.map(
-      (dimension) =>
-        `SELECT '${dimension}' AS dimension, ${dimension} AS key, SUM(amount)::text AS total, COUNT(*) AS n FROM ${table} ${where.sql} GROUP BY ${dimension}`,
-    ),
+    `SELECT 'outcome' AS dimension, outcome AS a, '' AS b, NULL AS total, COUNT(*) AS n FROM ${table} ${where.sql} GROUP BY outcome`,
+    `SELECT 'total', '', '', SUM(amount)::text, COUNT(*) FROM ${table} ${settled}`,
+    ...BREAKDOWNS.map(([dimension, columns]) => {
+      const a = columns[0];
+      const b = columns[1] ?? "''";
+      return `SELECT '${dimension}', ${a}, ${b}, SUM(amount)::text, COUNT(*) FROM ${table} ${settled} GROUP BY ${columns.join(", ")}`;
+    }),
   ];
   return parts.join(" UNION ALL ");
+}
+
+/** Asset first, then the group's label, in plain code-unit order. */
+function byAssetThen<T extends { asset: string }>(label: (row: T) => string) {
+  return (left: T, right: T): number => {
+    if (left.asset !== right.asset) return left.asset < right.asset ? -1 : 1;
+    const a = label(left);
+    const b = label(right);
+    if (a === b) return 0;
+    return a < b ? -1 : 1;
+  };
 }
 
 function amountText(value: unknown): string {
@@ -136,33 +166,50 @@ export function createPostgresMetricsStore(options: PostgresMetricsStoreOptions)
   async function summarize(query: MetricsQuery | undefined): Promise<SpendSummary> {
     const where = whereClause(query, queryBounds(query), 0);
     const { rows } = await client.query(summaryQuery(tables.metrics, where), where.params);
-    const summary: SpendSummary = {
-      totalAmount: "0",
-      count: 0,
-      byAsset: {},
-      byModel: {},
-      byPayer: {},
-      byPayee: {},
+    const byOutcome = { settled: 0, failed: 0, skipped: 0 };
+    let totalAmount = "0";
+    const flat = { asset: {}, model: {}, payer: {}, payee: {} } as Record<
+      "asset" | "model" | "payer" | "payee",
+      Record<string, string>
+    >;
+    const pairs = {
+      model_asset: [] as ModelAssetSpend[],
+      payer_asset: [] as PayerAssetSpend[],
+      payee_asset: [] as PayeeAssetSpend[],
     };
     for (const row of rows) {
-      const total = amountText(row.total);
-      const key = String(row.key);
+      const a = String(row.a);
+      const b = String(row.b);
+      const n = Number(row.n);
       switch (row.dimension) {
+        case "outcome":
+          if (a !== "settled" && a !== "failed" && a !== "skipped") {
+            throw new TollwayError("invalid-metric", `database returned an unknown outcome: ${a}`);
+          }
+          byOutcome[a] = n;
+          break;
         case "total":
-          summary.totalAmount = total;
-          summary.count = Number(row.n);
+          totalAmount = amountText(row.total);
           break;
         case "asset":
-          summary.byAsset[key] = total;
-          break;
         case "model":
-          (summary.byModel as Record<string, string>)[key] = total;
-          break;
         case "payer":
-          summary.byPayer[key] = total;
-          break;
         case "payee":
-          summary.byPayee[key] = total;
+          flat[row.dimension][a] = amountText(row.total);
+          break;
+        case "model_asset":
+          pairs.model_asset.push({
+            model: a as ModelAssetSpend["model"],
+            asset: b,
+            amount: amountText(row.total),
+            count: n,
+          });
+          break;
+        case "payer_asset":
+          pairs.payer_asset.push({ payer: a, asset: b, amount: amountText(row.total), count: n });
+          break;
+        case "payee_asset":
+          pairs.payee_asset.push({ payee: a, asset: b, amount: amountText(row.total), count: n });
           break;
         default:
           throw new TollwayError(
@@ -171,7 +218,20 @@ export function createPostgresMetricsStore(options: PostgresMetricsStoreOptions)
           );
       }
     }
-    return summary;
+    return {
+      totalAmount,
+      count: byOutcome.settled + byOutcome.failed + byOutcome.skipped,
+      byOutcome,
+      byAsset: flat.asset,
+      byModel: flat.model as SpendSummary["byModel"],
+      byPayer: flat.payer,
+      byPayee: flat.payee,
+      // Sorted here, not in SQL, so the order matches the other stores
+      // whatever the database collation.
+      byModelAsset: pairs.model_asset.sort(byAssetThen((row) => row.model)),
+      byPayerAsset: pairs.payer_asset.sort(byAssetThen((row) => row.payer)),
+      byPayeeAsset: pairs.payee_asset.sort(byAssetThen((row) => row.payee)),
+    };
   }
 
   return {

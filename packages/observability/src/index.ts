@@ -6,7 +6,7 @@
  * up. See docs/design.md, "Observability".
  */
 
-import { type SettlementModel, TollwayError } from "@vegaforge/tollway-core";
+import { TollwayError } from "@vegaforge/tollway-core";
 import { createWebhookDispatcher, type WebhookDispatcherTuning } from "./dispatcher.js";
 import type { TollwayEvent, TollwayEventInput, WebhookEvent } from "./events.js";
 import type { MetricsQuery, PaymentMetric, SpendSummary } from "./metrics.js";
@@ -22,6 +22,7 @@ import {
   resolvePageLimit,
 } from "./metrics-store.js";
 import type { WebhookOutbox } from "./outbox.js";
+import { summarizeMetrics } from "./summary.js";
 import {
   assertTimeseriesLimits,
   computeTimeseries,
@@ -49,7 +50,15 @@ export {
   webhookEvents,
 } from "./events.js";
 export { createMemoryMetricsStore } from "./memory-metrics-store.js";
-export type { MetricsQuery, PaymentMetric, SpendSummary } from "./metrics.js";
+export type {
+  MetricsQuery,
+  ModelAssetSpend,
+  PayeeAssetSpend,
+  PayerAssetSpend,
+  PaymentMetric,
+  SpendOutcomeCounts,
+  SpendSummary,
+} from "./metrics.js";
 export {
   assertValidMetric,
   DEFAULT_METRICS_PAGE_LIMIT,
@@ -376,6 +385,8 @@ function matchesQuery(m: PaymentMetric, query?: MetricsQuery): boolean {
   if (query.payer !== undefined && m.payer !== query.payer) return false;
   if (query.payee !== undefined && m.payee !== query.payee) return false;
   if (query.model !== undefined && m.model !== query.model) return false;
+  if (query.asset !== undefined && m.asset !== query.asset) return false;
+  if (query.outcome !== undefined && m.outcome !== query.outcome) return false;
   // `at` is ISO 8601; string comparison is order-preserving for that grammar.
   if (query.from !== undefined && m.at < query.from) return false;
   if (query.to !== undefined && m.at > query.to) return false;
@@ -384,18 +395,6 @@ function matchesQuery(m: PaymentMetric, query?: MetricsQuery): boolean {
 
 function filterMetrics(metrics: PaymentMetric[], query?: MetricsQuery): PaymentMetric[] {
   return metrics.filter((m) => matchesQuery(m, query));
-}
-
-function stringifyBigintMap<K extends string>(
-  source: Partial<Record<K, bigint>> | Record<K, bigint>,
-): Record<K, string> {
-  const out = {} as Record<K, string>;
-  for (const [key, value] of Object.entries(source) as Array<[K, bigint | undefined]>) {
-    if (value !== undefined) {
-      out[key] = value.toString();
-    }
-  }
-  return out;
 }
 
 const FORMULA_PREFIX = /^[=+\-@\t\r]/;
@@ -694,38 +693,7 @@ export function createObservabilityHub(options: ObservabilityHubOptions = {}): O
     },
     summarize(query) {
       requireNoStore("summarize", "summarizeAsync");
-      const matched = filterMetrics(metrics, query);
-      let totalAmount = 0n;
-      const byAsset: Record<string, bigint> = {};
-      const byModel: Partial<Record<SettlementModel, bigint>> = {};
-      const byPayer: Record<string, bigint> = {};
-      const byPayee: Record<string, bigint> = {};
-
-      for (const m of matched) {
-        let amount: bigint;
-        try {
-          amount = BigInt(m.amount);
-        } catch {
-          // A non-integer amount cannot be summed safely; skip it rather
-          // than poison the rollups for the whole window. The metric is
-          // still visible via export().
-          continue;
-        }
-        totalAmount += amount;
-        byAsset[m.asset] = (byAsset[m.asset] ?? 0n) + amount;
-        byModel[m.model] = (byModel[m.model] ?? 0n) + amount;
-        byPayer[m.payer] = (byPayer[m.payer] ?? 0n) + amount;
-        byPayee[m.payee] = (byPayee[m.payee] ?? 0n) + amount;
-      }
-
-      return {
-        totalAmount: totalAmount.toString(),
-        count: matched.length,
-        byAsset: stringifyBigintMap(byAsset),
-        byModel: stringifyBigintMap(byModel) as Partial<Record<SettlementModel, string>>,
-        byPayer: stringifyBigintMap(byPayer),
-        byPayee: stringifyBigintMap(byPayee),
-      };
+      return summarizeMetrics(filterMetrics(metrics, query));
     },
     timeseries(query) {
       requireNoStore("timeseries", "queryMetrics");
