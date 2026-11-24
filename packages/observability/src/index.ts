@@ -6,6 +6,7 @@
  * up. See docs/design.md, "Observability".
  */
 
+import type { SponsorBalanceReading } from "@vegaforge/tollway-core";
 import { TollwayError } from "@vegaforge/tollway-core";
 import { createWebhookDispatcher, type WebhookDispatcherTuning } from "./dispatcher.js";
 import type { TollwayEvent, TollwayEventInput, WebhookEvent } from "./events.js";
@@ -94,6 +95,7 @@ export {
   type PrometheusRequest,
   type PrometheusResponse,
 } from "./prometheus.js";
+export { renderFeeSponsorMetrics, type SponsorReadingSource } from "./sponsor.js";
 export {
   DEFAULT_MAX_TIMESERIES_BUCKETS,
   DEFAULT_MAX_TIMESERIES_ROWS,
@@ -266,6 +268,10 @@ export type HubObserver = {
 };
 
 export interface ObservabilityHub {
+  /** Store the latest attempt for this (network, account), replacing any previous value. */
+  recordSponsorBalance(reading: SponsorBalanceReading): void;
+  /** Copies of the latest sponsor readings, including stale/error status. */
+  getSponsorReadings(): SponsorBalanceReading[];
   /** Collect a payment metric for rollups. Implementation tracked in #31. */
   record(metric: PaymentMetric): void;
   /**
@@ -517,6 +523,7 @@ export function createObservabilityHub(options: ObservabilityHubOptions = {}): O
   const handlers = new Map<WebhookEvent, WebhookHandler[]>();
   const subscriptions: WebhookSubscription[] = [];
   const metrics: PaymentMetric[] = [];
+  const sponsors = new Map<string, SponsorBalanceReading>();
 
   if (options.webhooks) {
     for (const sub of options.webhooks) {
@@ -620,6 +627,12 @@ export function createObservabilityHub(options: ObservabilityHubOptions = {}): O
     : null;
 
   return {
+    recordSponsorBalance(reading) {
+      sponsors.set(`${reading.network}:${reading.account}`, { ...reading });
+    },
+    getSponsorReadings() {
+      return [...sponsors.values()].map((reading) => ({ ...reading }));
+    },
     record(metric) {
       if (!store) {
         metrics.push({ ...metric });

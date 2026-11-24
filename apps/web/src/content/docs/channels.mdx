@@ -40,6 +40,39 @@ Per the design notes, channel mode is naturally idempotent: a repeated commitmen
 
 The lifecycle manager lives in `packages/channels/src/`. Open, commit, close and resume are implemented against an injected `MppChannelAdapter`, and `createStellarMppChannelAdapter` backs it with `@stellar/mpp` 0.7.1. Recover throws `NotImplementedError` today ([#38](https://github.com/vegaforge/tollway/issues/38)). `@stellar/mpp/channel/server` exposes `close`, `getChannelState` and `watchChannel`; it has no `close_start` or `refund` helper, which recovery needs. The adapter finds a settlement in the channel contract's events: the transaction whose `close` event is effective at its own ledger, with its `withdraw` and `refund` amounts.
 
+## Lifecycle events
+
+Opening a channel locks funds and closing it releases them, so the manager reports both. Pass `onEvent` to `createChannelManager`:
+
+```ts
+import { createChannelManager, toObservabilitySink } from "@vegaforge/tollway-channels";
+
+const bridge = toObservabilitySink(hub, {
+  onDeliveryError: (error, event) => log.warn({ error, event }, "channel webhook failed"),
+});
+const manager = createChannelManager({
+  adapter,
+  onEvent: bridge.onEvent,
+  onEventError: (error, event) => log.warn({ error, event }, "channel observer failed"),
+});
+
+// On shutdown, wait for webhook deliveries still in flight.
+await bridge.flush();
+```
+
+| Event | When | Fields besides `at`, `channelId`, `counterparty`, `asset`, `network` |
+| --- | --- | --- |
+| `channel:opened` | The open landed and the channel was stored. | `deposit`, `openTxHash` |
+| `channel:closing` | A close was recorded as started, before it is submitted. | `cumulativeAmount` |
+| `channel:closed` | The close settled and was stored. | `settlementTxHash`, `settledAmount`, `returnedRemainder` |
+| `channel:close-failed` | The close did not complete. | `status` (`open`, `closing` or `settlement-mismatched`), `error` |
+
+Each event is emitted only after its store write succeeds. `at` comes from the manager's `now`, and amounts are integer strings in the asset's smallest unit. The handler is not awaited: a handler that throws or rejects never changes the result of `open` or `close`, and its error goes to `onEventError`.
+
+`toObservabilitySink(hub)` forwards `channel:opened` and `channel:closed` as the `channel.opened` and `channel.closed` webhooks; the other events are not webhooks. It takes any object with the hub's `emit`, so this package does not depend on `@vegaforge/tollway-observability`.
+
+A channel settler on the client side puts the same events on the client's `on()` stream through `ClientSettler.subscribe`.
+
 ## Reference
 
 [`docs/design.md`, "The channel lifecycle manager"](https://github.com/vegaforge/tollway/blob/main/docs/design.md#the-channel-lifecycle-manager) is the architectural reference.

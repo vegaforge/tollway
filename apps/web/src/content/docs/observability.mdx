@@ -3,7 +3,7 @@ title: Observability
 description: Payment metrics, spend summaries, time-series rollups with latency percentiles, exports, and webhooks
 ---
 
-The observability hub collects one `PaymentMetric` per measured payment and answers questions about them: how much was spent, on which model, in which asset, how often payments failed, and how long they took. It also delivers webhook events (`receipt.created`, `channel.opened`, `channel.closed`, `budget.warning`, `anomaly.detected`) to local handlers and HTTP subscribers.
+The observability hub collects one `PaymentMetric` per measured payment and answers questions about them: how much was spent, on which model, in which asset, how often payments failed, and how long they took. It also delivers webhook events (`receipt.created`, `channel.opened`, `channel.closed`, `budget.warning`, `anomaly.detected`, `sponsor.low_balance`) to local handlers and HTTP subscribers.
 
 ```ts
 import { createObservabilityHub } from "@vegaforge/tollway-observability";
@@ -168,6 +168,43 @@ Payer and payee addresses are never labels by default: they are unbounded, and a
 
 Every event carries a stable `id` assigned at emit time. Each request includes `Tollway-Event-Id`, and a subscription with a `secret` also gets a `Tollway-Signature` header that covers the exact body. Export `verifyWebhookSignature` from the package to check it on the receiving side, rejecting forged bodies and replayed timestamps.
 
+### Channel webhooks
+
+`@vegaforge/tollway-channels` produces `channel.opened` and `channel.closed` through `toObservabilitySink(hub)` (see [Channels](/docs/channels#lifecycle-events)). Amounts are integer strings in the asset's smallest unit.
+
+```json
+{
+  "id": "0f8b6a1e-4c2d-4f57-9a0b-2f7f3c1d9e21",
+  "type": "channel.opened",
+  "at": "2026-11-24T10:00:00.000Z",
+  "data": {
+    "channelId": "CCHAN1",
+    "counterparty": "GSERVICE",
+    "asset": "CUSDC",
+    "network": "testnet",
+    "deposit": "10000000",
+    "openTxHash": "3b1f"
+  }
+}
+```
+
+```json
+{
+  "id": "6d2e9c4a-1b7f-4e3a-8c5d-9a1b2c3d4e5f",
+  "type": "channel.closed",
+  "at": "2026-11-24T11:00:00.000Z",
+  "data": {
+    "channelId": "CCHAN1",
+    "counterparty": "GSERVICE",
+    "asset": "CUSDC",
+    "network": "testnet",
+    "settlementTxHash": "9c2a",
+    "settledAmount": "2500000",
+    "returnedRemainder": "7500000"
+  }
+}
+```
+
 ### Durable delivery
 
 Pass an `outbox` to `createObservabilityHub` to persist each delivery instead of POSTing inside `emit`. `createSqliteWebhookOutbox({ filename })` survives a restart; `createMemoryWebhookOutbox()` keeps rows in process for tests. Call `hub.startDispatcher()` to deliver with jittered exponential backoff under a lease, and `hub.stop()` to wait for in-flight attempts on shutdown. With an outbox, `emit` never rejects: a row that cannot be written is listed in the report's `failures`.
@@ -175,6 +212,105 @@ Pass an `outbox` to `createObservabilityHub` to persist each delivery instead of
 Delivery is **at-least-once**, and ordering is not guaranteed. Receivers dedupe on `Tollway-Event-Id`. `Tollway-Delivery-Id` names the delivery row: it is the same across retries of that row and new only when the row is enqueued or replayed. A delivery that exhausts `maxAttempts` (16 by default, retried over about 2 to 4 hours) moves to a dead-letter state: list it with `outbox.listDeadLetters()` and re-enqueue it once with `outbox.replay(deliveryId)`, which resets attempts and issues a fresh delivery id. Delivered rows are purged after `dispatcher.deliveredRetentionMs` (24 hours by default). Rows store the subscription id, never the secret, so the same subscriptions must be registered again after a restart.
 
 The full workflow, including the header format, leases, retention and a receiver example, is in [`docs/webhook-delivery.md`](https://github.com/vegaforge/tollway/blob/dev/docs/webhook-delivery.md).
+
+## Fee-sponsor balances
+
+`createSponsorMonitor` from `@vegaforge/tollway-server` observes the native XLM
+balance of configured Stellar accounts. It never funds, tops up, transfers from,
+or signs for an account. The balance includes the account reserve; it is not an
+estimate of spendable funds or the number of payments remaining.
+
+```ts
+import { createSponsorMonitor } from "@vegaforge/tollway-server";
+import { createObservabilityHub, renderFeeSponsorMetrics } from "@vegaforge/tollway-observability";
+
+const hub = createObservabilityHub();
+const monitor = createSponsorMonitor({
+  network: "testnet",
+  accounts: [process.env.FEE_SPONSOR_ACCOUNT!], // the actual G... fee payer
+  thresholdStroops: "100000000", // 10 XLM
+  hysteresisStroops: "10000000", // re-arm strictly above 11 XLM
+  intervalMs: 60_000,
+  sink: hub,
+});
+
+hub.on("sponsor.low_balance", (event) => console.warn(event.data));
+await monitor.start(); // immediate reading, then an unref'd timer
+// When shutting down:
+await monitor.stop(); // waits for an in-flight read
+
+// A string in Prometheus text exposition format 0.0.4:
+const body = renderFeeSponsorMetrics(hub);
+```
+
+For a single reading without a timer, use `await monitor.poll()`. Concurrent
+calls share the current poll, and the next timer starts only after the entire
+poll completes. `start()` and `stop()` can be called repeatedly. Background
+discovery and sink errors go to `onError`, defaulting to `console.error`.
+Read failures become stale readings and polling continues.
+
+Horizon responses are schema-checked. Decimal XLM is converted to integer
+stroops without floating point (1 XLM = 10,000,000 stroops). All comparisons
+use `bigint`. A balance below the threshold emits one `sponsor.low_balance`
+event with `account`, `network`, `balanceStroops`, `thresholdStroops` and
+`hysteresisStroops`. It re-arms only after a successful reading strictly above
+threshold plus hysteresis. A read failure neither alerts nor re-arms.
+
+`hub.getSponsorReadings()` returns the latest attempt for each network/account.
+A failed attempt has `stale: true`, an `error`, and no current `balanceStroops`;
+it replaces any previous successful reading. Each reading has an ISO timestamp
+`at`. Staleness records the last attempt's outcome; readings do not automatically
+expire. Use `at` for an application-defined age check, including when a stopped
+monitor leaves the metrics endpoint running. Prometheus `up` detects a failed
+scrape of the service endpoint.
+
+### Account discovery and OpenZeppelin
+
+Omit `accounts` and pass `facilitator` to seed the list from its schema-checked
+`/supported` signers for `stellar:testnet` or `stellar:pubnet`. Discovery is
+frozen after the first successful lookup; recreate the monitor when accounts
+change. Explicit `accounts` always overrides discovery, and an empty explicit
+list disables observation. Duplicate accounts are read once.
+
+Signer addresses are not proof of who pays transaction fees. Confirm the actual
+fee payer with your facilitator operator before enabling discovery. OpenZeppelin
+Channels' testnet `/supported` endpoint returned HTTP 401 without credentials
+when checked for this change, so its signer-to-sponsor mapping was not verified.
+If the actual sponsor is absent, configure its
+G... account explicitly. Service-sponsored MPP charges also need their actual
+fee-payer account configured explicitly. Missing signers for the requested
+network is an error requesting explicit configuration, never a successful empty
+monitor.
+
+### Prometheus gauges
+
+The payment exporter tracked in [#218](https://github.com/vegaforge/tollway/issues/218)
+is separate work. `renderFeeSponsorMetrics(hub)` supplies the sponsor portion for
+that exporter, or can be mounted on its own in an authenticated metrics route:
+
+```ts
+app.get("/metrics", (_req, res) => {
+  res.setHeader("Content-Type", "text/plain; version=0.0.4");
+  res.send(renderFeeSponsorMetrics(hub));
+});
+```
+
+| Metric | Type | Labels | Meaning |
+| --- | --- | --- | --- |
+| `tollway_fee_sponsor_balance_stroops` | gauge | `account`, `network` | Latest native XLM balance; omitted when stale |
+| `tollway_fee_sponsor_balance_stale` | gauge | `account`, `network` | 1 when the last read failed, otherwise 0 |
+
+Account labels are bounded by the configured sponsor list and expose those
+addresses to scrapers. Protect the metrics route. The renderer preserves integer
+text, but Prometheus stores float64 samples and can round amounts above 2^53.
+Use these gauges for monitoring, never accounting.
+
+The demo prints one reading before serving in live mode. Set
+`FEE_SPONSOR_ACCOUNTS` to a comma-separated list of actual sponsor G... accounts
+when discovery is unsuitable. `FEE_SPONSOR_THRESHOLD_STROOPS` defaults to
+`10000000` (1 XLM); choose a threshold for your workload. Mock mode injects an
+offline fake reader and prints `1000000000` stroops. The demo does not start a
+background timer; library services should call `start()` and stop on shutdown.
 
 ## Receipt archive
 
