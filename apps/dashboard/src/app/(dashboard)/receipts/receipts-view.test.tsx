@@ -148,7 +148,7 @@ describe("ReceiptsView", () => {
     screen.getByTestId("receipt-row-rcpt-channel").click();
 
     const link = await screen.findByTestId("receipt-channel-link");
-    expect(link).toHaveAttribute("href", "/channels#channel-row-ch-openai-03");
+    expect(link).toHaveAttribute("href", "/channels/ch-openai-03");
     expect(link).toHaveTextContent("ch-openai-03");
   });
 
