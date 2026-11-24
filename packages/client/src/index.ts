@@ -30,7 +30,6 @@ import {
   type SettlementModel,
   type SignedReceipt,
   type StellarNetwork,
-  signedReceiptSchema,
   TollwayError,
   verifyReceipt,
 } from "@vegaforge/tollway-core";
@@ -235,6 +234,13 @@ export function createClient(options: TollwayClientOptions): TollwayClient {
     },
     async pay(request): Promise<PayResult> {
       try {
+        if (request.offer.network !== options.network) {
+          throw new TollwayError(
+            "network-mismatch",
+            `offer network "${request.offer.network}" does not match client network "${options.network}"`,
+          );
+        }
+
         const model = await decideModel(options.router, request);
         const intent: PaymentIntent = {
           payee: request.offer.payTo,
@@ -321,9 +327,3 @@ export function createClient(options: TollwayClientOptions): TollwayClient {
     },
   };
 }
-
-/**
- * Thrown when the policy engine blocks a payment before settlement.
- * Extends `TollwayError` with code `"policy-blocked"` so a caller branching
- * on `error.code` across Tollway picks this
- */
