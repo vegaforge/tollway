@@ -258,6 +258,8 @@ describe("createVaultTransitSigner", () => {
     [{ timeoutMs: 0 }, /timeoutMs/],
     [{ address: "not a url" }, /address/],
     [{ mount: "../escape" }, /mount/],
+    // A long run of slashes inside the mount; the trim must stay linear.
+    [{ mount: `a${"/".repeat(100_000)}b` }, /mount/],
   ])("rejects bad options %o", async (overrides, message) => {
     await expect(createVaultTransitSigner(options(overrides))).rejects.toThrow(message);
   });

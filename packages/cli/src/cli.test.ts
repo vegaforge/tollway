@@ -27,7 +27,7 @@ import {
   TOLLWAY_QUOTE_HEADER as SERVER_TOLLWAY_QUOTE_HEADER,
 } from "@vegaforge/tollway-server";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
-import { decodeValue, detectEncoding } from "./decode.js";
+import { decodeValue, detectEncoding, trimPadding } from "./decode.js";
 import { PAYMENT_REQUIRED_HEADER, TOLLWAY_QUOTE_HEADER } from "./inspect.js";
 import { EXIT_FAILURE, EXIT_OK, EXIT_USAGE, type Io, run } from "./run.js";
 
@@ -193,6 +193,22 @@ describe("tollway decode", () => {
   it("names the alphabet it found", () => {
     expect(detectEncoding("ab-_")).toBe("base64url");
     expect(detectEncoding("ab+/")).toBe("base64");
+  });
+});
+
+describe("trimPadding", () => {
+  it("removes trailing padding only", () => {
+    expect(trimPadding("QUJD")).toBe("QUJD");
+    expect(trimPadding("QQ==")).toBe("QQ");
+    expect(trimPadding("==")).toBe("");
+  });
+
+  // This replaced `/=+$/`, which backtracks quadratically on a long run of
+  // `=` that is not at the end; with that pattern this input takes seconds.
+  it("stays linear on a long run of padding inside the value", () => {
+    const value = `A${"=".repeat(100_000)}B`;
+    expect(trimPadding(value)).toBe(value);
+    expect(trimPadding(`A${"=".repeat(100_000)}`)).toBe("A");
   });
 });
 

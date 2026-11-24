@@ -1,5 +1,5 @@
 import { Readable } from "node:stream";
-import { bindBodyToResource, utf8Bytes } from "@vegaforge/tollway-core";
+import { bindBodyToResource, bodyDigest, utf8Bytes } from "@vegaforge/tollway-core";
 import {
   PAYMENT_REQUIRED_HEADER,
   PAYMENT_SIGNATURE_HEADER,
@@ -23,7 +23,10 @@ async function build(options: { capture?: boolean; captureLimit?: number } = {})
   if (options.capture !== false) {
     app.addHook("preParsing", fastifyRawBody({ maxBytes: options.captureLimit ?? 4096 }));
   }
-  app.post("/infer", { preHandler: fastifyPaywall(gate) }, async (request) => request.body);
+  // Report a digest of the parsed body the handler sees, not the client's bytes.
+  app.post("/infer", { preHandler: fastifyPaywall(gate) }, async (request) => ({
+    digest: await bodyDigest(utf8Bytes(JSON.stringify(request.body))),
+  }));
   await app.ready();
   const post = (payload: string | Readable, headers: Record<string, string> = {}) =>
     app.inject({
@@ -52,7 +55,7 @@ describe("Fastify: body binding (#164)", () => {
       ),
     });
     expect(paid.statusCode).toBe(200);
-    expect(paid.json()).toEqual(JSON.parse(PROMPT_A));
+    expect(paid.json()).toEqual({ digest: await bodyDigest(utf8Bytes(PROMPT_A)) });
     expect(
       decodeReceiptResource(paid.headers[TOLLWAY_RECEIPT_HEADER.toLowerCase()] as string),
     ).toBe(await bindBodyToResource("/infer", utf8Bytes(PROMPT_A)));
@@ -110,7 +113,7 @@ describe("Fastify over a real socket: body limit (#164)", () => {
     const { gate, calls } = await boundGate();
     const app = Fastify();
     app.addHook("preParsing", fastifyRawBody({ maxBytes: 64 }));
-    app.post("/infer", { preHandler: fastifyPaywall(gate) }, async (request) => request.body);
+    app.post("/infer", { preHandler: fastifyPaywall(gate) }, async () => ({ ok: true }));
     const address = await app.listen({ port: 0, host: "127.0.0.1" });
     try {
       let sent = false;

@@ -110,11 +110,18 @@ export function detectEncoding(value: string): Encoding {
   return "base64";
 }
 
+/** Returns `value` without its trailing `=` padding. */
+export function trimPadding(value: string): string {
+  let end = value.length;
+  while (end > 0 && value[end - 1] === "=") end -= 1;
+  return value.slice(0, end);
+}
+
 function decodeBytes(value: string, encoding: Encoding): Uint8Array {
   const standard =
     encoding === "base64url" ? value.replaceAll("-", "+").replaceAll("_", "/") : value;
-  const padded =
-    standard.replace(/=+$/, "") + "=".repeat((4 - (standard.replace(/=+$/, "").length % 4)) % 4);
+  const unpadded = trimPadding(standard);
+  const padded = unpadded + "=".repeat((4 - (unpadded.length % 4)) % 4);
   let binary: string;
   try {
     binary = atob(padded);

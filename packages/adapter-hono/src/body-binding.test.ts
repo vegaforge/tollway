@@ -1,4 +1,4 @@
-import { bindBodyToResource, utf8Bytes } from "@vegaforge/tollway-core";
+import { bindBodyToResource, bodyDigest, utf8Bytes } from "@vegaforge/tollway-core";
 import {
   PAYMENT_REQUIRED_HEADER,
   PAYMENT_SIGNATURE_HEADER,
@@ -20,7 +20,10 @@ import { honoPaywall } from "./index.js";
 async function build() {
   const { gate, calls } = await boundGate();
   const app = new Hono();
-  app.post("/infer", honoPaywall(gate), async (c) => c.text(await c.req.text()));
+  // Report a digest of the body the handler sees, not the client's bytes.
+  app.post("/infer", honoPaywall(gate), async (c) =>
+    c.json({ digest: await bodyDigest(new Uint8Array(await c.req.arrayBuffer())) }),
+  );
   const post = (body: BodyInit, headers: Record<string, string> = {}) =>
     app.request("/infer", {
       method: "POST",
@@ -40,7 +43,7 @@ describe("Hono: body binding (#164)", () => {
       [PAYMENT_SIGNATURE_HEADER]: payFrom(challenge.headers.get(PAYMENT_REQUIRED_HEADER)),
     });
     expect(paid.status).toBe(200);
-    expect(await paid.text()).toBe(PROMPT_A);
+    expect(await paid.json()).toEqual({ digest: await bodyDigest(utf8Bytes(PROMPT_A)) });
     expect(decodeReceiptResource(paid.headers.get(TOLLWAY_RECEIPT_HEADER))).toBe(
       await bindBodyToResource("/infer", utf8Bytes(PROMPT_A)),
     );
@@ -68,7 +71,7 @@ describe("Hono: body binding (#164)", () => {
       [PAYMENT_SIGNATURE_HEADER]: payFrom(challenge.headers.get(PAYMENT_REQUIRED_HEADER)),
     });
     expect(paid.status).toBe(200);
-    expect(await paid.text()).toBe(PROMPT_A);
+    expect(await paid.json()).toEqual({ digest: await bodyDigest(utf8Bytes(PROMPT_A)) });
     expect(decodeReceiptResource(paid.headers.get(TOLLWAY_RECEIPT_HEADER))).toBe(
       await bindBodyToResource("/infer", utf8Bytes(PROMPT_A)),
     );

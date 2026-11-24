@@ -1,5 +1,5 @@
 import type { AddressInfo } from "node:net";
-import { bindBodyToResource, utf8Bytes } from "@vegaforge/tollway-core";
+import { bindBodyToResource, bodyDigest, utf8Bytes } from "@vegaforge/tollway-core";
 import {
   PAYMENT_REQUIRED_HEADER,
   PAYMENT_SIGNATURE_HEADER,
@@ -31,9 +31,13 @@ async function start(parser: "none" | "json-verify" | "raw") {
     );
   }
   if (parser === "raw") app.use(express.raw({ type: "application/json" }));
-  app.post("/infer", expressPaywall(gate), (req, res) => {
-    // Echo the body the handler sees: parsed JSON, or the raw Buffer.
-    res.send(Buffer.isBuffer(req.body) ? req.body : JSON.stringify(req.body));
+  app.post("/infer", expressPaywall(gate), async (req, res) => {
+    // Report a digest of the body the handler sees (parsed JSON, or the raw
+    // Buffer) rather than echoing the client's bytes back into the response.
+    const seen = Buffer.isBuffer(req.body)
+      ? new Uint8Array(req.body)
+      : utf8Bytes(JSON.stringify(req.body));
+    res.json({ digest: await bodyDigest(seen) });
   });
   const server = app.listen(0);
   await new Promise((resolve) => server.once("listening", resolve));
@@ -62,7 +66,7 @@ describe.each([
         [PAYMENT_SIGNATURE_HEADER]: payFrom(challenge.headers.get(PAYMENT_REQUIRED_HEADER)),
       });
       expect(paid.status).toBe(200);
-      expect(JSON.parse(await paid.text())).toEqual(JSON.parse(PROMPT_A));
+      expect(await paid.json()).toEqual({ digest: await bodyDigest(utf8Bytes(PROMPT_A)) });
       expect(decodeReceiptResource(paid.headers.get(TOLLWAY_RECEIPT_HEADER))).toBe(
         await bindBodyToResource("/infer", utf8Bytes(PROMPT_A)),
       );

@@ -89,8 +89,11 @@ async function payThrough(
 function stubFacilitatorFetch(): typeof fetch {
   return async (input, init) => {
     const request = new Request(input, init);
-    const path = new URL(request.url).pathname;
-    if (!request.url.startsWith(FACILITATOR_URL)) {
+    const url = new URL(request.url);
+    const path = url.pathname;
+    // Compare the parsed origin exactly: a prefix check would also accept
+    // https://facilitator.edge.test.attacker.example and similar hosts.
+    if (url.origin !== new URL(FACILITATOR_URL).origin) {
       throw new TypeError(`the edge scenario does not reach ${request.url}`);
     }
     const payer = "GBPAYEREDGEXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX";

@@ -1,5 +1,6 @@
 import { TollwayError } from "@vegaforge/tollway-core";
 import { z } from "zod";
+import { trimTrailingSlashes } from "./trim.js";
 
 /**
  * A minimal client for the two Vault Transit endpoints the signer needs. It
@@ -104,7 +105,7 @@ export async function vaultRequest(
   const headers: Record<string, string> = { "X-Vault-Token": token };
   if (options.namespace !== undefined) headers["X-Vault-Namespace"] = options.namespace;
   if (body !== undefined) headers["Content-Type"] = "application/json";
-  const url = `${options.address.replace(/\/+$/, "")}/v1/${path}`;
+  const url = `${trimTrailingSlashes(options.address)}/v1/${path}`;
 
   let response: Response;
   try {

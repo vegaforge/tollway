@@ -1,4 +1,4 @@
-import { bindBodyToResource, utf8Bytes } from "@vegaforge/tollway-core";
+import { bindBodyToResource, bodyDigest, utf8Bytes } from "@vegaforge/tollway-core";
 import {
   PAYMENT_REQUIRED_HEADER,
   PAYMENT_SIGNATURE_HEADER,
@@ -18,7 +18,10 @@ import { withPaywall } from "./index.js";
 /** Issue #164 through the Next route-handler adapter. */
 async function build() {
   const { gate, calls } = await boundGate();
-  const handler = withPaywall(gate, async (request) => new Response(await request.text()));
+  // Report a digest of the body the handler sees, not the client's bytes.
+  const handler = withPaywall(gate, async (request) =>
+    Response.json({ digest: await bodyDigest(new Uint8Array(await request.arrayBuffer())) }),
+  );
   const post = (body: BodyInit, headers: Record<string, string> = {}) =>
     handler(
       new Request("https://service.test/infer", {
@@ -40,7 +43,7 @@ describe("Next: body binding (#164)", () => {
       [PAYMENT_SIGNATURE_HEADER]: payFrom(challenge.headers.get(PAYMENT_REQUIRED_HEADER)),
     });
     expect(paid.status).toBe(200);
-    expect(await paid.text()).toBe(PROMPT_A);
+    expect(await paid.json()).toEqual({ digest: await bodyDigest(utf8Bytes(PROMPT_A)) });
     expect(decodeReceiptResource(paid.headers.get(TOLLWAY_RECEIPT_HEADER))).toBe(
       await bindBodyToResource("/infer", utf8Bytes(PROMPT_A)),
     );
@@ -67,6 +70,6 @@ describe("Next: body binding (#164)", () => {
       [PAYMENT_SIGNATURE_HEADER]: payFrom(challenge.headers.get(PAYMENT_REQUIRED_HEADER)),
     });
     expect(paid.status).toBe(200);
-    expect(await paid.text()).toBe(PROMPT_A);
+    expect(await paid.json()).toEqual({ digest: await bodyDigest(utf8Bytes(PROMPT_A)) });
   });
 });

@@ -1,5 +1,6 @@
 import { bytesToBase64Url, type PublicJwk, type ReceiptSigner } from "@vegaforge/tollway-core";
 import { z } from "zod";
+import { trimSlashes } from "./trim.js";
 import { type VaultTokenSource, VaultTransitError, vaultRequest } from "./vault.js";
 
 /**
@@ -139,7 +140,7 @@ export function vaultKeyId(mount: string, keyName: string, keyVersion: number): 
 export async function createVaultTransitSigner(
   options: VaultTransitSignerOptions,
 ): Promise<VaultTransitSigner> {
-  const mount = (options.mount ?? DEFAULT_MOUNT).replace(/^\/+|\/+$/g, "");
+  const mount = trimSlashes(options.mount ?? DEFAULT_MOUNT);
   if (!MOUNT.test(mount) || mount.split("/").some((part) => part === "." || part === "..")) {
     throw new TypeError(`mount must be a Vault path such as "transit", got "${mount}"`);
   }
