@@ -1,4 +1,4 @@
-import { settlementModels, TollwayError } from "@vegaforge/tollway-core";
+import { enumSchema, settlementModels, TollwayError } from "@vegaforge/tollway-core";
 import {
   type MetricsQuery,
   MetricsQueryTooLargeError,
@@ -60,13 +60,13 @@ const outcomes = ["settled", "failed", "skipped"] as const;
 export const paymentMetricSchema = z.strictObject({
   payer: z.string().min(1),
   payee: z.string().min(1),
-  model: z.enum(settlementModels),
+  model: enumSchema(settlementModels),
   // An integer string in the asset's smallest unit, the rule receipts and
   // offers follow. A decimal point here would be summed as a wrong amount.
   amount: z.string().regex(/^[0-9]+$/, "amount must be an integer string"),
   asset: z.string().min(1),
   latencyMs: z.number().finite().nonnegative(),
-  outcome: z.enum(outcomes),
+  outcome: enumSchema(outcomes),
   // With a zone: a timestamp without one names a different instant
   // depending on the process's time zone.
   at: z.iso.datetime({ offset: true }),
@@ -79,9 +79,9 @@ export const ingestBodySchema = z.strictObject({
 const filterFields = {
   payer: z.string().min(1).optional(),
   payee: z.string().min(1).optional(),
-  model: z.enum(settlementModels).optional(),
+  model: enumSchema(settlementModels).optional(),
   asset: z.string().min(1).optional(),
-  outcome: z.enum(outcomes).optional(),
+  outcome: enumSchema(outcomes).optional(),
 };
 
 export const summaryQuerySchema = z.strictObject({
@@ -95,13 +95,13 @@ export const seriesQuerySchema = z.strictObject({
   // A series is always bounded: the range sets how many buckets it allocates.
   from: z.iso.datetime({ offset: true }),
   to: z.iso.datetime({ offset: true }),
-  bucket: z.enum(timeseriesBuckets),
-  groupBy: z.enum(["model", "payer", "payee"]).optional(),
+  bucket: enumSchema(timeseriesBuckets),
+  groupBy: enumSchema(["model", "payer", "payee"]).optional(),
 });
 
 export const exportQuerySchema = z.strictObject({
   ...filterFields,
-  format: z.enum(["json", "csv"]),
+  format: enumSchema(["json", "csv"]),
   from: z.iso.datetime({ offset: true }).optional(),
   to: z.iso.datetime({ offset: true }).optional(),
 });
@@ -121,7 +121,7 @@ export const summaryResponseSchema = z.object({
   count: z.number(),
   byOutcome: z.object({ settled: z.number(), failed: z.number(), skipped: z.number() }),
   byAsset: z.array(assetTotalSchema),
-  byModel: z.array(assetTotalSchema.extend({ model: z.enum(settlementModels) })),
+  byModel: z.array(assetTotalSchema.extend({ model: enumSchema(settlementModels) })),
   byPayer: z.array(assetTotalSchema.extend({ payer: z.string() })),
   byPayee: z.array(assetTotalSchema.extend({ payee: z.string() })),
 });
@@ -132,8 +132,8 @@ const latencySchema = z.object({ p50: z.number(), p95: z.number(), p99: z.number
 
 /** The observability time series, unchanged. */
 export const seriesResponseSchema = z.object({
-  bucket: z.enum(timeseriesBuckets),
-  groupBy: z.enum(["model", "payer", "payee"]),
+  bucket: enumSchema(timeseriesBuckets),
+  groupBy: enumSchema(["model", "payer", "payee"]),
   from: z.string(),
   to: z.string(),
   buckets: z.array(
@@ -142,7 +142,7 @@ export const seriesResponseSchema = z.object({
       end: z.string(),
       rows: z.array(
         z.object({
-          model: z.enum(settlementModels),
+          model: enumSchema(settlementModels),
           asset: z.string(),
           payer: z.string().optional(),
           payee: z.string().optional(),
