@@ -30,9 +30,16 @@ import {
   type SettlementModel,
   type SignedReceipt,
   type StellarNetwork,
+  signedReceiptSchema,
   TollwayError,
   verifyReceipt,
 } from "@vegaforge/tollway-core";
+import {
+  assertOfferForRequest,
+  assertReceiptMatchesOffer,
+  DEFAULT_RECEIPT_MAX_SKEW_MS,
+  OfferNetworkMismatchError,
+} from "./receipt-binding.js";
 import type { ReceiptStore } from "./receipt-store.js";
 
 /** Events the client emits so callers and observability can follow along. */
@@ -75,6 +82,11 @@ export type ClientEventHandler = (event: ClientEvent) => void;
  */
 export interface ClientSettler {
   settle(input: SettleRequest): Promise<SignedReceipt>;
+  /**
+   * The Stellar address this settler pays from, when it knows it. The
+   * client then requires `receipt.payer` to equal it.
+   */
+  readonly payer?: string;
 }
 
 export type SettleRequest = {
@@ -109,8 +121,22 @@ export type TollwayClientOptions = {
    * code `"receipt-verification-failed"`. Recommended in production: the
    * receipt is the service's signature, and skipping verification leaves
    * a tampered receipt undetected on the agent side.
+   *
+   * Whether or not a verifier is set, the receipt must also describe the
+   * paid offer (amount, asset, payee, resource, network, model, settlement
+   * kind, payer and `issuedAt`); a mismatch rejects with code
+   * `"receipt-offer-mismatch"`. Without a verifier that check runs on an
+   * unauthenticated receipt, so it catches mistakes, not forgeries.
    */
   verifier?: ReceiptVerifier;
+  /**
+   * How far a receipt's `issuedAt` may be from the client clock, in
+   * milliseconds, either way. Defaults to five minutes. A receipt replayed
+   * from an older payment falls outside it and is rejected.
+   */
+  receiptMaxSkewMs?: number;
+  /** The clock for the `issuedAt` check. Defaults to `Date.now`. */
+  clock?: () => number;
   /** Default facilitator URL when an offer does not name one. */
   facilitatorUrl?: string;
   /**
@@ -161,6 +187,14 @@ export interface TollwayClient {
  */
 export function createClient(options: TollwayClientOptions): TollwayClient {
   const handlers: ClientEventHandler[] = [];
+  if (
+    options.receiptMaxSkewMs !== undefined &&
+    !(Number.isFinite(options.receiptMaxSkewMs) && options.receiptMaxSkewMs >= 0)
+  ) {
+    throw new TypeError(
+      `receiptMaxSkewMs must be a non-negative finite number, got ${options.receiptMaxSkewMs}`,
+    );
+  }
   // With a shadow policy and no active one, the candidate is compared with
   // "no policy", which an empty policy evaluates to exactly.
   const shadowBaseline =
@@ -234,12 +268,12 @@ export function createClient(options: TollwayClientOptions): TollwayClient {
     },
     async pay(request): Promise<PayResult> {
       try {
+        // Refused before any policy check or signature: paying on the wrong
+        // network is never what the agent configured.
         if (request.offer.network !== options.network) {
-          throw new TollwayError(
-            "network-mismatch",
-            `offer network "${request.offer.network}" does not match client network "${options.network}"`,
-          );
+          throw new OfferNetworkMismatchError(request.offer.network, options.network);
         }
+        assertOfferForRequest(request.resource, request.offer);
 
         const model = await decideModel(options.router, request);
         const intent: PaymentIntent = {
@@ -294,6 +328,19 @@ export function createClient(options: TollwayClientOptions): TollwayClient {
         // so a field the signature does not cover cannot reach the caller.
         const receipt = await checkedReceipt(settled, options.verifier);
 
+        // A valid signature proves only that the service signed something.
+        // The receipt must describe this payment before it is stored,
+        // recorded on the policy engine or reported as a payment.
+        assertReceiptMatchesOffer({
+          receipt,
+          offer: request.offer,
+          model,
+          network: options.network,
+          ...(options.settler.payer === undefined ? {} : { payer: options.settler.payer }),
+          now: (options.clock ?? Date.now)(),
+          maxSkewMs: options.receiptMaxSkewMs ?? DEFAULT_RECEIPT_MAX_SKEW_MS,
+        });
+
         // The payment has settled, so a store failure must not cost the payer
         // the receipt. The error goes on the result and to onStoreError.
         let storeError: Error | undefined;
@@ -327,3 +374,112 @@ export function createClient(options: TollwayClientOptions): TollwayClient {
     },
   };
 }
+
+/**
+ * Thrown when the policy engine blocks a payment before settlement.
+ * Extends `TollwayError` with code `"policy-blocked"` so a caller branching
+ * on `error.code` across Tollway picks this up uniformly with the rest of
+ * the typed errors. `rule` and `detail` carry the specific policy decision
+ * so the caller can branch on the rule that fired (budget, per-service,
+ * rate-limit, etc.).
+ */
+export class PolicyBlockedError extends TollwayError {
+  readonly rule: string;
+  readonly detail: string;
+  constructor(rule: string, detail: string) {
+    super("policy-blocked", `policy blocked payment: ${rule} (${detail})`);
+    this.name = "PolicyBlockedError";
+    this.rule = rule;
+    this.detail = detail;
+  }
+}
+
+/**
+ * Thrown when the returned receipt fails verification against the
+ * configured verifier. Extends `TollwayError` with code
+ * `"receipt-verification-failed"` so it composes with the rest of the
+ * typed-error model; `reason` carries the underlying verifier message
+ * (schema mismatch, signature did not verify, unknown key, etc.).
+ */
+export class ReceiptVerificationError extends TollwayError {
+  readonly reason: string;
+  constructor(reason: string) {
+    super("receipt-verification-failed", `receipt failed verification: ${reason}`);
+    this.name = "ReceiptVerificationError";
+    this.reason = reason;
+  }
+}
+
+/**
+ * Returns the receipt as parsed and, when a verifier is set, as verified.
+ * Without a verifier the signature is not checked, but the shape still is.
+ */
+async function checkedReceipt(
+  candidate: unknown,
+  verifier: ReceiptVerifier | undefined,
+): Promise<SignedReceipt> {
+  if (verifier) {
+    const verification = await verifyReceipt(candidate, verifier);
+    if (!verification.valid) {
+      throw new ReceiptVerificationError(verification.reason);
+    }
+    return verification.receipt;
+  }
+  const parsed = signedReceiptSchema.safeParse(candidate);
+  if (!parsed.success) {
+    throw new TollwayError(
+      "invalid-receipt",
+      `settler returned a malformed receipt: ${parsed.error.issues.map((i) => i.message).join("; ")}`,
+    );
+  }
+  return parsed.data;
+}
+
+async function decideModel(
+  router: ModelRouter | undefined,
+  request: PayRequest,
+): Promise<SettlementModel> {
+  if (request.model) return request.model;
+  if (!router) return "x402";
+  const decision = await router.decide({
+    counterparty: request.offer.payTo,
+    resource: request.resource,
+    offer: request.offer,
+  });
+  return decision.model;
+}
+
+function normalizeError(value: unknown): Error {
+  if (value instanceof Error) return value;
+  return new Error(typeof value === "string" ? value : JSON.stringify(value));
+}
+
+export {
+  DEFAULT_RECEIPT_MAX_SKEW_MS,
+  OfferNetworkMismatchError,
+  ReceiptOfferMismatchError,
+  resourceIdentity,
+} from "./receipt-binding.js";
+export {
+  createMemoryReceiptStore,
+  DEFAULT_RECEIPT_PAGE_SIZE,
+  MAX_RECEIPT_PAGE_SIZE,
+  type ModelSpendTotal,
+  type PayeeSpendTotal,
+  type ReceiptFilter,
+  type ReceiptHistory,
+  type ReceiptQueryPage,
+  type ReceiptQueryResult,
+  type ReceiptStore,
+  type SpendLedger,
+  type SpendLedgerQuery,
+  type SpendLedgerTotals,
+  type SpendTotal,
+} from "./receipt-store.js";
+export {
+  createX402Settler,
+  PAYMENT_REQUIRED_HEADER,
+  PAYMENT_SIGNATURE_HEADER,
+  TOLLWAY_RECEIPT_HEADER,
+  type X402SettlerOptions,
+} from "./x402-settler.js";
