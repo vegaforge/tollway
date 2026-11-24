@@ -243,6 +243,23 @@ a remote service can provide the `x402` capability with async callbacks and
 never expose a key. The MPP capabilities hand over a `Keypair`, so they can
 only come from a key held in process.
 
+## Paying for MCP tools
+
+`@vegaforge/tollway-client/mcp` wraps an MCP client so a paid tool call is
+paid through the same client: offer checks, policy, retries and receipt
+verification all apply, and the tool result comes back with the verified
+receipt. A tool error that is not an x402 payment request is returned
+unchanged and never paid.
+
+```ts
+import { createTollwayMcpClient } from "@vegaforge/tollway-client/mcp";
+
+const agent = createTollwayMcpClient({ client: mcp, network: "testnet", signer, policy, verifier });
+const { result, paid, receipt } = await agent.callTool({ name: "forecast", arguments: { city: "Lagos" } });
+```
+
+See the [MCP tools guide](https://github.com/vegaforge/tollway/blob/dev/apps/web/src/content/docs/mcp-tools.mdx).
+
 ## Hardening an agent
 
 A 402 challenge is attacker-controlled input. Before the policy engine and

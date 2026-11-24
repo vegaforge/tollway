@@ -6,7 +6,10 @@
 
 import { CounterpartyQuarantine } from '@vegaforge/tollway-core';
 import { QuarantineEntry } from '@vegaforge/tollway-core';
+import { ReceiptBody } from '@vegaforge/tollway-core';
 import { SignedReceipt } from '@vegaforge/tollway-core';
+import { StellarNetwork } from '@vegaforge/tollway-core';
+import { z } from 'zod';
 
 // @public (undocumented)
 export type AlertDeliveryReport = {
@@ -38,11 +41,117 @@ export type BuildReconciliationReportOptions = {
 };
 
 // @public
+export interface ChainReader {
+    assetContractId(asset: string, network: StellarNetwork): string;
+    getTransaction(hash: string, network: StellarNetwork): Promise<ChainTransaction>;
+}
+
+// @public (undocumented)
+export type ChainTransaction = z.infer<typeof chainTransactionSchema>;
+
+// @public
+export const chainTransactionSchema: z.ZodDiscriminatedUnion<[z.ZodObject<{
+    hash: z.ZodString;
+    networkPassphrase: z.ZodString;
+    latestLedger: z.ZodNumber;
+    latestLedgerCloseTime: z.ZodISODateTime;
+    oldestLedger: z.ZodNumber;
+    oldestLedgerCloseTime: z.ZodISODateTime;
+    status: z.ZodLiteral<"NOT_FOUND">;
+}, z.core.$strict>, z.ZodObject<{
+    ledger: z.ZodNumber;
+    createdAt: z.ZodISODateTime;
+    feeBump: z.ZodBoolean;
+    transfers: z.ZodArray<z.ZodObject<{
+        contract: z.ZodString;
+        from: z.ZodString;
+        to: z.ZodString;
+        amount: z.ZodString;
+    }, z.core.$strict>>;
+    hash: z.ZodString;
+    networkPassphrase: z.ZodString;
+    latestLedger: z.ZodNumber;
+    latestLedgerCloseTime: z.ZodISODateTime;
+    oldestLedger: z.ZodNumber;
+    oldestLedgerCloseTime: z.ZodISODateTime;
+    status: z.ZodEnum<{
+        SUCCESS: "SUCCESS";
+        FAILED: "FAILED";
+    }>;
+}, z.core.$strict>], "status">;
+
+// @public (undocumented)
+export type ChainTransfer = z.infer<typeof chainTransferSchema>;
+
+// @public
+export const chainTransferSchema: z.ZodObject<{
+    contract: z.ZodString;
+    from: z.ZodString;
+    to: z.ZodString;
+    amount: z.ZodString;
+}, z.core.$strict>;
+
+// @public (undocumented)
+export type ChannelDriftKind = "under-settled" | "over-settled" | "missing-commitment" | "unexpected-remainder" | "sequence-gap" | "malformed-record"
+/** A cumulative amount is lower than one at an earlier sequence. */
+| "non-monotonic-cumulative"
+/** A commitment names a different channel than the settlement. */
+| "foreign-commitment"
+/** Two or more commitments share one sequence. */
+| "duplicate-sequence";
+
+// @public
+export interface ChannelStateReader {
+    getChannelState(channelId: string, network: StellarNetwork): Promise<OnChainChannelState>;
+}
+
+// @public
+export type ChargeConfirmation = {
+    status: "confirmed";
+} | {
+    status: "drift";
+    drift: ChargeDrift[];
+} | {
+    status: "unverifiable";
+    reason: string;
+} | {
+    status: "retryable";
+    reason: string;
+};
+
+// @public (undocumented)
+export type ChargeDrift = {
+    kind: ChargeDriftKind;
+    detail: string;
+};
+
+// @public
+export type ChargeDriftKind =
+/** The transaction is on chain but failed. */
+"tx-failed"
+/** The transaction should be inside the RPC retention window but is not there. */
+| "tx-not-found"
+/** The transaction succeeded but moved no SEP-41 token at all. */
+| "transfer-missing" | "amount-mismatch" | "payee-mismatch" | "payer-mismatch"
+/** The closest transfer was emitted by a different token contract. */
+| "asset-mismatch"
+/** The RPC server is on a different network than the receipt names. */
+| "network-mismatch";
+
+// @public
+export type ChargeReceipt = Pick<ReceiptBody, "payer" | "payee" | "amount" | "asset" | "network" | "issuedAt"> & {
+    txHash: string;
+};
+
+// @public
 export type CommitmentRecord = {
     channelId: string;
     sequence: number;
     cumulativeAmount: string;
 };
+
+// @public
+export function confirmCharge(receipt: ChargeReceipt, tx: ChainTransaction, assetContract: string): ChargeConfirmation;
 
 // @public
 export function createDriftAlertBridge(options: DriftAlertBridgeOptions): DriftAlertBridge;
@@ -117,18 +226,12 @@ export interface DriftAlertStore {
 }
 
 // @public (undocumented)
-export type DriftKind = "under-settled" | "over-settled" | "missing-commitment" | "unexpected-remainder" | "sequence-gap" | "malformed-record"
-/** A cumulative amount is lower than one at an earlier sequence. */
-| "non-monotonic-cumulative"
-/** A commitment names a different channel than the settlement. */
-| "foreign-commitment"
-/** Two or more commitments share one sequence. */
-| "duplicate-sequence";
+export type DriftKind = ChannelDriftKind | ChargeDriftKind | OpenChannelDriftKind;
 
 // @public (undocumented)
 export type DriftQuarantineEvent = {
     counterparty: string;
-    channelId: string;
+    subject: ReconciliationSubject;
     drift: Drift;
     entry: QuarantineEntry;
 };
@@ -139,7 +242,7 @@ export type DriftSeverity = "low" | "medium" | "high" | "critical";
 // @public (undocumented)
 export type DriftWarnEvent = {
     counterparty: string;
-    channelId: string;
+    subject: ReconciliationSubject;
     drift: Drift;
 };
 
@@ -148,6 +251,53 @@ export function exportReconciliationReport(report: ReconciliationReport, format:
 
 // @public (undocumented)
 export type ExportReportFormat = "json" | "csv";
+
+// @public (undocumented)
+export type OnChainChannelState = z.infer<typeof onChainChannelStateSchema>;
+
+// @public
+export const onChainChannelStateSchema: z.ZodObject<{
+    balance: z.ZodString;
+    token: z.ZodString;
+    from: z.ZodString;
+    to: z.ZodString;
+    closeEffectiveAtLedger: z.ZodNullable<z.ZodNumber>;
+    currentLedger: z.ZodNumber;
+    refundWaitingPeriod: z.ZodNumber;
+}, z.core.$strict>;
+
+// @public (undocumented)
+export type OpenChannelDrift = {
+    kind: OpenChannelDriftKind;
+    detail: string;
+};
+
+// @public
+export type OpenChannelDriftKind =
+/** The channel is open locally, but a close has started or settled on chain. */
+"closed-on-chain"
+/** The contract pays a different recipient than the channel's counterparty. */
+| "recipient-mismatch"
+/** The contract was funded by a different address than expected. */
+| "funder-mismatch"
+/** The contract holds a different token than the channel's asset. */
+| "token-mismatch"
+/** Tokens left the contract beyond what was committed. */
+| "balance-mismatch"
+/** A snapshot amount is not a non-negative integer string. */
+| "malformed-record";
+
+// @public
+export type OpenChannelSnapshot = {
+    channelId: string;
+    network: StellarNetwork;
+    status: string;
+    counterparty: string;
+    tokenContract: string;
+    deposit: string;
+    committed: string;
+    funder?: string;
+};
 
 // @public (undocumented)
 export type ProcessedDriftAction = {
@@ -178,15 +328,21 @@ export type QuarantineEnforcerOptions = {
     maxRememberedResults?: number;
 };
 
+// @public
+export function reconcileOpenChannel(snapshot: OpenChannelSnapshot, state: OnChainChannelState): OpenChannelDrift[];
+
 // @public (undocumented)
 export interface Reconciler {
+    checkOpenChannel(snapshot: OpenChannelSnapshot): Promise<ReconciliationResult>;
     reconcileChannel(commitments: CommitmentRecord[], settlement: SettlementRecord): Promise<ReconciliationResult>;
     reconcileCharge(receipt: SignedReceipt): Promise<ReconciliationResult>;
 }
 
 // @public (undocumented)
 export type ReconcilerOptions = {
-    suppress?: (drift: Drift, channelId: string) => boolean;
+    suppress?: (drift: Drift, subject: ReconciliationSubject) => boolean;
+    chain?: ChainReader;
+    channels?: ChannelStateReader;
 };
 
 // @public (undocumented)
@@ -220,8 +376,10 @@ export type ReconciliationReport = {
 // @public (undocumented)
 export type ReconciliationReportEntry = {
     subject: string;
+    status: ReconciliationResult["status"];
     ok: boolean;
     drift: Drift[];
+    reason?: string;
     amounts?: ReconciliationAmounts;
 };
 
@@ -241,6 +399,8 @@ export type ReconciliationReportTotals = {
     total: number;
     ok: number;
     drifted: number;
+    unverifiable: number;
+    retryable: number;
     driftItems: number;
     byDriftKind: Record<DriftKind, number>;
     amounts?: {
@@ -250,15 +410,40 @@ export type ReconciliationReportTotals = {
     };
 };
 
-// @public (undocumented)
+// @public
 export type ReconciliationResult = {
+    status: "ok";
     ok: true;
+    subject: ReconciliationSubject;
+} | {
+    status: "drift";
+    ok: false;
+    subject: ReconciliationSubject;
+    drift: Drift[];
+} | {
+    status: "unverifiable";
+    ok: false;
+    subject: ReconciliationSubject;
+    reason: string;
+} | {
+    status: "retryable";
+    ok: false;
+    subject: ReconciliationSubject;
+    reason: string;
+};
+
+// @public
+export type ReconciliationSubject = {
+    kind: "channel";
     channelId: string;
 } | {
-    ok: false;
-    channelId: string;
-    drift: Drift[];
+    kind: "transaction";
+    txHash: string;
+    network: StellarNetwork;
 };
+
+// @public
+export function reconciliationSubjectId(subject: ReconciliationSubject): string;
 
 // @public (undocumented)
 export type ReportRange = {
@@ -276,6 +461,9 @@ export type SettlementRecord = {
     returnedRemainder: string;
     txHash: string;
 };
+
+// @public
+export const STELLAR_NETWORK_PASSPHRASE: Record<StellarNetwork, string>;
 
 // (No @packageDocumentation comment for this package)
 
