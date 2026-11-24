@@ -4,6 +4,8 @@
 
 Add `ChannelManager.recover` for funder-side channel recovery (#38).
 
-- Reads chain state first, starts a close when none is in progress, refunds once the close is effective by ledger number, and records an already-settled channel without refunding.
-- Adds `RecoveryNotYetEffectiveError` and `onEvent` with `channel:recovering` / `channel:recovered`; concurrent recoveries for one channel share one run.
-- Breaking for custom implementations: `MppChannelAdapter` now requires `startClose`, `refund` and `getState`. The Stellar adapter implements `getState` from `@stellar/mpp@0.7.1`; the real funder transactions are issue #101 and currently throw a typed not-implemented error.
+- Works on `open`, `closing` and `recovering` channels. Reads chain state first, moves the channel to `recovering` by compare-and-set before it starts a funder close, records the effective ledger, refunds once the current ledger is past it, and records an already-settled channel as `closed` without refunding.
+- A funder close found on chain is recorded as `recovering` even when this process did not start it. `CloseNotSubmittedError` from `startClose` hands the channel back to the status it had.
+- Adds `RecoveryNotYetEffectiveError`, and the `channel:recovering` and `channel:recovered` lifecycle events (`ChannelRecoveringEvent`, `ChannelRecoveredEvent`) through the existing `onEvent` and `onEventError`. `resume` now records the effective ledger when it hands a channel to recovery.
+- The PostgreSQL and Redis commitment stores persist `closeEffectiveAtLedger`, `recoveredAmount` and `refundTxHash`. PostgreSQL deployments apply `migrations/0002_channel_recovery.sql` after 0001.
+- Breaking for custom implementations: `MppChannelAdapter` now requires `startClose`, `refund` and `getState`. The Stellar adapter implements `getState` from `@stellar/mpp@0.7.1`; the funder transactions are issue #101, and until then `startClose` throws `CloseNotSubmittedError` wrapping a not-implemented error and `refund` throws a not-implemented error.

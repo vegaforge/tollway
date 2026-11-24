@@ -24,6 +24,23 @@ hub.record({
 
 Metrics are held in memory by the hub. Every amount, in and out, is an integer string in the asset's smallest unit, added with `bigint`.
 
+## From the payment gate
+
+Pass the hub to `createPaywall` as `observer` and the gate records every payment it settles or fails:
+
+```ts
+import { createPaywall } from "@vegaforge/tollway-server";
+
+const gate = createPaywall(config, {
+  signer,
+  facilitator,
+  observer: hub,
+  onObserverError: (error) => log.warn({ error }, "payment observer failed"),
+});
+```
+
+A fresh settlement records a `settled` metric and emits `receipt.created` with the receipt id, resource, model and amount. A rejected verification or a failed or thrown settlement records a `failed` metric. Its `payer` is `""`, because no payer was verified; stores accept an empty payer only on a `failed` metric. `latencyMs` covers verify plus settle, measured with the gate's `clock`. A replay from the idempotency cache, or a request that shares another request's settlement of the same payment, records nothing, so one payment counts once. The gate does not wait for event delivery, and an observer that throws or rejects never changes the payment's outcome: the error goes to `onObserverError`. The observer type is structural, so `@vegaforge/tollway-server` does not depend on this package.
+
 ## Querying a time series
 
 `hub.timeseries` cuts a time range into buckets and returns, for each bucket, one row per model and asset:
