@@ -6,6 +6,7 @@
     "deployment",
     "gate-errors",
     "route-tables",
+    "payment-options",
     "discovery",
     "---Concepts---",
     "model-router",

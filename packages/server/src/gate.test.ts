@@ -786,7 +786,10 @@ describe("createPaywall", () => {
 describe("TM-02 cross-offer replay", () => {
   const headers = { [PAYMENT_SIGNATURE_HEADER]: paymentHeader() };
 
-  function gateFor(overrides: Partial<PaywallConfig>, cache: SettlementCache) {
+  function gateFor(
+    overrides: Partial<Extract<PaywallConfig, { amount: unknown }>>,
+    cache: SettlementCache,
+  ) {
     return createPaywall(
       { ...config, ...overrides },
       {
@@ -817,12 +820,21 @@ describe("TM-02 cross-offer replay", () => {
     const first = await gateFor({ resource: "/a" }, cache)({ ...baseRequest, headers });
     expect(first.kind).toBe("settled");
 
-    const replay = await gateFor(
-      { resource: "/a", amount: "99999999" },
-      cache,
-    )({
+    const repriced = gateFor({ resource: "/a", amount: "99999999" }, cache);
+    // As paid, the payment's accepted terms name the old amount, which this
+    // offer does not list: refused before any lookup (#158).
+    expect(await repriced({ ...baseRequest, headers })).toMatchObject({
+      kind: "rejected",
+      status: 402,
+      code: "payment-invalid",
+    });
+    // With accepted rewritten to the new amount, the same signed payment
+    // reaches the cached receipt, whose binding refuses it.
+    const rewritten = decodePaymentSignatureHeader(headers[PAYMENT_SIGNATURE_HEADER]);
+    rewritten.accepted = { ...rewritten.accepted, amount: "99999999" };
+    const replay = await repriced({
       ...baseRequest,
-      headers,
+      headers: { [PAYMENT_SIGNATURE_HEADER]: encodePaymentSignatureHeader(rewritten) },
     });
     expect(replay).toEqual({
       kind: "rejected",
@@ -1197,7 +1209,7 @@ describe("receipt v2 issuance and binding (#166)", () => {
   const headers = { [PAYMENT_SIGNATURE_HEADER]: paymentHeader() };
 
   function gateFor(
-    overrides: Partial<PaywallConfig>,
+    overrides: Partial<Extract<PaywallConfig, { amount: unknown }>>,
     cache: SettlementCache,
     receiptVersion?: 1 | 2,
   ) {

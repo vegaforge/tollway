@@ -62,6 +62,7 @@ export {
   type PaywallTarget,
   type PaywallValidation,
   parseFacilitatorCapabilities,
+  paymentTargets,
   type ValidationMode,
   validatePaywall,
 } from "./facilitator-capabilities.js";
@@ -78,10 +79,13 @@ export {
   type DynamicPriceFunction,
   type Gate,
   type GateOutcome,
+  type PaymentOption,
+  type PaymentOptionsConfig,
   type PaymentPrevalidationOptions,
   type PaywallConfig,
   type PaywallDeps,
   type PrevalidationRejection,
+  type SinglePaymentOptionConfig,
   type TollwayRequest,
 } from "./gate.js";
 export {
@@ -143,6 +147,7 @@ export {
   type RouteTable,
   type RouteTableEntry,
   type RouteTableMatch,
+  type RouteTableOption,
 } from "./route-table.js";
 export {
   createInMemoryServicePolicyStore,

@@ -9,6 +9,7 @@ import {
   type FacilitatorClient,
   type PaywallConfig,
   type SettlementCache,
+  type SinglePaymentOptionConfig,
 } from "@vegaforge/tollway-server";
 import { Redis } from "ioredis";
 import { type ExampleConfig, ExampleConfigError, type ExampleEnv, resolveConfig } from "./config";
@@ -138,7 +139,7 @@ export async function createServices(env: ExampleEnv): Promise<Services> {
   // One cache for both routes: the gate binds each cached receipt to its
   // offer, so a payment for a quote can never unlock a summary.
   const cache = buildCache(config);
-  const base: Omit<PaywallConfig, "amount"> = {
+  const base: Omit<SinglePaymentOptionConfig, "amount"> & Pick<PaywallConfig, "models"> = {
     asset: config.asset,
     payTo: config.payTo,
     network: config.network,

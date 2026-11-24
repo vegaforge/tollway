@@ -17,7 +17,11 @@ import {
   type X402Payment,
 } from "@vegaforge/tollway-core";
 import { x402Version } from "@x402/core";
-import type { PaymentRequired, PaymentPayload as X402Payload } from "@x402/core/types";
+import type {
+  PaymentRequired,
+  PaymentRequirements,
+  PaymentPayload as X402Payload,
+} from "@x402/core/types";
 import type { SettlementCache, SettlementEntry, SettlementLock } from "./cache.js";
 import {
   checkDiscoveryDeclaration,
@@ -47,6 +51,11 @@ import {
   TOLLWAY_RECEIPT_HEADER,
 } from "./headers.js";
 import type { MppChargeHandler } from "./mpp-charge.js";
+import {
+  matchAcceptedOption,
+  type ResolvedPaymentOption,
+  resolvePaymentOptions,
+} from "./payment-options.js";
 import type { PaymentReceiptArchive } from "./payment-receipt-archive.js";
 import {
   createInMemoryServicePolicyStore,
@@ -80,10 +89,34 @@ export type TollwayRequest = {
 
 export type DynamicPriceFunction = (request: TollwayRequest) => string | Promise<string>;
 
-/** What the service charges for a resource. */
-export type PaywallConfig = {
+/**
+ * One way to pay for a route (#158): an amount of one asset, paid to one
+ * account on one network, settled through one facilitator.
+ */
+export type PaymentOption = {
   /** Price as an integer string in the asset's smallest unit. */
-  amount: string | DynamicPriceFunction;
+  amount: string;
+  /** The Soroban asset contract (`C...`) x402 names. */
+  asset: string;
+  /** Stellar address the payment settles to. Tollway never sits in between. */
+  payTo: string;
+  network: StellarNetwork;
+  /**
+   * The facilitator that verifies and settles this option. Defaults to
+   * `PaywallDeps.facilitator`; options on different networks usually need
+   * different ones. An x402 option with neither is refused at `createPaywall`.
+   */
+  facilitator?: FacilitatorClient;
+  /** Recorded on the offer, as the single-option field of the same name. */
+  facilitatorUrl?: string;
+  /** x402: how long the payment stays valid, in seconds. Defaults to 60. */
+  maxTimeoutSeconds?: number;
+  /** x402: scheme-specific data, sent as `PaymentRequirements.extra`. */
+  extra?: Record<string, unknown>;
+};
+
+/** The settings every paywall has, whether it offers one payment option or several. */
+type PaywallCommon = {
   /** Required bounds for a dynamic price function. */
   minAmount?: string;
   maxAmount?: string;
@@ -97,19 +130,10 @@ export type PaywallConfig = {
   previousQuoteSecrets?: readonly string[];
   /** Quote validity in seconds. Defaults to 60. */
   quoteTtlSeconds?: number;
-  asset: string;
-  /** Stellar address the payment settles to. Tollway never sits in between. */
-  payTo: string;
-  network: StellarNetwork;
   /** Accepted models, in order of preference. Defaults to x402 only. */
   models?: SettlementModel[];
   /** Overrides the request URL as the resource identifier in the receipt. */
   resource?: string;
-  facilitatorUrl?: string;
-  /** x402: how long the payment stays valid, in seconds. Defaults to 60. */
-  maxTimeoutSeconds?: number;
-  /** x402: scheme-specific data, sent as `PaymentRequirements.extra`. */
-  extra?: Record<string, unknown>;
   /**
    * Publishes the route through x402 Bazaar discovery (#154): the 402 then
    * carries `extensions.bazaar`, enriched with the request method and
@@ -119,6 +143,49 @@ export type PaywallConfig = {
    */
   discovery?: DiscoveryDeclaration;
 };
+
+/** A paywall with one payment option, set with the top-level fields. */
+export type SinglePaymentOptionConfig = {
+  /**
+   * Price as an integer string in the asset's smallest unit, or a function
+   * that prices each request (dynamic pricing, #157).
+   */
+  amount: string | DynamicPriceFunction;
+  asset: string;
+  /** Stellar address the payment settles to. Tollway never sits in between. */
+  payTo: string;
+  network: StellarNetwork;
+  facilitatorUrl?: string;
+  /** x402: how long the payment stays valid, in seconds. Defaults to 60. */
+  maxTimeoutSeconds?: number;
+  /** x402: scheme-specific data, sent as `PaymentRequirements.extra`. */
+  extra?: Record<string, unknown>;
+  accepts?: never;
+};
+
+/**
+ * A paywall with several payment options (#158), in the service's order of
+ * preference. The 402 lists all of them; a payment settles with the one the
+ * payer's `accepted` matches exactly, and is refused if it matches none.
+ * Dynamic pricing applies to single-option paywalls only.
+ */
+export type PaymentOptionsConfig = {
+  accepts: readonly PaymentOption[];
+  amount?: never;
+  asset?: never;
+  payTo?: never;
+  network?: never;
+  facilitatorUrl?: never;
+  maxTimeoutSeconds?: never;
+  extra?: never;
+};
+
+/**
+ * What the service charges for a resource: one payment option in the
+ * top-level fields, or several in `accepts`. A single option is the same as
+ * a one-item `accepts` list, and its 402 is unchanged by #158.
+ */
+export type PaywallConfig = PaywallCommon & (SinglePaymentOptionConfig | PaymentOptionsConfig);
 
 /**
  * What the gate decided for one request: a 402 with the challenge, a settled
@@ -203,7 +270,12 @@ export type Gate = (request: TollwayRequest) => Promise<GateOutcome>;
  */
 export type PaywallDeps = {
   signer: ReceiptSigner;
-  facilitator: FacilitatorClient;
+  /**
+   * The facilitator for every payment option that does not name its own.
+   * Required unless each x402 option sets `facilitator`, or the paywall only
+   * accepts mpp-charge.
+   */
+  facilitator?: FacilitatorClient;
   mppChargeHandler?: MppChargeHandler;
   router?: ModelRouter;
   cache?: SettlementCache;
@@ -496,16 +568,20 @@ async function priceRequest(
   request: TollwayRequest,
   onPriceError: PaywallDeps["onPriceError"],
 ): Promise<{ ok: true; amount: string } | { ok: false; outcome: RejectedOutcome }> {
+  const price = config.amount;
   const reject = (problem: string) =>
     ({
       ok: false,
       outcome: gateRejection("price-unavailable", `dynamic price ${problem}`),
     }) as const;
-  if (typeof config.amount !== "function") return { ok: true, amount: config.amount };
+  if (typeof price !== "function") {
+    // Only a dynamic single-option paywall is priced per request.
+    throw new TypeError("priceRequest needs a dynamic price function");
+  }
 
   let priced: unknown;
   try {
-    priced = await config.amount(request);
+    priced = await price(request);
   } catch (error) {
     onPriceError?.(error, request);
     return reject("function failed");
@@ -1508,6 +1584,38 @@ async function settleLateAnswer(
 
 const BODY_HEADERS = new Set(["content-type", "content-length", "content-encoding"]);
 
+/** One payment option as a request sees it: its offer and the requirements it advertises. */
+type OfferedOption = {
+  option: ResolvedPaymentOption;
+  offer: PaymentOffer;
+  requirements: PaymentRequirements;
+};
+
+/** The offer and advertised requirements of each option, for one request. */
+function offerOptions(
+  options: readonly ResolvedPaymentOption[],
+  resource: string,
+  dynamicAmount: string | undefined,
+  models: SettlementModel[],
+  quote: string | undefined,
+): OfferedOption[] {
+  return options.map((option) => {
+    // Only a single-option paywall can be dynamic; its price is per request.
+    const amount = typeof option.amount === "string" ? option.amount : (dynamicAmount as string);
+    const offer: PaymentOffer = {
+      resource,
+      amount,
+      asset: option.asset,
+      payTo: option.payTo,
+      network: option.network,
+      models,
+      facilitatorUrl: option.facilitatorUrl,
+      quote,
+    };
+    return { option, offer, requirements: toPaymentRequirements(offer, option.terms) };
+  });
+}
+
 /**
  * The 402 for a request with no payment. It carries the x402 V2
  * `PaymentRequired` in the PAYMENT-REQUIRED header and as the JSON body.
@@ -1516,25 +1624,24 @@ const BODY_HEADERS = new Set(["content-type", "content-length", "content-encodin
  * answer with either protocol.
  */
 async function paymentRequired(
-  offer: PaymentOffer,
+  offered: readonly OfferedOption[],
   request: TollwayRequest,
   acceptedModels: SettlementModel[],
   mppChargeHandler: MppChargeHandler | undefined,
   config: PaywallConfig,
   quote: string | undefined,
 ): Promise<Extract<GateOutcome, { kind: "payment-required" }>> {
+  const [primary] = offered;
+  if (!primary) throw new TypeError("a paywall offers at least one payment option");
+  const offer = primary.offer;
   const challenge: PaymentRequired = {
     x402Version,
     resource: {
       url: offer.resource,
       ...(config.discovery ? discoveryResourceInfo(config.discovery) : {}),
     },
-    accepts: [
-      toPaymentRequirements(offer, {
-        maxTimeoutSeconds: config.maxTimeoutSeconds,
-        extra: config.extra,
-      }),
-    ],
+    // Every option, in the service's preference order (#158).
+    accepts: offered.map((option) => option.requirements),
   };
   // Only a route that opts in publishes anything (#154).
   if (config.discovery) {
@@ -1544,6 +1651,8 @@ async function paymentRequired(
     [PAYMENT_REQUIRED_HEADER]: encodePaymentRequiredHeader(challenge),
   };
   if (quote !== undefined) headers[TOLLWAY_QUOTE_HEADER] = quote;
+  // MPP charges one amount of one asset, so it is offered on the primary
+  // (first) option only.
   if (acceptedModels.includes("mpp-charge") && mppChargeHandler?.challenge) {
     const mpp = await mppChargeHandler.challenge({
       offer,
@@ -1599,6 +1708,7 @@ export function createPaywallWithInFlight(
   }
   if (config.discovery) checkDiscoveryDeclaration(config.discovery);
   const acceptedModels = config.models ?? ["x402"];
+  const options = resolvePaymentOptions(config, deps.facilitator, acceptedModels);
   const clock = deps.clock ?? Date.now;
   const servicePolicyStore =
     deps.servicePolicy && (deps.servicePolicyStore ?? createInMemoryServicePolicyStore());
@@ -1617,8 +1727,6 @@ export function createPaywallWithInFlight(
       "paymentPrevalidation.maxPaymentSignatureLength must be a positive integer",
     );
   }
-  // The mock's payments are not Stellar envelopes; it says so explicitly.
-  const prevalidates = deps.facilitator.acceptsMockPayments !== true;
   let rejectedTotal = 0;
   const localRejection = async (
     reason: PrevalidationReason,
@@ -1689,13 +1797,11 @@ export function createPaywallWithInFlight(
     }
 
     const resource = config.resource ?? request.url;
-    let amount: string;
+    let dynamicAmount: string | undefined;
     let quote: string | undefined;
     let candidateQuote: string | undefined;
     let quoteExpired = false;
-    if (typeof config.amount !== "function") {
-      amount = config.amount;
-    } else {
+    if (typeof config.amount === "function") {
       const now = clock();
       candidateQuote = x402Payment
         ? quoteFromPayload(x402Payment)
@@ -1708,37 +1814,32 @@ export function createPaywallWithInFlight(
       // retries after expiry must get its receipt, not a 402 it would pay
       // again. MPP credentials carry no idempotency key, so they get a 402.
       if (verified && (!verified.expired || x402Payment)) {
-        amount = verified.payload.amount;
+        dynamicAmount = verified.payload.amount;
         quote = candidateQuote;
         quoteExpired = verified.expired;
       } else {
         const priced = await priceRequest(config, request, deps.onPriceError);
         if (!priced.ok) return priced.outcome;
-        amount = priced.amount;
+        dynamicAmount = priced.amount;
         quote = await createQuote(
           resource,
-          amount,
+          dynamicAmount,
           now,
           config.quoteTtlSeconds ?? DEFAULT_QUOTE_TTL_SECONDS,
           config.quoteSecret ?? "",
         );
       }
     }
-    const offer: PaymentOffer = {
-      resource,
-      amount,
-      asset: config.asset,
-      payTo: config.payTo,
-      network: config.network,
-      models: acceptedModels,
-      facilitatorUrl: config.facilitatorUrl,
-      quote,
-    };
+    const offered = offerOptions(options, resource, dynamicAmount, acceptedModels, quote);
+    // The primary option: the one MPP charges, and the only one a dynamic
+    // paywall has.
+    const primary = offered[0] as OfferedOption;
 
+    const challenge = (): Promise<Extract<GateOutcome, { kind: "payment-required" }>> =>
+      paymentRequired(offered, request, acceptedModels, deps.mppChargeHandler, config, quote);
     // The challenge a refused payment carries, so the agent can pay again.
     const challengeHeaders = async (): Promise<Record<string, string>> =>
-      (await paymentRequired(offer, request, acceptedModels, deps.mppChargeHandler, config, quote))
-        .headers;
+      (await challenge()).headers;
 
     if (oversized) {
       return localRejection("payment_signature_too_large", resource, challengeHeaders);
@@ -1747,7 +1848,7 @@ export function createPaywallWithInFlight(
     // A dynamic price is only paid against a quote this gate issued: a
     // missing, expired, tampered or mismatched one gets a fresh 402.
     if (typeof config.amount === "function" && candidateQuote !== quote) {
-      return paymentRequired(offer, request, acceptedModels, deps.mppChargeHandler, config, quote);
+      return challenge();
     }
 
     // An MPP credential answers an MPP challenge, so the agent has already
@@ -1759,7 +1860,7 @@ export function createPaywallWithInFlight(
       const payment: MppChargePayment = { model: "mpp-charge", payload: mppCredential };
       return settleWithHandler(
         payment,
-        offer,
+        primary.offer,
         "mpp-charge",
         method,
         deps.mppChargeHandler,
@@ -1769,14 +1870,34 @@ export function createPaywallWithInFlight(
     }
 
     if (!x402Payment) {
-      return paymentRequired(offer, request, acceptedModels, deps.mppChargeHandler, config, quote);
+      return challenge();
     }
+
+    // The payer names the option it chose in `accepted`, which it controls,
+    // so nothing is taken from it: it must equal, field for field, one of
+    // the requirements this gate advertises, and the matched option's own
+    // terms are used from here on (#158).
+    const chosen = matchAcceptedOption(offered, x402Payment.accepted);
+    if (!chosen) {
+      return gateRejection(
+        "payment-invalid",
+        "the payment's accepted terms match none of this route's payment options",
+        { headers: await challengeHeaders() },
+      );
+    }
+    const offer = chosen.offer;
 
     const decision = deps.router
       ? await deps.router.decide({ counterparty: offer.payTo, resource: offer.resource, offer })
       : ({ model: acceptedModels[0], reason: "default" } as const);
 
     if (decision.model === "x402") {
+      const facilitator = chosen.option.facilitator;
+      if (!facilitator) {
+        // resolvePaymentOptions refuses an x402 paywall without one, so this
+        // is a router that chose x402 for a paywall that does not accept it.
+        return gateRejection("handler-not-configured", "no facilitator configured for x402");
+      }
       const payment: X402Payment = { model: "x402", payload: x402Payment };
       // Under an expired quote the payment may only replay; if it never
       // settled, the agent gets a fresh price and quote instead.
@@ -1791,7 +1912,7 @@ export function createPaywallWithInFlight(
           config.quoteSecret ?? "",
         );
         return paymentRequired(
-          { ...offer, amount: priced.amount, quote: fresh },
+          offerOptions(options, resource, priced.amount, acceptedModels, fresh),
           request,
           acceptedModels,
           deps.mppChargeHandler,
@@ -1802,13 +1923,9 @@ export function createPaywallWithInFlight(
       const payload = x402Payment;
       const prevalidate = async (): Promise<RejectedOutcome | undefined> => {
         const transaction = payload.payload.transaction;
-        const terms = toPaymentRequirements(offer, {
-          maxTimeoutSeconds: config.maxTimeoutSeconds,
-          extra: config.extra,
-        });
         const check = (latestLedger?: number) =>
           typeof transaction === "string"
-            ? checkStellarExactPayment(transaction, terms, {
+            ? checkStellarExactPayment(transaction, chosen.requirements, {
                 accepted: payload.accepted,
                 maxTransactionLength: maxSignatureLength,
                 ...(latestLedger === undefined ? {} : { latestLedger }),
@@ -1823,7 +1940,9 @@ export function createPaywallWithInFlight(
         }
         return result.valid ? undefined : localRejection(result.reason, resource, challengeHeaders);
       };
-      return settleWithHandler(payment, offer, "x402", method, deps.facilitator, context, {
+      // The mock's payments are not Stellar envelopes; it says so explicitly.
+      const prevalidates = facilitator.acceptsMockPayments !== true;
+      return settleWithHandler(payment, offer, "x402", method, facilitator, context, {
         freshChallengeHeaders: challengeHeaders,
         ...(quoteExpired ? { replayOnly: freshChallenge } : {}),
         ...(prevalidates ? { prevalidate } : {}),

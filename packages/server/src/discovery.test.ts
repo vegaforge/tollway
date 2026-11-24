@@ -43,7 +43,9 @@ afterEach(() => {
   vi.unstubAllGlobals();
 });
 
-function config(overrides: Partial<PaywallConfig> = {}): PaywallConfig {
+function config(
+  overrides: Partial<Extract<PaywallConfig, { amount: unknown }>> = {},
+): PaywallConfig {
   return { amount: "10000", asset: STELLAR_USDC, payTo: PAYEE, network: "testnet", ...overrides };
 }
 
