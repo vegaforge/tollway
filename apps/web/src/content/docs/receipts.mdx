@@ -68,6 +68,22 @@ If a key is compromised, mark it `{ state: "revoked" }`. Every receipt it ever s
 
 Load a persisted key with `Ed25519Signer.fromPrivateKey` (seed or PKCS#8), `Ed25519Signer.fromJwk`, `EcdsaP256Signer.fromPkcs8` or `EcdsaP256Signer.fromJwk`, so every instance of a service signs with the same published key.
 
+## x402 offer-receipt extension
+
+Set `offerReceipt: true` on a paywall and the gate also issues the x402 offer-receipt extension, so stock x402 clients get proof in a format they already read:
+
+- the 402 carries a signed offer for each x402 payment option, in `extensions["offer-receipt"].info.offers`;
+- the paid response's `PAYMENT-RESPONSE` carries a signed receipt, in `extensions["offer-receipt"].info.receipt`.
+
+```ts
+const gate = createPaywall(
+  { amount: "10000", asset, payTo, network: "testnet", offerReceipt: { includeTxHash: false } },
+  { signer, facilitator },
+);
+```
+
+The Tollway receipt in `TOLLWAY-RECEIPT` stays the authoritative record. The extension receipt is a short delivery attestation derived from it (resource, payer, network, time), with no amount, asset or model. Both are signed with the same key; the JWS `kid` is a `did:key` for Ed25519, a `did:jwk` for P-256, or a `did:web` you set. The transaction hash is left out of the extension receipt unless you set `includeTxHash: true`, because it ties the payer's account to the resource for anyone who sees the receipt. Signed offers never outlive the payment timeout and are cached, so a burst of unpaid requests does not cost a signature each. With the option off nothing changes on the wire. Details are in [`docs/receipt-format.md`](https://github.com/vegaforge/tollway/blob/main/docs/receipt-format.md#x402-offer-receipt-extension).
+
 ## In the code
 
 ```ts

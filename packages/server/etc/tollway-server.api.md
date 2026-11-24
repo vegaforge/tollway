@@ -4,6 +4,7 @@
 
 ```ts
 
+import { close as close_2 } from '@stellar/mpp/channel/server';
 import { decodePaymentRequiredHeader } from '@x402/core/http';
 import { decodePaymentResponseHeader } from '@x402/core/http';
 import { decodePaymentSignatureHeader } from '@x402/core/http';
@@ -11,9 +12,11 @@ import { encodePaymentRequiredHeader } from '@x402/core/http';
 import { encodePaymentResponseHeader } from '@x402/core/http';
 import { encodePaymentSignatureHeader } from '@x402/core/http';
 import { FacilitatorConfig } from '@x402/core/http';
+import { JWSSigner } from '@x402/extensions/offer-receipt';
 import { KeySetDocument } from '@vegaforge/tollway-core';
 import { ListDiscoveryResourcesParams } from '@x402/extensions/bazaar';
 import { ModelRouter } from '@vegaforge/tollway-core';
+import { MppChannelPayment } from '@vegaforge/tollway-core';
 import { MppChargePayment } from '@vegaforge/tollway-core';
 import { Network } from '@x402/core/types';
 import { PaymentOffer } from '@vegaforge/tollway-core';
@@ -21,15 +24,28 @@ import { PaymentRequired } from '@x402/core/types';
 import { PaymentRequirements } from '@x402/core/types';
 import { ReceiptSigner } from '@vegaforge/tollway-core';
 import { SettlementModel } from '@vegaforge/tollway-core';
+import { SettlementRef } from '@vegaforge/tollway-core';
 import { SignedReceipt } from '@vegaforge/tollway-core';
 import { SponsorBalanceReading } from '@vegaforge/tollway-core';
 import { SponsorLowBalanceEvent } from '@vegaforge/tollway-core';
-import { stellar } from '@stellar/mpp/charge/server';
+import { stellar } from '@stellar/mpp/channel/server';
+import { stellar as stellar_2 } from '@stellar/mpp/charge/server';
 import { StellarNetwork } from '@vegaforge/tollway-core';
-import { Store } from '@stellar/mpp/charge/server';
+import { Store } from '@stellar/mpp/channel/server';
+import { Store as Store_2 } from '@stellar/mpp/charge/server';
 import { TollwayError } from '@vegaforge/tollway-core';
 import { X402Payment } from '@vegaforge/tollway-core';
 import { z } from 'zod';
+
+// @public
+export type AcceptedVoucher = {
+    channelId: string;
+    sequence: number;
+    cumulativeAmount: string;
+    commitment: string;
+    payer: string;
+    acceptedAt: string;
+};
 
 // @public (undocumented)
 export type ChannelDispute = {
@@ -48,6 +64,90 @@ export type ChannelLoss = {
     amountAtRisk: string;
     reason: "already-effective" | "settlement-failed";
 };
+
+// @public
+export interface ChannelRegistry {
+    // (undocumented)
+    get(channelId: string): Promise<RegisteredChannel | undefined>;
+    // (undocumented)
+    list(): Promise<readonly RegisteredChannel[]>;
+    // (undocumented)
+    register?(channel: RegisteredChannel): Promise<void>;
+}
+
+// @public
+export type ChannelSettlementRecord = {
+    channelId: string;
+    settledAmount: string;
+    returnedRemainder: string;
+    txHash: string;
+};
+
+// @public (undocumented)
+export type ChannelSettlementRunReport = {
+    settled: ChannelSettlementRecord[];
+    skipped: string[];
+    failed: Array<{
+        channelId: string;
+        error: string;
+    }>;
+    staleMarkers: SettlingMarker[];
+};
+
+// @public (undocumented)
+export type ChannelSettlementScheduler = {
+    runOnce(): Promise<ChannelSettlementRunReport>;
+    start(): void;
+    stop(): Promise<void>;
+};
+
+// @public (undocumented)
+export type ChannelSettlementSchedulerOptions = {
+    voucherStore: VoucherStore;
+    settler: ChannelSettler;
+    settlementStore?: ChannelSettlementStore;
+    intervalMs: number;
+    shouldSettle?: (voucher: AcceptedVoucher, nowMs: number) => boolean;
+    maxVoucherAgeMs?: number;
+    minSettleAmount?: string;
+    staleMarkerThresholdMs?: number;
+    onSettled?: (record: ChannelSettlementRecord) => void | Promise<void>;
+    onStaleMarker?: (marker: SettlingMarker) => void | Promise<void>;
+    onError?: (error: unknown, channelId: string) => void | Promise<void>;
+    now?: () => number;
+    setInterval?: typeof setInterval;
+    clearInterval?: typeof clearInterval;
+};
+
+// @public
+export interface ChannelSettlementStore {
+    // (undocumented)
+    clearMarker(channelId: string): Promise<void>;
+    // (undocumented)
+    getMarker(channelId: string): Promise<SettlingMarker | undefined>;
+    // (undocumented)
+    listMarkers(): Promise<readonly SettlingMarker[]>;
+    // (undocumented)
+    markSettled(channelId: string, record: ChannelSettlementRecord): Promise<void>;
+    markSettling(channelId: string, cumulativeAmount: string): Promise<boolean>;
+    markUnknown(channelId: string, errorMessage: string): Promise<void>;
+}
+
+// @public (undocumented)
+export type ChannelSettler = {
+    settle(input: {
+        channelId: string;
+        cumulativeAmount: string;
+        commitment: string;
+    }): Promise<ChannelSettlementRecord>;
+};
+
+// @public (undocumented)
+export type ChannelStateReader = (input: {
+    channel: string;
+    network: StellarNetwork;
+    rpcUrl?: string;
+}) => Promise<OnChainChannelSnapshot>;
 
 // @public (undocumented)
 export type ChannelWatchRegistry = {
@@ -91,6 +191,9 @@ export type ChannelWatchtower = {
     stop(): Promise<void>;
 };
 
+// @public
+export function createChannelSettlementScheduler(options: ChannelSettlementSchedulerOptions): ChannelSettlementScheduler;
+
 // @public (undocumented)
 export function createChannelWatchtower(options: CreateChannelWatchtowerOptions): ChannelWatchtower;
 
@@ -125,11 +228,26 @@ export function createHorizonSponsorBalanceReader(clientForNetwork?: (network: S
 // @public
 export function createHttpFacilitator(baseUrl: string, options?: HttpFacilitatorOptions): FacilitatorClient;
 
+// @public (undocumented)
+export function createInMemoryChannelRegistry(initial?: readonly RegisteredChannel[]): ChannelRegistry & {
+    register(channel: RegisteredChannel): Promise<void>;
+};
+
+// @public (undocumented)
+export function createInMemoryChannelSettlementStore(options?: {
+    now?: () => string;
+}): ChannelSettlementStore;
+
 // @public
 export function createInMemoryServicePolicyStore(options?: InMemoryServicePolicyStoreOptions): ServicePolicyStore;
 
 // @public
 export function createInMemorySettlementCache(ttlMs?: number, options?: InMemorySettlementCacheOptions): SettlementCache;
+
+// @public (undocumented)
+export function createInMemoryVoucherStore(options?: {
+    now?: () => string;
+}): VoucherStore;
 
 // @public
 export function createMemoryPinStore(clock?: () => number): SettlementPinStore;
@@ -138,10 +256,24 @@ export function createMemoryPinStore(clock?: () => number): SettlementPinStore;
 export function createMockFacilitator(): FacilitatorClient;
 
 // @public
+export function createMockMppChannelHandler(options?: {
+    registry?: ChannelRegistry;
+    voucherStore?: VoucherStore;
+    readChannelState?: ChannelStateReader;
+    now?: () => string;
+}): MppChannelHandler;
+
+// @public
 export function createMockMppChargeHandler(): MppChargeHandler;
 
 // @public
+export function createMppChannelHandler(options: MppChannelOptions): MppChannelHandler;
+
+// @public
 export function createMppChargeHandler(options: MppChargeOptions): MppChargeHandler;
+
+// @public
+export function createOfferReceiptJwsSigner(signer: ReceiptSigner, kid?: string): JWSSigner;
 
 // @public
 export function createPaywall(config: PaywallConfig, deps: PaywallDeps): Gate;
@@ -156,7 +288,13 @@ export function createRouteTable(routes: Record<string, PaywallConfig>, deps: Pa
 export function createSponsorMonitor(options: SponsorMonitorOptions): SponsorMonitor;
 
 // @public
+export function createStellarChannelSettler(options: StellarChannelSettlerOptions): ChannelSettler;
+
+// @public
 export function createStellarChannelWatchRpc(simulationTimeoutMs?: number): ChannelWatchRpc;
+
+// @public
+export function decodeCommitmentSignature(commitment: string): Uint8Array;
 
 // @public
 export function decodeHeader<T>(value: string): T;
@@ -175,6 +313,9 @@ export function deriveMppChargeNonce(payload: string): Promise<string>;
 
 // @public
 export function describeMismatches(mismatches: readonly PaywallMismatch[]): string;
+
+// @public
+export function didKeyFromEd25519PublicKey(publicKey: Uint8Array): string;
 
 // Warning: (ae-forgotten-export) The symbol "catalogueSchema" needs to be exported by the entry point index.d.ts
 //
@@ -349,6 +490,12 @@ export type InMemorySettlementCacheOptions = {
     now?: () => number;
 };
 
+// @public
+export function isAmbiguousCloseError(error: unknown): boolean;
+
+// @public
+export function isMppChannelCredential(authorizationValue: string): boolean;
+
 // @public (undocumented)
 export type KeySetResponse = {
     status: 200;
@@ -375,6 +522,111 @@ export type LockingSettlementCache = SettlementCache & Required<Pick<SettlementC
 
 // @public
 export const MPP_AUTHORIZATION_HEADER = "Authorization";
+
+// @public (undocumented)
+export type MppChannelChallenge = {
+    status: number;
+    headers: Record<string, string>;
+    body: string | null;
+};
+
+// @public (undocumented)
+export type MppChannelChallengeInput = {
+    offer: PaymentOffer;
+    request: {
+        method: string;
+        url: string;
+        headers?: Record<string, string | string[] | undefined>;
+    };
+    channelId?: string;
+};
+
+// @public
+export type MppChannelGatePayment = MppChannelPayment & {
+    credential?: string;
+    action?: "voucher" | "close";
+};
+
+// @public (undocumented)
+export interface MppChannelHandler {
+    // (undocumented)
+    challenge?(input: MppChannelChallengeInput): Promise<MppChannelChallenge>;
+    // (undocumented)
+    idempotencyKey?(input: {
+        payment: MppChannelGatePayment;
+    }): Promise<string | undefined>;
+    // (undocumented)
+    settle(input: MppChannelSettleInput): Promise<MppChannelSettleResult>;
+    // (undocumented)
+    verify(input: MppChannelVerifyInput): Promise<MppChannelVerifyResult>;
+}
+
+// @public (undocumented)
+export type MppChannelOptions = {
+    recipient: string;
+    currency: string;
+    network: StellarNetwork;
+    secretKey: string;
+    store: Store.AtomicStore;
+    registry: ChannelRegistry;
+    voucherStore: VoucherStore;
+    decimals?: number;
+    rpcUrl?: string;
+    realm?: string;
+    feePayer?: {
+        envelopeSigner: NonNullable<stellar.Parameters["feePayer"]>["envelopeSigner"];
+        feeBumpSigner?: NonNullable<stellar.Parameters["feePayer"]>["feeBumpSigner"];
+    };
+    readChannelState?: ChannelStateReader;
+    onDisputeDetected?: (info: {
+        channelId: string;
+        closeEffectiveAtLedger: number;
+    }) => void | Promise<void>;
+    onCloseCredential?: (input: {
+        channelId: string;
+        sequence: number;
+        cumulativeAmount: string;
+        commitment: string;
+        payer: string;
+    }) => Promise<{
+        txHash: string;
+    }>;
+    now?: () => string;
+};
+
+// @public (undocumented)
+export type MppChannelSettleInput = {
+    payment: MppChannelGatePayment;
+    offer: PaymentOffer;
+    payer: string;
+    nonce: string;
+};
+
+// @public (undocumented)
+export type MppChannelSettleResult = {
+    settled: true;
+    settlement: SettlementRef;
+    txHash?: string;
+} | {
+    settled: false;
+    reason: string;
+};
+
+// @public (undocumented)
+export type MppChannelVerifyInput = {
+    payment: MppChannelGatePayment;
+    offer: PaymentOffer;
+};
+
+// @public (undocumented)
+export type MppChannelVerifyResult = {
+    valid: true;
+    payer: string;
+    nonce: string;
+} | {
+    valid: false;
+    reason: string;
+};
 
 // @public
 export type MppChargeChallenge = {
@@ -405,7 +657,7 @@ export type MppChargeOptions = {
     currency: string;
     network: StellarNetwork;
     secretKey: string;
-    store: Store.AtomicStore;
+    store: Store_2.AtomicStore;
     feePayer?: {
         envelopeSigner: StellarSigner;
         feeBumpSigner?: StellarSigner;
@@ -448,7 +700,26 @@ export type MppChargeVerifyResult = {
 };
 
 // @public
+export type OfferReceiptOptions = {
+    includeTxHash?: boolean;
+    kid?: string;
+    offerValiditySeconds?: number;
+};
+
+// @public
+export type OnChainChannelSnapshot = {
+    balance: string;
+    token: string;
+    to: string;
+    closeEffectiveAtLedger: number | null;
+    currentLedger: number;
+};
+
+// @public
 export function parseFacilitatorCapabilities(raw: unknown): FacilitatorCapabilities;
+
+// @public
+export function parseMppChannelCredential(authorizationValue: string): MppChannelGatePayment | undefined;
 
 // @public
 export const PAYMENT_REQUIRED_HEADER = "PAYMENT-REQUIRED";
@@ -476,6 +747,7 @@ export type PaywallConfig = {
     maxTimeoutSeconds?: number;
     extra?: Record<string, unknown>;
     discovery?: DiscoveryDeclaration;
+    offerReceipt?: boolean | OfferReceiptOptions;
 };
 
 // @public
@@ -483,6 +755,7 @@ export type PaywallDeps = {
     signer: ReceiptSigner;
     facilitator: FacilitatorClient;
     mppChargeHandler?: MppChargeHandler;
+    mppChannelHandler?: MppChannelHandler;
     router?: ModelRouter;
     cache?: SettlementCache;
     servicePolicy?: ServicePolicy;
@@ -542,6 +815,17 @@ export type RedisSettlementCacheOptions = {
     client: RedisLikeClient;
     ttlMs?: number;
     keyPrefix?: string;
+};
+
+// @public
+export type RegisteredChannel = {
+    channelId: string;
+    commitmentKey: string;
+    payer: string;
+    network: StellarNetwork;
+    asset: string;
+    recipient: string;
+    refundWaitingPeriod?: number;
 };
 
 // @public
@@ -688,6 +972,17 @@ export type SettleResult = {
     reason: string;
 };
 
+// @public (undocumented)
+export type SettlingMarker = {
+    channelId: string;
+    cumulativeAmount: string;
+    startedAt: string;
+    status: "settling" | "settled" | "unknown";
+    txHash?: string;
+    returnedRemainder?: string;
+    errorMessage?: string;
+};
+
 // @public
 export type SponsorBalanceReader = (account: string, network: StellarNetwork) => Promise<string>;
 
@@ -728,6 +1023,32 @@ export const STELLAR_EXACT_SCHEME = "exact";
 
 // @public
 export function stellarCaip2(network: StellarNetwork): Network;
+
+// @public (undocumented)
+export type StellarChannelSettlerOptions = {
+    network: StellarNetwork;
+    rpcUrl: string;
+    feePayer: {
+        envelopeSigner: CloseSigner;
+        feeBumpSigner?: CloseSigner;
+    };
+    maxFeeBumpStroops?: number;
+    pollMaxAttempts?: number;
+    pollDelayMs?: number;
+    pollTimeoutMs?: number;
+    settlementStore?: ChannelSettlementStore;
+    closeChannel?: (input: {
+        channel: string;
+        amount: bigint;
+        signature: Uint8Array;
+        maxFeeBumpStroops: number;
+    }) => Promise<string>;
+    readChannelState?: (input: {
+        channel: string;
+    }) => Promise<{
+        balance: string | bigint;
+    }>;
+};
 
 // @public
 export const TOLLWAY_QUOTE_HEADER = "TOLLWAY-QUOTE";
@@ -770,6 +1091,18 @@ export type VerifyResult = {
     reason: string;
 };
 
+// @public
+export interface VoucherStore {
+    // (undocumented)
+    getBySequence(channelId: string, sequence: number): Promise<AcceptedVoucher | undefined>;
+    // (undocumented)
+    getLatest(channelId: string): Promise<AcceptedVoucher | undefined>;
+    // (undocumented)
+    listLatest(): Promise<readonly AcceptedVoucher[]>;
+    // (undocumented)
+    record(voucher: AcceptedVoucher): Promise<void>;
+}
+
 // @public (undocumented)
 export type WatchtowerChannel = {
     channelId: string;
@@ -789,10 +1122,11 @@ export type X402Terms = {
 
 // Warnings were encountered during analysis:
 //
-// dist/index.d.ts:176:9 - (ae-forgotten-export) The symbol "WatchtowerEvent" needs to be exported by the entry point index.d.ts
-// dist/index.d.ts:180:5 - (ae-forgotten-export) The symbol "ChannelState" needs to be exported by the entry point index.d.ts
-// dist/index.d.ts:218:5 - (ae-forgotten-export) The symbol "WatchtowerCursorStore" needs to be exported by the entry point index.d.ts
-// dist/index.d.ts:351:9 - (ae-forgotten-export) The symbol "StellarSigner" needs to be exported by the entry point index.d.ts
+// dist/index.d.ts:370:9 - (ae-forgotten-export) The symbol "CloseSigner" needs to be exported by the entry point index.d.ts
+// dist/index.d.ts:477:9 - (ae-forgotten-export) The symbol "WatchtowerEvent" needs to be exported by the entry point index.d.ts
+// dist/index.d.ts:481:5 - (ae-forgotten-export) The symbol "ChannelState" needs to be exported by the entry point index.d.ts
+// dist/index.d.ts:519:5 - (ae-forgotten-export) The symbol "WatchtowerCursorStore" needs to be exported by the entry point index.d.ts
+// dist/index.d.ts:652:9 - (ae-forgotten-export) The symbol "StellarSigner" needs to be exported by the entry point index.d.ts
 
 // (No @packageDocumentation comment for this package)
 

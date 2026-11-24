@@ -6,9 +6,12 @@ import {
   createPaywall,
   createRouteTable,
   decodePaymentRequiredHeader,
+  decodePaymentResponseHeader,
+  didKeyFromEd25519PublicKey,
   encodePaymentSignatureHeader,
   type MppChargeHandler,
   PAYMENT_REQUIRED_HEADER,
+  PAYMENT_RESPONSE_HEADER,
   PAYMENT_SIGNATURE_HEADER,
   type PaywallConfig,
 } from "@vegaforge/tollway-server";
@@ -118,6 +121,63 @@ describe("expressPaywall", () => {
       expect(body.receiptId).toBeTruthy();
     } finally {
       await app.close();
+    }
+  });
+});
+
+/** Decodes one part of a compact JWS, for checking what reached the wire. */
+function jwsPart(token: unknown, index: 0 | 1): Record<string, unknown> {
+  if (typeof token !== "string") throw new Error("expected a compact JWS string");
+  const part = token.split(".")[index] ?? "";
+  return JSON.parse(Buffer.from(part, "base64url").toString("utf8")) as Record<string, unknown>;
+}
+
+describe("expressPaywall with the x402 offer-receipt extension (#172)", () => {
+  it("sends the signed offer on the 402 and the signed receipt on the paid response", async () => {
+    const signer = await Ed25519Signer.generate("offer-receipt-express");
+    const gate = createPaywall(
+      { ...config, offerReceipt: true },
+      { signer, facilitator: createMockFacilitator() },
+    );
+    const app = express();
+    app.get("/quotes/latest", expressPaywall(gate), (_req, res) => res.json({ quote: 42 }));
+    const server = app.listen(0);
+    await new Promise((resolve) => server.once("listening", resolve));
+    const address = server.address();
+    if (!address || typeof address === "string") throw new Error("expected a TCP address");
+    const url = `http://127.0.0.1:${address.port}/quotes/latest`;
+    try {
+      const unpaid = await fetch(url);
+      expect(unpaid.status).toBe(402);
+      const required = unpaid.headers.get(PAYMENT_REQUIRED_HEADER);
+      const challenge = decodePaymentRequiredHeader(required ?? "");
+      const extension = challenge.extensions?.["offer-receipt"] as {
+        info: { offers: Array<{ format: string; signature: string }> };
+      };
+      const offer = extension.info.offers[0];
+      expect(offer?.format).toBe("jws");
+      expect(jwsPart(offer?.signature, 0)).toEqual({
+        alg: "EdDSA",
+        kid: didKeyFromEd25519PublicKey(signer.publicKey),
+      });
+      expect(jwsPart(offer?.signature, 1)).toMatchObject({ amount: "10000", payTo: "GSERVICE" });
+
+      const paid = await fetch(url, {
+        headers: { [PAYMENT_SIGNATURE_HEADER]: payFrom(required, "offer-receipt-express") },
+      });
+      expect(paid.status).toBe(200);
+      const settle = decodePaymentResponseHeader(paid.headers.get(PAYMENT_RESPONSE_HEADER) ?? "");
+      const receipt = (
+        settle.extensions?.["offer-receipt"] as { info: { receipt: { signature: string } } }
+      ).info.receipt;
+      expect(jwsPart(receipt.signature, 1)).toMatchObject({
+        network: "stellar:testnet",
+        // The same resource identifier the offer named.
+        resourceUrl: jwsPart(offer?.signature, 1).resourceUrl,
+      });
+      expect(challenge.resource.url).toBe(jwsPart(offer?.signature, 1).resourceUrl);
+    } finally {
+      await new Promise((resolve) => server.close(resolve));
     }
   });
 });

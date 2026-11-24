@@ -26,7 +26,12 @@ import {
   discoveryExtensions,
   discoveryResourceInfo,
 } from "./discovery.js";
-import { type FacilitatorClient, stellarCaip2, toPaymentRequirements } from "./facilitator.js";
+import {
+  DEFAULT_MAX_TIMEOUT_SECONDS,
+  type FacilitatorClient,
+  stellarCaip2,
+  toPaymentRequirements,
+} from "./facilitator.js";
 import {
   decodePaymentSignatureHeader,
   encodeHeader,
@@ -48,12 +53,10 @@ import {
 } from "./mpp-channel.js";
 import type { MppChargeHandler } from "./mpp-charge.js";
 import {
-  buildOfferReceiptChallengeExtension,
-  buildOfferReceiptSettlementExtension,
+  createOfferReceiptIssuer,
   OFFER_RECEIPT_EXTENSION_KEY,
-  type OfferReceiptConfig,
-  type ResolvedOfferReceiptConfig,
-  resolveOfferReceiptConfig,
+  type OfferReceiptIssuer,
+  type OfferReceiptOptions,
 } from "./offer-receipt.js";
 import {
   createInMemoryServicePolicyStore,
@@ -120,12 +123,14 @@ export type PaywallConfig = {
    */
   discovery?: DiscoveryDeclaration;
   /**
-   * Opt-in attachment of the x402 offer-receipt extension (#172). When
-   * enabled, 402 challenges carry `extensions["offer-receipt"].info.offers`
-   * and settled `PAYMENT-RESPONSE` headers carry
-   * `extensions["offer-receipt"].info.receipt`.
+   * Issues the x402 offer-receipt extension (#172), signed with
+   * `PaywallDeps.signer`: a signed offer per x402 requirement in the 402's
+   * `extensions["offer-receipt"]`, and a signed receipt in the settled x402
+   * payment's PAYMENT-RESPONSE. Off by default, and responses are then
+   * unchanged. An unusable signer or validity fails at `createPaywall`.
+   * See `OfferReceiptOptions` and docs/receipt-format.md.
    */
-  offerReceipt?: boolean | OfferReceiptConfig;
+  offerReceipt?: boolean | OfferReceiptOptions;
 };
 
 /**
@@ -490,20 +495,16 @@ async function priceRequest(
  */
 async function settlementHeaders(
   signed: SignedReceipt,
-  context: Pick<SettlementContext, "signer" | "offerReceipt">,
+  context: Pick<SettlementContext, "offerReceipt">,
 ): Promise<Record<string, string>> {
-  const { settlement, network } = signed.receipt;
+  const { settlement, network, model } = signed.receipt;
   const headers: Record<string, string> = { [TOLLWAY_RECEIPT_HEADER]: encodeHeader(signed) };
   if (settlement.kind === "transaction") {
-    const extensions = context.offerReceipt
-      ? {
-          [OFFER_RECEIPT_EXTENSION_KEY]: await buildOfferReceiptSettlementExtension({
-            signedReceipt: signed,
-            signer: context.signer,
-            config: context.offerReceipt,
-          }),
-        }
-      : undefined;
+    // The extension answers an x402 offer, so only an x402 settlement gets one.
+    const extensions =
+      context.offerReceipt && model === "x402"
+        ? { [OFFER_RECEIPT_EXTENSION_KEY]: await context.offerReceipt.receipt(signed) }
+        : undefined;
     headers[PAYMENT_RESPONSE_HEADER] = encodePaymentResponseHeader({
       success: true,
       transaction: settlement.txHash,
@@ -541,7 +542,8 @@ export type InFlightSettlementResult = SettlementResult;
 type SettlementContext = {
   signer: ReceiptSigner;
   receiptVersion: 1 | 2;
-  offerReceipt?: ResolvedOfferReceiptConfig;
+  /** Present only for a route that opted in to the offer-receipt extension. */
+  offerReceipt?: OfferReceiptIssuer;
   cache?: SettlementCache;
   onCacheError?: (error: Error, key: string) => void;
   /** Settlements in progress in this process, by cache key. */
@@ -997,7 +999,7 @@ async function toOutcome(
   model: SettlementModel,
   method: string,
   waited: boolean,
-  context: Pick<SettlementContext, "signer" | "offerReceipt">,
+  context: Pick<SettlementContext, "offerReceipt">,
 ): Promise<GateOutcome> {
   if (!result.ok) {
     return result.outcome;
@@ -1396,6 +1398,17 @@ async function settleLateAnswer(
 const BODY_HEADERS = new Set(["content-type", "content-length", "content-encoding"]);
 
 /**
+ * How long, in seconds, the gate keeps honouring the terms of one 402: the
+ * route's `maxTimeoutSeconds`, and for a dynamic price no longer than the
+ * quote it priced. A signed offer may not outlive it.
+ */
+function offerAcceptanceWindow(config: PaywallConfig): number {
+  const timeout = config.maxTimeoutSeconds ?? DEFAULT_MAX_TIMEOUT_SECONDS;
+  if (typeof config.amount !== "function") return timeout;
+  return Math.min(timeout, config.quoteTtlSeconds ?? DEFAULT_QUOTE_TTL_SECONDS);
+}
+
+/**
  * The 402 for a request with no payment. It carries the x402 V2
  * `PaymentRequired` in the PAYMENT-REQUIRED header and as the JSON body.
  * When the route accepts mpp-charge, the MPP challenge `mppx` built (its
@@ -1410,7 +1423,7 @@ async function paymentRequired(
   mppChannelHandler: MppChannelHandler | undefined,
   config: PaywallConfig,
   quote: string | undefined,
-  context: Pick<SettlementContext, "signer" | "offerReceipt" | "clock">,
+  context: Pick<SettlementContext, "offerReceipt" | "clock">,
 ): Promise<GateOutcome> {
   const challenge: PaymentRequired = {
     x402Version,
@@ -1429,13 +1442,13 @@ async function paymentRequired(
   const extensions: Record<string, unknown> = {
     ...(config.discovery ? discoveryExtensions(config.discovery, request) : {}),
   };
-  if (context.offerReceipt) {
-    extensions[OFFER_RECEIPT_EXTENSION_KEY] = await buildOfferReceiptChallengeExtension({
-      offer,
-      signer: context.signer,
-      nowMs: context.clock(),
-      config: context.offerReceipt,
-    });
+  // Offers are signed only for requirements the gate settles itself.
+  if (context.offerReceipt && acceptedModels.includes("x402")) {
+    extensions[OFFER_RECEIPT_EXTENSION_KEY] = await context.offerReceipt.offers(
+      challenge.resource?.url ?? offer.resource,
+      challenge.accepts,
+      context.clock(),
+    );
   }
   if (Object.keys(extensions).length > 0) {
     challenge.extensions = extensions;
@@ -1521,7 +1534,13 @@ export function createPaywallWithInFlight(
   if (deps.receiptVersion !== undefined && deps.receiptVersion !== 1 && deps.receiptVersion !== 2) {
     throw new TypeError(`receiptVersion must be 1 or 2, got ${String(deps.receiptVersion)}`);
   }
-  const offerReceipt = resolveOfferReceiptConfig(config.offerReceipt, config.maxTimeoutSeconds);
+  const offerReceipt = config.offerReceipt
+    ? createOfferReceiptIssuer(
+        deps.signer,
+        config.offerReceipt === true ? {} : config.offerReceipt,
+        offerAcceptanceWindow(config),
+      )
+    : undefined;
   const context: SettlementContext = {
     signer: deps.signer,
     receiptVersion: deps.receiptVersion ?? 1,
