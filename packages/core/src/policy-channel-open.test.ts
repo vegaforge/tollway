@@ -153,3 +153,42 @@ describe("PolicyEngine.evaluateChannelOpen", () => {
     await expect(attempt).rejects.toBeInstanceOf(TollwayError);
   });
 });
+
+// The per-service daily and rolling-window caps (#192) bound what may be spent
+// with one payee, so a deposit sized past them would lock funds the policy
+// will not let the agent spend.
+describe("channel opens under per-service daily and window caps", () => {
+  it("reports the per-service daily cap as headroom once spend has used part of it", async () => {
+    const engine = engineWith({ perService: { [PAYEE]: { dailyCap: "500" } } });
+    await engine.record(payment({ amount: "200" }));
+    await expect(headroomOf(engine, ASSET, PAYEE)).resolves.toMatchObject({
+      headroom: "300",
+      limitedBy: "per-service-daily",
+    });
+    const decision = await engine.evaluateChannelOpen?.({
+      payee: PAYEE,
+      asset: ASSET,
+      deposit: "400",
+    });
+    expect(decision).toMatchObject({ allowed: false, rule: "per-service-daily" });
+  });
+
+  it("reports the per-service rolling window as headroom", async () => {
+    const now = Date.parse("2026-11-24T12:00:00.000Z");
+    const engine = engineWith(
+      { perService: { [PAYEE]: { window: { windowSeconds: 3600, cap: "1000" } } } },
+      () => now,
+    );
+    await engine.record(payment({ amount: "750" }));
+    await expect(headroomOf(engine, ASSET, PAYEE)).resolves.toMatchObject({
+      headroom: "250",
+      limitedBy: "per-service-window",
+    });
+    const decision = await engine.evaluateChannelOpen?.({
+      payee: PAYEE,
+      asset: ASSET,
+      deposit: "300",
+    });
+    expect(decision).toMatchObject({ allowed: false, rule: "per-service-window" });
+  });
+});

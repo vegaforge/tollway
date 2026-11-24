@@ -49,7 +49,9 @@ export type ChannelOpenRule =
   | "min-channel-deposit"
   | "budget-daily"
   | "budget-total"
-  | "per-service";
+  | "per-service"
+  | "per-service-daily"
+  | "per-service-window";
 
 /** What {@link PolicyEngine.evaluateChannelOpen} decided. Does not record spend. */
 export type ChannelOpenDecision = {
@@ -145,7 +147,12 @@ function parseAmount(s: string): bigint {
 
 /** One spend ceiling for a payee and asset: its limit, and what is spent under it. */
 type SpendCeilingLimit = {
-  rule: "budget-daily" | "budget-total" | "per-service";
+  rule:
+    | "budget-daily"
+    | "budget-total"
+    | "per-service"
+    | "per-service-daily"
+    | "per-service-window";
   limit: bigint;
   spent: bigint;
 };
@@ -1035,12 +1042,29 @@ export function createPolicyEngine(
         spent: state.totalSpend.get(asset) ?? 0n,
       });
     }
-    const cap = policy.perService?.[payee]?.cap;
-    if (cap != null) {
+    const service = policy.perService?.[payee];
+    const key = serviceKey(payee, asset);
+    if (service?.cap != null) {
       ceilings.push({
         rule: "per-service",
-        limit: parseAmount(cap),
-        spent: state.serviceSpend.get(serviceKey(payee, asset)) ?? 0n,
+        limit: parseAmount(service.cap),
+        spent: state.serviceSpend.get(key) ?? 0n,
+      });
+    }
+    // The #192 caps bound spend with this payee too, so a deposit sized past
+    // them would lock funds the policy will not let the agent spend.
+    if (service?.dailyCap != null) {
+      ceilings.push({
+        rule: "per-service-daily",
+        limit: parseAmount(service.dailyCap),
+        spent: state.serviceDailySpend.get(key) ?? 0n,
+      });
+    }
+    if (service?.window != null) {
+      ceilings.push({
+        rule: "per-service-window",
+        limit: parseAmount(service.window.cap),
+        spent: state.serviceWindowSpend.get(key)?.sum(clock()) ?? 0n,
       });
     }
     return ceilings;

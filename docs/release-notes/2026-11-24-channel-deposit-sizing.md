@@ -21,8 +21,9 @@ adds the two inputs a caller needs to size a deposit.
   `not-applicable`. Four existing tests asserted the old behavior, two in
   the policy tests and two in the trace tests. They now assert the fixed behavior.
 - **`PolicyEngine.headroom(asset, payee)`.** Returns the tightest remaining
-  amount across the daily budget, the total budget and the per-service cap, as an
-  integer string, and names the ceiling in `limitedBy`. Read-only.
+  amount across the daily budget, the total budget and the payee's per-service
+  lifetime cap, `dailyCap` and rolling `window`, as an integer string, and names
+  the ceiling in `limitedBy`. Read-only.
 - **`PolicyEngine.evaluateChannelOpen({ payee, asset, deposit })`.** Checks a
   deposit against `minChannelDeposit` and the headroom. Returns `allowed`,
   `wouldBlock`, the blocking `rule`, and a `detail`. Records no spend. Dry-run
