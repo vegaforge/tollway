@@ -84,6 +84,60 @@ still unauthenticated: the checks catch a service that returns the wrong
 receipt by mistake, but anyone who can answer the request can forge one that
 passes them. Configure a verifier in production.
 
+## Hardening an agent
+
+A 402 challenge is attacker-controlled input. Before the policy engine and
+before any signature, `pay()` checks the offer itself (#209). A failed check
+throws `OfferRejectedError`, a `TollwayError` with code `offer-rejected` whose
+`checkName` names the check, and emits a `skip` event. The settler is never
+called.
+
+These checks always run:
+
+- **network**: the offer must name the client's `network`. A mismatch is
+  refused by the receipt binding above with `OfferNetworkMismatchError`.
+- **resource**: the offer must be for the URL the agent requested, under the
+  same path-and-query rule.
+- **structural**: `amount` is an integer string in base units and is not zero,
+  `models` is not empty, and `payTo` and `asset` are not empty.
+
+Configure the rest with `offerChecks`:
+
+```ts
+const client = createClient({
+  network: "mainnet",
+  settler,
+  offerChecks: {
+    // A ceiling per asset, in base units. USDC on Stellar has 7 decimals,
+    // so this is 5 USDC. An asset with no entry is refused: once you set
+    // ceilings, every accepted asset needs one.
+    maxAmount: { [USDC_CONTRACT]: "50000000" },
+    // Exact-string allowlists. No patterns.
+    allowedPayees: ["GSERVICE..."],
+    allowedAssets: [USDC_CONTRACT],
+  },
+});
+```
+
+| Option | Effect |
+| --- | --- |
+| `maxAmount` | Refuses an offer above the ceiling for its asset, and any asset with no entry (fail closed). Compared as `bigint`. |
+| `allowedPayees` | Refuses a `payTo` outside the list. |
+| `allowedAssets` | Refuses an `asset` outside the list. |
+| `allowZeroAmount` | Accepts offers for zero. Off by default: a free offer that still asks for a signature is more likely a probe than a sale. |
+| `requireNetwork` | The network offers must name. Defaults to `network` and must equal it. |
+
+`createClient` validates `offerChecks` when it is created, so a ceiling that
+is not an integer string fails at startup, not on the first payment.
+
+Pass the same `offerChecks` to `createX402Settler` too. It registers the
+allowlists as an x402 `PaymentPolicy` over every option in the challenge, so a
+402 that lists a disallowed option first cannot steer the settler to it.
+
+Recommended defaults for an agent with real funds: a `maxAmount` entry for
+each asset it should spend, an `allowedPayees` list of the services it calls,
+and the same checks on the settler.
+
 ## Retries
 
 A payment can fail in ways that are safe to try again and ways that are not.
