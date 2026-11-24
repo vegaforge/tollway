@@ -13,6 +13,7 @@ import {
   createRouteTable,
   decodePaymentRequiredHeader,
   encodePaymentSignatureHeader,
+  type MppChannelHandler,
   type MppChargeHandler,
   PAYMENT_REQUIRED_HEADER,
   PAYMENT_SIGNATURE_HEADER,
@@ -305,5 +306,109 @@ describe("serving the receipt key set (#167)", () => {
       signer,
     );
     await expect(verifyReceipt(receipt, verifier)).resolves.toMatchObject({ valid: true });
+  });
+});
+
+// MPP channel through the adapter: a request naming its channel gets the
+// channel challenge on the 402, a refused channel and a refused voucher come
+// back as 402 rejections, and a valid voucher settles with a receipt.
+const CHANNEL = "CDLZFC3SYJYDZT7K67VZ75HPJVIEUVNIXF47ZG2FB2RMQQVU2HHGCYSC";
+
+/** An mppx-format channel credential, built by hand so the adapter needs no mppx dependency. */
+function channelCredential(amount: string): string {
+  const b64 = (value: unknown) => Buffer.from(JSON.stringify(value)).toString("base64url");
+  const challenge = {
+    id: "chan",
+    realm: "tollway",
+    method: "stellar",
+    intent: "channel",
+    request: b64({ amount: config.amount, channel: CHANNEL }),
+  };
+  return `Payment ${b64({ challenge, payload: { action: "voucher", amount, signature: "ab".repeat(64) } })}`;
+}
+
+async function channelGate() {
+  const signer = await Ed25519Signer.generate("test-key-channel");
+  const handler: MppChannelHandler = {
+    async idempotencyKey({ payment }) {
+      return `${payment.channelId}:${payment.cumulativeAmount}`;
+    },
+    async challenge({ channelId }) {
+      return channelId === CHANNEL
+        ? { ok: true, headers: { "www-authenticate": 'Payment id="chan", intent="channel"' } }
+        : { ok: false, status: 402, reason: "channel-recipient-mismatch: wrong payout address" };
+    },
+    async verify({ payment }) {
+      return payment.cumulativeAmount === config.amount
+        ? {
+            valid: true,
+            payer: "GFUNDER",
+            nonce: `${payment.channelId}:${payment.cumulativeAmount}`,
+          }
+        : { valid: false, reason: "wrong-increment: the voucher adds 5, the offer costs 10000" };
+    },
+    async settle({ payment }) {
+      return {
+        settled: true,
+        settlement: { kind: "channel-commitment", channelId: payment.channelId, sequence: 1 },
+      };
+    },
+    async reconcile() {
+      return { outcome: "nothing-pending" };
+    },
+  };
+  return createPaywall(
+    { ...config, models: ["x402", "mpp-channel"] },
+    { signer, facilitator: createMockFacilitator(), mppChannelHandler: handler },
+  );
+}
+
+describe("honoPaywall with mpp-channel", () => {
+  async function build() {
+    const gate = await channelGate();
+    const app = new Hono();
+    app.get("/quotes/latest", honoPaywall(gate), (c) =>
+      c.json({ settlement: c.get(RECEIPT_CONTEXT_KEY).receipt.settlement }),
+    );
+    return app;
+  }
+
+  it("sends the channel challenge when the request names its channel", async () => {
+    const response = await (await build()).request("/quotes/latest", {
+      headers: { "tollway-channel": CHANNEL },
+    });
+    expect(response.status).toBe(402);
+    expect(response.headers.get("www-authenticate")).toContain('intent="channel"');
+  });
+
+  it("refuses a channel that fails its on-chain checks", async () => {
+    const response = await (await build()).request("/quotes/latest", {
+      headers: { "tollway-channel": "COTHER" },
+    });
+    expect(response.status).toBe(402);
+    expect(await response.json()).toEqual({
+      error: "channel-recipient-mismatch: wrong payout address",
+    });
+  });
+
+  it("settles a voucher with a channel-commitment receipt", async () => {
+    const response = await (await build()).request("/quotes/latest", {
+      headers: { authorization: channelCredential("10000") },
+    });
+    expect(response.status).toBe(200);
+    expect(response.headers.get("tollway-receipt")).toBeTruthy();
+    expect(await response.json()).toEqual({
+      settlement: { kind: "channel-commitment", channelId: CHANNEL, sequence: 1 },
+    });
+  });
+
+  it("answers a refused voucher with 402", async () => {
+    const response = await (await build()).request("/quotes/latest", {
+      headers: { authorization: channelCredential("5") },
+    });
+    expect(response.status).toBe(402);
+    expect(await response.json()).toEqual({
+      error: "wrong-increment: the voucher adds 5, the offer costs 10000",
+    });
   });
 });
