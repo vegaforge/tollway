@@ -130,6 +130,15 @@ jobs:
       - name: Test
         run: pnpm test
 
+      # docs/design.md "Testing": the end-to-end demo runs in CI on every
+      # commit. x402 and MPP charge for now; MPP channel joins once the gate
+      # accepts vouchers (#173). (#242)
+      - name: Build demo dependencies
+        run: pnpm --filter "@vegaforge/tollway-demo^..." build
+
+      - name: Demo all-models (mock mode)
+        run: MOCK_MODE=true pnpm --filter @vegaforge/tollway-demo start -- all-models
+
   adapter-next-matrix:
     name: Next adapter (Next ${{ matrix.major }})
     runs-on: ubuntu-latest
@@ -196,6 +205,15 @@ jobs:
 
       - name: Build
         run: pnpm build
+
+      - name: API Extractor reports (#254)
+        run: bash scripts/check-api-reports.sh
+
+      - name: Package exports, publint and arethetypeswrong (#254)
+        run: bash scripts/check-package-exports.sh
+
+      - name: Package consumers, ESM and CommonJS under node16 (#254)
+        run: bash scripts/check-package-consumers.sh
 
       - name: Release-note gate
         run: bash scripts/check_release_notes.sh
