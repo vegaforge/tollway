@@ -74,7 +74,7 @@ export type ChannelOpenIntent = {
 };
 
 // @public
-export type ChannelOpenRule = "min-channel-deposit" | "budget-daily" | "budget-total" | "per-service" | "per-service-daily" | "per-service-window";
+export type ChannelOpenRule = "min-channel-deposit" | "budget-daily" | "budget-weekly" | "budget-monthly" | "budget-rolling" | "budget-total" | "per-service" | "per-service-daily" | "per-service-window";
 
 // @public
 export type ChannelOpenSubmission = "not-submitted" | "failed" | "ambiguous";
@@ -513,7 +513,7 @@ export type PolicyParseResult = {
 export type PolicyRuleId = (typeof policyRuleIds)[number];
 
 // @public
-export const policyRuleIds: readonly ["per-model-disabled", "min-channel-deposit", "budget-daily", "budget-total", "per-service", "per-service-daily", "per-service-window", "per-resource", "per-resource-daily", "per-resource-window", "rate-limit", "anomaly", "anomaly-adaptive"];
+export const policyRuleIds: readonly ["per-model-disabled", "min-channel-deposit", "budget-daily", "budget-weekly", "budget-monthly", "budget-rolling", "budget-total", "per-service", "per-service-daily", "per-service-window", "per-resource", "per-resource-daily", "per-resource-window", "rate-limit", "anomaly", "anomaly-adaptive"];
 
 // @public
 export type PolicyRuleName = (typeof policyRuleNames)[number];
@@ -531,6 +531,17 @@ export const policySchema: z.ZodObject<{
     }>>;
     budgets: z.ZodOptional<z.ZodObject<{
         daily: z.ZodOptional<z.ZodString>;
+        weekly: z.ZodOptional<z.ZodString>;
+        monthly: z.ZodOptional<z.ZodString>;
+        rolling: z.ZodOptional<z.ZodObject<{
+            windowSeconds: z.ZodNumber;
+            cap: z.ZodString;
+        }, z.core.$strict>>;
+        timezone: z.ZodOptional<z.ZodString>;
+        weekStartsOn: z.ZodOptional<z.ZodEnum<{
+            monday: "monday";
+            sunday: "sunday";
+        }>>;
         total: z.ZodOptional<z.ZodString>;
     }, z.core.$strict>>;
     perService: z.ZodOptional<z.ZodRecord<z.ZodString, z.ZodObject<{
@@ -627,6 +638,9 @@ export const policyTraceEntrySchema: z.ZodObject<{
         "per-model-disabled": "per-model-disabled";
         "min-channel-deposit": "min-channel-deposit";
         "budget-daily": "budget-daily";
+        "budget-weekly": "budget-weekly";
+        "budget-monthly": "budget-monthly";
+        "budget-rolling": "budget-rolling";
         "budget-total": "budget-total";
         "per-service": "per-service";
         "per-service-daily": "per-service-daily";
@@ -664,6 +678,18 @@ export const policyTraceEntrySchema: z.ZodObject<{
         kind: z.ZodLiteral<"utc-day">;
         day: z.ZodISODate;
     }, z.core.$strict>, z.ZodObject<{
+        kind: z.ZodLiteral<"calendar-day">;
+        day: z.ZodISODate;
+        timezone: z.ZodString;
+    }, z.core.$strict>, z.ZodObject<{
+        kind: z.ZodLiteral<"calendar-week">;
+        weekStart: z.ZodISODate;
+        timezone: z.ZodString;
+    }, z.core.$strict>, z.ZodObject<{
+        kind: z.ZodLiteral<"calendar-month">;
+        month: z.ZodString;
+        timezone: z.ZodString;
+    }, z.core.$strict>, z.ZodObject<{
         kind: z.ZodLiteral<"lifetime">;
     }, z.core.$strict>, z.ZodObject<{
         kind: z.ZodLiteral<"sliding">;
@@ -698,6 +724,9 @@ export const policyTraceSchema: z.ZodObject<{
         "per-model-disabled": "per-model-disabled";
         "min-channel-deposit": "min-channel-deposit";
         "budget-daily": "budget-daily";
+        "budget-weekly": "budget-weekly";
+        "budget-monthly": "budget-monthly";
+        "budget-rolling": "budget-rolling";
         "budget-total": "budget-total";
         "per-service": "per-service";
         "per-service-daily": "per-service-daily";
@@ -714,6 +743,9 @@ export const policyTraceSchema: z.ZodObject<{
             "per-model-disabled": "per-model-disabled";
             "min-channel-deposit": "min-channel-deposit";
             "budget-daily": "budget-daily";
+            "budget-weekly": "budget-weekly";
+            "budget-monthly": "budget-monthly";
+            "budget-rolling": "budget-rolling";
             "budget-total": "budget-total";
             "per-service": "per-service";
             "per-service-daily": "per-service-daily";
@@ -751,6 +783,18 @@ export const policyTraceSchema: z.ZodObject<{
             kind: z.ZodLiteral<"utc-day">;
             day: z.ZodISODate;
         }, z.core.$strict>, z.ZodObject<{
+            kind: z.ZodLiteral<"calendar-day">;
+            day: z.ZodISODate;
+            timezone: z.ZodString;
+        }, z.core.$strict>, z.ZodObject<{
+            kind: z.ZodLiteral<"calendar-week">;
+            weekStart: z.ZodISODate;
+            timezone: z.ZodString;
+        }, z.core.$strict>, z.ZodObject<{
+            kind: z.ZodLiteral<"calendar-month">;
+            month: z.ZodString;
+            timezone: z.ZodString;
+        }, z.core.$strict>, z.ZodObject<{
             kind: z.ZodLiteral<"lifetime">;
         }, z.core.$strict>, z.ZodObject<{
             kind: z.ZodLiteral<"sliding">;
@@ -774,6 +818,18 @@ export type PolicyWindow = z.infer<typeof policyWindowSchema>;
 export const policyWindowSchema: z.ZodDiscriminatedUnion<[z.ZodObject<{
     kind: z.ZodLiteral<"utc-day">;
     day: z.ZodISODate;
+}, z.core.$strict>, z.ZodObject<{
+    kind: z.ZodLiteral<"calendar-day">;
+    day: z.ZodISODate;
+    timezone: z.ZodString;
+}, z.core.$strict>, z.ZodObject<{
+    kind: z.ZodLiteral<"calendar-week">;
+    weekStart: z.ZodISODate;
+    timezone: z.ZodString;
+}, z.core.$strict>, z.ZodObject<{
+    kind: z.ZodLiteral<"calendar-month">;
+    month: z.ZodString;
+    timezone: z.ZodString;
 }, z.core.$strict>, z.ZodObject<{
     kind: z.ZodLiteral<"lifetime">;
 }, z.core.$strict>, z.ZodObject<{

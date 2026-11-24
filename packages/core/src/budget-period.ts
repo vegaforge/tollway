@@ -1,9 +1,11 @@
 /**
- * Calendar period keys and time zone helpers for periodic budgets (#198).
+ * Calendar periods for budgets (#198): period ids, and the ledger that keeps
+ * spend per period.
  *
- * Uses the runtime's built-in `Intl.DateTimeFormat` with IANA time zones so
- * calendar-day, weekly, and monthly boundaries follow local wall-clock time
- * across Daylight Saving Time transitions with zero external dependencies.
+ * Local dates come from `Intl.DateTimeFormat` with an IANA time zone, so a
+ * period follows the wall clock in that zone and a 23 or 25 hour day around
+ * a Daylight Saving Time change is still one period. No date library is
+ * needed. See docs/design.md, "Policy and budgets".
  */
 
 export type WeekStartsOn = "monday" | "sunday";
@@ -100,4 +102,89 @@ export function calendarWeekKey(
   // when subtracting up to 6 days from the already-resolved local date.
   const weekStart = new Date(Date.UTC(year, month - 1, day - offset));
   return weekStart.toISOString().slice(0, 10);
+}
+
+/** The calendar budget periods. */
+export type CalendarPeriodKind = "day" | "week" | "month";
+
+/**
+ * The id of the calendar period that contains `timestampMs`, for example
+ * `day:2026-11-18@America/Los_Angeles`, `week:2026-11-16@UTC` (the date the
+ * week starts) or `month:2026-11@Europe/London`. For one kind and zone, ids
+ * sort in time order as plain strings, so a store can expire old periods by
+ * key.
+ */
+export function calendarPeriodId(
+  kind: CalendarPeriodKind,
+  timestampMs: number,
+  timeZone = "UTC",
+  weekStartsOn: WeekStartsOn = "monday",
+): string {
+  switch (kind) {
+    case "day":
+      return `day:${calendarDayKey(timestampMs, timeZone)}@${timeZone}`;
+    case "week":
+      return `week:${calendarWeekKey(timestampMs, timeZone, weekStartsOn)}@${timeZone}`;
+    case "month":
+      return `month:${calendarMonthKey(timestampMs, timeZone)}@${timeZone}`;
+  }
+}
+
+/** The date part of a period id: `2026-11-18` from `day:2026-11-18@UTC`. */
+export function periodDate(periodId: string): string {
+  const start = periodId.indexOf(":") + 1;
+  const end = periodId.indexOf("@", start);
+  return periodId.slice(start, end);
+}
+
+/**
+ * Spend per asset in one kind of calendar period. Spend is stored under its
+ * period id and is never reset in place: a new period simply has no entries
+ * yet, and the entries of periods that have closed are dropped.
+ *
+ * The current period only moves forward. When the clock steps back across a
+ * boundary, the latest period seen stays current, so a closed period is not
+ * reopened with an empty budget and nothing is counted twice.
+ */
+export class PeriodSpendLedger {
+  readonly #periodOf: (timestampMs: number) => string;
+  #current: string | undefined;
+  /** Keyed by `${periodId}|${asset}`. */
+  readonly #spend = new Map<string, bigint>();
+
+  constructor(periodOf: (timestampMs: number) => string) {
+    this.#periodOf = periodOf;
+  }
+
+  /** The period that spend at `timestampMs` counts toward. */
+  period(timestampMs: number): string {
+    const computed = this.#periodOf(timestampMs);
+    // Ids of one kind and zone differ only in their fixed-width date, so a
+    // string comparison is a time comparison.
+    if (this.#current === undefined || computed > this.#current) {
+      this.#current = computed;
+      this.#dropClosedPeriods(computed);
+    }
+    return this.#current;
+  }
+
+  spent(timestampMs: number, asset: string): bigint {
+    return this.#spend.get(`${this.period(timestampMs)}|${asset}`) ?? 0n;
+  }
+
+  add(timestampMs: number, asset: string, amount: bigint): void {
+    const key = `${this.period(timestampMs)}|${asset}`;
+    this.#spend.set(key, (this.#spend.get(key) ?? 0n) + amount);
+  }
+
+  /** How many period and asset entries are held. For tests of the memory bound. */
+  get size(): number {
+    return this.#spend.size;
+  }
+
+  #dropClosedPeriods(current: string): void {
+    for (const key of this.#spend.keys()) {
+      if (!key.startsWith(`${current}|`)) this.#spend.delete(key);
+    }
+  }
 }

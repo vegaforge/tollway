@@ -263,9 +263,7 @@ export const policySchema = z.strictObject({
       /** Spend ceiling per calendar month (UTC by default, or in `timezone`). */
       monthly: integerString.meta({ description: "Spend ceiling per calendar month." }).optional(),
       /** Rolling-window spend ceiling, e.g. 24 hours (86400s). */
-      rolling: windowCapSchema
-        .meta({ description: "Rolling-window spend ceiling." })
-        .optional(),
+      rolling: windowCapSchema.meta({ description: "Rolling-window spend ceiling." }).optional(),
       /** IANA time zone for calendar periods (daily, weekly, monthly). Defaults to "UTC". */
       timezone: z
         .string()

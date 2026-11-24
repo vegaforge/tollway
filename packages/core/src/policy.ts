@@ -1,4 +1,4 @@
-import { calendarDayKey, calendarMonthKey, calendarWeekKey } from "./budget-period.js";
+import { calendarPeriodId, PeriodSpendLedger, periodDate } from "./budget-period.js";
 import { TollwayError } from "./errors.js";
 import {
   type Policy,
@@ -167,18 +167,21 @@ type SpendCeilingLimit = {
 /** Spend and request history the stateful rules read. */
 type EngineState = {
   day: string;
-  budgetDay: string;
-  budgetWeek: string;
-  budgetMonth: string;
-  dailySpend: Map<string, bigint>;
-  weeklySpend: Map<string, bigint>;
-  monthlySpend: Map<string, bigint>;
+  /**
+   * Issue #198: budget spend per calendar period, in the policy's time zone.
+   * Each ledger keys spend by period id and never moves back to a closed
+   * period, so a clock that steps backwards cannot reopen a spent budget.
+   */
+  dailyBudget: PeriodSpendLedger;
+  weeklyBudget: PeriodSpendLedger;
+  monthlyBudget: PeriodSpendLedger;
+  /** Issue #198: the rolling budget, one bounded accumulator per asset (#192). */
   rollingBudgetSpend: Map<string, RollingSum>;
   totalSpend: Map<string, bigint>;
   serviceSpend: Map<string, bigint>;
   /**
-   * Issue #192: per-service calendar-day spend, reset in
-   * `resetDailyIfNeeded` alongside `dailySpend`.
+   * Issue #192: per-service UTC-day spend, cleared in
+   * `resetDailyIfNeeded` when the UTC date changes.
    */
   serviceDailySpend: Map<string, bigint>;
   /**
@@ -484,47 +487,53 @@ function spendCeiling(
   };
 }
 
-const budgetDaily: RuleEvaluator = ({ policy, intent, amount, state }) => {
+const budgetDaily: RuleEvaluator = ({ policy, intent, amount, now, state }) => {
   const tz = policy.budgets?.timezone;
+  const day = periodDate(state.dailyBudget.period(now));
   return spendCeiling(
     "budget-daily",
     "daily budget",
     `for ${intent.asset}`,
     policy.budgets?.daily,
     policy.budgets?.daily != null,
-    state.dailySpend.get(intent.asset) ?? 0n,
+    state.dailyBudget.spent(now, intent.asset),
     amount,
-    tz != null ? { kind: "calendar-day", day: state.budgetDay, timezone: tz } : { kind: "utc-day", day: state.budgetDay },
+    // Without a time zone the period is the UTC day, reported as before.
+    tz != null ? { kind: "calendar-day", day, timezone: tz } : { kind: "utc-day", day },
   );
 };
 
-const budgetWeekly: RuleEvaluator = ({ policy, intent, amount, state }) => {
-  const tz = policy.budgets?.timezone ?? "UTC";
-  return spendCeiling(
+const budgetWeekly: RuleEvaluator = ({ policy, intent, amount, now, state }) =>
+  spendCeiling(
     "budget-weekly",
     "weekly budget",
     `for ${intent.asset}`,
     policy.budgets?.weekly,
     policy.budgets?.weekly != null,
-    state.weeklySpend.get(intent.asset) ?? 0n,
+    state.weeklyBudget.spent(now, intent.asset),
     amount,
-    { kind: "calendar-week", weekStart: state.budgetWeek, timezone: tz },
+    {
+      kind: "calendar-week",
+      weekStart: periodDate(state.weeklyBudget.period(now)),
+      timezone: policy.budgets?.timezone ?? "UTC",
+    },
   );
-};
 
-const budgetMonthly: RuleEvaluator = ({ policy, intent, amount, state }) => {
-  const tz = policy.budgets?.timezone ?? "UTC";
-  return spendCeiling(
+const budgetMonthly: RuleEvaluator = ({ policy, intent, amount, now, state }) =>
+  spendCeiling(
     "budget-monthly",
     "monthly budget",
     `for ${intent.asset}`,
     policy.budgets?.monthly,
     policy.budgets?.monthly != null,
-    state.monthlySpend.get(intent.asset) ?? 0n,
+    state.monthlyBudget.spent(now, intent.asset),
     amount,
-    { kind: "calendar-month", month: state.budgetMonth, timezone: tz },
+    {
+      kind: "calendar-month",
+      month: periodDate(state.monthlyBudget.period(now)),
+      timezone: policy.budgets?.timezone ?? "UTC",
+    },
   );
-};
 
 const budgetRolling: RuleEvaluator = ({ policy, intent, amount, now, state }) => {
   const config = policy.budgets?.rolling;
@@ -914,12 +923,11 @@ export function createPolicyEngine(
   const initialNow = clock();
   const state: EngineState = {
     day: utcDate(() => initialNow),
-    budgetDay: calendarDayKey(initialNow, budgetTimezone),
-    budgetWeek: calendarWeekKey(initialNow, budgetTimezone, weekStartsOn),
-    budgetMonth: calendarMonthKey(initialNow, budgetTimezone),
-    dailySpend: new Map(),
-    weeklySpend: new Map(),
-    monthlySpend: new Map(),
+    dailyBudget: new PeriodSpendLedger((t) => calendarPeriodId("day", t, budgetTimezone)),
+    weeklyBudget: new PeriodSpendLedger((t) =>
+      calendarPeriodId("week", t, budgetTimezone, weekStartsOn),
+    ),
+    monthlyBudget: new PeriodSpendLedger((t) => calendarPeriodId("month", t, budgetTimezone)),
     rollingBudgetSpend: new Map(),
     totalSpend: new Map(),
     serviceSpend: new Map(),
@@ -939,21 +947,6 @@ export function createPolicyEngine(
       state.serviceDailySpend.clear();
       state.resourceDailySpend.clear();
       state.day = today;
-    }
-    const nextBudgetDay = calendarDayKey(now, budgetTimezone);
-    if (nextBudgetDay !== state.budgetDay) {
-      state.dailySpend.clear();
-      state.budgetDay = nextBudgetDay;
-    }
-    const nextBudgetWeek = calendarWeekKey(now, budgetTimezone, weekStartsOn);
-    if (nextBudgetWeek !== state.budgetWeek) {
-      state.weeklySpend.clear();
-      state.budgetWeek = nextBudgetWeek;
-    }
-    const nextBudgetMonth = calendarMonthKey(now, budgetTimezone);
-    if (nextBudgetMonth !== state.budgetMonth) {
-      state.monthlySpend.clear();
-      state.budgetMonth = nextBudgetMonth;
     }
   }
 
@@ -985,15 +978,13 @@ export function createPolicyEngine(
     const now = clock();
     resetDailyIfNeeded(now);
     const amount = parseAmount(intent.amount);
-    const { dailySpend, weeklySpend, monthlySpend, totalSpend, serviceSpend } = state;
+    const { totalSpend, serviceSpend } = state;
 
-    dailySpend.set(intent.asset, (dailySpend.get(intent.asset) ?? 0n) + amount);
-    if (policy.budgets?.weekly != null) {
-      weeklySpend.set(intent.asset, (weeklySpend.get(intent.asset) ?? 0n) + amount);
-    }
-    if (policy.budgets?.monthly != null) {
-      monthlySpend.set(intent.asset, (monthlySpend.get(intent.asset) ?? 0n) + amount);
-    }
+    // Every calendar ledger advances, configured or not, so the headroom
+    // and trace of a budget added later read the same history.
+    state.dailyBudget.add(now, intent.asset, amount);
+    state.weeklyBudget.add(now, intent.asset, amount);
+    state.monthlyBudget.add(now, intent.asset, amount);
     if (policy.budgets?.rolling != null) {
       let accumulator = state.rollingBudgetSpend.get(intent.asset);
       if (!accumulator) {
@@ -1153,7 +1144,7 @@ export function createPolicyEngine(
       ceilings.push({
         rule: "budget-daily",
         limit: parseAmount(daily),
-        spent: state.dailySpend.get(asset) ?? 0n,
+        spent: state.dailyBudget.spent(now, asset),
       });
     }
     const weekly = policy.budgets?.weekly;
@@ -1161,7 +1152,7 @@ export function createPolicyEngine(
       ceilings.push({
         rule: "budget-weekly",
         limit: parseAmount(weekly),
-        spent: state.weeklySpend.get(asset) ?? 0n,
+        spent: state.weeklyBudget.spent(now, asset),
       });
     }
     const monthly = policy.budgets?.monthly;
@@ -1169,7 +1160,7 @@ export function createPolicyEngine(
       ceilings.push({
         rule: "budget-monthly",
         limit: parseAmount(monthly),
-        spent: state.monthlySpend.get(asset) ?? 0n,
+        spent: state.monthlyBudget.spent(now, asset),
       });
     }
     const rolling = policy.budgets?.rolling;
