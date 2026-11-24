@@ -1,3 +1,4 @@
+import { TollwayError } from "@vegaforge/tollway-core";
 import type { Drift, DriftKind, ReconciliationResult } from "./index.js";
 
 export const RECONCILIATION_REPORT_VERSION = 1 as const;
@@ -21,17 +22,8 @@ export const DEFAULT_DRIFT_SEVERITY: Record<DriftKind, DriftSeverity> = {
   "foreign-commitment": "low",
 };
 
-const ALL_DRIFT_KINDS: readonly DriftKind[] = [
-  "under-settled",
-  "over-settled",
-  "missing-commitment",
-  "unexpected-remainder",
-  "sequence-gap",
-  "malformed-record",
-  "non-monotonic-cumulative",
-  "foreign-commitment",
-  "duplicate-sequence",
-];
+/** Every drift kind, taken from the severity table so the two cannot drift apart. */
+const ALL_DRIFT_KINDS = Object.keys(DEFAULT_DRIFT_SEVERITY) as DriftKind[];
 
 export function resolveDriftSeverity(
   kind: DriftKind,
@@ -95,7 +87,10 @@ const INTEGER_AMOUNT_RE = /^[0-9]+$/;
 
 function parseIntegerAmount(value: string, field: string): bigint {
   if (!INTEGER_AMOUNT_RE.test(value)) {
-    throw new Error(`${field} "${value}" is not a valid non-negative integer string`);
+    throw new TollwayError(
+      "invalid-amount",
+      `${field} "${value}" is not a valid non-negative integer string`,
+    );
   }
   return BigInt(value);
 }

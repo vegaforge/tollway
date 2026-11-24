@@ -164,6 +164,11 @@ export function createDriftAlertBridge(options: DriftAlertBridgeOptions): DriftA
           }
         }
 
+        // A kind whose emit threw never reached the hub. It is left out of the
+        // stored state, so the next run alerts on it again instead of treating
+        // it as already delivered. Failures the hub reports in its
+        // DeliveryReport are the hub's to retry and do count as alerted.
+        const unsent = new Set<DriftKind>();
         for (const item of result.drift) {
           if (!kindsToEmit.has(item.kind)) continue;
 
@@ -185,10 +190,14 @@ export function createDriftAlertBridge(options: DriftAlertBridgeOptions): DriftA
             }
           } catch (cause) {
             failures.push(cause instanceof Error ? cause : new Error(String(cause)));
+            unsent.add(item.kind);
           }
           emitted += 1;
         }
 
+        for (const kind of unsent) {
+          delete nextActive[kind];
+        }
         await store.setActive(subject, nextActive);
       }
 

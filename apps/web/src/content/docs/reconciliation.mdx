@@ -32,7 +32,7 @@ Use `createDriftAlertBridge({ emitter, store, severity })` to forward `Reconcili
 - **Alert payload (`anomaly.detected`):** `{ source: "reconcile", subject, kind, detail, severity }`.
 - **Deduplication:** the same `(subject, kind, detail)` alerts once until it resolves or its `detail` changes. Back `store` with a persistent `DriftAlertStore` (or seed `createMemoryDriftAlertStore(previousResults)`) to preserve deduplication across restarts.
 - **Severity defaults:** `under-settled`, `unexpected-remainder`, and `non-monotonic-cumulative` default to `critical`; `over-settled`, `missing-commitment`, and `malformed-record` default to `high`; `sequence-gap` and `duplicate-sequence` default to `medium`; `foreign-commitment` defaults to `low`. Override per kind via `severity`.
-- **Failure isolation:** delivery failures reported in `DeliveryReport.failures` (or thrown by the emitter) are collected in the bridge run summary and never fail the reconciliation run.
+- **Failure isolation:** delivery failures reported in `DeliveryReport.failures` (or thrown by the emitter) are collected in the bridge run summary and never fail the reconciliation run. A failure the hub reports is the hub's to retry, so that drift counts as alerted. A drift whose `emit` threw never reached the hub, so it is not recorded and the next run alerts on it again.
 
 ## Reports and exports
 

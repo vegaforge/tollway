@@ -170,4 +170,34 @@ describe("createDriftAlertBridge", () => {
       "unexpected emitter crash",
     ]);
   });
+  it("alerts again on the next run when emitting a drift threw", async () => {
+    // A thrown emit means the alert never reached the hub, so the drift must
+    // not be recorded as already alerted: the next run has to try again.
+    let crash = true;
+    const hub = createFakeHub({
+      deliver: async () => {
+        if (crash) throw new Error("emitter down");
+        return { failures: [] };
+      },
+    });
+    const bridge = createDriftAlertBridge({ emitter: hub });
+    const result: ReconciliationResult = {
+      ok: false,
+      channelId: "ch-retry",
+      drift: [{ kind: "under-settled", detail: "shortfall: 5" }],
+    };
+
+    const first = await bridge.process([result]);
+    expect(first.failures.map((error) => error.message)).toEqual(["emitter down"]);
+
+    crash = false;
+    const second = await bridge.process([result]);
+    expect(second.emitted).toBe(1);
+    expect(second.deduplicated).toBe(0);
+    expect(hub.events).toHaveLength(2);
+
+    const third = await bridge.process([result]);
+    expect(third.emitted).toBe(0);
+    expect(third.deduplicated).toBe(1);
+  });
 });

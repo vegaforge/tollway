@@ -172,6 +172,9 @@ describe("buildReconciliationReport", () => {
     expect(() =>
       buildReconciliationReport([{ ok: true, channelId: "ch-1", amounts: { settled: "12.34" } }]),
     ).toThrow(/not a valid non-negative integer string/);
+    expect(() =>
+      buildReconciliationReport([{ ok: true, channelId: "ch-1", amounts: { expected: "-1" } }]),
+    ).toThrow(expect.objectContaining({ code: "invalid-amount" }));
   });
 });
 
