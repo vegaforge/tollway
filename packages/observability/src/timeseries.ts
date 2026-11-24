@@ -8,7 +8,7 @@
 
 import type { SettlementModel } from "@vegaforge/tollway-core";
 import { TollwayError } from "@vegaforge/tollway-core";
-import type { MetricsQuery, PaymentMetric } from "./index.js";
+import type { MetricsQuery, PaymentMetric } from "./metrics.js";
 
 /** Bucket widths a time series can be cut into. */
 export const timeseriesBuckets = ["1m", "5m", "1h", "1d"] as const;

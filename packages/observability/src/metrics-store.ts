@@ -1,246 +1,220 @@
+import { type SettlementModel, settlementModels, TollwayError } from "@vegaforge/tollway-core";
+import type { MetricsQuery, PaymentMetric, SpendSummary } from "./metrics.js";
+import { parseIsoTimestamp } from "./timeseries.js";
+
 /**
- * Persistent metrics storage with SQLite and Postgres support.
- * Metrics are stored durably across process restarts for long-term
- * observability and analytics.
+ * Durable storage for payment metrics (#217). The hub writes to a store in
+ * batches; dashboards and exporters read rollups back from it. Every store
+ * returns the same results for the same data: the conformance suite in
+ * `metrics-store.test.ts` runs against each one.
  */
-
-import type { PaymentMetric, MetricsQuery } from "./index.js";
-
-/** Persistence boundary for payment metrics. */
 export interface MetricsStore {
-  /** Records one or more payment metrics. */
-  record(...metrics: PaymentMetric[]): Promise<void>;
   /**
-   * Queries metrics matching the filter, ordered by timestamp.
-   * Bounds are inclusive.
+   * Appends metrics in one batch. Rejects with {@link InvalidMetricError}
+   * before writing anything when a metric is malformed, so a batch is never
+   * half written for that reason.
    */
-  query(filter?: MetricsQuery): Promise<PaymentMetric[]>;
-  /** Deletes metrics older than the given timestamp (epoch milliseconds). */
-  purge(olderThan: number): Promise<number>;
-  /** Closes the underlying store (if applicable). */
-  close?(): void;
+  append(metrics: readonly PaymentMetric[]): Promise<void>;
+  /** Matching metrics in insertion order, one page at a time. */
+  query(query?: MetricsQuery, page?: MetricsPageRequest): Promise<MetricsPage>;
+  /** The spend summary for matching metrics, computed by the store. */
+  summarize(query?: MetricsQuery): Promise<SpendSummary>;
+  /** Releases the store's resources. A closed store rejects every call. */
+  close(): Promise<void>;
 }
 
-export type SqliteMetricsStoreOptions = {
-  /** Database file path, or `:memory:`. */
-  filename: string;
-  /**
-   * How long a write waits for another connection's lock before failing.
-   * Defaults to 500ms. Keep short to avoid blocking the event loop.
-   */
-  busyTimeoutMs?: number;
+export type MetricsPageRequest = {
+  /** Most metrics to return. Defaults to 1000, at most 10000. */
+  limit?: number;
+  /** The `nextCursor` of the previous page. */
+  cursor?: string;
 };
 
-export type SqliteMetricsStore = MetricsStore & {
-  close(): void;
+export type MetricsPage = {
+  metrics: PaymentMetric[];
+  /** Present when more metrics match; pass it as `cursor` for the next page. */
+  nextCursor?: string;
 };
 
-const DEFAULT_BUSY_TIMEOUT_MS = 500;
+export const DEFAULT_METRICS_PAGE_LIMIT = 1000;
+export const MAX_METRICS_PAGE_LIMIT = 10_000;
 
-function loadSqlite(): typeof import("node:sqlite") {
-  const unavailable = () =>
-    new Error(
-      "createSqliteMetricsStore needs node:sqlite, available without a flag from Node 22.13.0; ensure your Node version supports node:sqlite",
-    );
-  if (typeof process.getBuiltinModule !== "function") throw unavailable();
-  let sqlite: typeof import("node:sqlite") | undefined;
-  try {
-    sqlite = process.getBuiltinModule("node:sqlite");
-  } catch (cause) {
-    throw Object.assign(unavailable(), { cause });
+/** A metric a store refuses to write, naming the field that is wrong. */
+export class InvalidMetricError extends TollwayError {
+  readonly field: keyof PaymentMetric;
+
+  constructor(field: keyof PaymentMetric, message: string) {
+    super("invalid-metric", `invalid payment metric: ${field} ${message}`);
+    this.name = "InvalidMetricError";
+    this.field = field;
   }
-  if (!sqlite) throw unavailable();
-  return sqlite;
 }
 
-/**
- * In-memory metrics store. Rows disappear with the process.
- * Suitable for development and testing.
- */
-export function createMemoryMetricsStore(): MetricsStore {
-  const metrics: PaymentMetric[] = [];
-
-  return {
-    async record(...newMetrics) {
-      metrics.push(...newMetrics.map((m) => ({ ...m })));
-    },
-    async query(filter) {
-      return metrics
-        .slice()
-        .filter((m) => {
-          if (filter?.payer !== undefined && m.payer !== filter.payer) return false;
-          if (filter?.payee !== undefined && m.payee !== filter.payee) return false;
-          if (filter?.model !== undefined && m.model !== filter.model) return false;
-          if (filter?.from !== undefined && m.at < filter.from) return false;
-          if (filter?.to !== undefined && m.at > filter.to) return false;
-          return true;
-        })
-        .sort((a, b) => a.at.localeCompare(b.at));
-    },
-    async purge(olderThan) {
-      const before = metrics.length;
-      // Purge metrics with timestamp less than the threshold
-      const cutoff = new Date(olderThan).toISOString();
-      let removed = 0;
-      for (let i = metrics.length - 1; i >= 0; i--) {
-        if (metrics[i].at < cutoff) {
-          metrics.splice(i, 1);
-          removed++;
-        }
-      }
-      return removed;
-    },
-  };
-}
+const AMOUNT = /^[0-9]+$/;
+const OUTCOMES: readonly PaymentMetric["outcome"][] = ["settled", "failed", "skipped"];
 
 /**
- * SQLite-backed metrics store using `node:sqlite`.
- * Supports concurrent reads and writes with locking.
+ * Checks a metric before a durable store writes it. Amounts are integer
+ * strings in the asset's smallest unit, the same rule as receipts, so a
+ * rollup never has to skip a row it cannot sum.
  */
-export function createSqliteMetricsStore(options: SqliteMetricsStoreOptions): SqliteMetricsStore {
-  const busyTimeoutMs = options.busyTimeoutMs ?? DEFAULT_BUSY_TIMEOUT_MS;
-  if (!Number.isInteger(busyTimeoutMs) || busyTimeoutMs < 0) {
-    throw new RangeError("busyTimeoutMs must be a non-negative integer");
-  }
-
-  const { DatabaseSync } = loadSqlite();
-  const db = new DatabaseSync(options.filename);
-
-  db.exec(`PRAGMA busy_timeout = ${busyTimeoutMs}`);
-  db.exec("PRAGMA journal_mode = WAL");
-
-  db.exec(`
-    CREATE TABLE IF NOT EXISTS payment_metrics (
-      id TEXT PRIMARY KEY,
-      payer TEXT NOT NULL,
-      payee TEXT NOT NULL,
-      model TEXT NOT NULL,
-      amount TEXT NOT NULL,
-      asset TEXT NOT NULL,
-      latency_ms INTEGER NOT NULL,
-      outcome TEXT NOT NULL,
-      at TEXT NOT NULL,
-      created_at INTEGER NOT NULL
-    )
-  `);
-
-  db.exec(`
-    CREATE INDEX IF NOT EXISTS payment_metrics_payer_at
-      ON payment_metrics (payer, at)
-  `);
-
-  db.exec(`
-    CREATE INDEX IF NOT EXISTS payment_metrics_payee_at
-      ON payment_metrics (payee, at)
-  `);
-
-  db.exec(`
-    CREATE INDEX IF NOT EXISTS payment_metrics_model_at
-      ON payment_metrics (model, at)
-  `);
-
-  db.exec(`
-    CREATE INDEX IF NOT EXISTS payment_metrics_at
-      ON payment_metrics (at)
-  `);
-
-  const insert = db.prepare(`
-    INSERT INTO payment_metrics (
-      id, payer, payee, model, amount, asset, latency_ms, outcome, at, created_at
-    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-  `);
-
-  const selectByFilter = db.prepare(`
-    SELECT id, payer, payee, model, amount, asset, latency_ms, outcome, at
-    FROM payment_metrics
-    WHERE (? IS NULL OR payer = ?)
-      AND (? IS NULL OR payee = ?)
-      AND (? IS NULL OR model = ?)
-      AND (? IS NULL OR at >= ?)
-      AND (? IS NULL OR at <= ?)
-    ORDER BY at ASC
-  `);
-
-  const purge = db.prepare(`
-    DELETE FROM payment_metrics
-    WHERE created_at <= ?
-  `);
-
-  function transaction<T>(work: () => T): T {
-    db.exec("BEGIN IMMEDIATE");
-    try {
-      const result = work();
-      db.exec("COMMIT");
-      return result;
-    } catch (error) {
-      db.exec("ROLLBACK");
-      throw error;
+export function assertValidMetric(metric: PaymentMetric): void {
+  for (const field of ["payer", "payee", "asset"] as const) {
+    if (typeof metric[field] !== "string" || metric[field].length === 0) {
+      throw new InvalidMetricError(field, "must be a non-empty string");
     }
   }
+  if (typeof metric.amount !== "string" || !AMOUNT.test(metric.amount)) {
+    throw new InvalidMetricError(
+      "amount",
+      `must be an integer string in the asset's smallest unit, got ${JSON.stringify(metric.amount)}`,
+    );
+  }
+  if (!settlementModels.includes(metric.model as SettlementModel)) {
+    throw new InvalidMetricError("model", `is not a settlement model: ${String(metric.model)}`);
+  }
+  if (!OUTCOMES.includes(metric.outcome)) {
+    throw new InvalidMetricError("outcome", `is not an outcome: ${String(metric.outcome)}`);
+  }
+  if (!Number.isFinite(metric.latencyMs) || metric.latencyMs < 0) {
+    throw new InvalidMetricError("latencyMs", "must be a finite, non-negative number");
+  }
+  if (typeof metric.at !== "string" || parseIsoTimestamp(metric.at) === null) {
+    throw new InvalidMetricError("at", "must be an ISO 8601 timestamp with a zone");
+  }
+}
 
+/**
+ * The epoch milliseconds of a metric's `at`. Stores keep `at` exactly as
+ * recorded and order and filter on this value, so `2026-01-01T01:00:00+01:00`
+ * and `2026-01-01T00:00:00Z` are the same instant.
+ */
+export function metricTime(metric: Pick<PaymentMetric, "at">): number {
+  const time = parseIsoTimestamp(metric.at);
+  if (time === null)
+    throw new InvalidMetricError("at", "must be an ISO 8601 timestamp with a zone");
+  return time;
+}
+
+/** A query's time bounds as epoch milliseconds, both inclusive. */
+export type TimeBounds = { from: number | null; to: number | null };
+
+export function queryBounds(query: MetricsQuery | undefined): TimeBounds {
+  return { from: bound(query?.from, "from"), to: bound(query?.to, "to") };
+}
+
+function bound(value: string | undefined, name: "from" | "to"): number | null {
+  if (value === undefined) return null;
+  const time = parseIsoTimestamp(value);
+  if (time === null) {
+    throw new TollwayError(
+      "invalid-metrics-query",
+      `${name} must be an ISO 8601 timestamp with a zone`,
+    );
+  }
+  return time;
+}
+
+/** Copies only the metric's own fields, so a store never keeps extra keys. */
+export function copyMetric(metric: PaymentMetric): PaymentMetric {
   return {
-    async record(...metrics) {
-      const now = Date.now();
-      transaction(() => {
-        for (const metric of metrics) {
-          insert.run(
-            `${metric.payer}-${metric.payee}-${metric.at}-${Math.random()}`,
-            metric.payer,
-            metric.payee,
-            metric.model,
-            metric.amount,
-            metric.asset,
-            metric.latencyMs,
-            metric.outcome,
-            metric.at,
-            now,
-          );
-        }
-      });
-    },
-
-    async query(filter) {
-      return (
-        selectByFilter.all(
-          filter?.payer ?? null,
-          filter?.payer ?? null,
-          filter?.payee ?? null,
-          filter?.payee ?? null,
-          filter?.model ?? null,
-          filter?.model ?? null,
-          filter?.from ?? null,
-          filter?.from ?? null,
-          filter?.to ?? null,
-          filter?.to ?? null,
-        ) as Array<{
-          id: string;
-          payer: string;
-          payee: string;
-          model: string;
-          amount: string;
-          asset: string;
-          latency_ms: number;
-          outcome: string;
-          at: string;
-        }>
-      ).map((row) => ({
-        payer: row.payer,
-        payee: row.payee,
-        model: row.model,
-        amount: row.amount,
-        asset: row.asset,
-        latencyMs: row.latency_ms,
-        outcome: row.outcome,
-        at: row.at,
-      }));
-    },
-
-    async purge(olderThan) {
-      return Number(purge.run(olderThan).changes);
-    },
-
-    close() {
-      db.close();
-    },
+    payer: metric.payer,
+    payee: metric.payee,
+    model: metric.model,
+    amount: metric.amount,
+    asset: metric.asset,
+    latencyMs: metric.latencyMs,
+    outcome: metric.outcome,
+    at: metric.at,
   };
+}
+
+/** True when a stored metric matches every set field of the query. */
+export function metricMatches(
+  metric: PaymentMetric,
+  time: number,
+  query: MetricsQuery | undefined,
+  bounds: TimeBounds,
+): boolean {
+  if (query?.payer !== undefined && metric.payer !== query.payer) return false;
+  if (query?.payee !== undefined && metric.payee !== query.payee) return false;
+  if (query?.model !== undefined && metric.model !== query.model) return false;
+  if (bounds.from !== null && time < bounds.from) return false;
+  if (bounds.to !== null && time > bounds.to) return false;
+  return true;
+}
+
+export function resolvePageLimit(page: MetricsPageRequest | undefined): number {
+  const limit = page?.limit ?? DEFAULT_METRICS_PAGE_LIMIT;
+  if (!Number.isSafeInteger(limit) || limit < 1 || limit > MAX_METRICS_PAGE_LIMIT) {
+    throw new TollwayError(
+      "invalid-metrics-query",
+      `page limit must be a whole number from 1 to ${MAX_METRICS_PAGE_LIMIT}, got ${limit}`,
+    );
+  }
+  return limit;
+}
+
+const CURSOR_PREFIX = "m1.";
+
+/** Cursors are opaque to callers: a version prefix and the last row's position. */
+export function encodeCursor(position: number): string {
+  return `${CURSOR_PREFIX}${position}`;
+}
+
+/** The position after which the next page starts, or 0 for the first page. */
+export function decodeCursor(cursor: string | undefined): number {
+  if (cursor === undefined) return 0;
+  const raw = cursor.startsWith(CURSOR_PREFIX) ? cursor.slice(CURSOR_PREFIX.length) : "";
+  const position = /^[0-9]+$/.test(raw) ? Number(raw) : Number.NaN;
+  if (!Number.isSafeInteger(position)) {
+    throw new TollwayError("invalid-metrics-query", "page cursor is not one this store issued");
+  }
+  return position;
+}
+
+/** Sums metrics into a {@link SpendSummary} with bigint arithmetic. */
+export class SummaryAccumulator {
+  private total = 0n;
+  private count = 0;
+  private readonly byAsset = new Map<string, bigint>();
+  private readonly byModel = new Map<string, bigint>();
+  private readonly byPayer = new Map<string, bigint>();
+  private readonly byPayee = new Map<string, bigint>();
+
+  add(metric: Pick<PaymentMetric, "amount" | "asset" | "model" | "payer" | "payee">): void {
+    const amount = BigInt(metric.amount);
+    this.total += amount;
+    this.count += 1;
+    add(this.byAsset, metric.asset, amount);
+    add(this.byModel, metric.model, amount);
+    add(this.byPayer, metric.payer, amount);
+    add(this.byPayee, metric.payee, amount);
+  }
+
+  result(): SpendSummary {
+    return {
+      totalAmount: this.total.toString(),
+      count: this.count,
+      byAsset: record(this.byAsset),
+      byModel: record(this.byModel) as Partial<Record<SettlementModel, string>>,
+      byPayer: record(this.byPayer),
+      byPayee: record(this.byPayee),
+    };
+  }
+}
+
+function add(map: Map<string, bigint>, key: string, amount: bigint): void {
+  map.set(key, (map.get(key) ?? 0n) + amount);
+}
+
+function record(map: Map<string, bigint>): Record<string, string> {
+  const out: Record<string, string> = {};
+  for (const [key, value] of map) out[key] = value.toString();
+  return out;
+}
+
+/** Throws the error every store uses once it has been closed. */
+export function closedStoreError(): TollwayError {
+  return new TollwayError("invalid-metrics-query", "the metrics store is closed");
 }
