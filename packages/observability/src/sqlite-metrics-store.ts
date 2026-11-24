@@ -19,6 +19,7 @@ import {
   queryBounds,
   resolvePageLimit,
 } from "./metrics-store.js";
+import { loadSqlite } from "./sqlite.js";
 import { SummaryAccumulator } from "./summary.js";
 
 export type SqliteMetricsStoreOptions = {
@@ -33,20 +34,6 @@ export type SqliteMetricsStoreOptions = {
   /** Prefix for the store's tables. Defaults to `tollway_`. */
   tablePrefix?: string;
 };
-
-/** The first Node release where `node:sqlite` works without a flag. */
-const SQLITE_MINIMUM_NODE = "22.13.0";
-
-function loadSqlite(): typeof import("node:sqlite") {
-  const unavailable = () =>
-    new Error(
-      `createSqliteMetricsStore needs node:sqlite, available without a flag from Node ${SQLITE_MINIMUM_NODE}; this is Node ${process.versions.node}`,
-    );
-  if (typeof process.getBuiltinModule !== "function") throw unavailable();
-  const sqlite = process.getBuiltinModule("node:sqlite");
-  if (!sqlite) throw unavailable();
-  return sqlite;
-}
 
 /**
  * Schema versions in order. Each step is applied once and recorded in the
@@ -114,7 +101,7 @@ export function createSqliteMetricsStore(options: SqliteMetricsStoreOptions): Me
     throw new TypeError(`busyTimeoutMs must be a non-negative whole number, got ${busyTimeoutMs}`);
   }
   const tables = metricsTables(options.tablePrefix);
-  const { DatabaseSync } = loadSqlite();
+  const { DatabaseSync } = loadSqlite("createSqliteMetricsStore");
   const db = new DatabaseSync(options.filename);
   db.exec(`PRAGMA busy_timeout = ${busyTimeoutMs}`);
   migrate(db, tables);
