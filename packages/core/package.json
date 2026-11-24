@@ -34,13 +34,17 @@
     "build": "tsup",
     "dev": "tsup --watch",
     "test": "vitest run",
-    "typecheck": "tsc --noEmit"
+    "typecheck": "tsc --noEmit",
+    "mutation": "stryker run --incremental --force",
+    "mutation:incremental": "stryker run --incremental"
   },
   "dependencies": {
     "@x402/core": "^2.31.0",
     "zod": "^4.6.7"
   },
   "devDependencies": {
+    "@stryker-mutator/core": "^10.1.1",
+    "@stryker-mutator/vitest-runner": "^10.1.1",
     "@types/node": "^22.20.5",
     "fast-check": "^4.10.3",
     "tsup": "^9.0.0",
