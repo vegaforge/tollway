@@ -83,6 +83,16 @@ export {
   type TollwayRequest,
 } from "./gate.js";
 export {
+  GATE_ERROR_CODES,
+  GATE_ERRORS,
+  type GateErrorBody,
+  type GateErrorCode,
+  type GateErrorSpec,
+  type GateRejection,
+  type RenderedGateRejection,
+  renderGateRejection,
+} from "./gate-errors.js";
+export {
   decodeHeader,
   decodePaymentRequiredHeader,
   decodePaymentResponseHeader,

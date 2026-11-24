@@ -253,10 +253,11 @@ export function createHttpFacilitator(
             reason: reason(error.invalidReason, error.invalidMessage, "payment rejected"),
           };
         }
+        // `facilitator-unavailable` is what the gate answers with a 503 (#161).
         // Keep the underlying error as the cause: the failover client reads
         // it to tell a connection that was never made from one that was.
         throw new TollwayError(
-          "payment-failed",
+          "facilitator-unavailable",
           `facilitator /verify request failed: ${message(error)}`,
           { cause: error },
         );
@@ -297,7 +298,7 @@ export function createHttpFacilitator(
         // Keep the underlying error as the cause: the failover client reads
         // it to tell a connection that was never made from one that was.
         throw new TollwayError(
-          "payment-failed",
+          "facilitator-unavailable",
           `facilitator /settle request failed: ${message(error)}`,
           { cause: error },
         );
@@ -320,7 +321,7 @@ export function createHttpFacilitator(
         // Keep the underlying error as the cause: the failover client reads
         // it to tell a connection that was never made from one that was.
         throw new TollwayError(
-          "payment-failed",
+          "facilitator-unavailable",
           `facilitator /supported request failed: ${message(error)}`,
           { cause: error },
         );

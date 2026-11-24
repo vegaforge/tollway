@@ -27,6 +27,13 @@ import {
 } from "./discovery.js";
 import { type FacilitatorClient, stellarCaip2, toPaymentRequirements } from "./facilitator.js";
 import {
+  type GateRejection,
+  gateRejection,
+  isFacilitatorUnavailable,
+  isOutcomeUnknown,
+  retryAfterSeconds,
+} from "./gate-errors.js";
+import {
   decodePaymentSignatureHeader,
   encodeHeader,
   encodePaymentRequiredHeader,
@@ -141,14 +148,11 @@ export type GateOutcome =
        */
       lockLost?: true;
     }
-  | {
-      kind: "rejected";
-      status: number;
-      /** A stable reason code, or a human message when no code applies. */
-      reason: string;
-      /** Headers the adapter must send with the rejection, such as `Retry-After`. */
-      headers?: Record<string, string>;
-    };
+  /**
+   * A refusal with a machine-readable `code` (#161). Adapters render it with
+   * `renderGateRejection`, so every framework sends the same body.
+   */
+  | GateRejection;
 
 /** A payment gate for one paid resource, built by {@link createPaywall}. */
 export type Gate = (request: TollwayRequest) => Promise<GateOutcome>;
@@ -228,6 +232,16 @@ export type PaywallDeps = {
    * `settlementLockTtlMs`.
    */
   ambiguousSettlementHoldMs?: number;
+  /**
+   * `Retry-After`, in whole seconds, for rejections a client should answer
+   * by sending the same payment again (#161). `settlementInProgress` defaults
+   * to 1: the other request holding the payment usually finishes within a
+   * second, and the 409 contract from #203 promised that value.
+   * `facilitatorUnavailable` defaults to 1 as well. The 503
+   * `settlement-unknown` always uses the hold (`ambiguousSettlementHoldMs`),
+   * because a retry before then cannot be answered.
+   */
+  retryAfterSeconds?: { settlementInProgress?: number; facilitatorUnavailable?: number };
   /** Clock for quote expiry and service policy windows; injected tests can avoid waiting. */
   clock?: () => number;
   /**
@@ -422,11 +436,7 @@ async function priceRequest(
   const reject = (problem: string) =>
     ({
       ok: false,
-      outcome: {
-        kind: "rejected",
-        status: 500,
-        reason: `invalid-amount: dynamic price ${problem}`,
-      },
+      outcome: gateRejection("price-unavailable", `dynamic price ${problem}`),
     }) as const;
   if (typeof config.amount !== "function") return { ok: true, amount: config.amount };
 
@@ -504,6 +514,10 @@ type SettlementContext = {
   onServicePolicyError?: (error: Error, payer: string) => void;
   facilitatorTimeoutMs: number;
   ambiguousHoldMs: number;
+  /** The 409 for a payment another request is settling, with its configured `Retry-After`. */
+  settlementInProgress: RejectedOutcome;
+  /** `Retry-After` seconds for a 503 `facilitator-unavailable`. */
+  facilitatorRetryAfter: string;
 };
 
 /**
@@ -522,25 +536,31 @@ const DEFAULT_FACILITATOR_TIMEOUT_MS = 15_000;
  */
 const DEFAULT_AMBIGUOUS_HOLD_MS = 120_000;
 
-const OFFER_MISMATCH: RejectedOutcome = {
-  kind: "rejected",
-  status: 409,
-  reason: "payment already settled for a different offer",
-};
+const OFFER_MISMATCH: RejectedOutcome = gateRejection(
+  "offer-mismatch",
+  "payment already settled for a different offer",
+);
 
 /**
  * The same payment is being settled right now. `Retry-After` is the signal a
  * client reads to resend the identical payment (issue #203): the offer
  * mismatch above is also a 409, but carries none, because that payment has
- * already settled and must not be retried. One second is the shortest wait
- * the header can express. Machine-readable codes for every rejection are #161.
+ * already settled and must not be retried. The wait is configurable through
+ * `PaywallDeps.retryAfterSeconds` and defaults to one second, the shortest
+ * the header can express.
  */
-const SETTLEMENT_IN_PROGRESS: RejectedOutcome = {
-  kind: "rejected",
-  status: 409,
-  reason: "settlement in progress",
-  headers: { "retry-after": "1" },
-};
+function settlementInProgress(seconds: number): RejectedOutcome {
+  return gateRejection("settlement-in-progress", "settlement in progress", {
+    headers: { "retry-after": String(seconds) },
+  });
+}
+
+/** The 503 for a facilitator that could not be reached; nothing was settled. */
+function facilitatorUnavailable(message: string, retryAfter: string): RejectedOutcome {
+  return gateRejection("facilitator-unavailable", message, {
+    headers: { "retry-after": retryAfter },
+  });
+}
 
 /** A facilitator call that outlived the gate's deadline. */
 class FacilitatorDeadlineError extends Error {
@@ -659,16 +679,12 @@ async function awaitPending(pending: Promise<SettlementResult>): Promise<Settlem
  * carries the hold as `Retry-After`: after it, a retry either replays the
  * receipt or settles a payment that is known not to have landed.
  */
-function settlementDeadlineOutcome(
-  error: FacilitatorDeadlineError,
-  holdMs: number,
-): RejectedOutcome {
-  return {
-    kind: "rejected",
-    status: 503,
-    reason: `settlement-unknown: facilitator /settle did not answer within ${error.timeoutMs}ms, so the payment may have settled`,
-    headers: { "retry-after": String(Math.max(1, Math.ceil(holdMs / 1000))) },
-  };
+function settlementUnknownOutcome(problem: string, holdMs: number): RejectedOutcome {
+  return gateRejection(
+    "settlement-unknown",
+    `settlement-unknown: ${problem}, so the payment may have settled`,
+    { headers: { "retry-after": retryAfterSeconds(holdMs) } },
+  );
 }
 
 /** Calls an operator hook without letting the hook's own failure escape. */
@@ -696,15 +712,12 @@ function servicePolicyRejection(
   decision: Extract<ServicePolicyDecision, { allowed: false }>,
 ): RejectedOutcome {
   const retryAfter =
-    decision.retryAfterMs === undefined
-      ? undefined
-      : String(Math.max(1, Math.ceil(decision.retryAfterMs / 1000)));
-  return {
-    kind: "rejected",
-    status: decision.code === SERVICE_POLICY_DENIALS.notAllowed ? 403 : 429,
-    reason: decision.code,
-    ...(retryAfter === undefined ? {} : { headers: { "retry-after": retryAfter } }),
-  };
+    decision.retryAfterMs === undefined ? undefined : retryAfterSeconds(decision.retryAfterMs);
+  const rejection = gateRejection(decision.code, decision.code);
+  // The status follows the table: 403 for the lists, 429 for the windows.
+  rejection.status = decision.code === SERVICE_POLICY_DENIALS.notAllowed ? 403 : 429;
+  if (retryAfter !== undefined) rejection.headers = { "retry-after": retryAfter };
+  return rejection;
 }
 
 /** The fields a receipt must share with the offer it is returned for. */
@@ -742,6 +755,7 @@ async function settleWithHandler<TPayment>(
   method: string,
   handler: Handler<TPayment>,
   context: SettlementContext,
+  freshChallengeHeaders: () => Promise<Record<string, string>>,
   replayOnly?: () => Promise<GateOutcome>,
 ): Promise<GateOutcome> {
   // A payment that already settled is answered from the cache before it is
@@ -782,28 +796,35 @@ async function settleWithHandler<TPayment>(
       context.facilitatorTimeoutMs,
     );
   } catch (error) {
-    // Nothing has settled yet, so a retry is always safe here.
+    // Nothing has settled yet, so a retry is always safe here. Only failures
+    // the facilitator client classified as unavailability become a 503; any
+    // other error is a defect and propagates (Directive 4).
     if (error instanceof FacilitatorDeadlineError) {
-      return {
-        kind: "rejected",
-        status: 503,
-        reason: `facilitator-timeout: /verify did not answer within ${error.timeoutMs}ms`,
-        headers: { "retry-after": "1" },
-      };
+      return facilitatorUnavailable(
+        `facilitator /verify did not answer within ${error.timeoutMs}ms`,
+        context.facilitatorRetryAfter,
+      );
+    }
+    if (isFacilitatorUnavailable(error)) {
+      return facilitatorUnavailable(error.message, context.facilitatorRetryAfter);
     }
     throw error;
   }
   if (!verification.valid) {
-    return { kind: "rejected", status: 402, reason: verification.reason };
+    // A fresh challenge rides along, so the agent can sign again without a
+    // second unpaid request (#161, consistent with #43's 402).
+    return gateRejection("payment-invalid", "the payment was refused", {
+      upstreamReason: verification.reason,
+      headers: await freshChallengeHeaders(),
+    });
   }
   // The cache lookup above used the derived nonce; a facilitator whose verify
   // disagrees with it would store under a key retries never look up.
   if (knownNonce !== undefined && verification.nonce !== knownNonce) {
-    return {
-      kind: "rejected",
-      status: 500,
-      reason: "facilitator verify returned a nonce that differs from its idempotency key",
-    };
+    return gateRejection(
+      "facilitator-invalid-response",
+      "facilitator verify returned a nonce that differs from its idempotency key",
+    );
   }
 
   // The model is part of the key because two models can derive the same
@@ -1011,7 +1032,7 @@ async function settleOnce<TPayment>(
 
   const lock = await cache.acquire(key, context.lockTtlMs);
   if (!lock) {
-    return { ok: false, outcome: SETTLEMENT_IN_PROGRESS };
+    return { ok: false, outcome: context.settlementInProgress };
   }
   const release = (): Promise<boolean> => cache.release?.(key, lock) ?? Promise.resolve(false);
 
@@ -1214,13 +1235,31 @@ async function settleAndRecord<TPayment>(
       return {
         ok: false,
         hold,
-        outcome: settlementDeadlineOutcome(error, context.ambiguousHoldMs),
+        outcome: settlementUnknownOutcome(
+          `facilitator /settle did not answer within ${error.timeoutMs}ms`,
+          context.ambiguousHoldMs,
+        ),
       };
     }
     if (isPreSendFailure(error)) {
       // The request never left this process: nothing can land.
       hold.end();
+      if (isFacilitatorUnavailable(error)) {
+        return {
+          ok: false,
+          outcome: facilitatorUnavailable(error.message, context.facilitatorRetryAfter),
+        };
+      }
       throw error;
+    }
+    // A classified failure after the request may have been sent: answer with
+    // the same held 503 as a missed deadline, never a second /settle (#161).
+    if (isFacilitatorUnavailable(error) || isOutcomeUnknown(error)) {
+      return {
+        ok: false,
+        hold,
+        outcome: settlementUnknownOutcome(error.message, context.ambiguousHoldMs),
+      };
     }
     // The facilitator may have received the request and may still submit it.
     throw new AmbiguousSettlementFailure(error, hold);
@@ -1228,7 +1267,12 @@ async function settleAndRecord<TPayment>(
   hold.end();
 
   if (!settlement.settled) {
-    return { ok: false, outcome: { kind: "rejected", status: 502, reason: settlement.reason } };
+    return {
+      ok: false,
+      outcome: gateRejection("settlement-failed", "the facilitator refused to settle the payment", {
+        upstreamReason: settlement.reason,
+      }),
+    };
   }
 
   const receipt = await receiptFor(settlement.txHash, offer, model, method, verification, context);
@@ -1344,7 +1388,7 @@ async function paymentRequired(
   mppChargeHandler: MppChargeHandler | undefined,
   config: PaywallConfig,
   quote: string | undefined,
-): Promise<GateOutcome> {
+): Promise<Extract<GateOutcome, { kind: "payment-required" }>> {
   const challenge: PaymentRequired = {
     x402Version,
     resource: {
@@ -1391,6 +1435,15 @@ export function createPaywall(config: PaywallConfig, deps: PaywallDeps): Gate {
   return createPaywallWithInFlight(config, deps, new Map());
 }
 
+/** Reads an optional `Retry-After` setting: a positive whole number of seconds, default 1. */
+function positiveSeconds(value: number | undefined, name: string): number {
+  if (value === undefined) return 1;
+  if (!Number.isSafeInteger(value) || value < 1) {
+    throw new TypeError(`${name} must be a positive integer number of seconds`);
+  }
+  return value;
+}
+
 /** Internal constructor used by route tables to share duplicate coordination. */
 export function createPaywallWithInFlight(
   config: PaywallConfig,
@@ -1418,6 +1471,14 @@ export function createPaywallWithInFlight(
   if (deps.receiptVersion !== undefined && deps.receiptVersion !== 1 && deps.receiptVersion !== 2) {
     throw new TypeError(`receiptVersion must be 1 or 2, got ${String(deps.receiptVersion)}`);
   }
+  const inProgressSeconds = positiveSeconds(
+    deps.retryAfterSeconds?.settlementInProgress,
+    "retryAfterSeconds.settlementInProgress",
+  );
+  const unavailableSeconds = positiveSeconds(
+    deps.retryAfterSeconds?.facilitatorUnavailable,
+    "retryAfterSeconds.facilitatorUnavailable",
+  );
   const context: SettlementContext = {
     signer: deps.signer,
     receiptVersion: deps.receiptVersion ?? 1,
@@ -1428,6 +1489,8 @@ export function createPaywallWithInFlight(
     lockTtlMs: deps.settlementLockTtlMs ?? DEFAULT_SETTLEMENT_LOCK_TTL_MS,
     facilitatorTimeoutMs,
     ambiguousHoldMs,
+    settlementInProgress: settlementInProgress(inProgressSeconds),
+    facilitatorRetryAfter: String(unavailableSeconds),
     clock,
     ...(deps.servicePolicy && servicePolicyStore
       ? { servicePolicy: { policy: deps.servicePolicy, store: servicePolicyStore } }
@@ -1448,18 +1511,16 @@ export function createPaywallWithInFlight(
       try {
         x402Payment = decodePaymentSignatureHeader(signatureHeader);
       } catch (error) {
-        return {
-          kind: "rejected",
-          status: 400,
-          reason: `PAYMENT-SIGNATURE is not a base64 x402 PaymentPayload: ${asError(error, "invalid header").message}`,
-        };
+        return gateRejection(
+          "payment-malformed",
+          `PAYMENT-SIGNATURE is not a base64 x402 PaymentPayload: ${asError(error, "invalid header").message}`,
+        );
       }
       if (x402Payment.x402Version !== x402Version) {
-        return {
-          kind: "rejected",
-          status: 400,
-          reason: `unsupported x402Version ${String(x402Payment.x402Version)}; this gate speaks x402 version ${x402Version}`,
-        };
+        return gateRejection(
+          "payment-malformed",
+          `unsupported x402Version ${String(x402Payment.x402Version)}; this gate speaks x402 version ${x402Version}`,
+        );
       }
     }
 
@@ -1510,6 +1571,11 @@ export function createPaywallWithInFlight(
       quote,
     };
 
+    // The challenge a refused payment carries, so the agent can pay again.
+    const challengeHeaders = async (): Promise<Record<string, string>> =>
+      (await paymentRequired(offer, request, acceptedModels, deps.mppChargeHandler, config, quote))
+        .headers;
+
     // A dynamic price is only paid against a quote this gate issued: a
     // missing, expired, tampered or mismatched one gets a fresh 402.
     if (typeof config.amount === "function" && candidateQuote !== quote) {
@@ -1520,11 +1586,7 @@ export function createPaywallWithInFlight(
     // chosen the model; the router is not asked again.
     if (mppCredential) {
       if (!deps.mppChargeHandler) {
-        return {
-          kind: "rejected",
-          status: 500,
-          reason: "mpp-charge handler not configured",
-        };
+        return gateRejection("handler-not-configured", "mpp-charge handler not configured");
       }
       const payment: MppChargePayment = { model: "mpp-charge", payload: mppCredential };
       return settleWithHandler(
@@ -1534,6 +1596,7 @@ export function createPaywallWithInFlight(
         method,
         deps.mppChargeHandler,
         context,
+        challengeHeaders,
       );
     }
 
@@ -1575,23 +1638,21 @@ export function createPaywallWithInFlight(
         method,
         deps.facilitator,
         context,
+        challengeHeaders,
         quoteExpired ? freshChallenge : undefined,
       );
     }
 
     if (decision.model === "mpp-charge") {
-      return {
-        kind: "rejected",
-        status: 400,
-        reason:
-          "mpp-charge payments carry an Authorization: Payment credential, not PAYMENT-SIGNATURE",
-      };
+      return gateRejection(
+        "payment-malformed",
+        "mpp-charge payments carry an Authorization: Payment credential, not PAYMENT-SIGNATURE",
+      );
     }
 
-    return {
-      kind: "rejected",
-      status: 501,
-      reason: `model "${decision.model}" routing is selected but settlement is not implemented yet`,
-    };
+    return gateRejection(
+      "model-not-supported",
+      `model "${decision.model}" routing is selected but settlement is not implemented yet`,
+    );
   };
 }

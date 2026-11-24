@@ -290,9 +290,12 @@ export function createMppChargeHandler(options: MppChargeOptions): MppChargeHand
         // a StellarMppError, or an SDK error on a malformed transaction) and
         // is a rejection of the payment.
         if (isTransportFailure(error)) {
+          // `facilitator-unavailable` is what the gate answers with a 503
+          // (#161). The cause lets it tell a refused connection apart.
           throw new TollwayError(
-            "payment-failed",
+            "facilitator-unavailable",
             `mpp charge settlement failed: ${errorMessage(error)}`,
+            { cause: error },
           );
         }
         return { settled: false, reason: `mpp charge rejected: ${rejectionMessage(error)}` };

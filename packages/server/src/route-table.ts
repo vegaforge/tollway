@@ -9,6 +9,7 @@ import {
   type PaywallDeps,
   type TollwayRequest,
 } from "./gate.js";
+import { gateRejection } from "./gate-errors.js";
 import { createInMemoryServicePolicyStore } from "./service-policy.js";
 
 const HTTP_METHODS = new Set([
@@ -163,7 +164,7 @@ function compileEntry(key: string, config: PaywallConfig): CompiledRoute {
     pattern,
     segments,
     config: { ...config, ...(config.models === undefined ? {} : { models: [...config.models] }) },
-    gate: async () => ({ kind: "rejected", status: 500, reason: "route table not initialized" }),
+    gate: async () => gateRejection("handler-not-configured", "route table not initialized"),
     prefixLength,
     staticSegments,
   };

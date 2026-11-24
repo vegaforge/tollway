@@ -429,7 +429,8 @@ describe("createPaywall", () => {
         const challenge = await gate(baseRequest);
         expect(challenge).toMatchObject({ kind: "rejected", status: 500 });
         if (challenge.kind !== "rejected") return;
-        expect(challenge.reason).toMatch(/^invalid-amount: dynamic price/);
+        expect(challenge.code).toBe("price-unavailable");
+        expect(challenge.reason).toMatch(/^dynamic price/);
 
         const paid = await gate({
           ...baseRequest,
@@ -771,6 +772,7 @@ describe("createPaywall", () => {
       expect(outcome).toEqual({
         kind: "rejected",
         status: 400,
+        code: "payment-malformed",
         reason:
           "mpp-charge payments carry an Authorization: Payment credential, not PAYMENT-SIGNATURE",
       });
@@ -802,6 +804,7 @@ describe("TM-02 cross-offer replay", () => {
     expect(replay).toEqual({
       kind: "rejected",
       status: 409,
+      code: "offer-mismatch",
       reason: "payment already settled for a different offer",
     });
   });
@@ -821,6 +824,7 @@ describe("TM-02 cross-offer replay", () => {
     expect(replay).toEqual({
       kind: "rejected",
       status: 409,
+      code: "offer-mismatch",
       reason: "payment already settled for a different offer",
     });
   });
@@ -958,6 +962,7 @@ describe("TM-04 shared-lock duplicate settlement", () => {
     expect(outcome).toEqual({
       kind: "rejected",
       status: 409,
+      code: "settlement-in-progress",
       reason: "settlement in progress",
       // Issue #203: Retry-After is what tells a client this 409 is the same
       // payment still settling, safe to resend, unlike an offer mismatch.
@@ -1007,6 +1012,7 @@ describe("TM-04 shared-lock duplicate settlement", () => {
       expect(second).toEqual({
         kind: "rejected",
         status: 409,
+        code: "settlement-in-progress",
         reason: "settlement in progress",
         // Issue #203: Retry-After is what tells a client this 409 is the same
         // payment still settling, safe to resend, unlike an offer mismatch.
@@ -1138,6 +1144,7 @@ describe("method binding", () => {
     expect(write).toEqual({
       kind: "rejected",
       status: 409,
+      code: "offer-mismatch",
       reason: "payment already settled for a different offer",
     });
     expect(calls.settle).toBe(1);
@@ -1246,6 +1253,7 @@ describe("receipt v2 issuance and binding (#166)", () => {
     expect(replay).toEqual({
       kind: "rejected",
       status: 409,
+      code: "offer-mismatch",
       reason: "payment already settled for a different offer",
     });
   });
@@ -1612,6 +1620,7 @@ describe("settlement lock edge cases (#247)", () => {
     expect(outcome).toEqual({
       kind: "rejected",
       status: 409,
+      code: "offer-mismatch",
       reason: "payment already settled for a different offer",
     });
   });
