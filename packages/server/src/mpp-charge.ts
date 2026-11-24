@@ -17,11 +17,6 @@ import { mppSourceProofFailure } from "./mpp-payer.js";
  * PAYMENT-REQUIRED and PAYMENT-SIGNATURE headers. The gate passes the
  * `Payment ...` credential through as `MppChargePayment.payload`.
  */
-// The TypeError a failed fetch throws is worded differently on each runtime.
-const FETCH_FAILURE_MESSAGE =
-  /^(fetch failed|error sending request|network connection lost|unable to connect|failed to fetch|load failed|networkerror)/i;
-// in isTransportFailure, replace the `error.message === "fetch failed"` line with:
-if (error instanceof TypeError && FETCH_FAILURE_MESSAGE.test(error.message)) return true;
 
 export type MppChargeVerifyInput = {
   payment: MppChargePayment;
