@@ -1,7 +1,6 @@
 import {
   type AdapterDriver,
   type ConformanceResponse,
-  firstHeaderValue,
   runAdapterConformance,
 } from "@vegaforge/tollway-server/testing";
 import Fastify from "fastify";
@@ -44,14 +43,11 @@ const driver: AdapterDriver = {
 
     return {
       async send(request = {}) {
-        const headers: Record<string, string> = {};
-        for (const [name, value] of Object.entries(request.headers ?? {})) {
-          headers[name] = firstHeaderValue(value);
-        }
+        // inject passes an array value through as a repeated header.
         const injected = await app.inject({
           method: (request.method ?? "GET") as "GET",
           url: request.path ?? "/quotes/latest",
-          headers,
+          headers: request.headers ?? {},
         });
         return asConformanceResponse(injected);
       },

@@ -1,15 +1,55 @@
+import { request as httpRequest } from "node:http";
+import type { AddressInfo } from "node:net";
 import type { SignedReceipt } from "@vegaforge/tollway-core";
 import {
   type AdapterDriver,
-  firstHeaderValue,
+  type ConformanceRequest,
+  type ConformanceResponse,
   runAdapterConformance,
-  webConformanceResponse,
 } from "@vegaforge/tollway-server/testing";
 import express from "express";
 import { describe, it } from "vitest";
 import { expressPaywall, RECEIPT_LOCALS_KEY } from "./index.js";
 
-/** Express driver: a real HTTP server, as the issue asks for this adapter. */
+/**
+ * Sends one request with `node:http`. Unlike `fetch`, it writes a header
+ * given as an array as one line per value, so a repeated header reaches
+ * Express as it would from a real client.
+ */
+function send(port: number, request: ConformanceRequest): Promise<ConformanceResponse> {
+  return new Promise((resolve, reject) => {
+    const outgoing = httpRequest(
+      {
+        host: "127.0.0.1",
+        port,
+        method: request.method ?? "GET",
+        path: request.path ?? "/quotes/latest",
+        headers: request.headers ?? {},
+      },
+      (incoming) => {
+        const chunks: Buffer[] = [];
+        incoming.on("data", (chunk: Buffer) => chunks.push(chunk));
+        incoming.on("error", reject);
+        incoming.on("end", () => {
+          const body = Buffer.concat(chunks).toString("utf8");
+          resolve({
+            status: incoming.statusCode ?? 0,
+            header: (name) => {
+              const value = incoming.headers[name.toLowerCase()];
+              if (value === undefined) return null;
+              return Array.isArray(value) ? value.join(", ") : value;
+            },
+            text: async () => body,
+          });
+        });
+      },
+    );
+    outgoing.on("error", reject);
+    outgoing.end();
+  });
+}
+
+/** Express driver: a real HTTP server on an ephemeral port, as #107 asks. */
 const driver: AdapterDriver = {
   async create({ gate, onPaid }) {
     const app = express();
@@ -21,22 +61,10 @@ const driver: AdapterDriver = {
 
     const server = app.listen(0);
     await new Promise((resolve) => server.once("listening", resolve));
-    const address = server.address();
-    if (!address || typeof address === "string") throw new Error("expected a TCP address");
-    const base = `http://127.0.0.1:${address.port}`;
+    const { port } = server.address() as AddressInfo;
 
     return {
-      async send(request = {}) {
-        const headers = new Headers();
-        for (const [name, value] of Object.entries(request.headers ?? {})) {
-          headers.append(name, firstHeaderValue(value));
-        }
-        const response = await fetch(`${base}${request.path ?? "/quotes/latest"}`, {
-          method: request.method ?? "GET",
-          headers,
-        });
-        return webConformanceResponse(response);
-      },
+      send: (request = {}) => send(port, request),
       close: () => new Promise<void>((resolve) => server.close(() => resolve())),
     };
   },

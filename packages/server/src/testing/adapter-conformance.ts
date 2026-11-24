@@ -58,6 +58,9 @@ export type ConformanceRunner = {
 
 const PATH = "/quotes/latest";
 
+/** A repeated payment header reaches the gate as one joined value, which does not decode. */
+const REPEATED_PAYMENT_STATUS = 400;
+
 const config = {
   amount: "10000",
   asset: "USDC:GA5Z",
@@ -69,15 +72,19 @@ const config = {
 export const GATE_UNAVAILABLE_BODY = { error: "payment backend unavailable" } as const;
 
 /**
- * Wire formats join repeated fields; the gate's `readHeader` also takes the
- * first value. Drivers send that first value so the semantic is identical in
- * every framework, even where the HTTP layer collapses duplicates.
+ * Builds a Web `Headers` for a driver that sends a Fetch `Request`. A header
+ * given as an array is appended once per value, so it reaches the adapter as
+ * a repeated field, not as one value the driver picked.
  */
-export function firstHeaderValue(value: string | string[]): string {
-  return Array.isArray(value) ? (value[0] ?? "") : value;
+export function toWebHeaders(headers: ConformanceRequest["headers"] = {}): Headers {
+  const out = new Headers();
+  for (const [name, value] of Object.entries(headers)) {
+    for (const item of Array.isArray(value) ? value : [value]) out.append(name, item);
+  }
+  return out;
 }
 
-/** Adapts a Web `Response` (Hono, Next, Express `fetch`) to the suite's shape. */
+/** Adapts a Web `Response` (Hono, Next) to the suite's shape. */
 export async function webConformanceResponse(response: Response): Promise<ConformanceResponse> {
   const body = await response.text();
   return {
@@ -176,7 +183,10 @@ export function runAdapterConformance(driver: AdapterDriver, runner: Conformance
       });
     }
 
-    it("accepts the first value of a repeated payment header", async () => {
+    // Node and the Fetch API both join a repeated field into one value with
+    // ", ". Two payment signatures in one request are ambiguous, so every
+    // adapter must refuse them the same way rather than settle either one.
+    it("refuses a repeated payment header without settling either value", async () => {
       const receipts: SignedReceipt[] = [];
       const app = await driver.create({
         gate: await realGate(),
@@ -186,11 +196,17 @@ export function runAdapterConformance(driver: AdapterDriver, runner: Conformance
         const response = await app.send({
           path: PATH,
           headers: {
-            [PAYMENT_SIGNATURE_HEADER]: [paymentHeader("conformance-repeated"), "%%%not-base64%%%"],
+            [PAYMENT_SIGNATURE_HEADER]: [
+              paymentHeader("conformance-repeated-a"),
+              paymentHeader("conformance-repeated-b"),
+            ],
           },
         });
-        assert.equal(response.status, 200);
-        assert.equal(receipts.length, 1);
+        assert.equal(response.status, REPEATED_PAYMENT_STATUS);
+        const body = await jsonBody(response);
+        assert.equal(typeof body.error, "string", "the rejection has no { error }");
+        assert.equal(receipts.length, 0, "the paid handler ran for an ambiguous payment");
+        assert.equal(response.header(PAYMENT_RESPONSE_HEADER), null);
       } finally {
         await app.close();
       }

@@ -1,7 +1,7 @@
 import {
   type AdapterDriver,
-  firstHeaderValue,
   runAdapterConformance,
+  toWebHeaders,
   webConformanceResponse,
 } from "@vegaforge/tollway-server/testing";
 import { describe, it } from "vitest";
@@ -17,10 +17,7 @@ const driver: AdapterDriver = {
 
     return {
       async send(request = {}) {
-        const headers = new Headers();
-        for (const [name, value] of Object.entries(request.headers ?? {})) {
-          headers.append(name, firstHeaderValue(value));
-        }
+        const headers = toWebHeaders(request.headers);
         const response = await handler(
           new Request(`http://example.test${request.path ?? "/quotes/latest"}`, {
             method: request.method ?? "GET",
