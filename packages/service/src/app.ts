@@ -1,3 +1,5 @@
+import type { ChannelManager } from "@vegaforge/tollway-channels";
+import type { ObservabilityHub } from "@vegaforge/tollway-observability";
 import { Hono } from "hono";
 import { bodyLimit } from "hono/body-limit";
 import { z } from "zod";
@@ -19,6 +21,13 @@ export type ServiceContext = {
   config: ServiceConfig;
   stores: ServiceStores;
   logger: ServiceLogger;
+  /**
+   * The deployment's own channel manager, for the channels API (#227). The
+   * service only exposes channels this manager tracks.
+   */
+  channelManager?: ChannelManager;
+  /** Where modules emit events, for example `channel.closed`. */
+  observability?: Pick<ObservabilityHub, "emit">;
 };
 
 /**
@@ -39,6 +48,14 @@ export type CreateServiceOptions = {
   modules?: readonly ServiceModule[];
   /** Defaults to JSON lines through `console`. */
   logger?: ServiceLogger;
+  /**
+   * The channel manager the channels module reads and closes through. Its
+   * store is pluggable, so a persistent backend (#177, #178) needs no change
+   * here.
+   */
+  channelManager?: ChannelManager;
+  /** The observability hub modules emit events through. */
+  observability?: Pick<ObservabilityHub, "emit">;
 };
 
 /**
@@ -54,7 +71,13 @@ export function createService(options: CreateServiceOptions): Hono<ServiceEnv> {
   const { config } = options;
   const logger = options.logger ?? createConsoleLogger();
   const stores: ServiceStores = { ...createMemoryStores(), ...options.stores };
-  const context: ServiceContext = { config, stores, logger };
+  const context: ServiceContext = {
+    config,
+    stores,
+    logger,
+    ...(options.channelManager === undefined ? {} : { channelManager: options.channelManager }),
+    ...(options.observability === undefined ? {} : { observability: options.observability }),
+  };
 
   const app = new Hono<ServiceEnv>();
 

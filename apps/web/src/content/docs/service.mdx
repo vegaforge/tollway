@@ -106,6 +106,43 @@ The service hashes each presented key and compares the digest with every configu
 
 The OpenAPI document is generated from the zod schemas each route validates its path, query and body with, so it cannot drift from what the service accepts.
 
+## Channels
+
+The channels API lists the MPP channels this deployment tracks, shows one channel with its commitment stream, and triggers a close. Mount it with the deployment's own `ChannelManager`:
+
+```ts
+import { createChannelManager } from "@vegaforge/tollway-channels";
+import { createChannelsModule, createService } from "@vegaforge/tollway-service";
+
+const service = createService({
+  config,
+  channelManager: createChannelManager({ adapter, store }),
+  observability: hub, // optional: receives channel.closed
+  modules: [createChannelsModule()],
+});
+```
+
+`createChannelsModule` throws when the service has no `channelManager`, so a deployment never serves an empty channels API by mistake. The service only shows channels that manager tracks, and the manager's store is pluggable.
+
+| Route | Key | Purpose |
+| --- | --- | --- |
+| `GET /v1/channels` | `read` | Every tracked channel, newest first. Filters: `status`, `counterparty`, `asset`. Paged with `limit` (1 to 200, default 50) and the opaque `cursor` from the previous page's `nextCursor`. |
+| `GET /v1/channels/{id}` | `read` | One channel. |
+| `GET /v1/channels/{id}/commitments` | `read` | The commitment stream ordered by sequence, paged the same way. The signed blob is left out unless `include=blob` is passed with an `admin` key. |
+| `POST /v1/channels/{id}/close` | `admin` | Settles the channel on chain with its latest commitment. |
+
+Each channel carries its stored fields, plus `remaining` (`deposit` minus `committed`, computed as a bigint) and `shouldClose` (what the manager's close policy says now). Amounts are integer strings in the asset's smallest unit. `reconcileStatus` is reserved and stays absent until #212 or #213 persists reconcile results. An unknown channel id returns 404.
+
+**Closing.** A close request on an open channel calls `ChannelManager.close` and returns the closed channel. The response's `closeRequest` records the key name that asked and when, and the service emits `channel.closed` through the configured observability hub. The close is idempotent:
+- A channel already `closing` or `closed` is returned as it is, and is never closed a second time.
+- Concurrent requests for one channel in the same process share a single close, so the adapter submits once.
+- A channel in any other state, such as `recovering`, returns 409 `conflict`.
+- A close that fails returns 502 `close-failed`, with the channel's current status in `details`. The cause goes to the log, not the response.
+
+The service does not hold channel funds. They stay in the channel contract until the close settles them, and the service runs the same close the funder side would otherwise run.
+
+**Running more than one replica.** The guard against a second close is per process. Two replicas that both receive a close request can each submit one until the store gains the compare-and-set from #175. Until then, give the `admin` scope to one replica only. Close requests are recorded for the life of the process; the close itself is recorded by the manager's store.
+
 ## Errors
 
 Every error response has one shape:
@@ -114,7 +151,7 @@ Every error response has one shape:
 { "error": { "code": "invalid-request", "message": "the request did not match the schema", "details": [] } }
 ```
 
-`code` is stable and machine-readable: `unauthorized`, `forbidden`, `invalid-request`, `not-found`, `payload-too-large`, `not-ready` and `internal-error`. `details` carries structured context, such as each failing field with its location and path. An unexpected failure returns `internal-error`; its cause is logged, never returned.
+`code` is stable and machine-readable: `unauthorized`, `forbidden`, `invalid-request`, `not-found`, `payload-too-large`, `not-ready`, `conflict`, `close-failed` and `internal-error`. `details` carries structured context, such as each failing field with its location and path. An unexpected failure returns `internal-error`; its cause is logged, never returned.
 
 ## Logs
 

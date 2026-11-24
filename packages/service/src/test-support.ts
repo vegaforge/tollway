@@ -45,6 +45,8 @@ export async function testService(options?: {
   config?: Partial<ServiceConfig>;
   stores?: Partial<ServiceStores>;
   modules?: readonly ServiceModule[];
+  channelManager?: CreateServiceOptions["channelManager"];
+  observability?: CreateServiceOptions["observability"];
 }) {
   const logger = captureLogger();
   const serviceOptions: CreateServiceOptions = {
@@ -52,6 +54,8 @@ export async function testService(options?: {
     logger,
     ...(options?.stores === undefined ? {} : { stores: options.stores }),
     ...(options?.modules === undefined ? {} : { modules: options.modules }),
+    ...(options?.channelManager === undefined ? {} : { channelManager: options.channelManager }),
+    ...(options?.observability === undefined ? {} : { observability: options.observability }),
   };
   return { app: createService(serviceOptions), logger };
 }
