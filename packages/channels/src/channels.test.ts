@@ -18,7 +18,6 @@ import {
   ChannelNotFoundError,
   ChannelNotOpenError,
   CloseNotSubmittedError,
-  CommitmentConflictError,
   CommitmentExceedsDepositError,
   CounterpartyQuarantinedError,
   InvalidAmountError,
@@ -1576,11 +1575,12 @@ function slowSign(ms: number): Parameters<typeof createFakeAdapter>[0] {
 }
 
 describe("ChannelManager concurrent writers (#175)", () => {
-  it("never writes two commitments with one sequence when commits race", async () => {
-    // Three commits read the same channel state, then sign for 5 ms each.
-    // Before the compare-and-set, all three resolved with sequence 0 and
-    // cumulative 150 was recorded against a deposit of 100.
-    const { adapter } = createFakeAdapter(slowSign(5));
+  it("serialises commits that race on one channel", async () => {
+    // Three commits race on a deposit of 100, and each signs for 5 ms. Each
+    // commit must read the sequence and cumulative the one before it wrote. So
+    // the second 60 (cumulative 120) is refused against the deposit, and the 30
+    // lands at sequence 1 with cumulative 90.
+    const { adapter, calls } = createFakeAdapter(slowSign(5));
     const manager = createChannelManager({ adapter });
     const channel = await manager.open({
       counterparty: "GR",
@@ -1594,18 +1594,57 @@ describe("ChannelManager concurrent writers (#175)", () => {
       manager.commit(channel.id, "60"),
       manager.commit(channel.id, "30"),
     ]);
-    const accepted = results.flatMap((r) => (r.status === "fulfilled" ? [r.value] : []));
-    const rejected = results.flatMap((r) => (r.status === "rejected" ? [r.reason] : []));
 
-    expect(accepted).toHaveLength(1);
-    expect(rejected).toHaveLength(2);
-    for (const reason of rejected) expect(reason).toBeInstanceOf(CommitmentConflictError);
+    expect(results[0]).toMatchObject({
+      status: "fulfilled",
+      value: { sequence: 0, cumulativeAmount: "60" },
+    });
+    const refused = results[1];
+    if (refused?.status !== "rejected") throw new Error("the second commit was not refused");
+    expect(refused.reason).toBeInstanceOf(CommitmentExceedsDepositError);
+    expect(results[2]).toMatchObject({
+      status: "fulfilled",
+      value: { sequence: 1, cumulativeAmount: "90" },
+    });
 
+    // A refused commit never reaches the signer.
+    expect(calls.signCommitment.map((input) => input.cumulativeAmount)).toEqual(["60", "90"]);
     const stream = await manager.list(channel.id);
-    expect(stream.map((c) => c.sequence)).toEqual([0]);
-    expect(stream[0]?.cumulativeAmount).toBe(accepted[0]?.cumulativeAmount);
-    expect((await manager.get(channel.id))?.committed).toBe(accepted[0]?.cumulativeAmount);
-    expect((await manager.get(channel.id))?.sequence).toBe(0);
+    expect(stream.map((c) => [c.sequence, c.cumulativeAmount])).toEqual([
+      [0, "60"],
+      [1, "90"],
+    ]);
+    expect(await manager.get(channel.id)).toMatchObject({ committed: "90", sequence: 1 });
+  });
+
+  it("lets commits on different channels run while one channel waits", async () => {
+    // The signature for channel A stays blocked until it is released. A commit
+    // on channel B must still complete meanwhile, because each channel has its
+    // own queue.
+    let blockedChannelId = "";
+    const release: { open?: () => void } = {};
+    const blocked = new Promise<void>((resolve) => {
+      release.open = () => resolve();
+    });
+    const { adapter } = createFakeAdapter({
+      sign: async (input) => {
+        if (input.channelId === blockedChannelId) await blocked;
+        return { commitment: `sig:${input.channelId}:${input.cumulativeAmount}` };
+      },
+    });
+    const manager = createChannelManager({ adapter });
+    const open = () =>
+      manager.open({ counterparty: "GR", asset: "USDC", deposit: "100", network: "testnet" });
+    const first = await open();
+    const second = await open();
+    blockedChannelId = first.id;
+
+    const pendingFirst = manager.commit(first.id, "10");
+    const committedSecond = await manager.commit(second.id, "10");
+    expect(committedSecond).toMatchObject({ sequence: 0, cumulativeAmount: "10" });
+
+    release.open?.();
+    await expect(pendingFirst).resolves.toMatchObject({ sequence: 0, cumulativeAmount: "10" });
   });
 
   it("submits one close when two closes race", async () => {
@@ -1631,6 +1670,32 @@ describe("ChannelManager concurrent writers (#175)", () => {
     expect(losing).toHaveLength(1);
     expect(losing[0]).toBeInstanceOf(ChannelAlreadyClosedError);
     expect(calls.closeChannel).toHaveLength(1);
+  });
+
+  it("refuses a commit that starts after a close has begun", async () => {
+    // The close is queued first, so the commit runs after it and finds the
+    // channel no longer open. Its blob is never signed.
+    const { adapter, calls } = createFakeAdapter(slowSign(2));
+    const manager = createChannelManager({ adapter });
+    const channel = await manager.open({
+      counterparty: "GR",
+      asset: "USDC",
+      deposit: "100",
+      network: "testnet",
+    });
+    await manager.commit(channel.id, "40");
+    const signedBefore = calls.signCommitment.length;
+
+    const [closed, late] = await Promise.allSettled([
+      manager.close(channel.id),
+      manager.commit(channel.id, "10"),
+    ]);
+
+    expect(closed.status).toBe("fulfilled");
+    if (late?.status !== "rejected") throw new Error("the late commit was not refused");
+    expect(late.reason).toBeInstanceOf(ChannelNotOpenError);
+    expect(calls.signCommitment).toHaveLength(signedBefore);
+    expect(calls.closeChannel[0]?.cumulativeAmount).toBe("40");
   });
 
   it("settles with the last recorded commitment when a commit races a close", async () => {

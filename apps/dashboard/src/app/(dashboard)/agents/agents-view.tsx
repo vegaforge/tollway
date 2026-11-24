@@ -3,18 +3,12 @@
 import Link from "next/link";
 import { useMemo, useState } from "react";
 
+import { AssetTotals } from "@/components/ui/asset-totals";
 import { Panel } from "@/components/ui/panel";
 import { StatCard } from "@/components/ui/stat-card";
 import type { AgentSpendRow } from "@/data/agent-spend";
 import { useAgentSpend } from "@/data/use-agent-spend";
-
-/**
- * Default precision used to render integer-string amounts. Stellar SACs (the
- * settlement target of @vegaforge/tollway-core) use 7 decimal places. When the
- * observability hub starts attaching per-asset metadata to rows, the data
- * layer can override this.
- */
-const DEFAULT_ASSET_DECIMALS = 7;
+import { formatAmount, sumByAsset } from "@/lib/amount";
 
 type SortDirection = "asc" | "desc";
 
@@ -24,44 +18,6 @@ function compareSpend(a: AgentSpendRow, b: AgentSpendRow, direction: SortDirecti
   if (left === right) return 0;
   const ascending = left < right ? -1 : 1;
   return direction === "asc" ? ascending : -ascending;
-}
-
-function formatAmount(amount: string, asset: string): string {
-  let units: bigint;
-  try {
-    units = BigInt(amount);
-  } catch {
-    return `${amount} ${asset}`;
-  }
-  const divisor = 10n ** BigInt(DEFAULT_ASSET_DECIMALS);
-  const whole = units / divisor;
-  const fraction = units % divisor;
-  const fractionStr = fraction.toString().padStart(DEFAULT_ASSET_DECIMALS, "0").slice(0, 2);
-  return `${whole.toLocaleString("en-US")}.${fractionStr} ${asset}`;
-}
-
-function totalsByAsset(
-  rows: AgentSpendRow[],
-  pick: (row: AgentSpendRow) => string,
-): { asset: string; amount: string }[] {
-  const totals = new Map<string, bigint>();
-  for (const row of rows) {
-    totals.set(row.asset, (totals.get(row.asset) ?? 0n) + BigInt(pick(row)));
-  }
-  return [...totals.entries()].map(([asset, amount]) => ({ asset, amount: amount.toString() }));
-}
-
-function AssetTotals({ entries }: { entries: { asset: string; amount: string }[] }) {
-  // No rows means no asset to name; a made-up "0 USDC" would claim one.
-  if (entries.length === 0) return <>None</>;
-  return (
-    <>
-      {entries.flatMap((entry, index) => [
-        ...(index > 0 ? [<span key={`separator-${entry.asset}`}> · </span>] : []),
-        <span key={entry.asset}>{formatAmount(entry.amount, entry.asset)}</span>,
-      ])}
-    </>
-  );
 }
 
 export function AgentsView() {
@@ -77,8 +33,8 @@ export function AgentsView() {
 
   const totals = useMemo(
     () => ({
-      spend: totalsByAsset(rows, (row) => row.spend),
-      budget: totalsByAsset(rows, (row) => row.budget),
+      spend: sumByAsset(rows, (row) => row.spend),
+      budget: sumByAsset(rows, (row) => row.budget),
     }),
     [rows],
   );
