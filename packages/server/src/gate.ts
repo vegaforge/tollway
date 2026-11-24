@@ -19,6 +19,12 @@ import {
 import { x402Version } from "@x402/core";
 import type { PaymentRequired, PaymentPayload as X402Payload } from "@x402/core/types";
 import type { SettlementCache, SettlementLock } from "./cache.js";
+import {
+  checkDiscoveryDeclaration,
+  type DiscoveryDeclaration,
+  discoveryExtensions,
+  discoveryResourceInfo,
+} from "./discovery.js";
 import { type FacilitatorClient, stellarCaip2, toPaymentRequirements } from "./facilitator.js";
 import {
   decodePaymentSignatureHeader,
@@ -90,6 +96,14 @@ export type PaywallConfig = {
   maxTimeoutSeconds?: number;
   /** x402: scheme-specific data, sent as `PaymentRequirements.extra`. */
   extra?: Record<string, unknown>;
+  /**
+   * Publishes the route through x402 Bazaar discovery (#154): the 402 then
+   * carries `extensions.bazaar`, enriched with the request method and
+   * `routeTemplate`, plus `description` and `mimeType` on its `resource`.
+   * Without it the route publishes nothing. An invalid declaration fails
+   * at `createPaywall`. See `DiscoveryDeclaration` and docs/discovery.
+   */
+  discovery?: DiscoveryDeclaration;
 };
 
 /**
@@ -514,10 +528,18 @@ const OFFER_MISMATCH: RejectedOutcome = {
   reason: "payment already settled for a different offer",
 };
 
+/**
+ * The same payment is being settled right now. `Retry-After` is the signal a
+ * client reads to resend the identical payment (issue #203): the offer
+ * mismatch above is also a 409, but carries none, because that payment has
+ * already settled and must not be retried. One second is the shortest wait
+ * the header can express. Machine-readable codes for every rejection are #161.
+ */
 const SETTLEMENT_IN_PROGRESS: RejectedOutcome = {
   kind: "rejected",
   status: 409,
   reason: "settlement in progress",
+  headers: { "retry-after": "1" },
 };
 
 /** A facilitator call that outlived the gate's deadline. */
@@ -1325,7 +1347,10 @@ async function paymentRequired(
 ): Promise<GateOutcome> {
   const challenge: PaymentRequired = {
     x402Version,
-    resource: { url: offer.resource },
+    resource: {
+      url: offer.resource,
+      ...(config.discovery ? discoveryResourceInfo(config.discovery) : {}),
+    },
     accepts: [
       toPaymentRequirements(offer, {
         maxTimeoutSeconds: config.maxTimeoutSeconds,
@@ -1333,6 +1358,10 @@ async function paymentRequired(
       }),
     ],
   };
+  // Only a route that opts in publishes anything (#154).
+  if (config.discovery) {
+    challenge.extensions = discoveryExtensions(config.discovery, request);
+  }
   const headers: Record<string, string> = {
     [PAYMENT_REQUIRED_HEADER]: encodePaymentRequiredHeader(challenge),
   };
@@ -1381,6 +1410,7 @@ export function createPaywallWithInFlight(
       "ambiguousSettlementHoldMs must be an integer number of milliseconds longer than facilitatorTimeoutMs",
     );
   }
+  if (config.discovery) checkDiscoveryDeclaration(config.discovery);
   const acceptedModels = config.models ?? ["x402"];
   const clock = deps.clock ?? Date.now;
   const servicePolicyStore =

@@ -48,6 +48,23 @@ import {
   OfferNetworkMismatchError,
 } from "./receipt-binding.js";
 import type { ReceiptStore } from "./receipt-store.js";
+import {
+  AmbiguousSettlementError,
+  MAX_RETRY_AFTER_MS,
+  normaliseRetryOptions,
+  type RetryOptions,
+  SettlementOutcomeError,
+  type SignedTerms,
+} from "./retry.js";
+
+export {
+  AmbiguousSettlementError,
+  MAX_RETRY_AFTER_MS,
+  type RetryOptions,
+  SettlementOutcomeError,
+  type SettlementOutcomeKind,
+  type SignedTerms,
+} from "./retry.js";
 
 /** Events the client emits so callers and observability can follow along. */
 export type ClientEvent =
@@ -64,6 +81,13 @@ export type ClientEvent =
       receipt: SignedReceipt;
     }
   | { type: "skip"; resource: string; reason: string }
+  /**
+   * Issue #203: a retry attempt is about to run. `attempt` is 1-based
+   * and names the attempt being started (so `attempt: 2` is the first
+   * retry). `reason` carries the settler-reported cause of the previous
+   * failure.
+   */
+  | { type: "retry"; resource: string; attempt: number; reason: string }
   /**
    * The active policy's full trace for this payment, emitted before the
    * payment proceeds or is blocked. In dry-run, `trace.wouldBlock` marks a
@@ -118,6 +142,12 @@ export type SettleRequest = {
   resource: string;
   offer: PaymentOffer;
   model: SettlementModel;
+  /**
+   * Set on a retry with a fresh authorization: the terms the earlier
+   * attempt signed. A settler must refuse to sign a challenge that asks for
+   * anything else (issue #203).
+   */
+  pinned?: SignedTerms;
 };
 
 export type TollwayClientOptions = {
@@ -184,6 +214,15 @@ export type TollwayClientOptions = {
    * hide it. Mirrors the gate's `onCacheError`.
    */
   onStoreError?: (error: Error, receipt: SignedReceipt) => void;
+  /**
+   * Issue #203: how many times the client will call the settler per
+   * `pay()`. The default is 2 (one retry): the first attempt plus one
+   * fresh-authorization retry on an x402 expiry or nonce reuse. Only
+   * rejections classified `retryable-with-fresh-auth` or
+   * `settlement-in-progress` consume a retry; an `ambiguous` outcome
+   * never retries because the payment may have landed.
+   */
+  retry?: RetryOptions;
 };
 
 export type PayRequest = {
@@ -296,6 +335,95 @@ export function createClient(options: TollwayClientOptions): TollwayClient {
     }
   }
 
+  /** Counts one sent payment on the shadow too, so its attempt limits see real traffic. */
+  async function shadowAttempt(
+    shadow: PolicyEngine,
+    intent: PaymentIntent,
+    resource: string,
+  ): Promise<void> {
+    try {
+      await shadow.recordAttempt?.(intent);
+    } catch (rawError) {
+      emit({ type: "policy:shadow-error", resource, error: normalizeError(rawError) });
+    }
+  }
+
+  /**
+   * Calls the settler, then retries the way issue #203 allows: a fresh
+   * authorization for a payment the service refused before settling, the
+   * identical payment for one it is still settling, and never anything for
+   * a payment that may have landed. `maxAttempts` bounds every settler call
+   * and resend together.
+   */
+  async function settleWithRetry(args: {
+    retry: { maxAttempts: number; sleep: (ms: number) => Promise<void> };
+    request: PayRequest;
+    model: SettlementModel;
+    freshAttempt: () => Promise<void>;
+  }): Promise<SignedReceipt> {
+    const { retry, request, model } = args;
+    let pinned: SignedTerms | undefined;
+    let next = () =>
+      options.settler.settle({ resource: request.resource, offer: request.offer, model });
+    for (let attempt = 1; ; attempt += 1) {
+      try {
+        return await next();
+      } catch (rawError) {
+        if (!(rawError instanceof SettlementOutcomeError)) throw rawError;
+        if (rawError.kind === "ambiguous") {
+          throw new AmbiguousSettlementError(rawError.reason, { cause: rawError });
+        }
+        if (rawError.kind === "fatal") throw rawError;
+
+        const resend = rawError.resend;
+        const waitMs = rawError.retryAfterMs;
+        if (rawError.kind === "settlement-in-progress") {
+          // The payment is in flight. If the client cannot wait for it
+          // within its bounds, the outcome is unknown to the caller.
+          if (
+            resend === undefined ||
+            waitMs === undefined ||
+            waitMs > MAX_RETRY_AFTER_MS ||
+            attempt >= retry.maxAttempts
+          ) {
+            throw new AmbiguousSettlementError(
+              `${rawError.reason}, and the client stopped waiting for it`,
+              { cause: rawError },
+            );
+          }
+          emit({
+            type: "retry",
+            resource: request.resource,
+            attempt: attempt + 1,
+            reason: rawError.reason,
+          });
+          await retry.sleep(waitMs);
+          next = resend;
+          continue;
+        }
+
+        // retryable-with-fresh-auth
+        if (attempt >= retry.maxAttempts) throw rawError;
+        pinned = rawError.signedTerms ?? pinned;
+        await args.freshAttempt();
+        emit({
+          type: "retry",
+          resource: request.resource,
+          attempt: attempt + 1,
+          reason: rawError.reason,
+        });
+        const terms = pinned;
+        next = () =>
+          options.settler.settle({
+            resource: request.resource,
+            offer: request.offer,
+            model,
+            ...(terms === undefined ? {} : { pinned: terms }),
+          });
+      }
+    }
+  }
+
   /** Records a settled payment on the shadow; a failure is reported, not thrown. */
   async function shadowRecord(
     shadow: PolicyEngine,
@@ -324,9 +452,15 @@ export function createClient(options: TollwayClientOptions): TollwayClient {
         model,
       };
 
+      // `admit` evaluates and, when the policy allows the payment, counts
+      // it as an attempt in the same step (issue #197). An engine written
+      // before `admit` existed is evaluated instead.
+      const admit = async (engine: PolicyEngine): Promise<PolicyTrace> =>
+        engine.admit ? engine.admit(intent) : engine.evaluate(intent);
+
       let activeTrace: PolicyTrace | undefined;
       if (options.policy) {
-        activeTrace = await options.policy.evaluate(intent);
+        activeTrace = await admit(options.policy);
         // No handler, no event object: the quiet path stays as cheap as a
         // plain check().
         if (handlers.length > 0) {
@@ -338,10 +472,11 @@ export function createClient(options: TollwayClientOptions): TollwayClient {
         await shadowCompare(options.shadow, shadowBaseline, activeTrace, intent, request.resource);
       }
 
-      if (activeTrace) {
+      const blockIfDenied = (trace: PolicyTrace | undefined): void => {
+        if (!trace) return;
         // The same function check() uses, so the trace just emitted and the
         // decision below cannot disagree.
-        const decision = decisionFromTrace(activeTrace);
+        const decision = decisionFromTrace(trace);
         if (!decision.allowed) {
           emit({
             type: "skip",
@@ -350,12 +485,23 @@ export function createClient(options: TollwayClientOptions): TollwayClient {
           });
           throw new PolicyBlockedError(decision.rule, decision.detail);
         }
-      }
+      };
+      blockIfDenied(activeTrace);
+      if (options.shadow) await shadowAttempt(options.shadow, intent, request.resource);
 
-      const settled = await options.settler.settle({
-        resource: request.resource,
-        offer: request.offer,
+      // The retry runs inside the shared settlement (issue #210), so calls
+      // waiting on this purchase share one retried payment, and the
+      // receipt it ends with is bound to the offer below like any other.
+      const settled = await settleWithRetry({
+        retry: normaliseRetryOptions(options.retry),
+        request,
         model,
+        freshAttempt: async () => {
+          // A new authorization is a new payment attempt: the policy is
+          // checked again, and a budget that now bites stops the retry.
+          if (options.policy) blockIfDenied(await admit(options.policy));
+          if (options.shadow) await shadowAttempt(options.shadow, intent, request.resource);
+        },
       });
 
       // Only the parsed receipt leaves pay(), never the settler's object,

@@ -300,7 +300,7 @@ describe("rate-limit trace", () => {
     const trace = await e.evaluate(intent());
     expect(entry(trace, "rate-limit")).toMatchObject({
       outcome: "fail",
-      detail: "rate limit exceeded: 1 requests in the last minute",
+      detail: "global rate limit exceeded: 1 settled payments in the last 60 seconds, limit 1",
     });
   });
 
