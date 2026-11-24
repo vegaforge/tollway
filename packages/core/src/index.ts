@@ -7,7 +7,13 @@
  */
 
 export { base64UrlToBytes, bytesToBase64Url, utf8Bytes } from "./encoding.js";
-export { NotImplementedError, TollwayError, type TollwayErrorCode } from "./errors.js";
+export {
+  ChannelOpenFailedError,
+  type ChannelOpenSubmission,
+  NotImplementedError,
+  TollwayError,
+  type TollwayErrorCode,
+} from "./errors.js";
 export {
   type AdaptiveAnomalyEvent,
   createPolicyEngine,
