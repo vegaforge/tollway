@@ -134,7 +134,24 @@ export type MppChannelSettleInput = {
  */
 export type MppChannelSettleResult =
   | { settled: true; settlement: SettlementRef; txHash?: string }
-  | { settled: false; status: 402 | 409 | 429 | 503; reason: string };
+  | ({ settled: false } & MppChannelRefusal);
+
+/**
+ * Why the handler refused, as the gate code it answers with (see
+ * docs/gate-errors.md). `reason` starts with the channel code listed in
+ * docs/mpp-channels.md.
+ */
+export type MppChannelRefusal = {
+  code:
+    | "payment-invalid"
+    | "channel-refused"
+    | "channel-rate-limited"
+    | "settlement-in-progress"
+    | "facilitator-unavailable";
+  reason: string;
+  /** For `channel-rate-limited`: when trying again may succeed. */
+  retryAfterMs?: number;
+};
 
 export type MppChannelChallengeInput = {
   offer: PaymentOffer;
@@ -146,7 +163,7 @@ export type MppChannelChallengeInput = {
 /** The MPP challenge for a registered channel, or why the channel was refused. */
 export type MppChannelChallengeResult =
   | { ok: true; headers: Record<string, string> }
-  | { ok: false; status: 402 | 429 | 503; reason: string };
+  | ({ ok: false } & MppChannelRefusal);
 
 /** What {@link MppChannelHandler.reconcile} found and did. */
 export type MppChannelReconcileOutcome =
@@ -325,7 +342,8 @@ export function createMppChannelHandler(options: MppChannelOptions): MppChannelH
   }
 
   const registrations: number[] = [];
-  function registrationAllowed(): boolean {
+  /** Counts a registration check, or says how long until one is allowed. */
+  function registrationWaitMs(): number {
     const now = clock();
     while (
       registrations.length > 0 &&
@@ -333,9 +351,11 @@ export function createMppChannelHandler(options: MppChannelOptions): MppChannelH
     ) {
       registrations.shift();
     }
-    if (registrations.length >= registrationLimit.max) return false;
+    if (registrations.length >= registrationLimit.max) {
+      return registrationLimit.windowMs - (now - (registrations[0] ?? now));
+    }
     registrations.push(now);
-    return true;
+    return 0;
   }
 
   // Vouchers on one channel are settled one at a time in this process; across
@@ -374,19 +394,21 @@ export function createMppChannelHandler(options: MppChannelOptions): MppChannelH
   async function register(
     channelId: string,
     offer: PaymentOffer,
-  ): Promise<
-    { ok: true; record: ChannelRecord } | { ok: false; status: 402 | 429 | 503; reason: string }
-  > {
+  ): Promise<{ ok: true; record: ChannelRecord } | ({ ok: false } & MppChannelRefusal)> {
     const existing = await readChannelRecord(options.channels, channelId);
     if (existing) {
       const problem = statusProblem(existing);
-      return problem ? { ok: false, status: 402, reason: problem } : { ok: true, record: existing };
+      return problem
+        ? { ok: false, code: "channel-refused", reason: problem }
+        : { ok: true, record: existing };
     }
-    if (!registrationAllowed()) {
+    const waitMs = registrationWaitMs();
+    if (waitMs > 0) {
       return {
         ok: false,
-        status: 429,
+        code: "channel-rate-limited",
         reason: "registration-rate-limited: too many channel registrations, retry later",
+        retryAfterMs: waitMs,
       };
     }
     let onChain: OnChainChannel;
@@ -396,12 +418,12 @@ export function createMppChannelHandler(options: MppChannelOptions): MppChannelH
       // Fail closed: a channel that cannot be checked is not challenged.
       return {
         ok: false,
-        status: 503,
+        code: "facilitator-unavailable",
         reason: `channel-state-unavailable: could not read channel ${channelId} on chain (${errorMessage(error)})`,
       };
     }
     const refused = registrationProblem(onChain, offer, minRefundWaitingPeriod);
-    if (refused) return { ok: false, status: 402, reason: refused };
+    if (refused) return { ok: false, code: "channel-refused", reason: refused };
     const record: ChannelRecord = {
       channelId,
       network: offer.network,
@@ -422,7 +444,7 @@ export function createMppChannelHandler(options: MppChannelOptions): MppChannelH
     if (!raced) {
       return {
         ok: false,
-        status: 503,
+        code: "facilitator-unavailable",
         reason: "channel-state-unavailable: channel registration did not persist",
       };
     }
@@ -495,7 +517,11 @@ export function createMppChannelHandler(options: MppChannelOptions): MppChannelH
     const record = await readChannelRecord(options.channels, payment.channelId);
     const problem = acceptanceProblem(record, payment, offer);
     if (problem || !record) {
-      return { settled: false, status: 402, reason: problem ?? "channel-not-registered" };
+      return {
+        settled: false,
+        code: "payment-invalid",
+        reason: problem ?? "channel-not-registered",
+      };
     }
     const isClose = payment.action === "close";
     const sequence = (record.latest?.sequence ?? 0) + 1;
@@ -510,7 +536,7 @@ export function createMppChannelHandler(options: MppChannelOptions): MppChannelH
     let balanceBefore: string | undefined;
     if (isClose) {
       if (!options.feePayerKey) {
-        return { settled: false, status: 402, reason: closeNotSupported() };
+        return { settled: false, code: "payment-invalid", reason: closeNotSupported() };
       }
       if (
         options.closeRateGuard &&
@@ -518,7 +544,7 @@ export function createMppChannelHandler(options: MppChannelOptions): MppChannelH
       ) {
         return {
           settled: false,
-          status: 429,
+          code: "channel-rate-limited",
           reason: "close-rate-limited: the close budget for this fee payer is spent, retry later",
         };
       }
@@ -527,7 +553,7 @@ export function createMppChannelHandler(options: MppChannelOptions): MppChannelH
       } catch (error) {
         return {
           settled: false,
-          status: 503,
+          code: "facilitator-unavailable",
           reason: `channel-state-unavailable: could not read the balance before closing (${errorMessage(error)})`,
         };
       }
@@ -551,7 +577,7 @@ export function createMppChannelHandler(options: MppChannelOptions): MppChannelH
     if (!claimed) {
       return {
         settled: false,
-        status: 409,
+        code: "settlement-in-progress",
         reason: "channel-busy: the channel changed while this voucher was checked, retry",
       };
     }
@@ -659,7 +685,7 @@ export function createMppChannelHandler(options: MppChannelOptions): MppChannelH
     }
     return {
       settled: false,
-      status: 402,
+      code: "payment-invalid",
       reason: `mpp-channel-rejected: ${rejectionMessage(error)}`,
     };
   }
@@ -692,7 +718,7 @@ export function createMppChannelHandler(options: MppChannelOptions): MppChannelH
       if (!CONTRACT_ADDRESS.test(channelId)) {
         return {
           ok: false,
-          status: 402,
+          code: "channel-refused",
           reason: "channel-invalid: TOLLWAY-CHANNEL is not a contract address",
         };
       }

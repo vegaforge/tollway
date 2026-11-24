@@ -24,7 +24,8 @@ import {
   createInMemoryCloseRateGuard,
 } from "./channel-store.js";
 import { createMockFacilitator } from "./facilitator.js";
-import { createPaywall, type PaywallDeps } from "./gate.js";
+import { createPaywall, type GateOutcome, type PaywallDeps } from "./gate.js";
+import { PAYMENT_REQUIRED_HEADER } from "./headers.js";
 import {
   createMppChannelHandler,
   type MppChannelOptions,
@@ -177,6 +178,16 @@ function pay(gate: Awaited<ReturnType<typeof gateFor>>, credential: string) {
   return gate({ method: "GET", url: "/data", headers: { authorization: credential } });
 }
 
+/**
+ * The text that starts with the channel code: the handler's reason, which the
+ * gate passes as `upstreamReason` under `payment-invalid` and as the message
+ * for every other code.
+ */
+function channelReason(outcome: GateOutcome): string {
+  if (outcome.kind !== "rejected") throw new Error(`expected a rejection, got ${outcome.kind}`);
+  return outcome.upstreamReason ?? outcome.reason;
+}
+
 beforeEach(() => {
   vi.clearAllMocks();
   stub.create.mockReturnValue(stub.mppx);
@@ -249,8 +260,8 @@ describe("channel registration and challenge (#173)", () => {
     stub.readOnChainChannel.mockResolvedValue(onChain(state));
     const h = harness();
     const outcome = await register(await gateFor(h));
-    expect(outcome).toMatchObject({ kind: "rejected", status: 402 });
-    if (outcome.kind === "rejected") expect(outcome.reason.startsWith(`${code}:`)).toBe(true);
+    expect(outcome).toMatchObject({ kind: "rejected", status: 402, code: "channel-refused" });
+    expect(channelReason(outcome).startsWith(`${code}:`)).toBe(true);
     expect(await h.channels.get(CHANNEL)).toBeUndefined();
     expect(stub.mppx.channel).not.toHaveBeenCalled();
   });
@@ -259,8 +270,12 @@ describe("channel registration and challenge (#173)", () => {
     stub.readOnChainChannel.mockRejectedValue(new Error("rpc down"));
     const h = harness();
     const outcome = await register(await gateFor(h));
-    expect(outcome).toMatchObject({ kind: "rejected", status: 503 });
-    if (outcome.kind === "rejected") expect(outcome.reason).toMatch(/^channel-state-unavailable:/);
+    expect(outcome).toMatchObject({
+      kind: "rejected",
+      status: 503,
+      code: "facilitator-unavailable",
+    });
+    expect(channelReason(outcome)).toMatch(/^channel-state-unavailable:/);
     expect(await h.channels.get(CHANNEL)).toBeUndefined();
   });
 
@@ -270,7 +285,12 @@ describe("channel registration and challenge (#173)", () => {
     await register(gate);
     await register(gate);
     const third = await register(gate);
-    expect(third).toMatchObject({ kind: "rejected", status: 429 });
+    expect(third).toMatchObject({
+      kind: "rejected",
+      status: 429,
+      code: "channel-rate-limited",
+      headers: { "retry-after": "60" },
+    });
     expect(stub.readOnChainChannel).toHaveBeenCalledTimes(2);
   });
 
@@ -358,7 +378,7 @@ describe("mpp-channel vouchers through the gate (#173)", () => {
     await pay(gate, voucher("1000", SIG(1)));
     const again = await pay(gate, voucher("1000", SIG(1)));
     expect(again).toMatchObject({ kind: "rejected", status: 402 });
-    if (again.kind === "rejected") expect(again.reason).toMatch(/^voucher-already-accepted:/);
+    expect(channelReason(again)).toMatch(/^voucher-already-accepted:/);
     expect(stub.mppx.verifyCredential).toHaveBeenCalledTimes(1);
   });
 
@@ -374,7 +394,7 @@ describe("mpp-channel vouchers through the gate (#173)", () => {
     await pay(gate, voucher("1000", SIG(1)));
     const outcome = await pay(gate, voucher(amount, signature));
     expect(outcome).toMatchObject({ kind: "rejected", status: 402 });
-    if (outcome.kind === "rejected") expect(outcome.reason.startsWith(`${code}:`)).toBe(true);
+    expect(channelReason(outcome).startsWith(`${code}:`)).toBe(true);
     expect(stub.mppx.verifyCredential).toHaveBeenCalledTimes(1);
   });
 
@@ -384,14 +404,14 @@ describe("mpp-channel vouchers through the gate (#173)", () => {
     await register(gate);
     const outcome = await pay(gate, voucher("999", SIG(1)));
     if (outcome.kind !== "rejected") throw new Error("expected a rejection");
-    expect(outcome.reason).toMatch(/^wrong-increment:/);
+    expect(channelReason(outcome)).toMatch(/^wrong-increment:/);
   });
 
   it("rejects a voucher for an unregistered channel", async () => {
     const gate = await gateFor(harness());
     const outcome = await pay(gate, voucher("1000", SIG(1)));
     expect(outcome).toMatchObject({ kind: "rejected", status: 402 });
-    if (outcome.kind === "rejected") expect(outcome.reason).toMatch(/^channel-not-registered:/);
+    expect(channelReason(outcome)).toMatch(/^channel-not-registered:/);
   });
 
   it("rejects a challenge this server did not issue, and one priced differently", async () => {
@@ -401,12 +421,14 @@ describe("mpp-channel vouchers through the gate (#173)", () => {
     const forged = await pay(gate, voucher("1000", SIG(1), { secretKey: "x".repeat(40) }));
     expect(forged).toMatchObject({
       kind: "rejected",
-      reason: "mpp challenge was not issued by this server",
+      code: "payment-invalid",
+      upstreamReason: "mpp challenge was not issued by this server",
     });
     const repriced = await pay(gate, voucher("1", SIG(1), { challengeAmount: "1" }));
     expect(repriced).toMatchObject({
       kind: "rejected",
-      reason: "mpp credential amount does not match the offer",
+      code: "payment-invalid",
+      upstreamReason: "mpp credential amount does not match the offer",
     });
     expect(stub.mppx.verifyCredential).not.toHaveBeenCalled();
   });
@@ -419,11 +441,16 @@ describe("mpp-channel vouchers through the gate (#173)", () => {
       new StellarMppError("Commitment signature verification failed."),
     );
     const refused = await pay(gate, voucher("1000", SIG(1)));
-    expect(refused).toMatchObject({ kind: "rejected", status: 402 });
+    // Refused at settle time, it still carries the fresh challenge a refusal
+    // at verify time does.
+    expect(refused).toMatchObject({
+      kind: "rejected",
+      status: 402,
+      code: "payment-invalid",
+      upstreamReason: "mpp-channel-rejected: Commitment signature verification failed.",
+    });
     if (refused.kind === "rejected") {
-      expect(refused.reason).toBe(
-        "mpp-channel-rejected: Commitment signature verification failed.",
-      );
+      expect(refused.headers?.[PAYMENT_REQUIRED_HEADER]).toBeTruthy();
     }
     const record = await h.channels.get(CHANNEL);
     expect(record?.latest).toBeUndefined();
@@ -447,7 +474,7 @@ describe("mpp-channel vouchers through the gate (#173)", () => {
     });
     const settling = await pay(gate, voucher("1000", SIG(1)));
     if (settling.kind !== "rejected") throw new Error("expected a rejection");
-    expect(settling.reason).toMatch(/^channel-settling:/);
+    expect(channelReason(settling)).toMatch(/^channel-settling:/);
 
     const frozen = (await h.channels.get(CHANNEL)) as ChannelRecord;
     await h.channels.compareAndSet(CHANNEL, frozen.version, {
@@ -457,7 +484,7 @@ describe("mpp-channel vouchers through the gate (#173)", () => {
     });
     const closed = await pay(gate, voucher("1000", SIG(1)));
     if (closed.kind !== "rejected") throw new Error("expected a rejection");
-    expect(closed.reason).toMatch(/^channel-closed:/);
+    expect(channelReason(closed)).toMatch(/^channel-closed:/);
     const challenge = await register(gate);
     expect(challenge).toMatchObject({ kind: "rejected", status: 402 });
   });
@@ -477,6 +504,7 @@ describe("mpp-channel vouchers through the gate (#173)", () => {
     expect(outcome).toEqual({
       kind: "rejected",
       status: 500,
+      code: "handler-not-configured",
       reason: "mpp-channel handler not configured",
     });
   });
@@ -547,11 +575,12 @@ describe("mpp-channel vouchers through the gate (#173)", () => {
     });
     expect(await pay(gate, charge)).toMatchObject({
       kind: "rejected",
-      reason: "charge handler saw it",
+      code: "payment-invalid",
+      upstreamReason: "charge handler saw it",
     });
     expect(charged).toBe(1);
     const malformed = await pay(gate, voucher("1000", "not-hex"));
-    expect(malformed).toMatchObject({ kind: "rejected", status: 400 });
+    expect(malformed).toMatchObject({ kind: "rejected", status: 400, code: "payment-malformed" });
     expect(charged).toBe(1);
   });
 
@@ -613,7 +642,7 @@ describe("agent close credentials (#174)", () => {
     await register(gate);
     const outcome = await pay(gate, voucher("1000", SIG(1), { action: "close" }));
     if (outcome.kind !== "rejected") throw new Error("expected a rejection");
-    expect(outcome.reason).toMatch(/^close-not-supported:/);
+    expect(channelReason(outcome)).toMatch(/^close-not-supported:/);
     expect(stub.mppx.verifyCredential).not.toHaveBeenCalled();
   });
 
@@ -652,7 +681,7 @@ describe("agent close credentials (#174)", () => {
     });
     const after = await pay(gate, voucher("3000", SIG(3)));
     if (after.kind !== "rejected") throw new Error("expected a rejection");
-    expect(after.reason).toMatch(/^channel-closed:/);
+    expect(channelReason(after)).toMatch(/^channel-closed:/);
   });
 
   it("keeps the channel settling when the close fails, since it may have been broadcast", async () => {
@@ -715,7 +744,7 @@ describe("reconcile after a crash (#173)", () => {
     await crashedChannel(h);
     const outcome = await pay(await gateFor(h), voucher("1000", SIG(1)));
     if (outcome.kind !== "rejected") throw new Error("expected a rejection");
-    expect(outcome.reason).toMatch(/^channel-pending-reconciliation:/);
+    expect(channelReason(outcome)).toMatch(/^channel-pending-reconciliation:/);
   });
 
   it("commits the pending voucher when the SDK had accepted it", async () => {
@@ -856,7 +885,7 @@ describe("freeze before close (#174)", () => {
 
     const late = await pay(gate, voucher("2000", SIG(2)));
     if (late.kind !== "rejected") throw new Error("expected a rejection");
-    expect(late.reason).toMatch(/^channel-settling:/);
+    expect(channelReason(late)).toMatch(/^channel-settling:/);
 
     release();
     const outcome = await closing;

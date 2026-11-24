@@ -16,7 +16,10 @@ from the contract, and answers with the MPP channel challenge. Each voucher
 must add exactly the price, and its receipt is anchored at
 `{ kind: "channel-commitment", channelId, sequence }`, with the funder as
 payer. Resending a voucher returns its original receipt from the settlement
-cache. Rejections carry a stable code (for example `channel-settling:` or
+cache. Refusals use the gate error codes from docs/gate-errors.md, two of them
+new: `channel-refused` for a channel that fails its checks and
+`channel-rate-limited` for registration and close limits. The channel's own
+reason starts with a stable code (for example `channel-settling:` or
 `wrong-increment:`) listed in docs/mpp-channels.md.
 
 `createChannelSettler` closes channels with the latest accepted voucher, on

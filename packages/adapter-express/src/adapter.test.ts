@@ -243,7 +243,7 @@ describe("expressPaywall with a shared settlement cache", () => {
       const replay = await fetch(`${base}/quotes/history`, { headers });
       expect(replay.status).toBe(409);
       expect(await replay.json()).toEqual({
-        error: "payment already settled for a different offer",
+        error: { code: "offer-mismatch", message: "payment already settled for a different offer" },
       });
       expect(served).toEqual(["latest"]);
     } finally {
@@ -356,7 +356,11 @@ describe("expressPaywall with mpp-charge", () => {
       const response = await fetch(app.url, { headers: { authorization: "Payment refused" } });
       expect(response.status).toBe(402);
       expect(await response.json()).toEqual({
-        error: "mpp challenge was not issued by this server",
+        error: {
+          code: "payment-invalid",
+          message: "the payment was refused",
+          upstreamReason: "mpp challenge was not issued by this server",
+        },
       });
     } finally {
       await app.close();
@@ -441,7 +445,9 @@ describe("expressPaywall with a service policy", () => {
       });
       expect(response.status).toBe(429);
       expect(response.headers.get("retry-after")).toBe("60");
-      expect(await response.json()).toEqual({ error: "service-policy:spend-exceeded" });
+      expect(await response.json()).toEqual({
+        error: { code: "service-policy:spend-exceeded", message: "service-policy:spend-exceeded" },
+      });
     } finally {
       await new Promise((resolve) => server.close(resolve));
     }
@@ -475,7 +481,11 @@ async function channelGate() {
     async challenge({ channelId }) {
       return channelId === CHANNEL
         ? { ok: true, headers: { "www-authenticate": 'Payment id="chan", intent="channel"' } }
-        : { ok: false, status: 402, reason: "channel-recipient-mismatch: wrong payout address" };
+        : {
+            ok: false,
+            code: "channel-refused",
+            reason: "channel-recipient-mismatch: wrong payout address",
+          };
     },
     async verify({ payment }) {
       return payment.cumulativeAmount === config.amount
@@ -536,7 +546,10 @@ describe("expressPaywall with mpp-channel", () => {
       const response = await fetch(app.url, { headers: { "tollway-channel": "COTHER" } });
       expect(response.status).toBe(402);
       expect(await response.json()).toEqual({
-        error: "channel-recipient-mismatch: wrong payout address",
+        error: {
+          code: "channel-refused",
+          message: "channel-recipient-mismatch: wrong payout address",
+        },
       });
     } finally {
       await app.close();
@@ -565,7 +578,11 @@ describe("expressPaywall with mpp-channel", () => {
       const response = await fetch(app.url, { headers: { authorization: channelCredential("5") } });
       expect(response.status).toBe(402);
       expect(await response.json()).toEqual({
-        error: "wrong-increment: the voucher adds 5, the offer costs 10000",
+        error: {
+          code: "payment-invalid",
+          message: "the payment was refused",
+          upstreamReason: "wrong-increment: the voucher adds 5, the offer costs 10000",
+        },
       });
     } finally {
       await app.close();

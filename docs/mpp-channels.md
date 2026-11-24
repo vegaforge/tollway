@@ -49,30 +49,39 @@ challenge, because a channel challenge names one contract.
 
 ## Rejection reasons
 
-Every rejection reason starts with a stable code followed by a colon. Status
-is 402 unless stated.
+The gate answers every refusal with a code from
+[gate-errors.md](gate-errors.md), and the channel's own reason starts with a
+stable channel code followed by a colon:
 
-| Code | Meaning | What the client does |
+- A refused registration (the first group below) is `channel-refused` (402),
+  with the channel reason as the message.
+- A refused voucher is `payment-invalid` (402) with a fresh challenge, and the
+  channel reason in `upstreamReason`.
+- `channel-state-unavailable` is `facilitator-unavailable` (503), `channel-busy`
+  is `settlement-in-progress` (409), and the two rate limits are
+  `channel-rate-limited` (429), each with `Retry-After`.
+
+| Channel code | Meaning | What the client does |
 | ---- | ------- | -------------------- |
 | `channel-invalid` | `TOLLWAY-CHANNEL` is not a contract address | Send a `C...` address |
 | `channel-recipient-mismatch` | The channel pays out to someone else | Use a channel to this service |
 | `channel-token-mismatch` | The channel pays in another token | Use a channel in the offer's asset |
 | `channel-closing` | `close_start` or `close` has run on chain | Open a new channel |
 | `channel-refund-period-too-short` | The refund window is below the service minimum | Deploy with a longer window |
-| `channel-state-unavailable` | The chain could not be read (503) | Retry later |
-| `registration-rate-limited` | Too many registrations (429) | Retry later |
+| `channel-state-unavailable` | The chain could not be read | Retry later |
+| `registration-rate-limited` | Too many registrations | Retry later |
 | `channel-not-registered` | A voucher for a channel never challenged | Send `TOLLWAY-CHANNEL` first |
 | `channel-offer-mismatch` | The channel was registered for another payee, asset or network | Use the right channel |
 | `channel-settling` | The service is closing the channel | Open a new channel |
 | `channel-closed` | The channel is closed | Open a new channel |
 | `channel-pending-reconciliation` | A voucher is unrecorded after a crash | Retry after the operator reconciles |
-| `channel-busy` | The channel changed during this request (409) | Retry |
+| `channel-busy` | The channel changed during this request | Retry |
 | `voucher-already-accepted` | This exact voucher was already paid for | Send the next cumulative |
 | `commitment-conflict` | Another signature was accepted at this cumulative | Stop; the channel state disagrees |
 | `stale-cumulative` | The cumulative is below the accepted one | Send the next cumulative |
 | `wrong-increment` | The voucher does not add exactly the price | Sign `previous + price` |
 | `close-not-supported` | The service takes no close credentials | Send a voucher |
-| `close-rate-limited` | The fee payer's close budget is spent (429) | Retry later |
+| `close-rate-limited` | The fee payer's close budget is spent | Retry later |
 | `mpp-channel-rejected` | `@stellar/mpp` refused the voucher | Read the message |
 
 ## Replays and idempotency

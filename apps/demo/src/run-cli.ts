@@ -16,9 +16,10 @@ import { DemoConfigError } from "./config.js";
 import { runDemo } from "./demo.js";
 import type { runAllModels } from "./scenarios/all-models.js";
 import { runMppChargeScenario } from "./scenarios/mpp-charge.js";
+import { runPaymentOptionsScenario } from "./scenarios/payment-options.js";
 import type { ScenarioResult } from "./scenarios/types.js";
 
-const SCENARIOS = ["x402", "mpp-charge", "all-models"] as const;
+const SCENARIOS = ["x402", "mpp-charge", "payment-options", "all-models"] as const;
 
 /** Where the CLI writes, so tests can capture output. */
 export type CliOutput = { log: (line: string) => void; error: (line: string) => void };
@@ -85,6 +86,17 @@ export async function runCli(args: readonly string[], deps: CliDeps): Promise<nu
         return 1;
       }
       const result = await runMppChargeScenario();
+      output.log(summaryRow(result));
+      output.log(`Receipt signature valid: ${result.receiptValid}`);
+      return result.receiptValid ? 0 : 1;
+    }
+    case "payment-options": {
+      if (!mock) {
+        output.error("The payment-options scenario runs in mock mode only. Set MOCK_MODE=true.");
+        return 1;
+      }
+      const result = await runPaymentOptionsScenario();
+      output.log(`Offered in one 402: ${result.offered.join(", ")}`);
       output.log(summaryRow(result));
       output.log(`Receipt signature valid: ${result.receiptValid}`);
       return result.receiptValid ? 0 : 1;

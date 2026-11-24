@@ -209,7 +209,13 @@ describe("honoPaywall with mpp-charge", () => {
       headers: { authorization: "Payment refused" },
     });
     expect(response.status).toBe(402);
-    expect(await response.json()).toEqual({ error: "mpp challenge was not issued by this server" });
+    expect(await response.json()).toEqual({
+      error: {
+        code: "payment-invalid",
+        message: "the payment was refused",
+        upstreamReason: "mpp challenge was not issued by this server",
+      },
+    });
   });
 });
 
@@ -267,7 +273,9 @@ describe("honoPaywall with a service policy", () => {
     });
     expect(response.status).toBe(429);
     expect(response.headers.get("retry-after")).toBe("60");
-    expect(await response.json()).toEqual({ error: "service-policy:spend-exceeded" });
+    expect(await response.json()).toEqual({
+      error: { code: "service-policy:spend-exceeded", message: "service-policy:spend-exceeded" },
+    });
   });
 });
 
@@ -336,7 +344,11 @@ async function channelGate() {
     async challenge({ channelId }) {
       return channelId === CHANNEL
         ? { ok: true, headers: { "www-authenticate": 'Payment id="chan", intent="channel"' } }
-        : { ok: false, status: 402, reason: "channel-recipient-mismatch: wrong payout address" };
+        : {
+            ok: false,
+            code: "channel-refused",
+            reason: "channel-recipient-mismatch: wrong payout address",
+          };
     },
     async verify({ payment }) {
       return payment.cumulativeAmount === config.amount
@@ -387,7 +399,10 @@ describe("honoPaywall with mpp-channel", () => {
     });
     expect(response.status).toBe(402);
     expect(await response.json()).toEqual({
-      error: "channel-recipient-mismatch: wrong payout address",
+      error: {
+        code: "channel-refused",
+        message: "channel-recipient-mismatch: wrong payout address",
+      },
     });
   });
 
@@ -408,7 +423,11 @@ describe("honoPaywall with mpp-channel", () => {
     });
     expect(response.status).toBe(402);
     expect(await response.json()).toEqual({
-      error: "wrong-increment: the voucher adds 5, the offer costs 10000",
+      error: {
+        code: "payment-invalid",
+        message: "the payment was refused",
+        upstreamReason: "wrong-increment: the voucher adds 5, the offer costs 10000",
+      },
     });
   });
 });

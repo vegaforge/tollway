@@ -70,7 +70,7 @@ function manualClock() {
 async function gateWith(
   offerReceipt: PaywallConfig["offerReceipt"],
   deps: Partial<Omit<PaywallDeps, "signer">> & { signer?: Ed25519Signer } = {},
-  config: Partial<PaywallConfig> = {},
+  config: Partial<Extract<PaywallConfig, { amount: unknown }>> = {},
 ) {
   const signer = deps.signer ?? (await Ed25519Signer.generate("key-1"));
   const gate = createPaywall(
