@@ -68,6 +68,8 @@ jobs:
     timeout-minutes: 15
     permissions:
       contents: read
+      # Required for npm provenance: the publish job signs its own OIDC token.
+      id-token: write
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -105,3 +107,8 @@ jobs:
         run: pnpm exec changeset publish
         env:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+          # Publish with npm provenance so each package is signed and
+          # verifiable at https://www.npmjs.com/package/<name>/v/<version>.
+          # Requires id-token: write (above) and GitHub Actions OIDC.
+          # Verify with: npm audit signatures @vegaforge/tollway-core
+          NPM_CONFIG_PROVENANCE: "true"

@@ -15,14 +15,24 @@
   "types": "./dist/index.d.ts",
   "exports": {
     ".": {
-      "types": "./dist/index.d.ts",
-      "import": "./dist/index.js",
-      "require": "./dist/index.cjs"
+      "import": {
+        "types": "./dist/index.d.ts",
+        "default": "./dist/index.js"
+      },
+      "require": {
+        "types": "./dist/index.d.cts",
+        "default": "./dist/index.cjs"
+      }
     },
     "./policy-loader": {
-      "types": "./dist/policy-loader.d.ts",
-      "import": "./dist/policy-loader.js",
-      "require": "./dist/policy-loader.cjs"
+      "import": {
+        "types": "./dist/policy-loader.d.ts",
+        "default": "./dist/policy-loader.js"
+      },
+      "require": {
+        "types": "./dist/policy-loader.d.cts",
+        "default": "./dist/policy-loader.cjs"
+      }
     },
     "./schema/policy.schema.json": "./schema/policy.schema.json"
   },

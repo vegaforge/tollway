@@ -286,7 +286,7 @@ export interface ObservabilityHub {
    * one.
    */
   emit(event: TollwayEventInput): Promise<DeliveryReport>;
-  /** Register a local handler invoked synchronously during {@link emit}. */
+  /** Register a local handler invoked synchronously during {@link ObservabilityHub.emit}. */
   on(event: WebhookEvent, handler: WebhookHandler): void;
   /** Register an HTTP webhook subscription after construction. */
   addWebhook(subscription: WebhookSubscription): void;
@@ -324,12 +324,12 @@ export interface ObservabilityHub {
   /**
    * Matching metrics, one page at a time, in recording order. Reads the
    * store when there is one, otherwise the in-memory metrics. Metrics still
-   * in the write buffer are not included: call {@link flush} first.
+   * in the write buffer are not included: call {@link ObservabilityHub.flush} first.
    */
   queryMetrics(query?: MetricsQuery, page?: MetricsPageRequest): Promise<MetricsPage>;
-  /** {@link summarize}, answered by the store when there is one. */
+  /** {@link ObservabilityHub.summarize}, answered by the store when there is one. */
   summarizeAsync(query?: MetricsQuery): Promise<SpendSummary>;
-  /** {@link export}, read from the store when there is one. */
+  /** {@link ObservabilityHub.export}, read from the store when there is one. */
   exportAsync(format: ExportFormat, query?: MetricsQuery): Promise<string>;
   /**
    * Writes every buffered metric to the store and waits for the writes. A
@@ -340,7 +340,7 @@ export interface ObservabilityHub {
   /**
    * Flushes the buffer, stops the flush timer and closes the store. Later
    * calls to `record` throw. Does not stop the webhook dispatcher: call
-   * {@link stop} for that.
+   * {@link ObservabilityHub.stop} for that.
    */
   close(): Promise<void>;
   /** Adds an observer. Returns a function that removes it. */
