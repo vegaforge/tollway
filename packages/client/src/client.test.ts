@@ -1,5 +1,6 @@
 import {
   buildReceipt,
+  canonicalJson,
   createPolicyEngine,
   Ed25519Signer,
   Ed25519Verifier,
@@ -19,6 +20,7 @@ import {
   ReceiptOfferMismatchError,
   ReceiptVerificationError,
   resourceIdentity,
+  type SettleRequest,
 } from "./index.js";
 import { assertReceiptMatchesOffer } from "./receipt-binding.js";
 import { createMemoryReceiptStore, type ReceiptStore } from "./receipt-store.js";
@@ -876,5 +878,300 @@ describe("assertReceiptMatchesOffer", () => {
         maxSkewMs: 0,
       }),
     ).toThrow(/settlement\.kind/);
+  });
+});
+
+/**
+ * A settler that keeps every settlement open until `release` is called, so a
+ * test decides how many calls are in flight at once.
+ */
+function heldSettler(outcome?: SignedReceipt | Error) {
+  let open: () => void = () => {};
+  const held = new Promise<void>((resolve) => {
+    open = resolve;
+  });
+  const settle = vi.fn(async (input: SettleRequest): Promise<SignedReceipt> => {
+    await held;
+    if (outcome instanceof Error) throw outcome;
+    // By default each settlement returns a receipt for the offer it was
+    // asked to pay, as a real service does, so the client's receipt binding
+    // (#202) accepts it.
+    return outcome ?? (await receiptForSettlement(input));
+  });
+  const settler: ClientSettler = { settle };
+  return { settler, settle, release: () => open() };
+}
+
+/** A receipt signed by the test service for exactly this settlement. */
+function receiptForSettlement(input: SettleRequest): Promise<SignedReceipt> {
+  return signReceipt(
+    buildReceipt({
+      payer: "GPAYERXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX",
+      payee: input.offer.payTo,
+      amount: input.offer.amount,
+      asset: input.offer.asset,
+      resource: input.offer.resource,
+      model: input.model,
+      settlement: { kind: "transaction", txHash: `held-${input.model}-${input.offer.amount}` },
+      network: input.offer.network,
+    }),
+    signer,
+  );
+}
+
+/** Lets every pay() call already started run up to its first pending await. */
+function inFlight(): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, 0));
+}
+
+// Regression lock for #210: an agent that fires the same request twice in
+// parallel pays once.
+describe("createClient concurrent payments", () => {
+  it("settles once when two concurrent calls ask for the same resource and offer", async () => {
+    const held = heldSettler();
+    const client = createClient({ network: "testnet", settler: held.settler });
+
+    const first = client.pay({ resource: OFFER.resource, offer: OFFER });
+    const second = client.pay({ resource: OFFER.resource, offer: { ...OFFER } });
+    await inFlight();
+    held.release();
+    const [a, b] = await Promise.all([first, second]);
+
+    expect(held.settle).toHaveBeenCalledTimes(1);
+    expect(b.receipt).toEqual(a.receipt);
+  });
+
+  it("marks which call paid and which call waited", async () => {
+    const held = heldSettler();
+    const client = createClient({ network: "testnet", settler: held.settler });
+
+    const first = client.pay({ resource: OFFER.resource, offer: OFFER });
+    const second = client.pay({ resource: OFFER.resource, offer: OFFER });
+    await inFlight();
+    held.release();
+
+    await expect(first).resolves.toMatchObject({ deduplicated: false, model: "x402" });
+    await expect(second).resolves.toMatchObject({ deduplicated: true, model: "x402" });
+  });
+
+  it("pays twice when the concurrent offers differ in amount", async () => {
+    const held = heldSettler();
+    const client = createClient({ network: "testnet", settler: held.settler });
+
+    const first = client.pay({ resource: OFFER.resource, offer: OFFER });
+    const second = client.pay({ resource: OFFER.resource, offer: { ...OFFER, amount: "20000" } });
+    await inFlight();
+    held.release();
+    const results = await Promise.all([first, second]);
+
+    expect(held.settle).toHaveBeenCalledTimes(2);
+    expect(results.map((result) => result.deduplicated)).toEqual([false, false]);
+  });
+
+  it("pays twice when the same offer goes out on two settlement models", async () => {
+    const held = heldSettler();
+    const client = createClient({ network: "testnet", settler: held.settler });
+
+    const first = client.pay({ resource: OFFER.resource, offer: OFFER, model: "x402" });
+    const second = client.pay({ resource: OFFER.resource, offer: OFFER, model: "mpp-charge" });
+    await inFlight();
+    held.release();
+    await Promise.all([first, second]);
+
+    expect(held.settle).toHaveBeenCalledTimes(2);
+  });
+
+  it("pays again for a later call, because it is a new purchase", async () => {
+    const settler = mockSettler();
+    const client = createClient({ network: "testnet", settler });
+
+    const first = await client.pay({ resource: OFFER.resource, offer: OFFER });
+    const second = await client.pay({ resource: OFFER.resource, offer: OFFER });
+
+    expect(settler.settle).toHaveBeenCalledTimes(2);
+    expect(first.deduplicated).toBe(false);
+    expect(second.deduplicated).toBe(false);
+  });
+
+  it("rejects every waiter with the settling call's error and records nothing", async () => {
+    const failure = new Error("facilitator down");
+    const held = heldSettler(failure);
+    const inner = createPolicyEngine({ budgets: { daily: "1000000" } });
+    const record = vi.fn(inner.record);
+    const policy = { mode: inner.mode, evaluate: inner.evaluate, check: inner.check, record };
+    const events: ClientEvent[] = [];
+    const client = createClient({ network: "testnet", settler: held.settler, policy });
+    client.on((event) => events.push(event));
+
+    const calls = [1, 2, 3].map(() => client.pay({ resource: OFFER.resource, offer: OFFER }));
+    await inFlight();
+    held.release();
+    const outcomes = await Promise.allSettled(calls);
+
+    expect(held.settle).toHaveBeenCalledTimes(1);
+    for (const outcome of outcomes) {
+      expect(outcome.status).toBe("rejected");
+      // The same error object, not three copies of it.
+      expect(outcome.status === "rejected" && outcome.reason).toBe(failure);
+    }
+    expect(record).not.toHaveBeenCalled();
+    expect(events.filter((event) => event.type === "error")).toHaveLength(1);
+    expect(events.some((event) => event.type === "payment:deduplicated")).toBe(false);
+  });
+
+  it("forgets a failed settlement, so the next call pays", async () => {
+    const settle = vi
+      .fn<ClientSettler["settle"]>()
+      .mockRejectedValueOnce(new Error("facilitator down"))
+      .mockResolvedValue(baselineReceipt);
+    const client = createClient({ network: "testnet", settler: { settle } });
+
+    await expect(client.pay({ resource: OFFER.resource, offer: OFFER })).rejects.toThrow(
+      "facilitator down",
+    );
+    const retried = await client.pay({ resource: OFFER.resource, offer: OFFER });
+
+    expect(settle).toHaveBeenCalledTimes(2);
+    expect(retried.deduplicated).toBe(false);
+  });
+
+  it("shares a policy block with every waiter without reaching the settler", async () => {
+    const held = heldSettler();
+    const policy = createPolicyEngine({ budgets: { daily: "5000" } });
+    const client = createClient({ network: "testnet", settler: held.settler, policy });
+
+    const calls = [1, 2].map(() => client.pay({ resource: OFFER.resource, offer: OFFER }));
+    const outcomes = await Promise.allSettled(calls);
+
+    expect(held.settle).not.toHaveBeenCalled();
+    const reasons = outcomes.map((outcome) => outcome.status === "rejected" && outcome.reason);
+    expect(reasons[0]).toBeInstanceOf(PolicyBlockedError);
+    expect(reasons[1]).toBe(reasons[0]);
+  });
+
+  it("evaluates and records the policy once for N concurrent identical calls", async () => {
+    const held = heldSettler();
+    const inner = createPolicyEngine({ budgets: { daily: OFFER.amount } });
+    const evaluate = vi.fn(inner.evaluate);
+    const record = vi.fn(inner.record);
+    const policy = { mode: inner.mode, evaluate, check: inner.check, record };
+    const client = createClient({ network: "testnet", settler: held.settler, policy });
+
+    const calls = [1, 2, 3].map(() => client.pay({ resource: OFFER.resource, offer: OFFER }));
+    await inFlight();
+    held.release();
+    await Promise.all(calls);
+
+    expect(evaluate).toHaveBeenCalledTimes(1);
+    expect(record).toHaveBeenCalledTimes(1);
+    // The budget covers one payment and one was recorded, so the next is blocked.
+    await expect(client.pay({ resource: OFFER.resource, offer: OFFER })).rejects.toBeInstanceOf(
+      PolicyBlockedError,
+    );
+  });
+
+  it("emits exactly one payment event for N concurrent identical calls", async () => {
+    const held = heldSettler(baselineReceipt);
+    const events: ClientEvent[] = [];
+    const client = createClient({ network: "testnet", settler: held.settler });
+    client.on((event) => events.push(event));
+
+    const calls = [1, 2, 3, 4, 5].map(() => client.pay({ resource: OFFER.resource, offer: OFFER }));
+    await inFlight();
+    held.release();
+    await Promise.all(calls);
+
+    expect(held.settle).toHaveBeenCalledTimes(1);
+    expect(events.filter((event) => event.type === "payment")).toHaveLength(1);
+    const waiters = events.filter((event) => event.type === "payment:deduplicated");
+    expect(waiters).toHaveLength(4);
+    for (const waiter of waiters) {
+      expect(waiter).toMatchObject({
+        resource: OFFER.resource,
+        model: "x402",
+        receipt: baselineReceipt,
+      });
+    }
+  });
+
+  it("stores the receipt once for N concurrent identical calls", async () => {
+    const held = heldSettler();
+    const put = vi.fn().mockResolvedValue(undefined);
+    const client = createClient({
+      network: "testnet",
+      settler: held.settler,
+      receiptStore: { put, get: async () => null, query: async () => ({ items: [] }) },
+    });
+
+    const calls = [1, 2, 3].map(() => client.pay({ resource: OFFER.resource, offer: OFFER }));
+    await inFlight();
+    held.release();
+    await Promise.all(calls);
+
+    expect(put).toHaveBeenCalledTimes(1);
+  });
+
+  it("shares one settlement across different offers when the idempotencyKey matches", async () => {
+    const held = heldSettler();
+    const client = createClient({ network: "testnet", settler: held.settler });
+
+    const first = client.pay({
+      resource: OFFER.resource,
+      offer: OFFER,
+      idempotencyKey: "order-42",
+    });
+    const second = client.pay({
+      resource: "/quotes/latest?retry=1",
+      offer: { ...OFFER, resource: "/quotes/latest?retry=1", amount: "20000" },
+      idempotencyKey: "order-42",
+    });
+    await inFlight();
+    held.release();
+    const [a, b] = await Promise.all([first, second]);
+
+    // The first call's offer is the one that was paid.
+    expect(held.settle).toHaveBeenCalledTimes(1);
+    expect(held.settle).toHaveBeenCalledWith({
+      resource: OFFER.resource,
+      offer: OFFER,
+      model: "x402",
+    });
+    expect(b).toMatchObject({ deduplicated: true, receipt: a.receipt });
+  });
+
+  it("never shares a settlement when the idempotencyKey differs", async () => {
+    const held = heldSettler();
+    const client = createClient({ network: "testnet", settler: held.settler });
+
+    const first = client.pay({ resource: OFFER.resource, offer: OFFER, idempotencyKey: "a" });
+    const second = client.pay({ resource: OFFER.resource, offer: OFFER, idempotencyKey: "b" });
+    const third = client.pay({ resource: OFFER.resource, offer: OFFER });
+    await inFlight();
+    held.release();
+    const results = await Promise.all([first, second, third]);
+
+    expect(held.settle).toHaveBeenCalledTimes(3);
+    expect(results.map((result) => result.deduplicated)).toEqual([false, false, false]);
+  });
+
+  it("keeps a caller's key apart from a derived key that spells the same", async () => {
+    const held = heldSettler();
+    const client = createClient({ network: "testnet", settler: held.settler });
+    const derived = canonicalJson({
+      resource: OFFER.resource,
+      model: "x402",
+      amount: OFFER.amount,
+      asset: OFFER.asset,
+      payTo: OFFER.payTo,
+      network: OFFER.network,
+    });
+
+    const first = client.pay({ resource: OFFER.resource, offer: OFFER });
+    const second = client.pay({ resource: OFFER.resource, offer: OFFER, idempotencyKey: derived });
+    await inFlight();
+    held.release();
+    await Promise.all([first, second]);
+
+    expect(held.settle).toHaveBeenCalledTimes(2);
   });
 });
