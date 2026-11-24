@@ -1,15 +1,14 @@
 import type { StellarNetwork } from "@vegaforge/tollway-core";
 import { TollwayError } from "@vegaforge/tollway-core";
+import { validateStellarAssetAddress, validateStellarDestinationAddress } from "@x402/stellar";
+import { z } from "zod";
+import type { FacilitatorClient } from "./facilitator.js";
+import type { PaywallConfig } from "./gate.js";
 import {
   STELLAR_PUBNET_CAIP2,
   STELLAR_TESTNET_CAIP2,
   STELLAR_WILDCARD_CAIP2,
-  validateStellarAssetAddress,
-  validateStellarDestinationAddress,
-} from "@x402/stellar";
-import { z } from "zod";
-import type { FacilitatorClient } from "./facilitator.js";
-import type { PaywallConfig } from "./gate.js";
+} from "./stellar-caip2.js";
 
 /**
  * The x402 scheme @x402/stellar implements; see `ExactStellarScheme.scheme`.

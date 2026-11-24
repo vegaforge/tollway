@@ -9,10 +9,14 @@ import {
   VerifyError,
   type VerifyResponse,
 } from "@x402/core/types";
-import { STELLAR_PUBNET_CAIP2, STELLAR_TESTNET_CAIP2, STELLAR_WILDCARD_CAIP2 } from "@x402/stellar";
 import type { FacilitatorCapabilities } from "./facilitator-capabilities.js";
 import { parseFacilitatorCapabilities } from "./facilitator-capabilities.js";
 import { mockAccount, mockHex } from "./hash.js";
+import {
+  STELLAR_PUBNET_CAIP2,
+  STELLAR_TESTNET_CAIP2,
+  STELLAR_WILDCARD_CAIP2,
+} from "./stellar-caip2.js";
 
 /**
  * Tollway's view of a facilitator. A facilitator verifies a signed payment

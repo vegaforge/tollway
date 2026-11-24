@@ -1,0 +1,77 @@
+---
+title: Supported runtimes
+description: Where the gate runs, which versions CI checks, and the limits on each runtime
+---
+
+`@vegaforge/tollway-core`, `@vegaforge/tollway-server` and the Web-standard adapters (`@vegaforge/tollway-adapter-hono` and `@vegaforge/tollway-adapter-next`) run on Node, Cloudflare Workers, Deno and Bun. The Express and Fastify adapters are Node only by nature.
+
+## What CI checks
+
+Every pull request runs one gate scenario on each edge runtime, against the packages' built ESM output (`tests/edge/src/scenario.ts`):
+
+- an unpaid request gets 402, and a paid request settles through the mock facilitator and returns a receipt that verifies, through the Hono adapter and through a Next-style `withPaywall` handler;
+- the same through `createHttpFacilitator`, against a facilitator endpoint stubbed inside the runtime;
+- Ed25519 key generation, signing and verification over WebCrypto.
+
+| Runtime | Version in CI | How it runs |
+| --- | --- | --- |
+| Cloudflare Workers | workerd from Miniflare 4.20260730.0 | bundled with esbuild, `compatibility_date = "2026-07-01"`, `nodejs_compat` |
+| Deno | 2.9.8 | `deno run` on the built output |
+| Bun | 1.2.21 | `bun run` on the built output |
+| Node | 22 (`.nvmrc`) | the regular test suites |
+
+The edge job is part of the `quality` check, so a change that breaks a runtime cannot merge.
+
+## Known limits
+
+**Workers need `nodejs_compat`.** The Stellar SDK, which `@stellar/mpp` and `@x402/stellar` depend on, imports Node's `buffer`, and the x402 Bazaar extension (`@x402/extensions/bazaar`, used for discovery) imports `url`. workerd provides both only with the `nodejs_compat` compatibility flag. Without it, the Worker fails to load with "no matching module rules" for `buffer`.
+
+**Bundle size.** A minimal Worker with one paid route through `createHttpFacilitator` bundles to about 770 KiB, 178 KiB gzipped, measured with esbuild on 2026-11-24. Almost all of it is the Stellar SDK. Check it against Cloudflare's current Worker size limits for your plan. CI fails if the gzipped size grows past the budget in `tests/edge/bundle-budget.json` (200,000 bytes), so a dependency that balloons the bundle is caught in review.
+
+**Settlement cache.** The in-memory cache works everywhere, but on Workers each isolate has its own memory, so use a shared cache in production. `createRedisSettlementCache` needs a Redis client that works on the runtime. A client built on Node's `net` module, such as `ioredis`, runs on Deno and Bun; on Workers, use a client that supports them.
+
+**Network failures.** Each runtime reports a failed `fetch` differently: Node and Deno throw `TypeError: fetch failed`, Bun throws an error with code `ConnectionRefused`, and workerd throws `Network connection lost.`. The gate recognises all of them. A refused connection is treated as "never sent" on Node, Deno and Bun, so failover may try the next facilitator. workerd uses the same message for a refused connection and a reset, so there it is always treated as "may have been received", and the payment is held rather than settled twice.
+
+## A minimal Worker
+
+```ts
+// src/index.ts
+import { honoPaywall } from "@vegaforge/tollway-adapter-hono";
+import { Ed25519Signer } from "@vegaforge/tollway-core";
+import { createHttpFacilitator, createPaywall } from "@vegaforge/tollway-server";
+import { Hono } from "hono";
+
+type Env = { RECEIPT_SIGNING_KEY: string; PAY_TO: string };
+
+const app = new Hono<{ Bindings: Env }>();
+
+app.use("/quotes/*", async (c, next) => {
+  const gate = createPaywall(
+    {
+      amount: "10000",
+      asset: "CBIELTK6YBZJU5UP2WWQEUCYKLPU6AUNZ2BQ4WWFEIE3USCIHMXQDAMA",
+      payTo: c.env.PAY_TO,
+      network: "testnet",
+    },
+    {
+      signer: await Ed25519Signer.fromPrivateKey(c.env.RECEIPT_SIGNING_KEY, "worker"),
+      facilitator: createHttpFacilitator("https://channels.openzeppelin.com/x402/testnet"),
+    },
+  );
+  return honoPaywall(gate)(c, next);
+});
+
+app.get("/quotes/latest", (c) => c.json({ price: "1.00" }));
+
+export default app;
+```
+
+```toml
+# wrangler.toml
+name = "paid-quotes"
+main = "src/index.ts"
+compatibility_date = "2026-07-01"
+compatibility_flags = ["nodejs_compat"]
+```
+
+Keep the signing key in a Worker secret (`wrangler secret put RECEIPT_SIGNING_KEY`), never in `wrangler.toml`. For a key that never enters the Worker at all, see the Vault Transit signer.

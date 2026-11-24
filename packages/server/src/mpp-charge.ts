@@ -5,6 +5,7 @@ import { bytesToBase64Url, TollwayError, utf8Bytes } from "@vegaforge/tollway-co
 import { Challenge, Credential, Errors } from "mppx";
 import { mockAccount, mockHex } from "./hash.js";
 import { mppSourceProofFailure } from "./mpp-payer.js";
+import { isNetworkFailure } from "./transport-errors.js";
 
 /**
  * MPP charge handler. Unlike x402, MPP charge does not use a facilitator.
@@ -311,30 +312,13 @@ function payerFromSource(source: string | undefined, network: string): string | 
   return STELLAR_ACCOUNT.test(account) ? account : null;
 }
 
-const TRANSPORT_ERROR_CODES = new Set([
-  "ECONNREFUSED",
-  "ECONNRESET",
-  "ENOTFOUND",
-  "EAI_AGAIN",
-  "ETIMEDOUT",
-  "EPIPE",
-  "UND_ERR_CONNECT_TIMEOUT",
-  "UND_ERR_SOCKET",
-]);
-
 /**
- * True for errors raised by the HTTP layer rather than by payment checks:
- * axios errors (stellar-sdk's RPC client), fetch's `TypeError`, aborts and
- * timeouts, and socket error codes.
+ * True for errors raised by the HTTP layer rather than by payment checks.
+ * mppx and @stellar/mpp judging a credential is never a transport failure.
  */
 function isTransportFailure(error: unknown): boolean {
-  if (!(error instanceof Error)) return false;
   if (error instanceof Errors.PaymentError || error instanceof StellarMppError) return false;
-  if ("isAxiosError" in error && error.isAxiosError === true) return true;
-  if (error.name === "AbortError" || error.name === "TimeoutError") return true;
-  if (error instanceof TypeError && error.message === "fetch failed") return true;
-  const code = "code" in error ? error.code : undefined;
-  return typeof code === "string" && TRANSPORT_ERROR_CODES.has(code);
+  return isNetworkFailure(error);
 }
 
 function rejectionMessage(error: unknown): string {

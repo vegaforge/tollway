@@ -1,0 +1,4 @@
+{
+  "$comment": "Gzipped size budget for tests/edge/src/minimal-worker.ts bundled for Workers. Measured at 182,000 bytes on 2026-11-24; raise it only with a reason in the pull request.",
+  "maxGzipBytes": 200000
+}
