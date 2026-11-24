@@ -18,6 +18,7 @@ import {
   ChannelNotFoundError,
   ChannelNotOpenError,
   CloseNotSubmittedError,
+  CommitmentConflictError,
   CommitmentExceedsDepositError,
   CounterpartyQuarantinedError,
   InvalidAmountError,
@@ -26,9 +27,10 @@ import {
   SettlementMismatchError,
   SettlementNotFoundError,
 } from "./errors.js";
+import type { ChannelLifecycleEvent } from "./events.js";
 import { createChannelManager } from "./manager.js";
 import { createMemoryCommitmentStore } from "./store.js";
-import type { RecoveryEvent } from "./types.js";
+import type { Commitment } from "./types.js";
 
 // ── test double ───────────────────────────────────────────────────────────────
 
@@ -812,6 +814,13 @@ describe("ChannelManager.close", () => {
       if (next) observedStatuses.push(next.status);
       return next;
     };
+    // The move to closing is a compare-and-set (#175), so watch that write too.
+    const origTransition = store.transitionChannel.bind(store);
+    store.transitionChannel = async (id, expectedStatus, patch) => {
+      const next = await origTransition(id, expectedStatus, patch);
+      observedStatuses.push(next.status);
+      return next;
+    };
 
     const { adapter } = createFakeAdapter();
     const manager = createChannelManager({ adapter, store });
@@ -883,7 +892,7 @@ describe("ChannelManager.recover (#38)", () => {
     startClose?: () => StartCloseResult | Promise<StartCloseResult>;
     refund?: () => RefundResult | Promise<RefundResult>;
     findSettlement?: () => FoundChannelSettlement | null | Promise<FoundChannelSettlement | null>;
-    onEvent?: (event: RecoveryEvent) => void;
+    onEvent?: (event: ChannelLifecycleEvent) => void;
   };
 
   function setup(options: RecoverySetup = {}) {
@@ -894,7 +903,7 @@ describe("ChannelManager.recover (#38)", () => {
       ...options.initial,
     };
     const calls = { state: 0, startClose: 0, refund: 0, find: 0 };
-    const events: RecoveryEvent[] = [];
+    const events: ChannelLifecycleEvent[] = [];
     const { adapter } = createFakeAdapter({
       state: () => {
         calls.state += 1;
@@ -961,7 +970,13 @@ describe("ChannelManager.recover (#38)", () => {
       status: "recovering",
       closeEffectiveAtLedger: 1100,
     });
-    expect(events).toEqual([{ type: "channel:recovering", channelId: id }]);
+    expect(events.filter((event) => event.type.startsWith("channel:recover"))).toEqual([
+      expect.objectContaining({
+        type: "channel:recovering",
+        channelId: id,
+        closeEffectiveAtLedger: 1100,
+      }),
+    ]);
   });
 
   it("throws a typed error until the close is effective, then refunds in a later call", async () => {
@@ -990,7 +1005,11 @@ describe("ChannelManager.recover (#38)", () => {
       recoveredAmount: "1000",
       refundTxHash: "tx-refund",
     });
-    expect(events.map((event) => event.type)).toEqual(["channel:recovering", "channel:recovered"]);
+    expect(events.map((event) => event.type)).toEqual([
+      "channel:opened",
+      "channel:recovering",
+      "channel:recovered",
+    ]);
   });
 
   it("closes without refunding when the recipient already settled", async () => {
@@ -1073,6 +1092,96 @@ describe("ChannelManager.recover (#38)", () => {
       txHash: expect.stringMatching(/^tx-start/),
     });
     await expect(manager.get(channel.id)).resolves.toMatchObject({ status: "recovering" });
+  });
+
+  it("records a funder close found on chain as recovering before the refund is allowed", async () => {
+    // A crash between close_start landing and the store write, or a close
+    // started elsewhere, leaves the chain ahead of the store.
+    const { manager, calls } = setup({
+      initial: { closeEffectiveAtLedger: 1100, currentLedger: 1050 },
+    });
+    const id = await openAndCommit(manager);
+
+    await expect(manager.recover(id)).rejects.toBeInstanceOf(RecoveryNotYetEffectiveError);
+    expect(calls.startClose).toBe(0);
+    await expect(manager.get(id)).resolves.toMatchObject({
+      status: "recovering",
+      closeEffectiveAtLedger: 1100,
+    });
+    await expect(manager.commit(id, "1")).rejects.toBeInstanceOf(ChannelNotOpenError);
+  });
+
+  it("recovers a channel a close left in closing", async () => {
+    const store = createMemoryCommitmentStore();
+    const { adapter } = createFakeAdapter({
+      startClose: () => ({ txHash: "tx-start", closeEffectiveAtLedger: 1100 }),
+    });
+    const manager = createChannelManager({ adapter, store });
+    const id = await openAndCommit(manager);
+    await store.transitionChannel(id, "open", { status: "closing" });
+
+    await expect(manager.recover(id)).resolves.toEqual({
+      channelId: id,
+      recoveredAmount: "0",
+      txHash: "tx-start",
+    });
+    await expect(manager.get(id)).resolves.toMatchObject({
+      status: "recovering",
+      closeEffectiveAtLedger: 1100,
+    });
+  });
+
+  it("hands the channel back when the adapter says close_start was not submitted", async () => {
+    const { manager } = setup({
+      startClose: () => {
+        throw new CloseNotSubmittedError("unused", new Error("signer offline"));
+      },
+    });
+    const id = await openAndCommit(manager);
+
+    await expect(manager.recover(id)).rejects.toBeInstanceOf(CloseNotSubmittedError);
+    await expect(manager.get(id)).resolves.toMatchObject({ status: "open" });
+    await expect(manager.commit(id, "1")).resolves.toMatchObject({ cumulativeAmount: "401" });
+  });
+
+  it("keeps the channel recovering when close_start may have been submitted, and retries", async () => {
+    let attempts = 0;
+    const { manager, calls } = setup({
+      startClose: () => {
+        attempts += 1;
+        if (attempts === 1) throw new Error("rpc timed out after submit");
+        return { txHash: "tx-start-retry", closeEffectiveAtLedger: 1100 };
+      },
+    });
+    const id = await openAndCommit(manager);
+
+    await expect(manager.recover(id)).rejects.toThrow("rpc timed out after submit");
+    await expect(manager.get(id)).resolves.toMatchObject({ status: "recovering" });
+    await expect(manager.commit(id, "1")).rejects.toBeInstanceOf(ChannelNotOpenError);
+
+    await expect(manager.recover(id)).resolves.toMatchObject({ txHash: "tx-start-retry" });
+    expect(calls.startClose).toBe(2);
+    await expect(manager.get(id)).resolves.toMatchObject({
+      status: "recovering",
+      closeEffectiveAtLedger: 1100,
+    });
+  });
+
+  it("lets only one of a concurrent close and recover act on the channel", async () => {
+    let started = 0;
+    const { adapter, calls } = createFakeAdapter({
+      startClose: () => {
+        started += 1;
+        return { txHash: "tx-start", closeEffectiveAtLedger: 1100 };
+      },
+    });
+    const manager = createChannelManager({ adapter });
+    const id = await openAndCommit(manager);
+
+    const results = await Promise.allSettled([manager.close(id), manager.recover(id)]);
+
+    expect(results.filter((result) => result.status === "fulfilled")).toHaveLength(1);
+    expect(started + calls.closeChannel.length).toBe(1);
   });
 
   it("serialises concurrent recover calls so only one refund is submitted", async () => {
@@ -1443,6 +1552,8 @@ describe("ChannelManager.resume (Issue #176)", () => {
     expect(outcome.kind).toBe("recovering");
     const refreshed = await mgr2.get(channel.id);
     expect(refreshed?.status).toBe("recovering");
+    // Recorded so a later recover knows which ledger to wait for (#38).
+    expect(refreshed?.closeEffectiveAtLedger).toBe(160);
   });
 
   it("resume is a no-op for a channel that never started closing", async () => {
@@ -1823,5 +1934,133 @@ describe("ChannelManager close crash safety (#176)", () => {
     expect(byChannel.get(lost)).toMatchObject({ kind: "error" });
     expect((byChannel.get(lost) as { error: Error }).error).toBeInstanceOf(SettlementNotFoundError);
     expect(byChannel.get(funder)).toMatchObject({ kind: "recovering" });
+  });
+});
+
+// ── concurrent writers (#175) ─────────────────────────────────────────────────
+
+function slowSign(ms: number): Parameters<typeof createFakeAdapter>[0] {
+  return {
+    sign: async (input) => {
+      await new Promise((resolve) => setTimeout(resolve, ms));
+      return { commitment: `sig:${input.channelId}:${input.cumulativeAmount}` };
+    },
+  };
+}
+
+describe("ChannelManager concurrent writers (#175)", () => {
+  it("never writes two commitments with one sequence when commits race", async () => {
+    // Three commits read the same channel state, then sign for 5 ms each.
+    // Before the compare-and-set, all three resolved with sequence 0 and
+    // cumulative 150 was recorded against a deposit of 100.
+    const { adapter } = createFakeAdapter(slowSign(5));
+    const manager = createChannelManager({ adapter });
+    const channel = await manager.open({
+      counterparty: "GR",
+      asset: "USDC",
+      deposit: "100",
+      network: "testnet",
+    });
+
+    const results = await Promise.allSettled([
+      manager.commit(channel.id, "60"),
+      manager.commit(channel.id, "60"),
+      manager.commit(channel.id, "30"),
+    ]);
+    const accepted = results.flatMap((r) => (r.status === "fulfilled" ? [r.value] : []));
+    const rejected = results.flatMap((r) => (r.status === "rejected" ? [r.reason] : []));
+
+    expect(accepted).toHaveLength(1);
+    expect(rejected).toHaveLength(2);
+    for (const reason of rejected) expect(reason).toBeInstanceOf(CommitmentConflictError);
+
+    const stream = await manager.list(channel.id);
+    expect(stream.map((c) => c.sequence)).toEqual([0]);
+    expect(stream[0]?.cumulativeAmount).toBe(accepted[0]?.cumulativeAmount);
+    expect((await manager.get(channel.id))?.committed).toBe(accepted[0]?.cumulativeAmount);
+    expect((await manager.get(channel.id))?.sequence).toBe(0);
+  });
+
+  it("submits one close when two closes race", async () => {
+    // Before the status compare-and-set, both closes passed the status check
+    // and both submitted closeChannel.
+    const { adapter, calls } = createFakeAdapter(slowSign(0));
+    const manager = createChannelManager({ adapter });
+    const channel = await manager.open({
+      counterparty: "GR",
+      asset: "USDC",
+      deposit: "100",
+      network: "testnet",
+    });
+    await manager.commit(channel.id, "40");
+
+    const results = await Promise.allSettled([
+      manager.close(channel.id),
+      manager.close(channel.id),
+    ]);
+
+    expect(results.filter((r) => r.status === "fulfilled")).toHaveLength(1);
+    const losing = results.flatMap((r) => (r.status === "rejected" ? [r.reason] : []));
+    expect(losing).toHaveLength(1);
+    expect(losing[0]).toBeInstanceOf(ChannelAlreadyClosedError);
+    expect(calls.closeChannel).toHaveLength(1);
+  });
+
+  it("settles with the last recorded commitment when a commit races a close", async () => {
+    // Whichever of the two wins, the close must settle the cumulative amount
+    // that is in the stream at the time it was submitted, never an older one.
+    const { adapter, calls } = createFakeAdapter(slowSign(2));
+    const manager = createChannelManager({ adapter });
+    const channel = await manager.open({
+      counterparty: "GR",
+      asset: "USDC",
+      deposit: "100",
+      network: "testnet",
+    });
+    await manager.commit(channel.id, "40");
+
+    await Promise.allSettled([manager.close(channel.id), manager.commit(channel.id, "10")]);
+
+    const stream: readonly Commitment[] = await manager.list(channel.id);
+    const last = stream.at(-1);
+    expect(calls.closeChannel).toHaveLength(1);
+    expect(calls.closeChannel[0]?.cumulativeAmount).toBe(last?.cumulativeAmount);
+  });
+});
+
+// ── listChannels ─────────────────────────────────────────────────────────────
+
+describe("ChannelManager.listChannels", () => {
+  function managerWithClock(adapter: MppChannelAdapter) {
+    let tick = 0;
+    return createChannelManager({
+      adapter,
+      now: () => new Date(Date.UTC(2026, 0, 1, 0, 0, tick++)).toISOString(),
+    });
+  }
+
+  it("lists tracked channels newest first and forwards filters and paging", async () => {
+    const { adapter } = createFakeAdapter();
+    const manager = managerWithClock(adapter);
+
+    for (const counterparty of ["GONE", "GTWO", "GTHREE"]) {
+      await manager.open({
+        counterparty,
+        asset: "CBIELTK6YBZJU5UP2WWQEUCYKLPU6AUNZ2BQ4WWFEIE3USCIHMXQDAMA",
+        deposit: "10000000",
+        network: "testnet",
+      });
+    }
+
+    const all = await manager.listChannels();
+    expect(all.channels.map((channel) => channel.id)).toEqual(["CTEST003", "CTEST002", "CTEST001"]);
+
+    const filtered = await manager.listChannels({ counterparty: "GTWO" });
+    expect(filtered.channels.map((channel) => channel.id)).toEqual(["CTEST002"]);
+
+    const first = await manager.listChannels({ limit: 1 });
+    expect(first.channels.map((channel) => channel.id)).toEqual(["CTEST003"]);
+    const second = await manager.listChannels({ limit: 1, cursor: first.nextCursor });
+    expect(second.channels.map((channel) => channel.id)).toEqual(["CTEST002"]);
   });
 });

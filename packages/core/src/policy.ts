@@ -31,6 +31,54 @@ export type PaymentIntent = {
 };
 
 /**
+ * A channel the caller is about to open (#181). The deposit is what the
+ * channel locks, as an integer string in the asset's base units.
+ */
+export type ChannelOpenIntent = {
+  /** The counterparty the channel pays. Keys the per-service cap. */
+  payee: string;
+  asset: string;
+  deposit: string;
+};
+
+/**
+ * A rule that can block a channel open. The two spend ceilings are the rules
+ * the headroom query reports on.
+ */
+export type ChannelOpenRule =
+  | "min-channel-deposit"
+  | "budget-daily"
+  | "budget-total"
+  | "per-service"
+  | "per-service-daily"
+  | "per-service-window";
+
+/** What {@link PolicyEngine.evaluateChannelOpen} decided. Does not record spend. */
+export type ChannelOpenDecision = {
+  /** False when a rule blocks the open in enforce mode. Dry-run never blocks. */
+  allowed: boolean;
+  /** True when a rule would block the open, in either mode. */
+  wouldBlock: boolean;
+  /** The first rule that blocks the open, or null when none does. */
+  rule: ChannelOpenRule | null;
+  /** Says why, in words fit for a log line. */
+  detail: string;
+};
+
+/**
+ * How much an agent may still spend with one payee in one asset (#181).
+ * `headroom` is the smallest remaining amount across the spend ceilings that
+ * apply, as an integer string, and `limitedBy` names that ceiling. Both are
+ * null when the policy sets no ceiling for this asset and payee.
+ */
+export type PolicyHeadroom = {
+  asset: string;
+  payee: string;
+  headroom: string | null;
+  limitedBy: Exclude<ChannelOpenRule, "min-channel-deposit"> | null;
+};
+
+/**
  * Spending rules an agent applies before it pays. {@link createPolicyEngine}
  * builds one from a policy.
  */
@@ -62,6 +110,18 @@ export interface PolicyEngine {
   recordAttempt?(intent: PaymentIntent): Promise<void>;
   /** Records a settled payment so budgets and anomaly windows advance. */
   record(intent: PaymentIntent): Promise<void>;
+  /**
+   * The spend room left for one asset and payee (#181). Read-only. Optional,
+   * so engines written before this release still satisfy the interface.
+   */
+  headroom?(asset: string, payee: string): Promise<PolicyHeadroom>;
+  /**
+   * Checks a channel open's deposit against `minChannelDeposit` and the
+   * headroom for its asset and payee (#181). Does not record spend, because
+   * a deposit is not spend: unspent funds return to the funder on close.
+   * Optional, like `headroom`.
+   */
+  evaluateChannelOpen?(open: ChannelOpenIntent): Promise<ChannelOpenDecision>;
 }
 
 export type AdaptiveAnomalyEvent = {
@@ -84,6 +144,18 @@ function parseAmount(s: string): bigint {
   }
   return BigInt(s);
 }
+
+/** One spend ceiling for a payee and asset: its limit, and what is spent under it. */
+type SpendCeilingLimit = {
+  rule:
+    | "budget-daily"
+    | "budget-total"
+    | "per-service"
+    | "per-service-daily"
+    | "per-service-window";
+  limit: bigint;
+  spent: bigint;
+};
 
 /** Spend and request history the stateful rules read. */
 type EngineState = {
@@ -284,39 +356,29 @@ const perModelDisabled: RuleEvaluator = ({ policy, intent }) => {
   };
 };
 
-const minChannelDeposit: RuleEvaluator = ({ policy, intent, amount }) => {
+/**
+ * The minimum channel deposit guards opening a channel, not each payment on
+ * one (#181). Comparing every per-request price with it blocked each channel
+ * payment priced below the minimum, and no deposit was ever checked.
+ * `evaluateChannelOpen` checks the deposit, so this rule never applies to a
+ * payment. It stays in the trace so the reason is visible.
+ */
+const minChannelDeposit: RuleEvaluator = ({ policy, intent }) => {
   const base = { id: "min-channel-deposit", rule: "min-channel-deposit", window: null } as const;
   const configured = Object.values(policy.perModel ?? {}).some(
     (cfg) => cfg?.minChannelDeposit != null,
   );
-  const min = policy.perModel?.["mpp-channel"]?.minChannelDeposit;
-  // The minimum only guards channel opens; other models have no deposit.
-  if (intent.model !== "mpp-channel" || min == null) {
-    return {
-      ...base,
-      configured,
-      outcome: "not-applicable",
-      limit: null,
-      current: null,
-      projected: null,
-      detail:
-        intent.model === "mpp-channel"
-          ? "policy sets no minimum channel deposit for mpp-channel"
-          : `minimum channel deposit does not apply to ${intent.model}`,
-    };
-  }
-  const minDeposit = parseAmount(min);
-  const fails = amount < minDeposit;
   return {
     ...base,
     configured,
-    outcome: fails ? "fail" : "pass",
-    limit: minDeposit.toString(),
+    outcome: "not-applicable",
+    limit: null,
     current: null,
-    projected: amount.toString(),
-    detail: fails
-      ? `amount ${intent.amount} is below minimum channel deposit ${min}`
-      : `amount ${intent.amount} meets minimum channel deposit ${min}`,
+    projected: null,
+    detail:
+      intent.model === "mpp-channel"
+        ? "minimum channel deposit is checked when a channel opens, not per payment"
+        : `minimum channel deposit does not apply to ${intent.model}`,
   };
 };
 
@@ -956,6 +1018,117 @@ export function createPolicyEngine(
     if (state.rateLimiter?.count === "attempts") state.rateLimiter.record(intent.payee, clock());
   }
 
+  /**
+   * The spend ceilings that apply to one asset and payee, each with its limit
+   * and what has been spent under it. The daily ceiling is read after the
+   * day rolls over, so yesterday's spend is not counted.
+   */
+  function spendCeilings(payee: string, asset: string): SpendCeilingLimit[] {
+    resetDailyIfNeeded();
+    const ceilings: SpendCeilingLimit[] = [];
+    const daily = policy.budgets?.daily;
+    if (daily != null) {
+      ceilings.push({
+        rule: "budget-daily",
+        limit: parseAmount(daily),
+        spent: state.dailySpend.get(asset) ?? 0n,
+      });
+    }
+    const total = policy.budgets?.total;
+    if (total != null) {
+      ceilings.push({
+        rule: "budget-total",
+        limit: parseAmount(total),
+        spent: state.totalSpend.get(asset) ?? 0n,
+      });
+    }
+    const service = policy.perService?.[payee];
+    const key = serviceKey(payee, asset);
+    if (service?.cap != null) {
+      ceilings.push({
+        rule: "per-service",
+        limit: parseAmount(service.cap),
+        spent: state.serviceSpend.get(key) ?? 0n,
+      });
+    }
+    // The #192 caps bound spend with this payee too, so a deposit sized past
+    // them would lock funds the policy will not let the agent spend.
+    if (service?.dailyCap != null) {
+      ceilings.push({
+        rule: "per-service-daily",
+        limit: parseAmount(service.dailyCap),
+        spent: state.serviceDailySpend.get(key) ?? 0n,
+      });
+    }
+    if (service?.window != null) {
+      ceilings.push({
+        rule: "per-service-window",
+        limit: parseAmount(service.window.cap),
+        spent: state.serviceWindowSpend.get(key)?.sum(clock()) ?? 0n,
+      });
+    }
+    return ceilings;
+  }
+
+  /** What is left under a ceiling. Never negative: an exhausted ceiling has none left. */
+  function remaining(limit: bigint, spent: bigint): bigint {
+    return limit > spent ? limit - spent : 0n;
+  }
+
+  function headroomOf(asset: string, payee: string): PolicyHeadroom {
+    let tightest: { rule: SpendCeilingLimit["rule"]; left: bigint } | undefined;
+    for (const ceiling of spendCeilings(payee, asset)) {
+      const left = remaining(ceiling.limit, ceiling.spent);
+      if (tightest === undefined || left < tightest.left) {
+        tightest = { rule: ceiling.rule, left };
+      }
+    }
+    return {
+      asset,
+      payee,
+      headroom: tightest === undefined ? null : tightest.left.toString(),
+      limitedBy: tightest?.rule ?? null,
+    };
+  }
+
+  function evaluateChannelOpenNow(open: ChannelOpenIntent): ChannelOpenDecision {
+    const deposit = parseAmount(open.deposit);
+    const failures: Array<{ rule: ChannelOpenRule; detail: string }> = [];
+
+    const min = policy.perModel?.["mpp-channel"]?.minChannelDeposit;
+    if (min != null && deposit < parseAmount(min)) {
+      failures.push({
+        rule: "min-channel-deposit",
+        detail: `deposit ${open.deposit} is below minimum channel deposit ${min}`,
+      });
+    }
+    for (const ceiling of spendCeilings(open.payee, open.asset)) {
+      const left = remaining(ceiling.limit, ceiling.spent);
+      if (deposit > left) {
+        failures.push({
+          rule: ceiling.rule,
+          detail: `deposit ${open.deposit} exceeds the ${ceiling.rule} headroom of ${left}`,
+        });
+      }
+    }
+
+    const blocker = failures[0];
+    if (blocker === undefined) {
+      return {
+        allowed: true,
+        wouldBlock: false,
+        rule: null,
+        detail: `deposit ${open.deposit} is within policy`,
+      };
+    }
+    return {
+      allowed: mode === "dry-run",
+      wouldBlock: true,
+      rule: blocker.rule,
+      detail: blocker.detail,
+    };
+  }
+
   return {
     mode,
 
@@ -985,6 +1158,14 @@ export function createPolicyEngine(
       const now = clock();
       pruneWindow(now);
       pruneRollingSums(now);
+    },
+
+    async headroom(asset: string, payee: string): Promise<PolicyHeadroom> {
+      return headroomOf(asset, payee);
+    },
+
+    async evaluateChannelOpen(open: ChannelOpenIntent): Promise<ChannelOpenDecision> {
+      return evaluateChannelOpenNow(open);
     },
   };
 }

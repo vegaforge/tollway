@@ -282,18 +282,31 @@ describe("webhook dispatcher", () => {
     // A claims the row and its POST hangs. A's lease expires, B reclaims the
     // row and delivers it. A's POST then fails on its last attempt: A must
     // not dead-letter the row, or a replay would send it a second time.
+    //
+    // Time is driven explicitly. Only setTimeout is faked, so A's request
+    // timeout cannot fire while the test is still arranging B, however slow
+    // the machine is. The row is enqueued before `start` is read: enqueue
+    // stamps `nextAttemptAt` with the real clock, and A, frozen at `start`,
+    // must see the row as due.
+    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+    const outbox = createMemoryWebhookOutbox();
+    await outbox.enqueue([{ subscriptionId: "sub-1", event }]);
     const start = Date.now();
     let failA: (error: Error) => void = () => {};
+    let fetchAStarted: () => void = () => {};
+    const fetchAStartedPromise = new Promise<void>((resolve) => {
+      fetchAStarted = resolve;
+    });
     const fetchA = vi.fn().mockImplementation(
       () =>
         new Promise<Response>((_resolve, reject) => {
           failA = reject;
+          fetchAStarted();
         }),
     );
     const fetchB = vi.fn().mockResolvedValue(okResponse());
     const onErrorA = vi.fn();
     const onDeliveryFailureA = vi.fn();
-    const outbox = createMemoryWebhookOutbox();
     const a = createWebhookDispatcher({
       outbox,
       resolveSubscription: () => subscription,
@@ -313,10 +326,10 @@ describe("webhook dispatcher", () => {
       leaseMs: 2_000,
       now: () => start + 2_001,
     });
-    await outbox.enqueue([{ subscriptionId: "sub-1", event }]);
 
     const passA = a.drainOnce();
-    await vi.waitFor(() => expect(fetchA).toHaveBeenCalledTimes(1));
+    await fetchAStartedPromise;
+    expect(fetchA).toHaveBeenCalledTimes(1);
     expect(await b.drainOnce()).toBe(1);
     failA(new Error("connection reset"));
     await passA;

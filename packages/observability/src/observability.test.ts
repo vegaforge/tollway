@@ -23,7 +23,8 @@ describe("observability webhook events catalogue", () => {
   it("lists the webhook events from the design document", () => {
     expect(webhookEvents).toContain("receipt.created");
     expect(webhookEvents).toContain("anomaly.detected");
-    expect(webhookEvents).toHaveLength(5);
+    expect(webhookEvents).toContain("sponsor.low_balance");
+    expect(webhookEvents).toHaveLength(6);
   });
 });
 
@@ -44,7 +45,7 @@ describe("observability hub: handler registration", () => {
     expect(report.failures).toEqual([]);
   });
 
-  it("invokes handlers for all five documented event types", async () => {
+  it("invokes handlers for all documented event types", async () => {
     const hub = createObservabilityHub({ sleep: noSleep });
     const calls: WebhookEvent[] = [];
     for (const eventType of webhookEvents) {
@@ -374,10 +375,14 @@ describe("observability hub: record + summarize", () => {
     expect(summary).toEqual({
       totalAmount: "0",
       count: 0,
+      byOutcome: { settled: 0, failed: 0, skipped: 0 },
       byAsset: {},
       byModel: {},
       byPayer: {},
       byPayee: {},
+      byModelAsset: [],
+      byPayerAsset: [],
+      byPayeeAsset: [],
     });
   });
 

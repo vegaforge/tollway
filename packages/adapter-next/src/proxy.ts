@@ -11,7 +11,9 @@ import {
   PAYMENT_RESPONSE_HEADER,
   PAYMENT_SIGNATURE_HEADER,
 } from "@vegaforge/tollway-server";
-import { type NextRequest, NextResponse } from "next/server";
+// The explicit `.js` lets plain Node ESM resolve it: `next` publishes no
+// export map, so `next/server` alone only resolves under a bundler.
+import { type NextRequest, NextResponse } from "next/server.js";
 
 /** Header used only between a configured Next proxy and its route handler. */
 export const PROXY_RECEIPT_HEADER = "x-tollway-proxy-receipt";

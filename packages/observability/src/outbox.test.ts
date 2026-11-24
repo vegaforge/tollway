@@ -422,14 +422,21 @@ describe("sqlite webhook outbox: durability", () => {
 
 describe("sqlite webhook outbox: a lock held by another connection", () => {
   /**
-   * Starts a worker thread that opens the same file, takes the write lock
-   * with BEGIN IMMEDIATE, and holds it for `holdMs`. A separate thread is
-   * needed because `node:sqlite` is synchronous: a lock held on this thread
-   * could never be released while this thread waits for it.
+   * Starts a worker thread that opens the same file and takes the write lock
+   * with BEGIN IMMEDIATE. It holds the lock until `beginWrite()` is called,
+   * then for `holdMs` more. A separate thread is needed because `node:sqlite`
+   * is synchronous: a lock held on this thread could never be released while
+   * this thread waits for it. Counting the hold from `beginWrite()` means the
+   * lock is still held when the write starts, however slowly the worker's
+   * message arrives.
    */
-  async function holdWriteLock(filename: string, holdMs: number): Promise<Worker> {
+  async function holdWriteLock(
+    filename: string,
+    holdMs: number,
+  ): Promise<{ worker: Worker; beginWrite: () => void }> {
+    const signal = new SharedArrayBuffer(4);
     const worker = new Worker(new URL("./test-support/sqlite-lock-holder.mjs", import.meta.url), {
-      workerData: { filename, holdMs },
+      workerData: { filename, holdMs, signal },
     });
     await new Promise<void>((resolve, reject) => {
       worker.once("message", (message) => {
@@ -437,7 +444,14 @@ describe("sqlite webhook outbox: a lock held by another connection", () => {
       });
       worker.once("error", reject);
     });
-    return worker;
+    const flag = new Int32Array(signal);
+    return {
+      worker,
+      beginWrite: () => {
+        Atomics.store(flag, 0, 1);
+        Atomics.notify(flag, 0);
+      },
+    };
   }
 
   function exited(worker: Worker): Promise<number> {
@@ -451,10 +465,11 @@ describe("sqlite webhook outbox: a lock held by another connection", () => {
       busyTimeoutMs: 5_000,
     });
     try {
-      const worker = await holdWriteLock(database.filename, 200);
+      const { worker, beginWrite } = await holdWriteLock(database.filename, 200);
       const done = exited(worker);
 
       const startedAt = Date.now();
+      beginWrite();
       await outbox.enqueue([{ subscriptionId: "sub-1", event }]);
       expect(Date.now() - startedAt).toBeGreaterThanOrEqual(150);
       expect(await outbox.claim(10, 1_000)).toHaveLength(1);
@@ -469,9 +484,10 @@ describe("sqlite webhook outbox: a lock held by another connection", () => {
     const database = temporaryDatabase();
     const outbox = createSqliteWebhookOutbox({ filename: database.filename, busyTimeoutMs: 50 });
     try {
-      const worker = await holdWriteLock(database.filename, 1_000);
+      const { worker, beginWrite } = await holdWriteLock(database.filename, 1_000);
       const done = exited(worker);
 
+      beginWrite();
       await expect(outbox.enqueue([{ subscriptionId: "sub-1", event }])).rejects.toThrow(
         /database is locked/,
       );

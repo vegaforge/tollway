@@ -18,14 +18,24 @@
   "types": "./dist/index.d.ts",
   "exports": {
     ".": {
-      "types": "./dist/index.d.ts",
-      "import": "./dist/index.js",
-      "require": "./dist/index.cjs"
+      "import": {
+        "types": "./dist/index.d.ts",
+        "default": "./dist/index.js"
+      },
+      "require": {
+        "types": "./dist/index.d.cts",
+        "default": "./dist/index.cjs"
+      }
     },
     "./sqlite": {
-      "types": "./dist/sqlite-store.d.ts",
-      "import": "./dist/sqlite-store.js",
-      "require": "./dist/sqlite-store.cjs"
+      "import": {
+        "types": "./dist/sqlite-store.d.ts",
+        "default": "./dist/sqlite-store.js"
+      },
+      "require": {
+        "types": "./dist/sqlite-store.d.cts",
+        "default": "./dist/sqlite-store.cjs"
+      }
     }
   },
   "files": [
@@ -38,12 +48,15 @@
     "typecheck": "tsc --noEmit"
   },
   "dependencies": {
+    "@stellar/mpp": "0.7.1",
+    "@stellar/stellar-sdk": "16.4.1",
     "@vegaforge/tollway-core": "workspace:*",
     "@x402/core": "^2.31.0",
-    "@x402/stellar": "^2.31.0"
+    "@x402/stellar": "^2.31.0",
+    "mppx": "0.8.19",
+    "zod": "^4.6.7"
   },
   "devDependencies": {
-    "@stellar/stellar-sdk": "16.4.1",
     "@types/node": "^22.20.5",
     "fast-check": "^4.10.3",
     "tsup": "^9.0.0",

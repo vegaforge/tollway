@@ -139,3 +139,12 @@ export {
   type ServicePolicyStore,
   validateServicePolicy,
 } from "./service-policy.js";
+export {
+  createHorizonSponsorBalanceReader,
+  createSponsorMonitor,
+  type SponsorBalanceReader,
+  type SponsorHorizonClient,
+  type SponsorMonitor,
+  type SponsorMonitorOptions,
+  type SponsorMonitorSink,
+} from "./sponsor-monitor.js";

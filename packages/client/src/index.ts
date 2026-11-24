@@ -14,12 +14,14 @@
  * The settler is the seam between this orchestrator and the protocol-
  * specific dance (Soroban auth entry signing for x402, MPP channel
  * commitments, etc.). Tests inject a mock settler; production wires a
- * settler backed by @x402/stellar (and later @stellar/mpp). Keeping the
+ * settler backed by @x402/stellar or @stellar/mpp. Keeping the
  * settler injected means the client itself stays pure orchestration and
  * the test surface is small.
  */
 
 import {
+  ChannelOpenFailedError,
+  type ChannelOpenSubmission,
   type CounterpartyQuarantine,
   canonicalJson,
   comparePolicyTraces,
@@ -41,6 +43,12 @@ import {
   TollwayError,
   verifyReceipt,
 } from "@vegaforge/tollway-core";
+import {
+  type OfferChecks,
+  OfferRejectedError,
+  runOfferChecks,
+  validateOfferChecks,
+} from "./offer-checks.js";
 import {
   assertOfferForRequest,
   assertReceiptMatchesOffer,
@@ -110,8 +118,26 @@ export type ClientEvent =
   | { type: "policy:shadow-error"; resource: string; error: Error }
   | { type: "error"; resource: string; error: Error }
   | { type: "budget:warning"; remaining: string }
+  /**
+   * A channel settler opened or closed a payment channel. The client never
+   * opens channels itself: a settler reports these through
+   * `ClientSettler.subscribe` (#187).
+   */
   | { type: "channel:opened"; channelId: string }
   | { type: "channel:closed"; channelId: string }
+  /**
+   * The payment was made on another model than the one chosen (#183): a
+   * channel could not be opened, or the counterparty's channel path is
+   * cooling down after a failed open. The `payment` event that follows
+   * reports the model that actually paid.
+   */
+  | {
+      type: "fallback";
+      resource: string;
+      from: SettlementModel;
+      to: SettlementModel;
+      reason: string;
+    }
   | {
       type: "counterparty:quarantined";
       counterparty: string;
@@ -121,6 +147,9 @@ export type ClientEvent =
     };
 
 export type ClientEventHandler = (event: ClientEvent) => void;
+
+/** The events a settler may put on the client's stream. */
+export type SettlerEvent = Extract<ClientEvent, { type: "channel:opened" | "channel:closed" }>;
 
 /**
  * The agent-side analog of the server's `FacilitatorClient`. Given a
@@ -136,7 +165,54 @@ export interface ClientSettler {
    * client then requires `receipt.payer` to equal it.
    */
   readonly payer?: string;
+  /**
+   * Called once by `createClient` with a function that puts a settler's
+   * events on the client's `on()` stream (#187). A channel settler wires its
+   * channel manager's `channel:opened` and `channel:closed` lifecycle events
+   * through it. Settlers that have nothing to report leave it out.
+   */
+  subscribe?(emit: (event: SettlerEvent) => void): void;
 }
+
+/** What `onOrphanedChannel` is told about an open that may have landed (#183). */
+export type OrphanedChannel = {
+  counterparty: string;
+  asset: string;
+  channelId?: string;
+  txHash?: string;
+  error: Error;
+};
+
+/**
+ * Paying by x402 when a channel cannot be opened (#183). The fallback is
+ * taken only for an error with code `channel-open-failed`, which a channel
+ * settler throws when the open failed before any voucher was signed. Any
+ * later failure may have paid the service already and is never retried on
+ * another model.
+ */
+export type ChannelFallbackOptions = {
+  /** The settler that pays when the channel path cannot. */
+  x402: ClientSettler;
+  /**
+   * After a failed open, how long the counterparty's channel path rests
+   * before one request may try to open again. Doubles on each further
+   * failure, up to `maxCooldownMs`. Defaults to 60 seconds.
+   */
+  cooldownMs?: number;
+  /** The longest cooldown. Defaults to 15 minutes. */
+  maxCooldownMs?: number;
+  /**
+   * How many counterparty and asset pairs the cooldown remembers; the
+   * oldest is forgotten first. Defaults to 1000.
+   */
+  maxTracked?: number;
+  /**
+   * Called when an open may have landed on chain (`submission:
+   * "ambiguous"`), so the funder side can resume or recover the channel.
+   * A throwing callback does not fail the payment.
+   */
+  onOrphanedChannel?: (channel: OrphanedChannel) => void;
+};
 
 export type SettleRequest = {
   resource: string;
@@ -169,6 +245,13 @@ export type TollwayClientOptions = {
   logger?: { warn(message: string): void };
   /** Optional router. When omitted, defaults to x402 unless `model` is on the request. */
   router?: ModelRouter;
+  /**
+   * Per-offer sanity checks (#209): price ceilings per asset, payee and asset
+   * allowlists, and a zero-amount opt-in. They run in `pay()` before the
+   * policy engine and before the settler. The network and structural checks
+   * always run. See `offer-checks.ts`.
+   */
+  offerChecks?: OfferChecks;
   /**
    * Optional quarantine store. When provided, `pay()` checks the
    * counterparty's standing before routing, emits `counterparty:quarantined`,
@@ -223,6 +306,11 @@ export type TollwayClientOptions = {
    * never retries because the payment may have landed.
    */
   retry?: RetryOptions;
+  /**
+   * Falls back to x402 when a channel open fails (#183). Without it, a
+   * failed open is thrown like any other settler error.
+   */
+  fallback?: ChannelFallbackOptions;
 };
 
 export type PayRequest = {
@@ -278,6 +366,13 @@ export function createClient(options: TollwayClientOptions): TollwayClient {
       `receiptMaxSkewMs must be a non-negative finite number, got ${options.receiptMaxSkewMs}`,
     );
   }
+  const fallback = options.fallback;
+  const cooldown = fallback ? createChannelCooldown(fallback) : undefined;
+  const clientNow = (): number => (options.clock ?? Date.now)();
+  if (options.offerChecks) {
+    // A typo in a ceiling fails here, at startup, not on the first payment.
+    validateOfferChecks(options.offerChecks, options.network);
+  }
   // Settlements in progress, by purchase key. In process only: two workers
   // of the same agent do not see each other's entries.
   const inFlight = new Map<string, Promise<Settled>>();
@@ -303,6 +398,34 @@ export function createClient(options: TollwayClientOptions): TollwayClient {
         // A bad handler must not poison the pay() promise. Observability
         // pipelines wire their own retry/log strategy; this is best-effort.
       }
+    }
+  }
+
+  // A settler reports channel lifecycle on the same stream as payments.
+  options.settler.subscribe?.(emit);
+  fallback?.x402.subscribe?.(emit);
+
+  /**
+   * Tells the funder side about an open that may have landed on chain, so a
+   * funded channel nobody tracks can be resumed or recovered (#176, #38).
+   * An error without a submission state is treated as possibly landed.
+   */
+  function reportOrphan(error: TollwayError, offer: PaymentOffer): void {
+    const submission: ChannelOpenSubmission =
+      error instanceof ChannelOpenFailedError ? error.submission : "ambiguous";
+    if (submission !== "ambiguous" || !fallback?.onOrphanedChannel) return;
+    const details = error instanceof ChannelOpenFailedError ? error : undefined;
+    try {
+      fallback.onOrphanedChannel({
+        counterparty: details?.counterparty ?? offer.payTo,
+        asset: details?.asset ?? offer.asset,
+        ...(details?.channelId === undefined ? {} : { channelId: details.channelId }),
+        ...(details?.txHash === undefined ? {} : { txHash: details.txHash }),
+        error,
+      });
+    } catch {
+      // The callback is an alert. A throwing one must not fail a payment
+      // that can still be made by x402.
     }
   }
 
@@ -359,12 +482,12 @@ export function createClient(options: TollwayClientOptions): TollwayClient {
     retry: { maxAttempts: number; sleep: (ms: number) => Promise<void> };
     request: PayRequest;
     model: SettlementModel;
+    settler: ClientSettler;
     freshAttempt: () => Promise<void>;
   }): Promise<SignedReceipt> {
-    const { retry, request, model } = args;
+    const { retry, request, model, settler } = args;
     let pinned: SignedTerms | undefined;
-    let next = () =>
-      options.settler.settle({ resource: request.resource, offer: request.offer, model });
+    let next = () => settler.settle({ resource: request.resource, offer: request.offer, model });
     for (let attempt = 1; ; attempt += 1) {
       try {
         return await next();
@@ -414,7 +537,7 @@ export function createClient(options: TollwayClientOptions): TollwayClient {
         });
         const terms = pinned;
         next = () =>
-          options.settler.settle({
+          settler.settle({
             resource: request.resource,
             offer: request.offer,
             model,
@@ -442,7 +565,11 @@ export function createClient(options: TollwayClientOptions): TollwayClient {
    * evaluates the policy, stores the receipt, records the spend and emits
    * `payment`, so calls that share the settlement are not counted twice.
    */
-  async function settleOnce(request: PayRequest, model: SettlementModel): Promise<Settled> {
+  async function settleOnce(
+    request: PayRequest,
+    model: SettlementModel,
+    settler: ClientSettler,
+  ): Promise<Settled> {
     try {
       const intent: PaymentIntent = {
         payee: request.offer.payTo,
@@ -455,12 +582,12 @@ export function createClient(options: TollwayClientOptions): TollwayClient {
       // `admit` evaluates and, when the policy allows the payment, counts
       // it as an attempt in the same step (issue #197). An engine written
       // before `admit` existed is evaluated instead.
-      const admit = async (engine: PolicyEngine): Promise<PolicyTrace> =>
-        engine.admit ? engine.admit(intent) : engine.evaluate(intent);
+      const admit = async (engine: PolicyEngine, toAdmit: PaymentIntent): Promise<PolicyTrace> =>
+        engine.admit ? engine.admit(toAdmit) : engine.evaluate(toAdmit);
 
       let activeTrace: PolicyTrace | undefined;
       if (options.policy) {
-        activeTrace = await admit(options.policy);
+        activeTrace = await admit(options.policy, intent);
         // No handler, no event object: the quiet path stays as cheap as a
         // plain check().
         if (handlers.length > 0) {
@@ -489,20 +616,64 @@ export function createClient(options: TollwayClientOptions): TollwayClient {
       blockIfDenied(activeTrace);
       if (options.shadow) await shadowAttempt(options.shadow, intent, request.resource);
 
-      // The retry runs inside the shared settlement (issue #210), so calls
-      // waiting on this purchase share one retried payment, and the
-      // receipt it ends with is bound to the offer below like any other.
-      const settled = await settleWithRetry({
-        retry: normaliseRetryOptions(options.retry),
-        request,
-        model,
-        freshAttempt: async () => {
-          // A new authorization is a new payment attempt: the policy is
-          // checked again, and a budget that now bites stops the retry.
-          if (options.policy) blockIfDenied(await admit(options.policy));
-          if (options.shadow) await shadowAttempt(options.shadow, intent, request.resource);
-        },
-      });
+      /**
+       * One payment on one model through one settler. The retry runs
+       * inside the shared settlement (issue #210), so calls waiting on this
+       * purchase share one retried payment.
+       */
+      const pay = (settler: ClientSettler, paying: PaymentIntent) =>
+        settleWithRetry({
+          retry: normaliseRetryOptions(options.retry),
+          request,
+          model: paying.model,
+          settler,
+          freshAttempt: async () => {
+            // A new authorization is a new payment attempt: the policy is
+            // checked again, and a budget that now bites stops the retry.
+            if (options.policy) blockIfDenied(await admit(options.policy, paying));
+            if (options.shadow) await shadowAttempt(options.shadow, paying, request.resource);
+          },
+        });
+
+      // What actually paid. A fallback (#183) changes all three.
+      let paidIntent = intent;
+      let paidBy = settler;
+      let settled: SignedReceipt;
+      const channelKey = cooldownKey(request.offer);
+      try {
+        settled = await pay(settler, intent);
+        if (model === "mpp-channel") cooldown?.opened(channelKey);
+      } catch (rawError) {
+        // Anything but an open failure may already have paid the service
+        // (a voucher sent, a response lost), so it is never paid again.
+        if (model !== "mpp-channel" || !isChannelOpenFailure(rawError)) throw rawError;
+        cooldown?.failed(channelKey, clientNow());
+        reportOrphan(rawError, request.offer);
+        if (!fallback || !request.offer.models.includes("x402")) throw rawError;
+
+        // Nothing was offered to the service on the channel, so paying the
+        // same request by x402 cannot pay it twice. x402 is a different
+        // model, so the policy is asked again before paying.
+        paidIntent = { ...intent, model: "x402" };
+        paidBy = fallback.x402;
+        emit({
+          type: "fallback",
+          resource: request.resource,
+          from: "mpp-channel",
+          to: "x402",
+          reason: rawError.message,
+        });
+        if (options.policy) {
+          const fallbackTrace = await admit(options.policy, paidIntent);
+          if (handlers.length > 0) {
+            emit({ type: "policy:decision", resource: request.resource, trace: fallbackTrace });
+          }
+          blockIfDenied(fallbackTrace);
+        }
+        if (options.shadow) await shadowAttempt(options.shadow, paidIntent, request.resource);
+        settled = await pay(fallback.x402, paidIntent);
+      }
+      const paidModel = paidIntent.model;
 
       // Only the parsed receipt leaves pay(), never the settler's object,
       // so a field the signature does not cover cannot reach the caller.
@@ -514,10 +685,10 @@ export function createClient(options: TollwayClientOptions): TollwayClient {
       assertReceiptMatchesOffer({
         receipt,
         offer: request.offer,
-        model,
+        model: paidModel,
         network: options.network,
-        ...(options.settler.payer === undefined ? {} : { payer: options.settler.payer }),
-        now: (options.clock ?? Date.now)(),
+        ...(paidBy.payer === undefined ? {} : { payer: paidBy.payer }),
+        now: clientNow(),
         maxSkewMs: options.receiptMaxSkewMs ?? DEFAULT_RECEIPT_MAX_SKEW_MS,
       });
 
@@ -537,16 +708,20 @@ export function createClient(options: TollwayClientOptions): TollwayClient {
         }
       }
 
+      // Budgets advance once, for the model that actually paid.
       if (options.policy) {
-        await options.policy.record(intent);
+        await options.policy.record(paidIntent);
       }
       if (options.shadow) {
-        await shadowRecord(options.shadow, intent, request.resource);
+        await shadowRecord(options.shadow, paidIntent, request.resource);
       }
 
-      emit({ type: "payment", resource: request.resource, model, receipt });
-      return storeError ? { receipt, model, storeError } : { receipt, model };
+      emit({ type: "payment", resource: request.resource, model: paidModel, receipt });
+      return storeError ? { receipt, model: paidModel, storeError } : { receipt, model: paidModel };
     } catch (rawError) {
+      // A request that was allowed to try the channel after a cooldown frees
+      // that slot however it ended, so the next request may try again.
+      if (model === "mpp-channel") cooldown?.release(cooldownKey(request.offer));
       const error = normalizeError(rawError);
       emit({ type: "error", resource: request.resource, error });
       throw error;
@@ -559,6 +734,8 @@ export function createClient(options: TollwayClientOptions): TollwayClient {
     },
     async pay(request): Promise<PayResult> {
       let model: SettlementModel;
+      // The cooldown below sends a channel payment to the fallback's settler.
+      let settler = options.settler;
       let emittedQuarantine = false;
       try {
         // Refused before any policy check or signature: paying on the wrong
@@ -567,6 +744,20 @@ export function createClient(options: TollwayClientOptions): TollwayClient {
           throw new OfferNetworkMismatchError(request.offer.network, options.network);
         }
         assertOfferForRequest(request.resource, request.offer);
+        // The offer is attacker-controlled input: check it before quarantine,
+        // routing, policy or any signature.
+        try {
+          runOfferChecks(request.offer, request.resource, options.network, options.offerChecks);
+        } catch (checkError) {
+          if (checkError instanceof OfferRejectedError) {
+            emit({
+              type: "skip",
+              resource: request.resource,
+              reason: `${checkError.checkName}: ${checkError.message}`,
+            });
+          }
+          throw checkError;
+        }
         let quarantined = false;
         if (options.quarantine) {
           let entry: QuarantineEntry | undefined;
@@ -600,6 +791,26 @@ export function createClient(options: TollwayClientOptions): TollwayClient {
           });
         }
         model = decision.model;
+
+        // After a failed open the counterparty's channel path rests (#183):
+        // requests go straight to x402 until the cooldown ends, and then one
+        // request at a time may try the channel again.
+        if (
+          model === "mpp-channel" &&
+          cooldown &&
+          request.offer.models.includes("x402") &&
+          cooldown.admit(cooldownKey(request.offer), clientNow()) === "cooling"
+        ) {
+          model = "x402";
+          settler = fallback?.x402 ?? settler;
+          emit({
+            type: "fallback",
+            resource: request.resource,
+            from: "mpp-channel",
+            to: "x402",
+            reason: "the channel path is cooling down after a failed open",
+          });
+        }
       } catch (rawError) {
         const error = normalizeError(rawError);
         if (
@@ -636,7 +847,7 @@ export function createClient(options: TollwayClientOptions): TollwayClient {
         return { ...shared, deduplicated: true };
       }
 
-      const attempt = settleOnce(request, model);
+      const attempt = settleOnce(request, model, settler);
       inFlight.set(key, attempt);
       try {
         return { ...(await attempt), deduplicated: false };
@@ -668,6 +879,87 @@ function purchaseKey(request: PayRequest, model: SettlementModel): string {
     payTo: request.offer.payTo,
     network: request.offer.network,
   })}`;
+}
+
+/** True for the one error a channel settler throws when an open failed before any voucher. */
+function isChannelOpenFailure(error: unknown): error is TollwayError {
+  return error instanceof TollwayError && error.code === "channel-open-failed";
+}
+
+/** The channel path an offer would use: one counterparty, one asset. */
+function cooldownKey(offer: PaymentOffer): string {
+  return canonicalJson({ payTo: offer.payTo, asset: offer.asset, network: offer.network });
+}
+
+const DEFAULT_CHANNEL_COOLDOWN_MS = 60_000;
+const DEFAULT_MAX_CHANNEL_COOLDOWN_MS = 15 * 60_000;
+const DEFAULT_MAX_TRACKED_CHANNELS = 1000;
+
+type CooldownEntry = { failures: number; until: number; probing: boolean };
+
+/**
+ * Per counterparty and asset: how long the channel path rests after a
+ * failed open, and whether one request is already trying it again. Memory
+ * is bounded by `maxTracked`; the least recently touched entry goes first.
+ */
+function createChannelCooldown(options: ChannelFallbackOptions) {
+  const initial = options.cooldownMs ?? DEFAULT_CHANNEL_COOLDOWN_MS;
+  const max = options.maxCooldownMs ?? DEFAULT_MAX_CHANNEL_COOLDOWN_MS;
+  const maxTracked = options.maxTracked ?? DEFAULT_MAX_TRACKED_CHANNELS;
+  for (const [name, value] of [
+    ["fallback.cooldownMs", initial],
+    ["fallback.maxCooldownMs", max],
+  ] as const) {
+    if (!Number.isFinite(value) || value <= 0) {
+      throw new TypeError(`${name} must be a positive finite number, got ${value}`);
+    }
+  }
+  if (max < initial) {
+    throw new TypeError(
+      `fallback.maxCooldownMs (${max}) must be at least fallback.cooldownMs (${initial})`,
+    );
+  }
+  if (!Number.isSafeInteger(maxTracked) || maxTracked < 1) {
+    throw new TypeError(`fallback.maxTracked must be a positive integer, got ${maxTracked}`);
+  }
+
+  const entries = new Map<string, CooldownEntry>();
+
+  function put(key: string, entry: CooldownEntry): void {
+    entries.delete(key);
+    entries.set(key, entry);
+    while (entries.size > maxTracked) {
+      const oldest = entries.keys().next().value;
+      if (oldest === undefined) break;
+      entries.delete(oldest);
+    }
+  }
+
+  return {
+    /**
+     * `open`: no failure on record. `probe`: the cooldown has ended and this
+     * request is the one that tries the channel. `cooling`: pay by x402.
+     */
+    admit(key: string, now: number): "open" | "probe" | "cooling" {
+      const entry = entries.get(key);
+      if (!entry) return "open";
+      if (entry.probing || now < entry.until) return "cooling";
+      put(key, { ...entry, probing: true });
+      return "probe";
+    },
+    opened(key: string): void {
+      entries.delete(key);
+    },
+    failed(key: string, now: number): void {
+      const failures = (entries.get(key)?.failures ?? 0) + 1;
+      const wait = Math.min(max, initial * 2 ** Math.min(failures - 1, 30));
+      put(key, { failures, until: now + wait, probing: false });
+    },
+    release(key: string): void {
+      const entry = entries.get(key);
+      if (entry?.probing) put(key, { ...entry, probing: false });
+    },
+  };
 }
 
 /**
@@ -761,6 +1053,18 @@ function normalizeError(value: unknown): Error {
   return new Error(typeof value === "string" ? value : JSON.stringify(value));
 }
 
+export {
+  createMppChargeSettler,
+  MPP_NETWORK_ID,
+  type MppChargeMode,
+  type MppChargeSettlerOptions,
+  offerAssetContract,
+} from "./mpp-charge-settler.js";
+export {
+  type OfferCheckName,
+  type OfferChecks,
+  OfferRejectedError,
+} from "./offer-checks.js";
 export {
   DEFAULT_RECEIPT_MAX_SKEW_MS,
   OfferNetworkMismatchError,

@@ -8,7 +8,7 @@
 
 import type { SettlementModel } from "@vegaforge/tollway-core";
 import { TollwayError } from "@vegaforge/tollway-core";
-import type { MetricsQuery, PaymentMetric } from "./index.js";
+import type { MetricsQuery, PaymentMetric } from "./metrics.js";
 
 /** Bucket widths a time series can be cut into. */
 export const timeseriesBuckets = ["1m", "5m", "1h", "1d"] as const;
@@ -330,6 +330,8 @@ export function computeTimeseries(
     if (query.payer !== undefined && m.payer !== query.payer) continue;
     if (query.payee !== undefined && m.payee !== query.payee) continue;
     if (query.model !== undefined && m.model !== query.model) continue;
+    if (query.asset !== undefined && m.asset !== query.asset) continue;
+    if (query.outcome !== undefined && m.outcome !== query.outcome) continue;
 
     const atMs = parseIsoTimestamp(m.at);
     if (atMs === null) {
