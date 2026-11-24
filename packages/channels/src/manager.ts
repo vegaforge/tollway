@@ -681,10 +681,14 @@ export function createChannelManager(options: CreateChannelManagerOptions): Chan
 
     recover(channelId: string): Promise<RecoveryResult> {
       // One run per channel: a second caller waits for the same refund
-      // instead of submitting its own.
+      // instead of submitting its own. The run takes its turn behind any
+      // commit or close in flight on the channel (#343), so it reads the
+      // state they leave and cannot move the status under them.
       const running = recovering.get(channelId);
       if (running) return running;
-      const run = recoverOnce(channelId).finally(() => recovering.delete(channelId));
+      const run = serialiseChannel(channelId, () => recoverOnce(channelId)).finally(() =>
+        recovering.delete(channelId),
+      );
       recovering.set(channelId, run);
       return run;
     },

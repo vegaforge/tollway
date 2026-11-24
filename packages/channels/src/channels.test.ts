@@ -1183,6 +1183,29 @@ describe("ChannelManager.recover (#38)", () => {
     expect(started + calls.closeChannel.length).toBe(1);
   });
 
+  it("waits for a commit in flight before it starts a funder close", async () => {
+    // Without the per-channel queue (#343) recover moves the channel to
+    // recovering while the commit is signing, and the commit's append fails.
+    const { adapter } = createFakeAdapter({
+      ...slowSign(5),
+      startClose: () => ({ txHash: "tx-start", closeEffectiveAtLedger: 1100 }),
+    });
+    const manager = createChannelManager({ adapter });
+    const id = await openAndCommit(manager);
+
+    const [committed, recovered] = await Promise.allSettled([
+      manager.commit(id, "100"),
+      manager.recover(id),
+    ]);
+
+    expect(committed).toMatchObject({ status: "fulfilled", value: { cumulativeAmount: "500" } });
+    expect(recovered).toMatchObject({ status: "fulfilled", value: { txHash: "tx-start" } });
+    await expect(manager.get(id)).resolves.toMatchObject({
+      status: "recovering",
+      committed: "500",
+    });
+  });
+
   it("serialises concurrent recover calls so only one refund is submitted", async () => {
     let release = () => {};
     const gate = new Promise<void>((resolve) => {
