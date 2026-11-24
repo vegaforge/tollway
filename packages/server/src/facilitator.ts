@@ -1,6 +1,7 @@
-import type { PaymentOffer, StellarNetwork, X402Payment } from "@vegaforge/tollway-core";
-import { bytesToBase64Url, TollwayError, utf8Bytes } from "@vegaforge/tollway-core";
-import { type FacilitatorConfig, HTTPFacilitatorClient } from "@x402/core/http";
+// before
+import { STELLAR_PUBNET_CAIP2, STELLAR_TESTNET_CAIP2, STELLAR_WILDCARD_CAIP2 } from "@x402/stellar";
+// after
+import { STELLAR_PUBNET_CAIP2, STELLAR_TESTNET_CAIP2, STELLAR_WILDCARD_CAIP2 } from "./stellar-caip2.js";
 import {
   type Network,
   type PaymentRequirements,
