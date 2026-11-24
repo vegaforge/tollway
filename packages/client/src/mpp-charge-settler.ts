@@ -31,16 +31,20 @@ import { type SignedReceipt, type StellarNetwork, TollwayError } from "@vegaforg
 import { Challenge, Receipt } from "mppx";
 import { Mppx } from "mppx/client";
 import { z } from "zod";
-import type { ClientSettler, SettleRequest } from "./index.js";
+import { type PaidExchange, replayInit } from "./exchange.js";
+import type { ClientSettler, ExchangeSettleRequest, SettleRequest } from "./index.js";
 import { messageOf, readReceiptHeader, TOLLWAY_RECEIPT_HEADER } from "./receipt-header.js";
-import { type AgentSigner, assertKeypairSigner } from "./signer.js";
+import { type AgentSigner, requireMppKey } from "./signer.js";
 
 /** How the charge transaction reaches the chain; see the `mode` option. */
 export type MppChargeMode = "pull" | "push";
 
 type SignerOption =
   | {
-      /** Unified agent signer (#205). Must be a keypair signer; smart-account signers are rejected. */
+      /**
+       * The agent's signer (#205). It needs the `mppCharge` capability, which
+       * only a keypair signer has: a smart-account signer is refused here.
+       */
       signer: AgentSigner;
       secretKey?: undefined;
       keypair?: undefined;
@@ -147,25 +151,16 @@ export function createMppChargeSettler(options: MppChargeSettlerOptions): Client
   const method = options.method ?? "GET";
   const receiptHeader = options.receiptHeader ?? TOLLWAY_RECEIPT_HEADER;
 
-  let resolvedKeypair: Keypair | undefined = options.keypair;
-  let payerAddress: string | undefined = options.keypair?.publicKey();
-  if (options.signer !== undefined) {
-    const kpSigner = assertKeypairSigner(options.signer, "mpp-charge");
-    if (kpSigner.network !== network) {
-      throw new TollwayError(
-        "payment-failed",
-        `the MPP charge settler is configured for ${network}, but the signer is on ${kpSigner.network}`,
-      );
-    }
-    resolvedKeypair = kpSigner.keypair;
-    payerAddress = kpSigner.address;
-  }
+  // A signer without the mppCharge capability is refused here, before any request.
+  const keypair: Keypair | undefined =
+    options.signer !== undefined
+      ? requireMppKey(options.signer, "mpp-charge", network).keypair()
+      : options.keypair;
+  const payerAddress = keypair?.publicKey();
 
   // The key is handed to @stellar/mpp here and not kept anywhere else.
   const chargeMethod = stellar.charge({
-    ...(options.secretKey !== undefined
-      ? { secretKey: options.secretKey }
-      : { keypair: resolvedKeypair }),
+    ...(options.secretKey !== undefined ? { secretKey: options.secretKey } : { keypair }),
     // Tollway amounts are already base units, and so are MPP challenge amounts.
     decimals: 0,
     ...(options.rpcUrl !== undefined ? { rpcUrl: options.rpcUrl } : {}),
@@ -175,66 +170,89 @@ export function createMppChargeSettler(options: MppChargeSettlerOptions): Client
   // createCredential is used: the settler makes both HTTP requests itself.
   const mppx = Mppx.create({ methods: [chargeMethod], fetch: doFetch, polyfill: false });
 
+  /** Refuses a request this settler cannot pay, before any network call. */
+  function assertPayable({ offer, model }: SettleRequest): void {
+    if (model !== "mpp-charge") {
+      throw new TollwayError(
+        "payment-failed",
+        `the MPP charge settler cannot settle model "${model}"`,
+      );
+    }
+    if (offer.network !== network) {
+      throw new TollwayError(
+        "payment-failed",
+        `the MPP charge settler is configured for ${network}, but the offer is on ${offer.network}`,
+      );
+    }
+  }
+
+  /** Answers the 402 in `first` and sends the credential with `send`. */
+  async function pay(
+    { resource, offer }: SettleRequest,
+    first: Response,
+    send: (headers: Record<string, string>) => Promise<Response>,
+  ): Promise<PaidExchange> {
+    const currency = offerAssetContract(offer.asset, network);
+    if (first.status !== 402) {
+      throw new TollwayError(
+        "payment-failed",
+        `expected a 402 challenge from ${resource}, got ${first.status}`,
+      );
+    }
+    const challenge = selectChallenge(first, resource, (request) =>
+      offerMismatch(request, offer, currency, networkId),
+    );
+
+    let credential: string;
+    try {
+      credential = await mppx.createCredential(first, undefined, {
+        // Pin the credential to the challenge that was checked.
+        orderChallenges: (candidates) =>
+          candidates.filter((candidate) => candidate.challenge.id === challenge.id),
+      });
+    } catch (error) {
+      throw new TollwayError(
+        "payment-failed",
+        `could not create the MPP charge credential for ${resource}: ${messageOf(error)}`,
+      );
+    }
+
+    const paid = await send({ Authorization: credential });
+    if (paid.status === 402) {
+      throw new TollwayError(
+        "payment-failed",
+        `${resource} answered the MPP credential with another 402`,
+      );
+    }
+    if (!paid.ok) {
+      throw new TollwayError(
+        "payment-failed",
+        `${resource} answered the MPP credential with ${paid.status}`,
+      );
+    }
+
+    const receipt = readReceiptHeader(paid, resource, receiptHeader);
+    assertReceiptMatches(receipt, offer, resource);
+    assertMppReferenceMatches(paid, receipt, resource);
+    return { receipt, response: paid };
+  }
+
   return {
     ...(payerAddress !== undefined ? { payer: payerAddress } : {}),
-    async settle({ resource, offer, model }: SettleRequest): Promise<SignedReceipt> {
-      if (model !== "mpp-charge") {
-        throw new TollwayError(
-          "payment-failed",
-          `the MPP charge settler cannot settle model "${model}"`,
-        );
-      }
-      if (offer.network !== network) {
-        throw new TollwayError(
-          "payment-failed",
-          `the MPP charge settler is configured for ${network}, but the offer is on ${offer.network}`,
-        );
-      }
-      const currency = offerAssetContract(offer.asset, network);
-
-      const first = await doFetch(resource, { method });
-      if (first.status !== 402) {
-        throw new TollwayError(
-          "payment-failed",
-          `expected a 402 challenge from ${resource}, got ${first.status}`,
-        );
-      }
-      const challenge = selectChallenge(first, resource, (request) =>
-        offerMismatch(request, offer, currency, networkId),
+    async settle(request: SettleRequest): Promise<SignedReceipt> {
+      assertPayable(request);
+      const first = await doFetch(request.resource, { method });
+      const paid = await pay(request, first, (headers) =>
+        doFetch(request.resource, { method, headers }),
       );
-
-      let credential: string;
-      try {
-        credential = await mppx.createCredential(first, undefined, {
-          // Pin the credential to the challenge that was checked.
-          orderChallenges: (candidates) =>
-            candidates.filter((candidate) => candidate.challenge.id === challenge.id),
-        });
-      } catch (error) {
-        throw new TollwayError(
-          "payment-failed",
-          `could not create the MPP charge credential for ${resource}: ${messageOf(error)}`,
-        );
-      }
-
-      const paid = await doFetch(resource, { method, headers: { Authorization: credential } });
-      if (paid.status === 402) {
-        throw new TollwayError(
-          "payment-failed",
-          `${resource} answered the MPP credential with another 402`,
-        );
-      }
-      if (!paid.ok) {
-        throw new TollwayError(
-          "payment-failed",
-          `${resource} answered the MPP credential with ${paid.status}`,
-        );
-      }
-
-      const receipt = readReceiptHeader(paid, resource, receiptHeader);
-      assertReceiptMatches(receipt, offer, resource);
-      assertMppReferenceMatches(paid, receipt, resource);
-      return receipt;
+      return paid.receipt;
+    },
+    async settleExchange(request: ExchangeSettleRequest): Promise<PaidExchange> {
+      assertPayable(request);
+      const replay = request.exchange.request;
+      return pay(request, request.exchange.challenge, (headers) =>
+        doFetch(replay.url, replayInit(replay, headers)),
+      );
     },
   };
 }

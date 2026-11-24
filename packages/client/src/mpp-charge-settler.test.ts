@@ -395,14 +395,14 @@ describe("createMppChargeSettler", () => {
   it("requires exactly one of secretKey and keypair", () => {
     expect(() =>
       createMppChargeSettler({ network: "testnet" } as unknown as MppChargeSettlerOptions),
-    ).toThrow(/exactly one of secretKey or keypair/);
+    ).toThrow(/exactly one of signer, secretKey, or keypair/);
     expect(() =>
       createMppChargeSettler({
         network: "testnet",
         secretKey: AGENT.secret(),
         keypair: AGENT,
       } as unknown as MppChargeSettlerOptions),
-    ).toThrow(/exactly one of secretKey or keypair/);
+    ).toThrow(/exactly one of signer, secretKey, or keypair/);
   });
 
   it("never patches globalThis.fetch and keeps the secret off the settler", async () => {
