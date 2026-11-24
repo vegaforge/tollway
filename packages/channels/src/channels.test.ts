@@ -18,6 +18,7 @@ import {
   ChannelNotFoundError,
   ChannelNotOpenError,
   CloseNotSubmittedError,
+  CommitmentConflictError,
   CommitmentExceedsDepositError,
   CounterpartyQuarantinedError,
   InvalidAmountError,
@@ -27,6 +28,7 @@ import {
 } from "./errors.js";
 import { createChannelManager } from "./manager.js";
 import { createMemoryCommitmentStore } from "./store.js";
+import type { Commitment } from "./types.js";
 
 // ── test double ───────────────────────────────────────────────────────────────
 
@@ -771,6 +773,13 @@ describe("ChannelManager.close", () => {
     store.updateChannel = async (id, patch) => {
       const next = await origUpdate(id, patch);
       if (next) observedStatuses.push(next.status);
+      return next;
+    };
+    // The move to closing is a compare-and-set (#175), so watch that write too.
+    const origTransition = store.transitionChannel.bind(store);
+    store.transitionChannel = async (id, expectedStatus, patch) => {
+      const next = await origTransition(id, expectedStatus, patch);
+      observedStatuses.push(next.status);
       return next;
     };
 
@@ -1552,6 +1561,97 @@ describe("ChannelManager close crash safety (#176)", () => {
     expect(byChannel.get(lost)).toMatchObject({ kind: "error" });
     expect((byChannel.get(lost) as { error: Error }).error).toBeInstanceOf(SettlementNotFoundError);
     expect(byChannel.get(funder)).toMatchObject({ kind: "recovering" });
+  });
+});
+
+// ── concurrent writers (#175) ─────────────────────────────────────────────────
+
+function slowSign(ms: number): Parameters<typeof createFakeAdapter>[0] {
+  return {
+    sign: async (input) => {
+      await new Promise((resolve) => setTimeout(resolve, ms));
+      return { commitment: `sig:${input.channelId}:${input.cumulativeAmount}` };
+    },
+  };
+}
+
+describe("ChannelManager concurrent writers (#175)", () => {
+  it("never writes two commitments with one sequence when commits race", async () => {
+    // Three commits read the same channel state, then sign for 5 ms each.
+    // Before the compare-and-set, all three resolved with sequence 0 and
+    // cumulative 150 was recorded against a deposit of 100.
+    const { adapter } = createFakeAdapter(slowSign(5));
+    const manager = createChannelManager({ adapter });
+    const channel = await manager.open({
+      counterparty: "GR",
+      asset: "USDC",
+      deposit: "100",
+      network: "testnet",
+    });
+
+    const results = await Promise.allSettled([
+      manager.commit(channel.id, "60"),
+      manager.commit(channel.id, "60"),
+      manager.commit(channel.id, "30"),
+    ]);
+    const accepted = results.flatMap((r) => (r.status === "fulfilled" ? [r.value] : []));
+    const rejected = results.flatMap((r) => (r.status === "rejected" ? [r.reason] : []));
+
+    expect(accepted).toHaveLength(1);
+    expect(rejected).toHaveLength(2);
+    for (const reason of rejected) expect(reason).toBeInstanceOf(CommitmentConflictError);
+
+    const stream = await manager.list(channel.id);
+    expect(stream.map((c) => c.sequence)).toEqual([0]);
+    expect(stream[0]?.cumulativeAmount).toBe(accepted[0]?.cumulativeAmount);
+    expect((await manager.get(channel.id))?.committed).toBe(accepted[0]?.cumulativeAmount);
+    expect((await manager.get(channel.id))?.sequence).toBe(0);
+  });
+
+  it("submits one close when two closes race", async () => {
+    // Before the status compare-and-set, both closes passed the status check
+    // and both submitted closeChannel.
+    const { adapter, calls } = createFakeAdapter(slowSign(0));
+    const manager = createChannelManager({ adapter });
+    const channel = await manager.open({
+      counterparty: "GR",
+      asset: "USDC",
+      deposit: "100",
+      network: "testnet",
+    });
+    await manager.commit(channel.id, "40");
+
+    const results = await Promise.allSettled([
+      manager.close(channel.id),
+      manager.close(channel.id),
+    ]);
+
+    expect(results.filter((r) => r.status === "fulfilled")).toHaveLength(1);
+    const losing = results.flatMap((r) => (r.status === "rejected" ? [r.reason] : []));
+    expect(losing).toHaveLength(1);
+    expect(losing[0]).toBeInstanceOf(ChannelAlreadyClosedError);
+    expect(calls.closeChannel).toHaveLength(1);
+  });
+
+  it("settles with the last recorded commitment when a commit races a close", async () => {
+    // Whichever of the two wins, the close must settle the cumulative amount
+    // that is in the stream at the time it was submitted, never an older one.
+    const { adapter, calls } = createFakeAdapter(slowSign(2));
+    const manager = createChannelManager({ adapter });
+    const channel = await manager.open({
+      counterparty: "GR",
+      asset: "USDC",
+      deposit: "100",
+      network: "testnet",
+    });
+    await manager.commit(channel.id, "40");
+
+    await Promise.allSettled([manager.close(channel.id), manager.commit(channel.id, "10")]);
+
+    const stream: readonly Commitment[] = await manager.list(channel.id);
+    const last = stream.at(-1);
+    expect(calls.closeChannel).toHaveLength(1);
+    expect(calls.closeChannel[0]?.cumulativeAmount).toBe(last?.cumulativeAmount);
   });
 });
 

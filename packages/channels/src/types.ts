@@ -86,6 +86,7 @@ export type ChannelListFilter = {
   status?: ChannelStatus;
   counterparty?: string;
   asset?: string;
+  network?: StellarNetwork;
   /** `nextCursor` from a previous page. Opaque to the caller. */
   cursor?: string;
   /** Page size from 1 to 200. Defaults to 50. */

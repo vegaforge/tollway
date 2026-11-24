@@ -195,6 +195,22 @@ pnpm --filter @vegaforge/tollway-demo start
 
 If a setting is missing or invalid, the demo lists every problem and exits with code 1. `FACILITATOR_URL` overrides the facilitator. `STELLAR_NETWORK=mainnet` switches to mainnet and then also needs `STELLAR_RPC_URL`.
 
+The demo also runs named scenarios. With no argument it runs the x402 demo above:
+
+```bash
+MOCK_MODE=true pnpm --filter @vegaforge/tollway-demo start -- x402         # the default
+MOCK_MODE=true pnpm --filter @vegaforge/tollway-demo start -- mpp-charge   # mock mode only
+MOCK_MODE=true pnpm --filter @vegaforge/tollway-demo start -- all-models   # mock mode only
+```
+
+| Scenario | What it shows |
+| --- | --- |
+| `x402` | One per-request x402 payment producing a canonical receipt. Runs in mock or live mode. |
+| `mpp-charge` | The same route with only the paywall's model switched to MPP charge: the same route serves both models with a config flag. |
+| `all-models` | Runs `x402` then `mpp-charge` and prints one table. It exits non-zero if any receipt fails verification. CI runs it in mock mode on every commit. |
+
+The MPP channel scenarios join once the gate accepts channel vouchers (#173).
+
 Gate a route on the service side:
 
 ```ts

@@ -30,6 +30,31 @@ export class CommitmentExceedsDepositError extends TollwayError {
   }
 }
 
+/**
+ * Thrown by a `CommitmentStore` compare-and-set when the state it holds is
+ * not the state the caller expected, so another writer got there first
+ * (#175). `field` says which part lost: the channel's `sequence` or its
+ * `status`. The write was not applied, and nothing partial is visible.
+ */
+export class CommitmentConflictError extends TollwayError {
+  readonly channelId: string;
+  readonly field: "sequence" | "status";
+  readonly expected: string;
+  readonly actual: string;
+
+  constructor(channelId: string, field: "sequence" | "status", expected: string, actual: string) {
+    super(
+      "commitment-conflict",
+      `channel "${channelId}" ${field} is "${actual}", not the expected "${expected}"; another writer changed it first`,
+    );
+    this.name = "CommitmentConflictError";
+    this.channelId = channelId;
+    this.field = field;
+    this.expected = expected;
+    this.actual = actual;
+  }
+}
+
 /** Thrown when an amount string is not a non-negative integer. */
 export class InvalidAmountError extends TollwayError {
   constructor(value: string, field: string) {

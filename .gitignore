@@ -35,6 +35,7 @@ pnpm-debug.log*
 # Misc
 *.tsbuildinfo
 .vercel
+temp/
 
 # Fumadocs generated source
 .source/

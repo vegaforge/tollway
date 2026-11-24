@@ -61,6 +61,12 @@ if [ "$SKIP_BUILD" = "true" ]; then
 else
   echo -e "\n${BLUE}[5/5] Production build${NC}"
   pnpm build
+  echo -e "\n${BLUE}[5/5a] API Extractor reports${NC}"
+  bash scripts/check-api-reports.sh
+  echo -e "\n${BLUE}[5/5b] Package exports (publint + arethetypeswrong)${NC}"
+  bash scripts/check-package-exports.sh
+  echo -e "\n${BLUE}[5/5c] Package consumers (ESM and CommonJS under node16)${NC}"
+  bash scripts/check-package-consumers.sh
 fi
 
 echo -e "\n${GREEN}All preflight gates passed.${NC}"
