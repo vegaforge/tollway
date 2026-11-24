@@ -29,6 +29,7 @@ import { SignedReceipt } from '@vegaforge/tollway-core';
 import { SpendSummary } from '@vegaforge/tollway-observability';
 import { TimeseriesQuery } from '@vegaforge/tollway-observability';
 import { TimeseriesResult } from '@vegaforge/tollway-observability';
+import * as _vegaforge_tollway_core from '@vegaforge/tollway-core';
 import { z } from 'zod';
 
 // @public
@@ -52,11 +53,7 @@ export const apiKeyConfigSchema: z.ZodObject<{
     orgId: z.ZodString;
     projectId: z.ZodString;
     sha256: z.ZodString;
-    scopes: z.ZodArray<z.ZodEnum<{
-        read: "read";
-        ingest: "ingest";
-        admin: "admin";
-    }>>;
+    scopes: z.ZodArray<z.ZodEnum<_vegaforge_tollway_core.EnumShape<readonly ["read", "ingest", "admin"]>>>;
     revoked: z.ZodOptional<z.ZodBoolean>;
 }, z.core.$strict>;
 
@@ -186,11 +183,7 @@ export const batchIngestBodySchema: z.ZodObject<{
             amount: z.ZodString;
             asset: z.ZodString;
             resource: z.ZodString;
-            model: z.ZodEnum<{
-                x402: "x402";
-                "mpp-charge": "mpp-charge";
-                "mpp-channel": "mpp-channel";
-            }>;
+            model: z.ZodEnum<_vegaforge_tollway_core.EnumShape<readonly ["x402", "mpp-charge", "mpp-channel"]>>;
             settlement: z.ZodDiscriminatedUnion<[z.ZodObject<{
                 kind: z.ZodLiteral<"transaction">;
                 txHash: z.ZodString;
@@ -199,10 +192,7 @@ export const batchIngestBodySchema: z.ZodObject<{
                 channelId: z.ZodString;
                 sequence: z.ZodNumber;
             }, z.core.$strict>], "kind">;
-            network: z.ZodEnum<{
-                testnet: "testnet";
-                mainnet: "mainnet";
-            }>;
+            network: z.ZodEnum<_vegaforge_tollway_core.EnumShape<readonly ["testnet", "mainnet"]>>;
             issuedAt: z.ZodISODateTime;
             version: z.ZodLiteral<1>;
         }, z.core.$strict>, z.ZodObject<{
@@ -215,11 +205,7 @@ export const batchIngestBodySchema: z.ZodObject<{
             amount: z.ZodString;
             asset: z.ZodString;
             resource: z.ZodString;
-            model: z.ZodEnum<{
-                x402: "x402";
-                "mpp-charge": "mpp-charge";
-                "mpp-channel": "mpp-channel";
-            }>;
+            model: z.ZodEnum<_vegaforge_tollway_core.EnumShape<readonly ["x402", "mpp-charge", "mpp-channel"]>>;
             settlement: z.ZodDiscriminatedUnion<[z.ZodObject<{
                 kind: z.ZodLiteral<"transaction">;
                 txHash: z.ZodString;
@@ -228,10 +214,7 @@ export const batchIngestBodySchema: z.ZodObject<{
                 channelId: z.ZodString;
                 sequence: z.ZodNumber;
             }, z.core.$strict>], "kind">;
-            network: z.ZodEnum<{
-                testnet: "testnet";
-                mainnet: "mainnet";
-            }>;
+            network: z.ZodEnum<_vegaforge_tollway_core.EnumShape<readonly ["testnet", "mainnet"]>>;
             issuedAt: z.ZodISODateTime;
             version: z.ZodLiteral<2>;
         }, z.core.$strict>], "version">;
@@ -251,11 +234,7 @@ export const batchIngestBodySchema: z.ZodObject<{
                 amount: z.ZodString;
                 asset: z.ZodString;
                 resource: z.ZodString;
-                model: z.ZodEnum<{
-                    x402: "x402";
-                    "mpp-charge": "mpp-charge";
-                    "mpp-channel": "mpp-channel";
-                }>;
+                model: z.ZodEnum<_vegaforge_tollway_core.EnumShape<readonly ["x402", "mpp-charge", "mpp-channel"]>>;
                 settlement: z.ZodDiscriminatedUnion<[z.ZodObject<{
                     kind: z.ZodLiteral<"transaction">;
                     txHash: z.ZodString;
@@ -264,10 +243,7 @@ export const batchIngestBodySchema: z.ZodObject<{
                     channelId: z.ZodString;
                     sequence: z.ZodNumber;
                 }, z.core.$strict>], "kind">;
-                network: z.ZodEnum<{
-                    testnet: "testnet";
-                    mainnet: "mainnet";
-                }>;
+                network: z.ZodEnum<_vegaforge_tollway_core.EnumShape<readonly ["testnet", "mainnet"]>>;
                 issuedAt: z.ZodISODateTime;
                 version: z.ZodLiteral<1>;
             }, z.core.$strict>, z.ZodObject<{
@@ -280,11 +256,7 @@ export const batchIngestBodySchema: z.ZodObject<{
                 amount: z.ZodString;
                 asset: z.ZodString;
                 resource: z.ZodString;
-                model: z.ZodEnum<{
-                    x402: "x402";
-                    "mpp-charge": "mpp-charge";
-                    "mpp-channel": "mpp-channel";
-                }>;
+                model: z.ZodEnum<_vegaforge_tollway_core.EnumShape<readonly ["x402", "mpp-charge", "mpp-channel"]>>;
                 settlement: z.ZodDiscriminatedUnion<[z.ZodObject<{
                     kind: z.ZodLiteral<"transaction">;
                     txHash: z.ZodString;
@@ -293,10 +265,7 @@ export const batchIngestBodySchema: z.ZodObject<{
                     channelId: z.ZodString;
                     sequence: z.ZodNumber;
                 }, z.core.$strict>], "kind">;
-                network: z.ZodEnum<{
-                    testnet: "testnet";
-                    mainnet: "mainnet";
-                }>;
+                network: z.ZodEnum<_vegaforge_tollway_core.EnumShape<readonly ["testnet", "mainnet"]>>;
                 issuedAt: z.ZodISODateTime;
                 version: z.ZodLiteral<2>;
             }, z.core.$strict>], "version">;
@@ -314,19 +283,11 @@ export const batchIngestBodySchema: z.ZodObject<{
         projectId: z.ZodOptional<z.ZodString>;
         payer: z.ZodString;
         payee: z.ZodString;
-        model: z.ZodEnum<{
-            x402: "x402";
-            "mpp-charge": "mpp-charge";
-            "mpp-channel": "mpp-channel";
-        }>;
+        model: z.ZodEnum<_vegaforge_tollway_core.EnumShape<readonly ["x402", "mpp-charge", "mpp-channel"]>>;
         amount: z.ZodString;
         asset: z.ZodString;
         latencyMs: z.ZodNumber;
-        outcome: z.ZodEnum<{
-            settled: "settled";
-            failed: "failed";
-            skipped: "skipped";
-        }>;
+        outcome: z.ZodEnum<_vegaforge_tollway_core.EnumShape<readonly ["settled", "failed", "skipped"]>>;
         at: z.ZodISODateTime;
     }, z.core.$strict>>>;
     events: z.ZodOptional<z.ZodArray<z.ZodObject<{
@@ -334,14 +295,7 @@ export const batchIngestBodySchema: z.ZodObject<{
         orgId: z.ZodOptional<z.ZodString>;
         projectId: z.ZodOptional<z.ZodString>;
         id: z.ZodOptional<z.ZodString>;
-        type: z.ZodEnum<{
-            "receipt.created": "receipt.created";
-            "channel.opened": "channel.opened";
-            "channel.closed": "channel.closed";
-            "budget.warning": "budget.warning";
-            "anomaly.detected": "anomaly.detected";
-            "sponsor.low_balance": "sponsor.low_balance";
-        }>;
+        type: z.ZodEnum<_vegaforge_tollway_core.EnumShape<readonly ["receipt.created", "channel.opened", "channel.closed", "budget.warning", "anomaly.detected", "sponsor.low_balance"]>>;
         at: z.ZodISODateTime;
     }, z.core.$strict>>>;
     orgId: z.ZodOptional<z.ZodString>;
@@ -411,14 +365,7 @@ export const channelViewSchema: z.ZodObject<{
     committed: z.ZodString;
     remaining: z.ZodString;
     sequence: z.ZodNumber;
-    status: z.ZodEnum<{
-        open: "open";
-        closing: "closing";
-        closed: "closed";
-        recovering: "recovering";
-        recovered: "recovered";
-        "settlement-mismatched": "settlement-mismatched";
-    }>;
+    status: z.ZodEnum<_vegaforge_tollway_core.EnumShape<readonly ["open", "closing", "closed", "recovering", "recovered", "settlement-mismatched"]>>;
     network: z.ZodString;
     openTxHash: z.ZodString;
     openedAt: z.ZodString;
@@ -560,25 +507,14 @@ export const errorBodySchema: z.ZodObject<{
 
 // @public
 export const exportQuerySchema: z.ZodObject<{
-    format: z.ZodEnum<{
-        json: "json";
-        csv: "csv";
-    }>;
+    format: z.ZodEnum<_vegaforge_tollway_core.EnumShape<readonly ["json", "csv"]>>;
     from: z.ZodOptional<z.ZodISODateTime>;
     to: z.ZodOptional<z.ZodISODateTime>;
     payer: z.ZodOptional<z.ZodString>;
     payee: z.ZodOptional<z.ZodString>;
-    model: z.ZodOptional<z.ZodEnum<{
-        x402: "x402";
-        "mpp-charge": "mpp-charge";
-        "mpp-channel": "mpp-channel";
-    }>>;
+    model: z.ZodOptional<z.ZodEnum<_vegaforge_tollway_core.EnumShape<readonly ["x402", "mpp-charge", "mpp-channel"]>>>;
     asset: z.ZodOptional<z.ZodString>;
-    outcome: z.ZodOptional<z.ZodEnum<{
-        settled: "settled";
-        failed: "failed";
-        skipped: "skipped";
-    }>>;
+    outcome: z.ZodOptional<z.ZodEnum<_vegaforge_tollway_core.EnumShape<readonly ["settled", "failed", "skipped"]>>>;
 }, z.core.$strict>;
 
 // @public
@@ -594,19 +530,11 @@ export const ingestBodySchema: z.ZodObject<{
         projectId: z.ZodOptional<z.ZodString>;
         payer: z.ZodString;
         payee: z.ZodString;
-        model: z.ZodEnum<{
-            x402: "x402";
-            "mpp-charge": "mpp-charge";
-            "mpp-channel": "mpp-channel";
-        }>;
+        model: z.ZodEnum<_vegaforge_tollway_core.EnumShape<readonly ["x402", "mpp-charge", "mpp-channel"]>>;
         amount: z.ZodString;
         asset: z.ZodString;
         latencyMs: z.ZodNumber;
-        outcome: z.ZodEnum<{
-            settled: "settled";
-            failed: "failed";
-            skipped: "skipped";
-        }>;
+        outcome: z.ZodEnum<_vegaforge_tollway_core.EnumShape<readonly ["settled", "failed", "skipped"]>>;
         at: z.ZodISODateTime;
     }, z.core.$strict>>;
     orgId: z.ZodOptional<z.ZodString>;
@@ -619,14 +547,7 @@ export const ingestEventItemSchema: z.ZodObject<{
     orgId: z.ZodOptional<z.ZodString>;
     projectId: z.ZodOptional<z.ZodString>;
     id: z.ZodOptional<z.ZodString>;
-    type: z.ZodEnum<{
-        "receipt.created": "receipt.created";
-        "channel.opened": "channel.opened";
-        "channel.closed": "channel.closed";
-        "budget.warning": "budget.warning";
-        "anomaly.detected": "anomaly.detected";
-        "sponsor.low_balance": "sponsor.low_balance";
-    }>;
+    type: z.ZodEnum<_vegaforge_tollway_core.EnumShape<readonly ["receipt.created", "channel.opened", "channel.closed", "budget.warning", "anomaly.detected", "sponsor.low_balance"]>>;
     at: z.ZodISODateTime;
 }, z.core.$strict>;
 
@@ -648,11 +569,7 @@ export const ingestReceiptsBodySchema: z.ZodObject<{
             amount: z.ZodString;
             asset: z.ZodString;
             resource: z.ZodString;
-            model: z.ZodEnum<{
-                x402: "x402";
-                "mpp-charge": "mpp-charge";
-                "mpp-channel": "mpp-channel";
-            }>;
+            model: z.ZodEnum<_vegaforge_tollway_core.EnumShape<readonly ["x402", "mpp-charge", "mpp-channel"]>>;
             settlement: z.ZodDiscriminatedUnion<[z.ZodObject<{
                 kind: z.ZodLiteral<"transaction">;
                 txHash: z.ZodString;
@@ -661,10 +578,7 @@ export const ingestReceiptsBodySchema: z.ZodObject<{
                 channelId: z.ZodString;
                 sequence: z.ZodNumber;
             }, z.core.$strict>], "kind">;
-            network: z.ZodEnum<{
-                testnet: "testnet";
-                mainnet: "mainnet";
-            }>;
+            network: z.ZodEnum<_vegaforge_tollway_core.EnumShape<readonly ["testnet", "mainnet"]>>;
             issuedAt: z.ZodISODateTime;
             version: z.ZodLiteral<1>;
         }, z.core.$strict>, z.ZodObject<{
@@ -677,11 +591,7 @@ export const ingestReceiptsBodySchema: z.ZodObject<{
             amount: z.ZodString;
             asset: z.ZodString;
             resource: z.ZodString;
-            model: z.ZodEnum<{
-                x402: "x402";
-                "mpp-charge": "mpp-charge";
-                "mpp-channel": "mpp-channel";
-            }>;
+            model: z.ZodEnum<_vegaforge_tollway_core.EnumShape<readonly ["x402", "mpp-charge", "mpp-channel"]>>;
             settlement: z.ZodDiscriminatedUnion<[z.ZodObject<{
                 kind: z.ZodLiteral<"transaction">;
                 txHash: z.ZodString;
@@ -690,10 +600,7 @@ export const ingestReceiptsBodySchema: z.ZodObject<{
                 channelId: z.ZodString;
                 sequence: z.ZodNumber;
             }, z.core.$strict>], "kind">;
-            network: z.ZodEnum<{
-                testnet: "testnet";
-                mainnet: "mainnet";
-            }>;
+            network: z.ZodEnum<_vegaforge_tollway_core.EnumShape<readonly ["testnet", "mainnet"]>>;
             issuedAt: z.ZodISODateTime;
             version: z.ZodLiteral<2>;
         }, z.core.$strict>], "version">;
@@ -713,11 +620,7 @@ export const ingestReceiptsBodySchema: z.ZodObject<{
                 amount: z.ZodString;
                 asset: z.ZodString;
                 resource: z.ZodString;
-                model: z.ZodEnum<{
-                    x402: "x402";
-                    "mpp-charge": "mpp-charge";
-                    "mpp-channel": "mpp-channel";
-                }>;
+                model: z.ZodEnum<_vegaforge_tollway_core.EnumShape<readonly ["x402", "mpp-charge", "mpp-channel"]>>;
                 settlement: z.ZodDiscriminatedUnion<[z.ZodObject<{
                     kind: z.ZodLiteral<"transaction">;
                     txHash: z.ZodString;
@@ -726,10 +629,7 @@ export const ingestReceiptsBodySchema: z.ZodObject<{
                     channelId: z.ZodString;
                     sequence: z.ZodNumber;
                 }, z.core.$strict>], "kind">;
-                network: z.ZodEnum<{
-                    testnet: "testnet";
-                    mainnet: "mainnet";
-                }>;
+                network: z.ZodEnum<_vegaforge_tollway_core.EnumShape<readonly ["testnet", "mainnet"]>>;
                 issuedAt: z.ZodISODateTime;
                 version: z.ZodLiteral<1>;
             }, z.core.$strict>, z.ZodObject<{
@@ -742,11 +642,7 @@ export const ingestReceiptsBodySchema: z.ZodObject<{
                 amount: z.ZodString;
                 asset: z.ZodString;
                 resource: z.ZodString;
-                model: z.ZodEnum<{
-                    x402: "x402";
-                    "mpp-charge": "mpp-charge";
-                    "mpp-channel": "mpp-channel";
-                }>;
+                model: z.ZodEnum<_vegaforge_tollway_core.EnumShape<readonly ["x402", "mpp-charge", "mpp-channel"]>>;
                 settlement: z.ZodDiscriminatedUnion<[z.ZodObject<{
                     kind: z.ZodLiteral<"transaction">;
                     txHash: z.ZodString;
@@ -755,10 +651,7 @@ export const ingestReceiptsBodySchema: z.ZodObject<{
                     channelId: z.ZodString;
                     sequence: z.ZodNumber;
                 }, z.core.$strict>], "kind">;
-                network: z.ZodEnum<{
-                    testnet: "testnet";
-                    mainnet: "mainnet";
-                }>;
+                network: z.ZodEnum<_vegaforge_tollway_core.EnumShape<readonly ["testnet", "mainnet"]>>;
                 issuedAt: z.ZodISODateTime;
                 version: z.ZodLiteral<2>;
             }, z.core.$strict>], "version">;
@@ -860,19 +753,11 @@ export const paymentMetricSchema: z.ZodObject<{
     projectId: z.ZodOptional<z.ZodString>;
     payer: z.ZodString;
     payee: z.ZodString;
-    model: z.ZodEnum<{
-        x402: "x402";
-        "mpp-charge": "mpp-charge";
-        "mpp-channel": "mpp-channel";
-    }>;
+    model: z.ZodEnum<_vegaforge_tollway_core.EnumShape<readonly ["x402", "mpp-charge", "mpp-channel"]>>;
     amount: z.ZodString;
     asset: z.ZodString;
     latencyMs: z.ZodNumber;
-    outcome: z.ZodEnum<{
-        settled: "settled";
-        failed: "failed";
-        skipped: "skipped";
-    }>;
+    outcome: z.ZodEnum<_vegaforge_tollway_core.EnumShape<readonly ["settled", "failed", "skipped"]>>;
     at: z.ZodISODateTime;
 }, z.core.$strict>;
 
@@ -907,10 +792,7 @@ export const policyVersionResponseSchema: z.ZodObject<{
     policy: z.ZodNullable<z.ZodObject<{
         $schema: z.ZodOptional<z.ZodString>;
         policyVersion: z.ZodLiteral<1>;
-        mode: z.ZodOptional<z.ZodEnum<{
-            enforce: "enforce";
-            "dry-run": "dry-run";
-        }>>;
+        mode: z.ZodOptional<z.ZodEnum<_vegaforge_tollway_core.EnumShape<readonly ["enforce", "dry-run"]>>>;
         budgets: z.ZodOptional<z.ZodObject<{
             daily: z.ZodOptional<z.ZodString>;
             total: z.ZodOptional<z.ZodString>;
@@ -924,10 +806,7 @@ export const policyVersionResponseSchema: z.ZodObject<{
             }, z.core.$strict>>;
         }, z.core.$strict>>>;
         perResource: z.ZodOptional<z.ZodRecord<z.ZodString, z.ZodObject<{
-            match: z.ZodOptional<z.ZodEnum<{
-                exact: "exact";
-                prefix: "prefix";
-            }>>;
+            match: z.ZodOptional<z.ZodEnum<_vegaforge_tollway_core.EnumShape<readonly ["exact", "prefix"]>>>;
             cap: z.ZodOptional<z.ZodString>;
             dailyCap: z.ZodOptional<z.ZodString>;
             window: z.ZodOptional<z.ZodObject<{
@@ -935,11 +814,7 @@ export const policyVersionResponseSchema: z.ZodObject<{
                 cap: z.ZodString;
             }, z.core.$strict>>;
         }, z.core.$strict>>>;
-        perModel: z.ZodOptional<z.ZodRecord<z.ZodEnum<{
-            x402: "x402";
-            "mpp-charge": "mpp-charge";
-            "mpp-channel": "mpp-channel";
-        }> & z.core.$partial, z.ZodObject<{
+        perModel: z.ZodOptional<z.ZodRecord<z.ZodEnum<_vegaforge_tollway_core.EnumShape<readonly ["x402", "mpp-charge", "mpp-channel"]>> & z.core.$partial, z.ZodObject<{
             enabled: z.ZodOptional<z.ZodBoolean>;
             minChannelDeposit: z.ZodOptional<z.ZodString>;
         }, z.core.$strict>>>;
@@ -949,14 +824,8 @@ export const policyVersionResponseSchema: z.ZodObject<{
                 windowSeconds: z.ZodNumber;
                 limit: z.ZodNumber;
             }, z.core.$strict>>>;
-            count: z.ZodOptional<z.ZodEnum<{
-                settlements: "settlements";
-                attempts: "attempts";
-            }>>;
-            scope: z.ZodOptional<z.ZodEnum<{
-                global: "global";
-                "per-counterparty": "per-counterparty";
-            }>>;
+            count: z.ZodOptional<z.ZodEnum<_vegaforge_tollway_core.EnumShape<readonly ["settlements", "attempts"]>>>;
+            scope: z.ZodOptional<z.ZodEnum<_vegaforge_tollway_core.EnumShape<readonly ["global", "per-counterparty"]>>>;
             perCounterpartyKeyLimit: z.ZodOptional<z.ZodNumber>;
         }, z.core.$strict>>;
         anomaly: z.ZodOptional<z.ZodObject<{
@@ -972,10 +841,7 @@ export const policyVersionResponseSchema: z.ZodObject<{
                     denominator: z.ZodString;
                 }, z.core.$strict>;
                 warmupPeriods: z.ZodNumber;
-                scope: z.ZodOptional<z.ZodEnum<{
-                    asset: "asset";
-                    "asset-payee": "asset-payee";
-                }>>;
+                scope: z.ZodOptional<z.ZodEnum<_vegaforge_tollway_core.EnumShape<readonly ["asset", "asset-payee"]>>>;
                 maxBaselineGrowthPerMinute: z.ZodOptional<z.ZodString>;
             }, z.core.$strict>>;
         }, z.core.$strict>>;
@@ -1008,10 +874,7 @@ export const putPolicyBodySchema: z.ZodObject<{
     policy: z.ZodNullable<z.ZodObject<{
         $schema: z.ZodOptional<z.ZodString>;
         policyVersion: z.ZodLiteral<1>;
-        mode: z.ZodOptional<z.ZodEnum<{
-            enforce: "enforce";
-            "dry-run": "dry-run";
-        }>>;
+        mode: z.ZodOptional<z.ZodEnum<_vegaforge_tollway_core.EnumShape<readonly ["enforce", "dry-run"]>>>;
         budgets: z.ZodOptional<z.ZodObject<{
             daily: z.ZodOptional<z.ZodString>;
             total: z.ZodOptional<z.ZodString>;
@@ -1025,10 +888,7 @@ export const putPolicyBodySchema: z.ZodObject<{
             }, z.core.$strict>>;
         }, z.core.$strict>>>;
         perResource: z.ZodOptional<z.ZodRecord<z.ZodString, z.ZodObject<{
-            match: z.ZodOptional<z.ZodEnum<{
-                exact: "exact";
-                prefix: "prefix";
-            }>>;
+            match: z.ZodOptional<z.ZodEnum<_vegaforge_tollway_core.EnumShape<readonly ["exact", "prefix"]>>>;
             cap: z.ZodOptional<z.ZodString>;
             dailyCap: z.ZodOptional<z.ZodString>;
             window: z.ZodOptional<z.ZodObject<{
@@ -1036,11 +896,7 @@ export const putPolicyBodySchema: z.ZodObject<{
                 cap: z.ZodString;
             }, z.core.$strict>>;
         }, z.core.$strict>>>;
-        perModel: z.ZodOptional<z.ZodRecord<z.ZodEnum<{
-            x402: "x402";
-            "mpp-charge": "mpp-charge";
-            "mpp-channel": "mpp-channel";
-        }> & z.core.$partial, z.ZodObject<{
+        perModel: z.ZodOptional<z.ZodRecord<z.ZodEnum<_vegaforge_tollway_core.EnumShape<readonly ["x402", "mpp-charge", "mpp-channel"]>> & z.core.$partial, z.ZodObject<{
             enabled: z.ZodOptional<z.ZodBoolean>;
             minChannelDeposit: z.ZodOptional<z.ZodString>;
         }, z.core.$strict>>>;
@@ -1050,14 +906,8 @@ export const putPolicyBodySchema: z.ZodObject<{
                 windowSeconds: z.ZodNumber;
                 limit: z.ZodNumber;
             }, z.core.$strict>>>;
-            count: z.ZodOptional<z.ZodEnum<{
-                settlements: "settlements";
-                attempts: "attempts";
-            }>>;
-            scope: z.ZodOptional<z.ZodEnum<{
-                global: "global";
-                "per-counterparty": "per-counterparty";
-            }>>;
+            count: z.ZodOptional<z.ZodEnum<_vegaforge_tollway_core.EnumShape<readonly ["settlements", "attempts"]>>>;
+            scope: z.ZodOptional<z.ZodEnum<_vegaforge_tollway_core.EnumShape<readonly ["global", "per-counterparty"]>>>;
             perCounterpartyKeyLimit: z.ZodOptional<z.ZodNumber>;
         }, z.core.$strict>>;
         anomaly: z.ZodOptional<z.ZodObject<{
@@ -1073,10 +923,7 @@ export const putPolicyBodySchema: z.ZodObject<{
                     denominator: z.ZodString;
                 }, z.core.$strict>;
                 warmupPeriods: z.ZodNumber;
-                scope: z.ZodOptional<z.ZodEnum<{
-                    asset: "asset";
-                    "asset-payee": "asset-payee";
-                }>>;
+                scope: z.ZodOptional<z.ZodEnum<_vegaforge_tollway_core.EnumShape<readonly ["asset", "asset-payee"]>>>;
                 maxBaselineGrowthPerMinute: z.ZodOptional<z.ZodString>;
             }, z.core.$strict>>;
         }, z.core.$strict>>;
@@ -1128,19 +975,10 @@ export type ReadinessReport = z.infer<typeof readinessReportSchema>;
 
 // @public
 export const readinessReportSchema: z.ZodObject<{
-    status: z.ZodEnum<{
-        "not-ready": "not-ready";
-        ready: "ready";
-    }>;
+    status: z.ZodEnum<_vegaforge_tollway_core.EnumShape<readonly ["ready", "not-ready"]>>;
     stores: z.ZodRecord<z.ZodString, z.ZodObject<{
-        status: z.ZodEnum<{
-            ok: "ok";
-            failing: "failing";
-        }>;
-        reason: z.ZodOptional<z.ZodEnum<{
-            error: "error";
-            timeout: "timeout";
-        }>>;
+        status: z.ZodEnum<_vegaforge_tollway_core.EnumShape<readonly ["ok", "failing"]>>;
+        reason: z.ZodOptional<z.ZodEnum<_vegaforge_tollway_core.EnumShape<readonly ["timeout", "error"]>>>;
     }, z.core.$strip>>;
 }, z.core.$strip>;
 
@@ -1153,11 +991,7 @@ export const receiptIngestItemSchema: z.ZodUnion<readonly [z.ZodObject<{
         amount: z.ZodString;
         asset: z.ZodString;
         resource: z.ZodString;
-        model: z.ZodEnum<{
-            x402: "x402";
-            "mpp-charge": "mpp-charge";
-            "mpp-channel": "mpp-channel";
-        }>;
+        model: z.ZodEnum<_vegaforge_tollway_core.EnumShape<readonly ["x402", "mpp-charge", "mpp-channel"]>>;
         settlement: z.ZodDiscriminatedUnion<[z.ZodObject<{
             kind: z.ZodLiteral<"transaction">;
             txHash: z.ZodString;
@@ -1166,10 +1000,7 @@ export const receiptIngestItemSchema: z.ZodUnion<readonly [z.ZodObject<{
             channelId: z.ZodString;
             sequence: z.ZodNumber;
         }, z.core.$strict>], "kind">;
-        network: z.ZodEnum<{
-            testnet: "testnet";
-            mainnet: "mainnet";
-        }>;
+        network: z.ZodEnum<_vegaforge_tollway_core.EnumShape<readonly ["testnet", "mainnet"]>>;
         issuedAt: z.ZodISODateTime;
         version: z.ZodLiteral<1>;
     }, z.core.$strict>, z.ZodObject<{
@@ -1182,11 +1013,7 @@ export const receiptIngestItemSchema: z.ZodUnion<readonly [z.ZodObject<{
         amount: z.ZodString;
         asset: z.ZodString;
         resource: z.ZodString;
-        model: z.ZodEnum<{
-            x402: "x402";
-            "mpp-charge": "mpp-charge";
-            "mpp-channel": "mpp-channel";
-        }>;
+        model: z.ZodEnum<_vegaforge_tollway_core.EnumShape<readonly ["x402", "mpp-charge", "mpp-channel"]>>;
         settlement: z.ZodDiscriminatedUnion<[z.ZodObject<{
             kind: z.ZodLiteral<"transaction">;
             txHash: z.ZodString;
@@ -1195,10 +1022,7 @@ export const receiptIngestItemSchema: z.ZodUnion<readonly [z.ZodObject<{
             channelId: z.ZodString;
             sequence: z.ZodNumber;
         }, z.core.$strict>], "kind">;
-        network: z.ZodEnum<{
-            testnet: "testnet";
-            mainnet: "mainnet";
-        }>;
+        network: z.ZodEnum<_vegaforge_tollway_core.EnumShape<readonly ["testnet", "mainnet"]>>;
         issuedAt: z.ZodISODateTime;
         version: z.ZodLiteral<2>;
     }, z.core.$strict>], "version">;
@@ -1218,11 +1042,7 @@ export const receiptIngestItemSchema: z.ZodUnion<readonly [z.ZodObject<{
             amount: z.ZodString;
             asset: z.ZodString;
             resource: z.ZodString;
-            model: z.ZodEnum<{
-                x402: "x402";
-                "mpp-charge": "mpp-charge";
-                "mpp-channel": "mpp-channel";
-            }>;
+            model: z.ZodEnum<_vegaforge_tollway_core.EnumShape<readonly ["x402", "mpp-charge", "mpp-channel"]>>;
             settlement: z.ZodDiscriminatedUnion<[z.ZodObject<{
                 kind: z.ZodLiteral<"transaction">;
                 txHash: z.ZodString;
@@ -1231,10 +1051,7 @@ export const receiptIngestItemSchema: z.ZodUnion<readonly [z.ZodObject<{
                 channelId: z.ZodString;
                 sequence: z.ZodNumber;
             }, z.core.$strict>], "kind">;
-            network: z.ZodEnum<{
-                testnet: "testnet";
-                mainnet: "mainnet";
-            }>;
+            network: z.ZodEnum<_vegaforge_tollway_core.EnumShape<readonly ["testnet", "mainnet"]>>;
             issuedAt: z.ZodISODateTime;
             version: z.ZodLiteral<1>;
         }, z.core.$strict>, z.ZodObject<{
@@ -1247,11 +1064,7 @@ export const receiptIngestItemSchema: z.ZodUnion<readonly [z.ZodObject<{
             amount: z.ZodString;
             asset: z.ZodString;
             resource: z.ZodString;
-            model: z.ZodEnum<{
-                x402: "x402";
-                "mpp-charge": "mpp-charge";
-                "mpp-channel": "mpp-channel";
-            }>;
+            model: z.ZodEnum<_vegaforge_tollway_core.EnumShape<readonly ["x402", "mpp-charge", "mpp-channel"]>>;
             settlement: z.ZodDiscriminatedUnion<[z.ZodObject<{
                 kind: z.ZodLiteral<"transaction">;
                 txHash: z.ZodString;
@@ -1260,10 +1073,7 @@ export const receiptIngestItemSchema: z.ZodUnion<readonly [z.ZodObject<{
                 channelId: z.ZodString;
                 sequence: z.ZodNumber;
             }, z.core.$strict>], "kind">;
-            network: z.ZodEnum<{
-                testnet: "testnet";
-                mainnet: "mainnet";
-            }>;
+            network: z.ZodEnum<_vegaforge_tollway_core.EnumShape<readonly ["testnet", "mainnet"]>>;
             issuedAt: z.ZodISODateTime;
             version: z.ZodLiteral<2>;
         }, z.core.$strict>], "version">;
@@ -1298,15 +1108,8 @@ export type ReceiptsModuleOptions = {
 export const receiptsQuerySchema: z.ZodObject<{
     payer: z.ZodOptional<z.ZodString>;
     payee: z.ZodOptional<z.ZodString>;
-    model: z.ZodOptional<z.ZodEnum<{
-        x402: "x402";
-        "mpp-charge": "mpp-charge";
-        "mpp-channel": "mpp-channel";
-    }>>;
-    network: z.ZodOptional<z.ZodEnum<{
-        testnet: "testnet";
-        mainnet: "mainnet";
-    }>>;
+    model: z.ZodOptional<z.ZodEnum<_vegaforge_tollway_core.EnumShape<readonly ["x402", "mpp-charge", "mpp-channel"]>>>;
+    network: z.ZodOptional<z.ZodEnum<_vegaforge_tollway_core.EnumShape<readonly ["testnet", "mainnet"]>>>;
     asset: z.ZodOptional<z.ZodString>;
     resource: z.ZodOptional<z.ZodString>;
     resourcePrefix: z.ZodOptional<z.ZodString>;
@@ -1389,56 +1192,26 @@ export function scopedRecordKey(tenant: TenantScope, id: string): string;
 export const seriesQuerySchema: z.ZodObject<{
     from: z.ZodISODateTime;
     to: z.ZodISODateTime;
-    bucket: z.ZodEnum<{
-        "1m": "1m";
-        "5m": "5m";
-        "1h": "1h";
-        "1d": "1d";
-    }>;
-    groupBy: z.ZodOptional<z.ZodEnum<{
-        payer: "payer";
-        payee: "payee";
-        model: "model";
-    }>>;
+    bucket: z.ZodEnum<_vegaforge_tollway_core.EnumShape<readonly ["1m", "5m", "1h", "1d"]>>;
+    groupBy: z.ZodOptional<z.ZodEnum<_vegaforge_tollway_core.EnumShape<readonly ["model", "payer", "payee"]>>>;
     payer: z.ZodOptional<z.ZodString>;
     payee: z.ZodOptional<z.ZodString>;
-    model: z.ZodOptional<z.ZodEnum<{
-        x402: "x402";
-        "mpp-charge": "mpp-charge";
-        "mpp-channel": "mpp-channel";
-    }>>;
+    model: z.ZodOptional<z.ZodEnum<_vegaforge_tollway_core.EnumShape<readonly ["x402", "mpp-charge", "mpp-channel"]>>>;
     asset: z.ZodOptional<z.ZodString>;
-    outcome: z.ZodOptional<z.ZodEnum<{
-        settled: "settled";
-        failed: "failed";
-        skipped: "skipped";
-    }>>;
+    outcome: z.ZodOptional<z.ZodEnum<_vegaforge_tollway_core.EnumShape<readonly ["settled", "failed", "skipped"]>>>;
 }, z.core.$strict>;
 
 // @public
 export const seriesResponseSchema: z.ZodObject<{
-    bucket: z.ZodEnum<{
-        "1m": "1m";
-        "5m": "5m";
-        "1h": "1h";
-        "1d": "1d";
-    }>;
-    groupBy: z.ZodEnum<{
-        payer: "payer";
-        payee: "payee";
-        model: "model";
-    }>;
+    bucket: z.ZodEnum<_vegaforge_tollway_core.EnumShape<readonly ["1m", "5m", "1h", "1d"]>>;
+    groupBy: z.ZodEnum<_vegaforge_tollway_core.EnumShape<readonly ["model", "payer", "payee"]>>;
     from: z.ZodString;
     to: z.ZodString;
     buckets: z.ZodArray<z.ZodObject<{
         start: z.ZodString;
         end: z.ZodString;
         rows: z.ZodArray<z.ZodObject<{
-            model: z.ZodEnum<{
-                x402: "x402";
-                "mpp-charge": "mpp-charge";
-                "mpp-channel": "mpp-channel";
-            }>;
+            model: z.ZodEnum<_vegaforge_tollway_core.EnumShape<readonly ["x402", "mpp-charge", "mpp-channel"]>>;
             asset: z.ZodString;
             payer: z.ZodOptional<z.ZodString>;
             payee: z.ZodOptional<z.ZodString>;
@@ -1491,11 +1264,7 @@ export const serviceConfigSchema: z.ZodObject<{
         orgId: z.ZodString;
         projectId: z.ZodString;
         sha256: z.ZodString;
-        scopes: z.ZodArray<z.ZodEnum<{
-            read: "read";
-            ingest: "ingest";
-            admin: "admin";
-        }>>;
+        scopes: z.ZodArray<z.ZodEnum<_vegaforge_tollway_core.EnumShape<readonly ["read", "ingest", "admin"]>>>;
         revoked: z.ZodOptional<z.ZodBoolean>;
     }, z.core.$strict>>;
     operatorKeys: z.ZodOptional<z.ZodArray<z.ZodObject<{
@@ -1608,17 +1377,9 @@ export const summaryQuerySchema: z.ZodObject<{
     to: z.ZodOptional<z.ZodISODateTime>;
     payer: z.ZodOptional<z.ZodString>;
     payee: z.ZodOptional<z.ZodString>;
-    model: z.ZodOptional<z.ZodEnum<{
-        x402: "x402";
-        "mpp-charge": "mpp-charge";
-        "mpp-channel": "mpp-channel";
-    }>>;
+    model: z.ZodOptional<z.ZodEnum<_vegaforge_tollway_core.EnumShape<readonly ["x402", "mpp-charge", "mpp-channel"]>>>;
     asset: z.ZodOptional<z.ZodString>;
-    outcome: z.ZodOptional<z.ZodEnum<{
-        settled: "settled";
-        failed: "failed";
-        skipped: "skipped";
-    }>>;
+    outcome: z.ZodOptional<z.ZodEnum<_vegaforge_tollway_core.EnumShape<readonly ["settled", "failed", "skipped"]>>>;
 }, z.core.$strict>;
 
 // @public
@@ -1641,11 +1402,7 @@ export const summaryResponseSchema: z.ZodObject<{
         asset: z.ZodString;
         amount: z.ZodString;
         count: z.ZodNumber;
-        model: z.ZodEnum<{
-            x402: "x402";
-            "mpp-charge": "mpp-charge";
-            "mpp-channel": "mpp-channel";
-        }>;
+        model: z.ZodEnum<_vegaforge_tollway_core.EnumShape<readonly ["x402", "mpp-charge", "mpp-channel"]>>;
     }, z.core.$strip>>;
     byPayer: z.ZodArray<z.ZodObject<{
         asset: z.ZodString;

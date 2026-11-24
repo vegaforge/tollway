@@ -1,4 +1,9 @@
-import { canonicalJson, type JsonValue, type ReceiptVerifier } from "@vegaforge/tollway-core";
+import {
+  canonicalJson,
+  enumSchema,
+  type JsonValue,
+  type ReceiptVerifier,
+} from "@vegaforge/tollway-core";
 import { type PaymentMetric, webhookEvents } from "@vegaforge/tollway-observability";
 import { z } from "zod";
 import type { ServiceModule } from "./app.js";
@@ -37,7 +42,7 @@ export type IngestModuleOptions = {
 /** Schema for one lifecycle event item inside `POST /v1/ingest`. */
 export const ingestEventItemSchema = z.strictObject({
   id: z.string().min(1).max(128).optional(),
-  type: z.enum(webhookEvents),
+  type: enumSchema(webhookEvents),
   at: z.iso.datetime({ offset: true }),
   ...tenantClaimFields,
   data: z.record(z.string(), z.unknown()),

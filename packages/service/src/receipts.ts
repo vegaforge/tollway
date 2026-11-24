@@ -1,5 +1,6 @@
 import {
   canonicalJson,
+  enumSchema,
   type JsonValue,
   type ReceiptVerifier,
   type SignedReceipt,
@@ -61,8 +62,8 @@ export const ingestReceiptsBodySchema = z.strictObject({
 export const receiptsQuerySchema = z.strictObject({
   payer: z.string().min(1).optional(),
   payee: z.string().min(1).optional(),
-  model: z.enum(settlementModels).optional(),
-  network: z.enum(stellarNetworks).optional(),
+  model: enumSchema(settlementModels).optional(),
+  network: enumSchema(stellarNetworks).optional(),
   asset: z.string().min(1).optional(),
   resource: z.string().min(1).optional(),
   resourcePrefix: z.string().min(1).optional(),
