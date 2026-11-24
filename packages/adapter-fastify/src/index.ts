@@ -21,6 +21,9 @@ type SettledReceipt = Extract<GateOutcome, { kind: "settled" }>["receipt"];
 /** Where the verified receipt is stashed on the Fastify request for downstream handlers. */
 export const RECEIPT_REQUEST_KEY = "tollwayReceipt";
 
+/** The one body every adapter returns when the gate itself throws (#107). */
+const GATE_ERROR_BODY = { error: "payment backend unavailable" } as const;
+
 declare module "fastify" {
   interface FastifyRequest {
     tollwayReceipt?: SettledReceipt;
@@ -36,7 +39,11 @@ declare module "fastify" {
  */
 export function fastifyPaywall(gate: Gate): preHandlerHookHandler {
   return async function preHandler(request: FastifyRequest, reply: FastifyReply): Promise<void> {
-    await runGate(gate, request, reply);
+    try {
+      await runGate(gate, request, reply);
+    } catch {
+      if (!reply.sent) await reply.status(502).send(GATE_ERROR_BODY);
+    }
   };
 }
 
@@ -45,7 +52,11 @@ export function fastifyRouteTable(table: RouteTable): preHandlerHookHandler {
   return async function preHandler(request: FastifyRequest, reply: FastifyReply): Promise<void> {
     const match = table.match(request.method, request.url);
     if (!match) return;
-    await runGate(match.gate, request, reply);
+    try {
+      await runGate(match.gate, request, reply);
+    } catch {
+      if (!reply.sent) await reply.status(502).send(GATE_ERROR_BODY);
+    }
   };
 }
 

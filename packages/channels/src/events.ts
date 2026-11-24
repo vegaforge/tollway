@@ -7,9 +7,8 @@
  * timestamp from the manager's clock, and give every amount as an integer
  * string in the asset's smallest unit.
  *
- * The union is open for the recovery events #38 adds (`channel:recovering`,
- * `channel:recovered`): each variant has its own `type`, so a new one joins
- * without changing the others.
+ * `recover` (#38) adds `channel:recovering` and `channel:recovered`. Each
+ * variant has its own `type`, so a new one joins without changing the others.
  */
 
 import type { StellarNetwork } from "@vegaforge/tollway-core";
@@ -62,11 +61,31 @@ export type ChannelCloseFailedEvent = ChannelEventBase & {
   error: Error;
 };
 
+/**
+ * A funder close is on chain and the channel was recorded as `recovering`
+ * (#38). `closeEffectiveAtLedger` is the ledger after which the funder may
+ * refund.
+ */
+export type ChannelRecoveringEvent = ChannelEventBase & {
+  type: "channel:recovering";
+  closeEffectiveAtLedger: number;
+};
+
+/** The funder's refund landed and the channel was recorded as `recovered` (#38). */
+export type ChannelRecoveredEvent = ChannelEventBase & {
+  type: "channel:recovered";
+  /** What came back to the funder, in base units. */
+  recoveredAmount: string;
+  refundTxHash: string;
+};
+
 export type ChannelLifecycleEvent =
   | ChannelOpenedEvent
   | ChannelClosingEvent
   | ChannelClosedEvent
-  | ChannelCloseFailedEvent;
+  | ChannelCloseFailedEvent
+  | ChannelRecoveringEvent
+  | ChannelRecoveredEvent;
 
 /** Receives lifecycle events. A returned promise is not awaited. */
 export type ChannelEventHandler = (event: ChannelLifecycleEvent) => void | Promise<void>;

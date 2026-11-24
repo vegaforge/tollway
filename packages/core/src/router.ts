@@ -57,6 +57,14 @@ export interface ModelRouter {
 /** Cheapest accountable model first; channels only pay off under sustained load. */
 const preferenceOrder: readonly SettlementModel[] = ["x402", "mpp-charge", "mpp-channel"];
 
+/** Traffic conditions under which a counterparty is promoted to channel mode. */
+export type ChannelThreshold = {
+  /** Sustained request rate that must be met or exceeded. */
+  requestsPerMinute: number;
+  /** Minimum observation window, so a brief spike cannot trigger promotion. */
+  minWindowSeconds: number;
+};
+
 export type DefaultRouterOptions = {
   /**
    * Optional quarantine store. When provided, `mpp-channel` is excluded for
@@ -64,6 +72,16 @@ export type DefaultRouterOptions = {
    * `mpp-channel`.
    */
   quarantine?: CounterpartyQuarantine;
+  /**
+   * When to promote a busy counterparty to `mpp-channel`. Traffic promotion
+   * is off by default: choosing a threshold is still an open design question
+   * (docs/design.md, "Open questions", item 5), and an unconfigured router
+   * keeps its original behaviour. Promotion additionally requires that both
+   * the offer and the policy allow channels, and that the counterparty is not
+   * quarantined. Both fields must be positive integers or router creation
+   * throws a `TollwayError`.
+   */
+  channelThreshold?: ChannelThreshold;
 };
 
 async function isCounterpartyQuarantined(
@@ -82,18 +100,29 @@ async function isCounterpartyQuarantined(
   }
 }
 
+function assertPositiveInteger(field: string, value: number): void {
+  if (!Number.isSafeInteger(value) || value <= 0) {
+    throw new TollwayError(
+      "invalid-policy",
+      `channelThreshold.${field} must be a positive finite integer, got ${String(value)}`,
+    );
+  }
+}
+
 /**
  * The default router: an override wins (unless `mpp-channel` is requested for
- * a quarantined counterparty), otherwise the first model both the offer and
+ * a quarantined counterparty), then a configured traffic threshold may promote
+ * a busy counterparty to channels, then the first model both the offer and
  * policy accept (excluding `mpp-channel` when quarantined), otherwise x402 for
- * an unknown counterparty.
- *
- * TODO: promote a counterparty to channel mode once traffic crosses the
- * threshold and @vegaforge/tollway-channels can run the lifecycle. The threshold is an
- * open question; see docs/design.md, "Open questions", item 5.
+ * an unknown counterparty. Traffic promotion is opt-in; see docs/design.md,
+ * "Open questions", item 5 for the unresolved choice of threshold.
  */
 export function createDefaultRouter(options: DefaultRouterOptions = {}): ModelRouter {
-  const { quarantine } = options;
+  const { quarantine, channelThreshold } = options;
+  if (channelThreshold) {
+    assertPositiveInteger("requestsPerMinute", channelThreshold.requestsPerMinute);
+    assertPositiveInteger("minWindowSeconds", channelThreshold.minWindowSeconds);
+  }
 
   return {
     async decide(input: RouteInput): Promise<RouteDecision> {
@@ -113,6 +142,20 @@ export function createDefaultRouter(options: DefaultRouterOptions = {}): ModelRo
       const effectiveAllowed = quarantined
         ? allowed.filter((model) => model !== "mpp-channel")
         : allowed;
+
+      // Promotion is a narrow exception to the cheapest-model rule: a channel
+      // only wins when the operator opted in, the observed load is sustained,
+      // and both the policy and the counterparty's offer accept channels.
+      if (
+        channelThreshold &&
+        input.traffic &&
+        input.traffic.requestsPerMinute >= channelThreshold.requestsPerMinute &&
+        input.traffic.windowSeconds >= channelThreshold.minWindowSeconds &&
+        effectiveAllowed.includes("mpp-channel") &&
+        (!input.offer || input.offer.models.includes("mpp-channel"))
+      ) {
+        return { model: "mpp-channel", reason: "traffic" };
+      }
 
       if (input.offer) {
         const viable = preferenceOrder.find(

@@ -1,7 +1,7 @@
 /**
  * A `CommitmentStore` on PostgreSQL (#177), so channel state survives a
- * restart and can be shared by several processes. Apply
- * `packages/channels/migrations/0001_commitment_store.sql` first.
+ * restart and can be shared by several processes. Apply the migrations in
+ * `packages/channels/migrations/` in order first.
  *
  * The store takes a structural client, so `@vegaforge/tollway-channels` has no
  * runtime dependency on a driver. A `pg` Pool fits it, because a Pool has
@@ -93,6 +93,9 @@ const CHANNEL_SELECT = [
   "close_attempt_started_at",
   "settlement_expected_amount::text AS settlement_expected_amount",
   "settlement_observed_amount::text AS settlement_observed_amount",
+  "close_effective_at_ledger",
+  "recovered_amount::text AS recovered_amount",
+  "refund_tx_hash",
 ].join(", ");
 
 type Assignment = { column: string; value: unknown };
@@ -127,6 +130,11 @@ function patchAssignments(patch: Partial<Channel>): Assignment[] {
     set("settlement_expected_amount", patch.settlementMismatch?.expectedAmount ?? null);
     set("settlement_observed_amount", patch.settlementMismatch?.observedAmount ?? null);
   }
+  if ("closeEffectiveAtLedger" in patch) {
+    set("close_effective_at_ledger", patch.closeEffectiveAtLedger ?? null);
+  }
+  if ("recoveredAmount" in patch) set("recovered_amount", patch.recoveredAmount ?? null);
+  if ("refundTxHash" in patch) set("refund_tx_hash", patch.refundTxHash ?? null);
   return out;
 }
 
@@ -233,6 +241,13 @@ function rowToChannel(row: Row): Channel {
     }
     channel.settlementMismatch = { expectedAmount: expected, observedAmount: observed };
   }
+
+  const closeEffectiveAtLedger = optionalInteger(row, "close_effective_at_ledger");
+  if (closeEffectiveAtLedger !== undefined) channel.closeEffectiveAtLedger = closeEffectiveAtLedger;
+  const recoveredAmount = optionalAmount(row, "recovered_amount");
+  if (recoveredAmount !== undefined) channel.recoveredAmount = recoveredAmount;
+  const refundTxHash = optionalText(row, "refund_tx_hash");
+  if (refundTxHash !== undefined) channel.refundTxHash = refundTxHash;
   return channel;
 }
 
@@ -345,6 +360,9 @@ export function createPostgresCommitmentStore(
         returnedRemainder: undefined,
         closeAttempt: undefined,
         settlementMismatch: undefined,
+        closeEffectiveAtLedger: undefined,
+        recoveredAmount: undefined,
+        refundTxHash: undefined,
         ...channel,
       };
       const assignments = patchAssignments(full);

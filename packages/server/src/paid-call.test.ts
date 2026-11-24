@@ -224,4 +224,50 @@ describe("createPaidCall (#206)", () => {
     expect(() => createPaidCall({ ...config, resource: "" }, deps)).toThrow(/resource/);
     expect(() => createPaidCall({ ...config, models: ["mpp-charge"] }, deps)).toThrow(/x402/);
   });
+
+  it("reports settled and failed calls to the payment observer, like the HTTP gate (#106)", async () => {
+    const record = vi.fn();
+    const emit = vi.fn(async () => undefined);
+    let now = 1_000;
+    const call = createPaidCall(config, {
+      signer,
+      facilitator: createMockFacilitator(),
+      observer: { record, emit },
+      clock: () => now,
+    });
+
+    const settled = await call.settle({
+      payment: payment("observed-1"),
+      method: "tools/call",
+      beforeSettle: async () => {
+        now += 25;
+        return true;
+      },
+    });
+    expect(settled.kind).toBe("settled");
+    expect(record).toHaveBeenCalledWith(
+      expect.objectContaining({
+        outcome: "settled",
+        model: "x402",
+        amount: config.amount,
+        payee: config.payTo,
+        latencyMs: 25,
+      }),
+    );
+    expect(emit).toHaveBeenCalledWith(
+      expect.objectContaining({
+        type: "receipt.created",
+        data: expect.objectContaining({ resource: config.resource }),
+      }),
+    );
+
+    record.mockClear();
+    const failed = await call.settle({
+      payment: payment("observed-2"),
+      method: "tools/call",
+      beforeSettle: async () => false,
+    });
+    expect(failed).toMatchObject({ code: "work-failed" });
+    expect(record).toHaveBeenCalledWith(expect.objectContaining({ outcome: "failed", payer: "" }));
+  });
 });
