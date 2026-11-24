@@ -6,6 +6,7 @@
     "deployment",
     "route-tables",
     "discovery",
+    "mcp",
     "---Concepts---",
     "model-router",
     "channels",
