@@ -308,6 +308,9 @@ describe("POST /v1/channels/{id}/close", () => {
   });
 
   it("submits exactly one close across concurrent requests", async () => {
+    // The manager checks the status, reads the chain, then marks the channel
+    // closing. Holding the chain read keeps every request inside that window,
+    // so only the service's per-channel guard can stop a second close.
     let release: () => void = () => {};
     const held = new Promise<void>((resolve) => {
       release = resolve;
@@ -329,6 +332,7 @@ describe("POST /v1/channels/{id}/close", () => {
       app.request(`/v1/channels/${a.id}/close`, { method: "POST", headers: bearer(KEYS.admin) }),
     );
     await vi.waitFor(() => expect(chainReads).toHaveBeenCalled());
+    // Give every request time to reach the manager before the chain answers.
     await new Promise((resolve) => setTimeout(resolve, 20));
     release();
     const responses = await Promise.all(requests);

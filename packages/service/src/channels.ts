@@ -113,6 +113,10 @@ export type ChannelsModuleOptions = {
  * modules: [createChannelsModule()] })`; it throws when the service has no
  * `channelManagers`, so a deployment never serves an empty channels API by
  * mistake.
+ *
+ * Concurrent close requests for one channel in this process share a single
+ * close, so the adapter submits once. Across replicas that needs the store's
+ * compare-and-set (#175); until then, run one replica with the admin scope.
  */
 export function createChannelsModule(options: ChannelsModuleOptions = {}): ServiceModule {
   const now = options.now ?? (() => new Date().toISOString());
@@ -130,6 +134,8 @@ function channelRoutes(context: ServiceContext, now: () => string): readonly Ser
   // Keyed by `(orgId, projectId, channelId)` so two projects sharing one
   // channel id never collide on close metadata or in-flight guards.
   const closeRequests = new Map<string, CloseRequest>();
+  // One close in flight per tenant channel. The map is read and written with
+  // no await in between, so two requests cannot both start a close.
   const closing = new Map<string, Promise<void>>();
 
   const view = async (
@@ -231,6 +237,7 @@ function channelRoutes(context: ServiceContext, now: () => string): readonly Ser
             limit: query.limit ?? DEFAULT_PAGE,
           });
         } catch (error) {
+          // The store rejects a cursor it did not issue with a RangeError.
           if (error instanceof RangeError) {
             return c.json(errorBody("invalid-request", error.message), 400);
           }
@@ -460,6 +467,8 @@ function channelRoutes(context: ServiceContext, now: () => string): readonly Ser
     try {
       result = await channelManager.close(id);
     } catch (error) {
+      // Another process closed it between our read and our close. Its close
+      // stands; this request has nothing left to do.
       if (error instanceof ChannelAlreadyClosedError) return;
       throw error;
     }
@@ -472,6 +481,7 @@ function channelRoutes(context: ServiceContext, now: () => string): readonly Ser
     });
     const sink = observabilityFor(tenant);
     if (sink !== undefined) {
+      // emit never rejects; its report lists any webhook that failed.
       await sink.emit({
         type: "channel.closed",
         at: now(),

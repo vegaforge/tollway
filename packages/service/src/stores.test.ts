@@ -36,6 +36,7 @@ describe("memory receipt store", () => {
     const store = createMemoryReceiptStore();
 
     expect(await store.put(TENANT_A, receipt)).toBe("stored");
+    // Same receipt, keys in a different order: still the same receipt.
     const reordered = JSON.parse(
       JSON.stringify({ signature: receipt.signature, receipt: receipt.receipt }),
     );

@@ -38,7 +38,7 @@ Every stored record in `@vegaforge/tollway-service` (receipt, payment metric, ch
 
 ### Composite keys and PostgreSQL row-level security
 
-When backing the service with PostgreSQL (`serviceTenantMigrations` and `withTenantTransaction`), isolation uses two layers:
+The service ships only in-memory stores today. `serviceTenantMigrations`, `withTenantTransaction` and `withOperatorReadTransaction` are the schema and transaction helpers a PostgreSQL-backed `ReceiptStore`, `MetricsStore`, `ChannelStore`, `PolicyStore` and `AuditStore` must use; no such store exists yet (the PostgreSQL deployment is tracked in #230). Their tests run against a fake client, not a live database. A store built on them gets two layers of isolation:
 
 - **Primary layer (composite schema keys):** `(org_id, project_id)` leads every `PRIMARY KEY`, `FOREIGN KEY` and secondary index across `receipts`, `metrics`, `channels`, `commitments`, `policy_versions` and `audit_entries`. Queries use the composite index directly and allow identical caller-chosen IDs across projects.
 - **Second layer (forced row-level security):** Every tenant table runs with both `ENABLE ROW LEVEL SECURITY` and `FORCE ROW LEVEL SECURITY`, checking `org_id = NULLIF(current_setting('tollway.org_id', true), '')` and `project_id = NULLIF(current_setting('tollway.project_id', true), '')`. `withTenantTransaction` checks out a dedicated connection when given a pool, starts a transaction, binds both settings with `set_config(..., true)` (transaction-local), and destroys the pooled connection (`release(true)`) if `ROLLBACK` itself fails. A separate `FOR SELECT` policy gated on `tollway.operator_read = 'on'` lets `withOperatorReadTransaction` compute read-only `AdminStore` count rollups without granting `BYPASSRLS`. If a future query omits a `WHERE` clause or runs outside `withTenantTransaction`, `current_setting(..., true)` resolves to `NULL` after `NULLIF` and matches zero rows instead of leaking across tenants (#231).
@@ -184,7 +184,7 @@ Optional per-tenant quotas bound shared-instance usage and return `429` with a `
 
 The OpenAPI document is generated from the zod schemas each route validates its path, query and body with, so it cannot drift from what the service accepts.
 
-The `tollway-service` CLI mounts `metricsModule()`, `policiesModule()`, `receiptsModule()`, `ingestModule()` and `adminModule()` by default. Programmatic callers pass a `ReceiptVerifier` (`receiptsModule({ verifier })`, `ingestModule({ verifier })`) to accept signed receipt writes and `createChannelsModule()` with `channelManagers` to serve the channel endpoints.
+The `tollway-service` CLI mounts `metricsModule()`, `policiesModule()`, `receiptsModule()`, `ingestModule()` and `adminModule()` by default. The CLI configures no `ReceiptVerifier`, so `POST /v1/receipts`, and `POST /v1/ingest` with receipts, answer `503 not-ready` there. Programmatic callers pass a `ReceiptVerifier` (`receiptsModule({ verifier })`, `ingestModule({ verifier })`) to accept signed receipt writes and `createChannelsModule()` with `channelManagers` to serve the channel endpoints.
 
 ## Channels
 
@@ -332,4 +332,4 @@ The binary writes one JSON object per line. Each request logs its method, path, 
 
 ## Storage
 
-Receipts, metrics, channels, policies and audit entries each sit behind a tenant-scoped interface (`ReceiptStore`, `MetricsStore`, `ChannelStore`, `PolicyStore`, `AuditStore`), while `AdminStore` provides operator-only tenant record counts, and every data store answers `/readyz`. Persistent PostgreSQL deployments can apply `serviceTenantMigrations` and run queries inside `withTenantTransaction` without changing any route.
+Receipts, metrics, channels, policies and audit entries each sit behind a tenant-scoped interface (`ReceiptStore`, `MetricsStore`, `ChannelStore`, `PolicyStore`, `AuditStore`), while `AdminStore` provides operator-only tenant record counts, and every data store answers `/readyz`. Only in-memory stores ship today, so data lasts for the life of the process. A persistent store implements the same interfaces over `serviceTenantMigrations` and runs every query inside `withTenantTransaction`; routes do not change.
