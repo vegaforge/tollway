@@ -76,9 +76,7 @@ describe("ChannelDetailView", () => {
     // The chart's accessible description carries the same numbers as text.
     expect(
       screen.getByRole("img", { name: /cumulative commitments/i }),
-    ).toHaveAccessibleDescription(
-      /198\.00 USDC of 200\.00 USDC committed across 97 commitments/,
-    );
+    ).toHaveAccessibleDescription(/198\.00 USDC of 200\.00 USDC committed across 97 commitments/);
   });
 
   it("pages a long commitment stream 25 at a time", () => {

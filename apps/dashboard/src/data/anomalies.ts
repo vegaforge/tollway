@@ -20,7 +20,7 @@
  */
 
 import { type PolicyRuleName, policyRuleNames } from "@vegaforge/tollway-core";
-import { type DriftKind, DRIFT_KINDS } from "./channel-detail";
+import { DRIFT_KINDS, type DriftKind } from "./channel-detail";
 
 export const ANOMALY_KINDS = [
   "policy-stop",

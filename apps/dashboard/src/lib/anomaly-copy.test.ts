@@ -5,8 +5,8 @@ import type { AnomalyEvent } from "@/data/anomalies";
 import { DRIFT_KINDS } from "@/data/channel-detail";
 import {
   anomalyLinks,
-  DRIFT_COPY,
   describeAnomaly,
+  DRIFT_COPY,
   KIND_LABEL,
   POLICY_RULE_COPY,
 } from "./anomaly-copy";
@@ -140,8 +140,6 @@ describe("anomalyLinks", () => {
       agentId: "agent-research-01",
     };
 
-    expect(anomalyLinks(event)).toEqual([
-      { label: "Agent", href: "/agents/agent-research-01" },
-    ]);
+    expect(anomalyLinks(event)).toEqual([{ label: "Agent", href: "/agents/agent-research-01" }]);
   });
 });

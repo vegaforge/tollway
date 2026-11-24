@@ -73,9 +73,7 @@ describe("AnomaliesView", () => {
 
     const ids = await loadedIds();
 
-    expect(screen.getByTestId("anomalies-agent-filter")).toHaveTextContent(
-      "agent-classifier-03",
-    );
+    expect(screen.getByTestId("anomalies-agent-filter")).toHaveTextContent("agent-classifier-03");
     expect(ids).toHaveLength(3);
     expect(ids.every((id) => id.includes("spend-spike"))).toBe(true);
   });

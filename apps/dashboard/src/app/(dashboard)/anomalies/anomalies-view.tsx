@@ -7,10 +7,10 @@ import { Badge } from "@/components/ui/badge";
 import { Panel } from "@/components/ui/panel";
 import {
   ANOMALY_KINDS,
+  anomalyCounterparties,
   type AnomalyEvent,
   type AnomalyKind,
   type AnomalySeverity,
-  anomalyCounterparties,
   severityOf,
 } from "@/data/anomalies";
 import { useAnomalies } from "@/data/use-anomalies";

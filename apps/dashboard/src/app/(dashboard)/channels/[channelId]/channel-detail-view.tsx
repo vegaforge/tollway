@@ -132,10 +132,7 @@ function DetailBody({ detail }: { detail: ChannelDetail }) {
         <ReconciliationStatus reconciliation={reconciliation} />
       </Panel>
 
-      <Panel
-        title="Receipts"
-        description="Receipts that settle through this channel, newest first"
-      >
+      <Panel title="Receipts" description="Receipts that settle through this channel, newest first">
         {receipts.length === 0 ? (
           <p className="text-sm text-muted">No receipts settle through this channel yet.</p>
         ) : (

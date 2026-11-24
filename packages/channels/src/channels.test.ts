@@ -1622,9 +1622,9 @@ describe("ChannelManager concurrent writers (#175)", () => {
     // on channel B must still complete meanwhile, because each channel has its
     // own queue.
     let blockedChannelId = "";
-    let releaseBlocked!: () => void;
+    const release: { open?: () => void } = {};
     const blocked = new Promise<void>((resolve) => {
-      releaseBlocked = resolve;
+      release.open = () => resolve();
     });
     const { adapter } = createFakeAdapter({
       sign: async (input) => {
@@ -1643,7 +1643,7 @@ describe("ChannelManager concurrent writers (#175)", () => {
     const committedSecond = await manager.commit(second.id, "10");
     expect(committedSecond).toMatchObject({ sequence: 0, cumulativeAmount: "10" });
 
-    releaseBlocked();
+    release.open?.();
     await expect(pendingFirst).resolves.toMatchObject({ sequence: 0, cumulativeAmount: "10" });
   });
 

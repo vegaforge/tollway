@@ -1,7 +1,7 @@
 import { render, screen, within } from "@testing-library/react";
 import { afterEach, beforeAll, describe, expect, it, vi } from "vitest";
 
-import { type OverviewSnapshot, fetchOverview } from "@/data/overview";
+import { fetchOverview, type OverviewSnapshot } from "@/data/overview";
 
 const useOverviewMock = vi.hoisted(() => vi.fn());
 const useAnomaliesMock = vi.hoisted(() => vi.fn());
@@ -111,10 +111,7 @@ describe("OverviewView", () => {
     render(<OverviewView />);
 
     expect(screen.getByText("rcpt-x402-v2-stripe-02")).toBeInTheDocument();
-    expect(screen.getByRole("link", { name: "All receipts" })).toHaveAttribute(
-      "href",
-      "/receipts",
-    );
+    expect(screen.getByRole("link", { name: "All receipts" })).toHaveAttribute("href", "/receipts");
   });
 
   it("shows the anomalies strip as nothing flagged when the feed is empty", () => {
