@@ -19,6 +19,23 @@ import {
   type TimeseriesResult,
 } from "./timeseries.js";
 import { assertWebhookSecret, buildWebhookRequest, postWebhook } from "./webhook-http.js";
+import { createDuplicateDetector } from "./duplicate-detector.js";
+import {
+  createMemoryMetricsStore,
+  createSqliteMetricsStore,
+} from "./metrics-store.js";
+import {
+  formatPrometheusMetrics,
+  createPrometheusHandler,
+  TOLLWAY_METRIC_NAMES,
+} from "./prometheus-exporter.js";
+import {
+  createOtelSpan,
+  traceSettlementOperation,
+  extractOtelContextFromHeaders,
+  injectOtelContextToHeaders,
+  createOtelMetricsCollector,
+} from "./otel-instrumentation.js";
 
 export {
   createWebhookDispatcher,
@@ -69,6 +86,34 @@ export {
   verifyWebhookSignature,
   WEBHOOK_SIGNATURE_HEADER,
 } from "./webhook-signature.js";
+export {
+  createDuplicateDetector,
+  type DuplicateDetectorOptions,
+  type SettlementRecord,
+} from "./duplicate-detector.js";
+export {
+  createMemoryMetricsStore,
+  createSqliteMetricsStore,
+  type MetricsStore,
+  type SqliteMetricsStore,
+  type SqliteMetricsStoreOptions,
+} from "./metrics-store.js";
+export {
+  formatPrometheusMetrics,
+  createPrometheusHandler,
+  TOLLWAY_METRIC_NAMES,
+  type PrometheusExporterOptions,
+} from "./prometheus-exporter.js";
+export {
+  createOtelSpan,
+  traceSettlementOperation,
+  extractOtelContextFromHeaders,
+  injectOtelContextToHeaders,
+  createOtelMetricsCollector,
+  type OtelContext,
+  type OtelSpanAttributes,
+  type OtelMetricsCollector,
+} from "./otel-instrumentation.js";
 
 /** A single measured payment, the unit metrics roll up from. */
 export type PaymentMetric = {
