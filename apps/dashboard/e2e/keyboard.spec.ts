@@ -90,3 +90,16 @@ test("the agents sort control works from the keyboard", async ({ page }) => {
     "ascending",
   );
 });
+
+test("the services sort controls work from the keyboard", async ({ page }) => {
+  await page.goto("/services");
+  const payments = page.getByRole("columnheader", { name: /payments/i });
+  const sort = payments.getByRole("button");
+
+  await sort.focus();
+  await expectVisibleFocus(sort);
+  await page.keyboard.press("Enter");
+
+  await expect(payments).toHaveAttribute("aria-sort", "descending");
+  await expect(page.getByRole("rowheader").first()).toContainText("Weather API");
+});
