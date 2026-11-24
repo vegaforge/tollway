@@ -17,6 +17,7 @@ import { ModelRouter } from '@vegaforge/tollway-core';
 import { MppChargePayment } from '@vegaforge/tollway-core';
 import { Network } from '@x402/core/types';
 import { PaymentOffer } from '@vegaforge/tollway-core';
+import { PaymentPayload } from '@x402/core/types';
 import { PaymentRequired } from '@x402/core/types';
 import { PaymentRequirements } from '@x402/core/types';
 import { ReceiptSigner } from '@vegaforge/tollway-core';
@@ -142,6 +143,9 @@ export function createMockMppChargeHandler(): MppChargeHandler;
 
 // @public
 export function createMppChargeHandler(options: MppChargeOptions): MppChargeHandler;
+
+// @public
+export function createPaidCall(config: PaidCallConfig, deps: PaidCallDeps): PaidCall;
 
 // @public
 export function createPaywall(config: PaywallConfig, deps: PaywallDeps): Gate;
@@ -445,6 +449,38 @@ export type MppChargeVerifyResult = {
 } | {
     valid: false;
     reason: string;
+};
+
+// @public
+export type PaidCall = {
+    readonly offer: PaymentOffer;
+    paymentRequired(error?: string): PaymentRequired;
+    settle(input: PaidCallSettleInput): Promise<GateOutcome>;
+};
+
+// @public
+export type PaidCallConfig = {
+    amount: string;
+    asset: string;
+    payTo: string;
+    network: StellarNetwork;
+    resource: string;
+    models?: SettlementModel[];
+    facilitatorUrl?: string;
+    maxTimeoutSeconds?: number;
+    extra?: Record<string, unknown>;
+    description?: string;
+    mimeType?: string;
+};
+
+// @public
+export type PaidCallDeps = Omit<PaywallDeps, "mppChargeHandler" | "router" | "onPriceError">;
+
+// @public
+export type PaidCallSettleInput = {
+    payment: PaymentPayload;
+    method: string;
+    beforeSettle?: () => Promise<boolean>;
 };
 
 // @public

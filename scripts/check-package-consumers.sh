@@ -29,6 +29,7 @@ PUBLISHABLE=(
   packages/adapter-next
   packages/channels
   packages/client
+  packages/mcp
   packages/core
   packages/observability
   packages/reconcile
@@ -50,6 +51,7 @@ ENTRY_POINTS=(
   @vegaforge/tollway-client/sqlite
   @vegaforge/tollway-core
   @vegaforge/tollway-core/policy-loader
+  @vegaforge/tollway-mcp
   @vegaforge/tollway-observability
   @vegaforge/tollway-observability/sqlite
   @vegaforge/tollway-reconcile
