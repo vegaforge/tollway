@@ -1,0 +1,125 @@
+---
+title: Shared service
+description: The optional, self-hosted Tollway service, what it holds, how it is configured, and how API keys work
+---
+
+Tollway is a library first. A gate in your server and a client in your agent need nothing else: budgets, receipts and metrics live in the process that uses them. The shared service, `@vegaforge/tollway-service`, is for teams that want those things shared across many processes, for example one budget for a fleet of agents, or one dashboard over every gate.
+
+This page covers the skeleton every service feature builds on: the trust boundary, configuration, API keys, and the health, readiness and OpenAPI endpoints. Receipts, metrics, channels and the policy store mount their routes on it.
+
+## Library or service
+
+Embed the library when one process makes or takes the payments you care about, or when each process can keep its own budget. Nothing runs besides your code.
+
+Run the service when you need state that more than one process reads or writes: a budget shared by many agents, a receipt archive several gates write to, or a dashboard that spans services. You run it yourself, next to your other infrastructure. Tollway does not operate a hosted service, so there is no third party to trust with your payment data.
+
+## Trust boundary
+
+The service is deliberately limited:
+
+- **It holds no keys that sign or pay.** There is no receipt signing key, no Stellar secret and no facilitator credential in its configuration. It cannot move funds or issue a receipt, so compromising it cannot either. Receipts it stores were signed elsewhere, and anyone can re-verify them.
+- **It calls nothing Tollway runs.** It makes no outbound network call of its own: no telemetry, no update check, no license server. The only traffic it can cause is to the stores and webhook targets you configure. A test runs every route with `fetch` stubbed to fail and asserts it is never called.
+- **It stores only what you send it.** Receipts, payment metrics, channel state and policies arrive from your gates and clients over the authenticated API. The current release keeps them in memory; persistent stores are configured by you.
+- **It never reveals a credential.** API keys are configured as SHA-256 hashes. No response or log line contains a key, a key hash, or a request's `Authorization` header.
+
+Anyone with access to the service's host or stores can read everything it stores. Treat it like any other database of payment records.
+
+## Running it
+
+The package ships a `tollway-service` binary that reads its configuration from the environment and listens on Node:
+
+```bash
+export TOLLWAY_SERVICE_PORT=8787
+export TOLLWAY_SERVICE_API_KEYS='[{"name":"ops","sha256":"<hash>","scopes":["read","admin"]}]'
+npx tollway-service
+```
+
+Configuration is parsed once at startup. A missing or malformed value stops the service with a list naming each variable or field to fix, for example:
+
+```text
+invalid service configuration:
+  TOLLWAY_SERVICE_PORT: expected a whole number, got "eighty"
+  TOLLWAY_SERVICE_API_KEYS (or "apiKeys" in the config file): is required
+```
+
+To embed it in your own server, or run it on another runtime, build the app yourself. `createService` returns a Hono app and does not listen:
+
+```ts
+import { createService, parseServiceConfig } from "@vegaforge/tollway-service";
+
+const app = createService({ config: parseServiceConfig({ env: process.env }) });
+export default { fetch: app.fetch };
+```
+
+The library entry imports nothing Node-only. Only the binary reads files and opens a socket.
+
+## Configuration reference
+
+Every field can come from an environment variable or from a JSON file named by `TOLLWAY_SERVICE_CONFIG_FILE`, whose keys are the field names. An environment variable wins over the same field in the file. Unknown fields in the file are refused, so a typo fails startup instead of being ignored.
+
+| Field | Variable | Required | Default | Meaning |
+| --- | --- | --- | --- | --- |
+| `port` | `TOLLWAY_SERVICE_PORT` | yes | none | TCP port to listen on, 1 to 65535. |
+| `apiKeys` | `TOLLWAY_SERVICE_API_KEYS` | yes | none | JSON array of keys, at least one. See below. |
+| `host` | `TOLLWAY_SERVICE_HOST` | no | `127.0.0.1` | Interface to bind. Loopback by default, so exposing the service is a choice you make. |
+| `readinessTimeoutMs` | `TOLLWAY_SERVICE_READINESS_TIMEOUT_MS` | no | `2000` | How long `/readyz` waits for each store. |
+| `maxBodyBytes` | `TOLLWAY_SERVICE_MAX_BODY_BYTES` | no | `1048576` | Largest request body `/v1/*` accepts. Larger bodies get 413. |
+
+## API keys
+
+Every route under `/v1/` requires `Authorization: Bearer <key>`. Each configured key has:
+
+- `name`: shown in request logs and audit records in place of the key.
+- `sha256`: the lowercase hex SHA-256 of the key. The key itself is never configured.
+- `scopes`: one or more of `read`, `ingest` and `admin`. Each route names the one scope it needs, and no scope implies another, so a key that reads and administers lists both.
+- `revoked` (optional): `true` refuses the key with 401.
+
+Generate a key with any source of randomness, then hash it. `hash-key` reads the key on stdin, so it never lands in shell history or the process list:
+
+```bash
+KEY=$(openssl rand -base64 32)
+printf '%s' "$KEY" | npx tollway-service hash-key
+```
+
+Give `$KEY` to the client and configure the printed hash. To rotate, add the new key, move clients over, mark the old one `revoked`, and remove it once no client uses it.
+
+The service hashes each presented key and compares the digest with every configured hash in constant time, so response timing does not reveal which entry matched or how close a guess came.
+
+| Situation | Status | `error.code` |
+| --- | --- | --- |
+| No `Authorization` header, another scheme, or a malformed value | 401 | `unauthorized` |
+| A key that is not configured, or is revoked | 401 | `unauthorized` |
+| A valid key without the route's scope | 403 | `forbidden` |
+
+`GET /v1/whoami` returns the name and scopes of the calling key, which is a quick way to check a key works.
+
+## Endpoints
+
+| Route | Key | Purpose |
+| --- | --- | --- |
+| `GET /healthz` | none | Liveness. Answers while the process serves, and calls no store. |
+| `GET /readyz` | none | Readiness. Checks every backing store; 200 when all are ok, 503 naming each failing one. |
+| `GET /openapi.json` | none | The OpenAPI 3.1 document for every mounted route. |
+| `GET /v1/whoami` | any scope | The calling key's name and scopes. |
+
+`/readyz` reports a store as failing with `reason: "timeout"` or `reason: "error"`. The error itself goes to the service log, never the response, because it can name a host or carry a connection string.
+
+The OpenAPI document is generated from the zod schemas each route validates its path, query and body with, so it cannot drift from what the service accepts.
+
+## Errors
+
+Every error response has one shape:
+
+```json
+{ "error": { "code": "invalid-request", "message": "the request did not match the schema", "details": [] } }
+```
+
+`code` is stable and machine-readable: `unauthorized`, `forbidden`, `invalid-request`, `not-found`, `payload-too-large`, `not-ready` and `internal-error`. `details` carries structured context, such as each failing field with its location and path. An unexpected failure returns `internal-error`; its cause is logged, never returned.
+
+## Logs
+
+The binary writes one JSON object per line. Each request logs its method, path, status, duration and the calling key's name. Headers and query strings are never logged.
+
+## Storage
+
+Receipts, metrics, channels and policies each sit behind an interface (`ReceiptStore`, `MetricsStore`, `ChannelStore`, `PolicyStore`), and every store answers the readiness check. This release ships in-memory stores, which keep state for the life of the process. Persistent backends plug in through the `stores` option of `createService` without changing any route.

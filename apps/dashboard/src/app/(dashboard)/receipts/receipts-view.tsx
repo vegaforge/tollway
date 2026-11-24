@@ -241,6 +241,18 @@ function ReceiptDetail({
         <Detail label="Network" value={receipt.receipt.network} />
         <Detail label="Issued at" value={receipt.receipt.issuedAt} mono />
         <SettlementDetail settlement={receipt.receipt.settlement} />
+        <Detail label="Version" value={String(receipt.receipt.version)} />
+        {receipt.receipt.version === 2 ? (
+          <>
+            <Detail label="Method" value={receipt.receipt.method} mono />
+            <Detail label="Offer hash" value={receipt.receipt.offerHash} mono />
+            <Detail
+              label="Expires at"
+              value={receipt.receipt.expiresAt ?? "Never"}
+              mono={receipt.receipt.expiresAt !== undefined}
+            />
+          </>
+        ) : null}
       </dl>
 
       <footer className="mt-4 border-t border-border pt-3">

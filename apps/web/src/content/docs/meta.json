@@ -3,7 +3,9 @@
   "pages": [
     "index",
     "getting-started",
+    "deployment",
     "route-tables",
+    "discovery",
     "---Concepts---",
     "model-router",
     "channels",
@@ -11,6 +13,7 @@
     "receipts",
     "reconciliation",
     "observability",
+    "service",
     "---Tools---",
     "playground",
     "---API reference---",

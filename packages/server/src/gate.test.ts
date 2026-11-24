@@ -329,7 +329,11 @@ describe("createPaywall", () => {
         return { settled: true, txHash: "a".repeat(64) };
       },
       async supported() {
-        return { models: ["x402"], assets: [] };
+        return {
+          kinds: [{ x402Version: 2, scheme: "exact", network: "stellar:*" }],
+          extensions: [],
+          signers: {},
+        };
       },
     };
     const gate = createPaywall(
@@ -951,7 +955,14 @@ describe("TM-04 shared-lock duplicate settlement", () => {
     });
 
     const outcome = await gate({ ...baseRequest, headers });
-    expect(outcome).toEqual({ kind: "rejected", status: 409, reason: "settlement in progress" });
+    expect(outcome).toEqual({
+      kind: "rejected",
+      status: 409,
+      reason: "settlement in progress",
+      // Issue #203: Retry-After is what tells a client this 409 is the same
+      // payment still settling, safe to resend, unlike an offer mismatch.
+      headers: { "retry-after": "1" },
+    });
     expect(calls.settle).toBe(0);
   });
 
@@ -993,7 +1004,14 @@ describe("TM-04 shared-lock duplicate settlement", () => {
       // original TTL would have expired without renewal.
       await vi.advanceTimersByTimeAsync(1_800);
       const second = await processB({ ...baseRequest, headers });
-      expect(second).toEqual({ kind: "rejected", status: 409, reason: "settlement in progress" });
+      expect(second).toEqual({
+        kind: "rejected",
+        status: 409,
+        reason: "settlement in progress",
+        // Issue #203: Retry-After is what tells a client this 409 is the same
+        // payment still settling, safe to resend, unlike an offer mismatch.
+        headers: { "retry-after": "1" },
+      });
 
       await vi.advanceTimersByTimeAsync(1_500);
       expect((await first).kind).toBe("settled");
@@ -1162,5 +1180,107 @@ describe("method binding", () => {
     const outcome = await gate({ ...baseRequest, method: "GET", headers });
     expect(outcome).toMatchObject({ kind: "rejected", status: 409 });
     expect(calls.settle).toBe(0);
+  });
+});
+
+describe("receipt v2 issuance and binding (#166)", () => {
+  const headers = { [PAYMENT_SIGNATURE_HEADER]: paymentHeader() };
+
+  function gateFor(
+    overrides: Partial<PaywallConfig>,
+    cache: SettlementCache,
+    receiptVersion?: 1 | 2,
+  ) {
+    return createPaywall(
+      { ...config, ...overrides },
+      {
+        signer,
+        facilitator: createMockFacilitator(),
+        cache,
+        ...(receiptVersion === undefined ? {} : { receiptVersion }),
+      },
+    );
+  }
+
+  it("issues v1 receipts unless the operator switches to v2", async () => {
+    const outcome = await gateFor({}, createInMemorySettlementCache())({ ...baseRequest, headers });
+    expect(outcome.kind).toBe("settled");
+    if (outcome.kind !== "settled") return;
+    expect(outcome.receipt.receipt.version).toBe(1);
+    expect(outcome.receipt.receipt).not.toHaveProperty("offerHash");
+  });
+
+  it("issues v2 receipts bound to the offer hash and the method when switched on", async () => {
+    const outcome = await gateFor(
+      { facilitatorUrl: "https://facilitator.example" },
+      createInMemorySettlementCache(),
+      2,
+    )({ ...baseRequest, headers });
+    expect(outcome.kind).toBe("settled");
+    if (outcome.kind !== "settled") return;
+    const body = outcome.receipt.receipt;
+    expect(body.version).toBe(2);
+    if (body.version !== 2) return;
+    expect(body.method).toBe("GET");
+    expect(body.offerHash).toMatch(/^[A-Za-z0-9_-]{43}$/);
+    const verified = await verifyReceipt(outcome.receipt, Ed25519Verifier.forSigner(signer));
+    expect(verified.valid).toBe(true);
+  });
+
+  it("never serves a v2 receipt for offer A to offer B, even when amount and resource match", async () => {
+    const cache = createInMemorySettlementCache();
+    const first = await gateFor(
+      { resource: "/a", facilitatorUrl: "https://a.example" },
+      cache,
+      2,
+    )({ ...baseRequest, headers });
+    expect(first.kind).toBe("settled");
+
+    // Same resource, amount, asset, payee, network and model: only the
+    // facilitator differs, which the six-field v1 binding cannot see.
+    const replay = await gateFor(
+      { resource: "/a", facilitatorUrl: "https://b.example" },
+      cache,
+      2,
+    )({ ...baseRequest, headers });
+    expect(replay).toEqual({
+      kind: "rejected",
+      status: 409,
+      reason: "payment already settled for a different offer",
+    });
+  });
+
+  it("still serves a v2 receipt to a retry of the same offer", async () => {
+    const cache = createInMemorySettlementCache();
+    const gate = gateFor({ resource: "/a" }, cache, 2);
+    const first = await gate({ ...baseRequest, headers });
+    const retry = await gate({ ...baseRequest, headers });
+    expect(retry.kind).toBe("settled");
+    if (first.kind !== "settled" || retry.kind !== "settled") return;
+    expect(retry.replayed).toBe(true);
+    expect(retry.receipt).toEqual(first.receipt);
+  });
+
+  it("serves a v1 receipt already in the cache after the switch to v2", async () => {
+    const cache = createInMemorySettlementCache();
+    const before = await gateFor({ resource: "/a" }, cache)({ ...baseRequest, headers });
+    expect(before.kind).toBe("settled");
+
+    const after = await gateFor({ resource: "/a" }, cache, 2)({ ...baseRequest, headers });
+    expect(after.kind).toBe("settled");
+    if (before.kind !== "settled" || after.kind !== "settled") return;
+    expect(after.replayed).toBe(true);
+    expect(after.receipt.receipt.version).toBe(1);
+    expect(after.receipt).toEqual(before.receipt);
+  });
+
+  it("refuses an unknown receipt version at construction", () => {
+    expect(() =>
+      createPaywall(config, {
+        signer,
+        facilitator: createMockFacilitator(),
+        receiptVersion: 3 as unknown as 2,
+      }),
+    ).toThrow(/receiptVersion must be 1 or 2/);
   });
 });

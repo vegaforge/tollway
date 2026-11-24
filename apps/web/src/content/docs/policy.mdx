@@ -9,17 +9,35 @@ Policy is data, not code: a small declarative schema the policy engine enforces 
 
 ```ts
 type Policy = {
+  $schema?: string; // optional; lets an editor find the JSON Schema, ignored by the engine
+  policyVersion: 1; // required; 0 (unversioned) is migrated on parse
   mode?: "enforce" | "dry-run"; // default "enforce"
   budgets?: {
     daily?: string;   // spend ceiling per UTC day, integer string in smallest unit
     total?: string;   // lifetime ceiling for this policy
   };
-  perService?: Record<string, { cap?: string }>;
+  perService?: Record<string, {
+    cap?: string;                                       // lifetime
+    dailyCap?: string;                                  // UTC-day
+    window?: { windowSeconds: number; cap: string };    // sliding window
+  }>;
+  perResource?: Record<string, {
+    cap?: string;
+    dailyCap?: string;
+    window?: { windowSeconds: number; cap: string };
+    match?: "exact" | "prefix";                         // default "exact"
+  }>;
   perModel?: Partial<Record<SettlementModel, {
     enabled?: boolean;
     minChannelDeposit?: string;
   }>>;
-  rateLimit?: { requestsPerMinute?: number };
+  rateLimit?: {
+    requestsPerMinute?: number;                         // shorthand: one 60s window
+    windows?: { windowSeconds: number; limit: number }[]; // all apply together
+    count?: "settlements" | "attempts";                 // default "settlements"
+    scope?: "global" | "per-counterparty";              // default "global"
+    perCounterpartyKeyLimit?: number;                   // default 1024
+  };
   anomaly?: {
     maxSpendPerMinute?: string;
     adaptive?: {
@@ -34,21 +52,133 @@ type Policy = {
 };
 ```
 
-Every amount is an integer string in the asset's smallest unit, the same convention used on the canonical receipt. That is what lets the engine compose with bigint arithmetic and keep 64-bit amounts exact.
+Every amount is an integer string in the asset's smallest unit, the same convention used on the canonical receipt. That is what lets the engine compose with bigint arithmetic and keep 64-bit amounts exact. Every object in the schema is strict: an unknown key such as `budgets.dialy` is an error, not a rule that silently enforces nothing.
+
+## Versioning, validation and policy files
+
+`policyVersion` is required in a policy file. Version `1` is the current shape. A document without the field (and a document with `"policyVersion": 0`) is the legacy, unversioned shape from earlier releases; it is migrated to version 1 by adding the field, then validated. Any other version is refused with the supported versions in the message, so a newer file fails loudly instead of being half-enforced by an older engine.
+
+Parse an external policy with `parsePolicy`, which returns every issue with its field path instead of throwing:
+
+```ts
+import { parsePolicy } from "@vegaforge/tollway-core";
+
+const result = parsePolicy(JSON.parse(file));
+if (!result.ok) {
+  for (const issue of result.issues) {
+    console.error(`${issue.path.join(".")}: ${issue.message}`);
+  }
+} else {
+  const policy = result.policy; // typed, current version
+}
+```
+
+The engine validates at construction. A bad amount, a negative rate, an unknown key, or an unsupported `policyVersion` throws `PolicyValidationError` (a `TollwayError` with code `invalid-policy`) from `createPolicyEngine`, listing every issue. Nothing is discovered on the first payment.
+
+In Node, load a JSON policy file with the separate Node-only entry point, which keeps `node:fs` out of the edge-safe main entry:
+
+```ts
+import { loadPolicyFile, PolicyLoadError } from "@vegaforge/tollway-core/policy-loader";
+
+try {
+  const policy = await loadPolicyFile("./tollway-policy.json");
+} catch (error) {
+  if (error instanceof PolicyLoadError) {
+    // error.kind is "read", "json" or "validation"; error.issues names fields.
+  }
+}
+```
+
+### Editor autocompletion
+
+The schema is published as JSON Schema, with a description on every field, so an editor can validate a policy file and explain each field while you write it. The file is generated from `policySchema`, and the test suite fails when it is stale.
+
+There are two ways to point an editor at it. The first is a `$schema` line in the policy file, which the engine accepts and ignores:
+
+```json
+{
+  "$schema": "https://raw.githubusercontent.com/vegaforge/tollway/dev/packages/core/schema/policy.schema.json",
+  "policyVersion": 1,
+  "budgets": { "daily": "1000000000" }
+}
+```
+
+The second works offline and matches the version you installed: point the editor at the copy inside the package, `node_modules/@vegaforge/tollway-core/schema/policy.schema.json`. In VS Code, add it under `json.schemas` in your settings, with `fileMatch` set to your policy file's name. Code can also import it as `@vegaforge/tollway-core/schema/policy.schema.json`.
 
 ## What each field does
 
-**`mode`** is `enforce` unless you set it. In `enforce`, a failing rule blocks the payment. In `dry-run`, every rule is evaluated the same way, spend is recorded the same way, and the payment is allowed; the decision trace marks what enforce mode would have blocked. See "Dry-run and shadow policies" below. An unknown mode is refused with a `TollwayError` coded `invalid-policy`.
+**`mode`** is `enforce` unless you set it. In `enforce`, a failing rule blocks the payment. In `dry-run`, every rule is evaluated the same way, spend is recorded the same way, and the payment is allowed; the decision trace marks what enforce mode would have blocked. See "Dry-run and shadow policies" below. An unknown mode is refused at construction with a `PolicyValidationError`.
 
 **`budgets.daily`** is the per-UTC-day ceiling. The engine resets at the day boundary derived from the configured clock.
 
 **`budgets.total`** is the lifetime ceiling for this policy. Useful for a fixed credit allocation.
 
-**`perService`** lets the agent cap exposure to a single counterparty independently of the global budget. The key is the payee address (or service id).
+**`perService`** lets the agent cap exposure to a single counterparty independently of the global budget. The key is the payee address (or service id). Each entry carries up to three ceilings: `cap` is a lifetime cap (never resets), `dailyCap` resets at the same UTC midnight as `budgets.daily`, and `window = { windowSeconds, cap }` is a sliding rolling-window cap (for example 5 USDC per hour). All three count only recorded, settled spend and are tracked per `(payee, asset)`.
 
-**`perModel`** turns a model off (`enabled: false`) or sets a minimum deposit for channel mode (`minChannelDeposit`). Channel mode below the minimum deposit cannot pay back the open cost, so the engine refuses to route there.
+**`perResource`** mirrors the same three ceilings (`cap`, `dailyCap`, `window`) but keyed off the resource identifier the receipt carries. The identifier is compared as a plain string, so it includes any query string: `/api/quotes?pair=usd` and `/api/quotes` are different resources. An entry matches the resource exactly by default. Setting `match: "prefix"` lets one entry cover every resource that starts with its key, and the comparison is character by character, so the prefix `/api` also matches `/apix`. End a prefix with `/` to cover one path segment. No regex or glob is evaluated from config.
 
-**`rateLimit.requestsPerMinute`** is a sliding-window cap. The window is one minute.
+Every entry that matches a resource applies, and every one of them is charged when a payment is recorded. A narrower entry can tighten a broader one but never lift it: with `/api/` capped at 150 and `/api/quotes/` at 10000, total spend under `/api/` still stops at 150.
+
+Rolling-window accounting is approximate on purpose: a shared `RollingSum` accumulator bucketises time (default `windowMs / 60`), so memory per key is bounded to at most `ceil(windowMs / bucketMs) + 1` entries regardless of traffic. The accumulator may over-count by at most one bucket's worth of spend at the window edge and never under-counts, so a cap on top of it fails closed. Idle keys are evicted once their window drains. `windowSeconds` must be a whole number of seconds, at least 1, and every cap must be a base-unit integer string. `createPolicyEngine` refuses a policy that breaks either rule with a `PolicyValidationError` naming the field, for example `perService.GPAYEE.window.windowSeconds`.
+
+Examples of each cap kind:
+
+```ts
+const policy: Policy = {
+  policyVersion: 1,
+  perService: {
+    // Lifetime: never more than 50 USDC to this payee, ever.
+    GPAYEE: { cap: "500000000" },
+    // Daily: at most 5 USDC per UTC day to this payee.
+    GOTHERPAYEE: { dailyCap: "50000000" },
+    // Rolling window: at most 1 USDC in any hour to this payee.
+    GTHIRDPAYEE: { window: { windowSeconds: 3600, cap: "10000000" } },
+  },
+  perResource: {
+    // Exact: this one route, lifetime.
+    "/api/report": { cap: "20000000" },
+    // Prefix, daily: every route under /api/quotes/.
+    "/api/quotes/": { match: "prefix", dailyCap: "10000000" },
+    // Prefix, rolling window: every route under /api/, 2 USDC per 10 minutes.
+    // It also applies to /api/report and /api/quotes/*, on top of their own caps.
+    "/api/": { match: "prefix", window: { windowSeconds: 600, cap: "20000000" } },
+  },
+};
+```
+
+USDC on Stellar has 7 decimals, so `10000000` is 1 USDC.
+
+**`rateLimit`** caps how often the agent pays. It answers three questions.
+
+- **Over which windows.** `windows` lists one or more sliding windows, and a payment must fit in every one of them. An event counts while it is at most `windowSeconds` old: one recorded at 12:00:00 still counts at 12:01:00 against a 60 second window, and stops counting a millisecond later. `requestsPerMinute: 30` is shorthand for `windows: [{ windowSeconds: 60, limit: 30 }]`. Set one or the other, not both.
+- **What is counted.** With `count: "settlements"`, the default, a payment counts when it is recorded after it settles, so failed and blocked payments never count. With `count: "attempts"`, a payment counts at the moment the client sends it, whether or not it then settles, and each retry with a fresh authorization counts again. A payment the policy blocked is not an attempt and is not counted. The client counts an attempt through the engine's `admit`, which evaluates and counts in one step, so of several concurrent attempts only as many pass as there are free slots. Evaluating, `check`, a shadow comparison or a dry run never counts anything.
+- **Per whom.** With `scope: "global"`, the default, every payment shares one count. With `scope: "per-counterparty"`, each payee address has its own count, the same key `perService` uses, and the decision detail names the payee. At most `perCounterpartyKeyLimit` payees (default 1024) are tracked. A payee whose events have all left every window is idle and is dropped first. When every tracked payee is still active, a payment to a new payee is refused until one goes idle: dropping an active payee would reset its count and let it through.
+
+The count is exact: each tracked key keeps the timestamps of its newest events, never more than the largest limit, so memory is bounded and no approximation is involved. The rate limit has its own windows, independent of the one-minute window the anomaly stop uses.
+
+A worked example: an agent that may make 60 payment attempts a minute and 1000 an hour to each service, however the payments turn out.
+
+```ts
+const policy: Policy = {
+  policyVersion: 1,
+  rateLimit: {
+    windows: [
+      { windowSeconds: 60, limit: 60 },
+      { windowSeconds: 3600, limit: 1000 },
+    ],
+    count: "attempts",
+    scope: "per-counterparty",
+  },
+};
+```
+
+After 1000 attempts to `GQUOTES` in the last hour, the next one is blocked with the hourly window in the trace, even if the last minute was quiet:
+
+```text
+per-counterparty rate limit for GQUOTES exceeded: 1000 attempts in the last 3600 seconds, limit 1000
+```
+
+A payment to `GWEATHER` in the same hour is still allowed, because each payee has its own count. With the default `scope: "global"`, it would be blocked too.
 
 **`anomaly.maxSpendPerMinute`** is the per-minute spend ceiling. Crossing it trips the anomaly stop, which the agent surfaces as a hard error: a sudden burst of spending is the most common signal of a compromised key or a runaway agent, and the engine fails closed rather than rationalize the spike.
 
@@ -68,6 +198,7 @@ The policy types and the in-memory engine live in `packages/core/src/policy.ts`:
 import { createPolicyEngine, type Policy } from "@vegaforge/tollway-core";
 
 const engine = createPolicyEngine({
+  policyVersion: 1,
   budgets: { daily: "1000000000" },
   perModel: { "mpp-channel": { minChannelDeposit: "500000000" } },
 });
@@ -93,9 +224,14 @@ Rules are evaluated in this order. Static checks on the payment come first, then
 | 3 | `budget-daily` | `budget` | `utc-day` |
 | 4 | `budget-total` | `budget` | `lifetime` |
 | 5 | `per-service` | `per-service` | `lifetime` |
-| 6 | `rate-limit` | `rate-limit` | `sliding`, 60 seconds |
-| 7 | `anomaly` | `anomaly` | `sliding`, 60 seconds |
-| 8 | `anomaly-adaptive` | `anomaly-adaptive` | `sliding`, 60 seconds |
+| 6 | `per-service-daily` | `per-service-daily` | `utc-day` |
+| 7 | `per-service-window` | `per-service-window` | `sliding`, configurable |
+| 8 | `per-resource` | `per-resource` | `lifetime` |
+| 9 | `per-resource-daily` | `per-resource-daily` | `utc-day` |
+| 10 | `per-resource-window` | `per-resource-window` | `sliding`, configurable |
+| 11 | `rate-limit` | `rate-limit` | `sliding`, 60 seconds |
+| 12 | `anomaly` | `anomaly` | `sliding`, 60 seconds |
+| 13 | `anomaly-adaptive` | `anomaly-adaptive` | `sliding`, 60 seconds |
 
 Both budget rules report `budget` to `check()` and `PolicyBlockedError`, as they always have. The trace keeps them apart with `id`.
 
@@ -181,7 +317,7 @@ This is a real trace, for a sixth payment of 1 USDC (`10000000` at 7 decimals) u
       "current": "5",
       "projected": "6",
       "window": { "kind": "sliding", "seconds": 60 },
-      "detail": "rate limit: 6 of 30 requests in the last minute"
+      "detail": "global rate limit: 6 of 30 settled payments in the last 60 seconds"
     },
     {
       "id": "anomaly",
@@ -240,7 +376,7 @@ client.on((event) => {
 });
 ```
 
-- **Shadow.** A `shadow` engine is evaluated on every payment next to the active policy. The client emits `policy:shadow` with both traces and a comparison: whether the two would decide alike, and each rule whose outcome differs. Modes are ignored in the comparison: it asks what each policy would do if enforced. The shadow never affects the payment, and if it throws (a malformed limit, say) the client emits `policy:shadow-error` and pays as usual. Settled payments are recorded on the shadow too, so its budgets count real spend from the moment the client is created. With no active `policy`, the candidate is compared with no policy at all.
+- **Shadow.** A `shadow` engine is evaluated on every payment next to the active policy. The client emits `policy:shadow` with both traces and a comparison: whether the two would decide alike, and each rule whose outcome differs. Modes are ignored in the comparison: it asks what each policy would do if enforced. The shadow never affects the payment, and if its `evaluate` throws (a custom engine over a policy source that is not validated, say) the client emits `policy:shadow-error` and pays as usual. Settled payments are recorded on the shadow too, so its budgets count real spend from the moment the client is created. With no active `policy`, the candidate is compared with no policy at all.
 - **Dry-run.** With `mode: "dry-run"` the active policy evaluates and records exactly as in enforce mode, but allows every payment. The `policy:decision` trace marks the would-be block with `wouldBlock` and `blockedBy`. Dry-run is never the default, and the client logs a warning through `console.warn` (or the `logger` option) when it is created with a dry-run policy.
 
 The trace and the shadow comparison are only built into events while at least one handler is registered; with none, shadow evaluation is skipped and only its spend is recorded.

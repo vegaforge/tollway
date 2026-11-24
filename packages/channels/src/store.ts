@@ -15,6 +15,13 @@ export interface CommitmentStore {
   appendCommitment(commitment: Commitment): Promise<void>;
   listCommitments(channelId: string): Promise<readonly Commitment[]>;
   /**
+   * Every tracked channel in one status, in no particular order.
+   * `resumeAll` uses it to find the channels a crash left in `closing`
+   * (#176). It is deliberately narrow: the paged, filtered listing the
+   * service endpoints need is `listChannels` (#179, #227).
+   */
+  listChannelsByStatus(status: Channel["status"]): Promise<readonly Channel[]>;
+  /**
    * Every tracked channel, newest first, filtered and paginated. A cursor from
    * one page resumes exactly after the last channel it returned, even when a
    * channel's status changed in between.
@@ -88,6 +95,9 @@ export function createMemoryCommitmentStore(): CommitmentStore {
     async listCommitments(channelId) {
       const stream = commitments.get(channelId) ?? [];
       return [...stream].sort((a, b) => a.sequence - b.sequence);
+    },
+    async listChannelsByStatus(status) {
+      return [...channels.values()].filter((channel) => channel.status === status);
     },
     async listChannels(filter = {}) {
       const limit = filter.limit ?? DEFAULT_LIST_LIMIT;
