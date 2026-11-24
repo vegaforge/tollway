@@ -1,3 +1,4 @@
+import { enumSchema } from "@vegaforge/tollway-core";
 import { z } from "zod";
 
 /**
@@ -29,7 +30,7 @@ export const apiKeyConfigSchema = z.strictObject({
     ),
   /** Lowercase hex SHA-256 of the key. */
   sha256: z.string().regex(/^[0-9a-f]{64}$/, "expected 64 lowercase hex characters"),
-  scopes: z.array(z.enum(apiKeyScopes)).min(1, "expected at least one scope"),
+  scopes: z.array(enumSchema(apiKeyScopes)).min(1, "expected at least one scope"),
   /** A revoked key is refused with 401. Keep it listed until every client has rotated. */
   revoked: z.boolean().optional(),
 });

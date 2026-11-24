@@ -17,6 +17,7 @@ import { SignedReceipt } from '@vegaforge/tollway-core';
 import { SpendSummary } from '@vegaforge/tollway-observability';
 import { TimeseriesQuery } from '@vegaforge/tollway-observability';
 import { TimeseriesResult } from '@vegaforge/tollway-observability';
+import * as _vegaforge_tollway_core from '@vegaforge/tollway-core';
 import { z } from 'zod';
 
 // @public (undocumented)
@@ -26,11 +27,7 @@ export type ApiKeyConfig = z.infer<typeof apiKeyConfigSchema>;
 export const apiKeyConfigSchema: z.ZodObject<{
     name: z.ZodString;
     sha256: z.ZodString;
-    scopes: z.ZodArray<z.ZodEnum<{
-        read: "read";
-        ingest: "ingest";
-        admin: "admin";
-    }>>;
+    scopes: z.ZodArray<z.ZodEnum<_vegaforge_tollway_core.EnumShape<readonly ["read", "ingest", "admin"]>>>;
     revoked: z.ZodOptional<z.ZodBoolean>;
 }, z.core.$strict>;
 
@@ -141,25 +138,14 @@ export const errorBodySchema: z.ZodObject<{
 
 // @public (undocumented)
 export const exportQuerySchema: z.ZodObject<{
-    format: z.ZodEnum<{
-        json: "json";
-        csv: "csv";
-    }>;
+    format: z.ZodEnum<_vegaforge_tollway_core.EnumShape<readonly ["json", "csv"]>>;
     from: z.ZodOptional<z.ZodISODateTime>;
     to: z.ZodOptional<z.ZodISODateTime>;
     payer: z.ZodOptional<z.ZodString>;
     payee: z.ZodOptional<z.ZodString>;
-    model: z.ZodOptional<z.ZodEnum<{
-        x402: "x402";
-        "mpp-charge": "mpp-charge";
-        "mpp-channel": "mpp-channel";
-    }>>;
+    model: z.ZodOptional<z.ZodEnum<_vegaforge_tollway_core.EnumShape<readonly ["x402", "mpp-charge", "mpp-channel"]>>>;
     asset: z.ZodOptional<z.ZodString>;
-    outcome: z.ZodOptional<z.ZodEnum<{
-        settled: "settled";
-        failed: "failed";
-        skipped: "skipped";
-    }>>;
+    outcome: z.ZodOptional<z.ZodEnum<_vegaforge_tollway_core.EnumShape<readonly ["settled", "failed", "skipped"]>>>;
 }, z.core.$strict>;
 
 // @public
@@ -173,19 +159,11 @@ export const ingestBodySchema: z.ZodObject<{
     metrics: z.ZodArray<z.ZodObject<{
         payer: z.ZodString;
         payee: z.ZodString;
-        model: z.ZodEnum<{
-            x402: "x402";
-            "mpp-charge": "mpp-charge";
-            "mpp-channel": "mpp-channel";
-        }>;
+        model: z.ZodEnum<_vegaforge_tollway_core.EnumShape<readonly ["x402", "mpp-charge", "mpp-channel"]>>;
         amount: z.ZodString;
         asset: z.ZodString;
         latencyMs: z.ZodNumber;
-        outcome: z.ZodEnum<{
-            settled: "settled";
-            failed: "failed";
-            skipped: "skipped";
-        }>;
+        outcome: z.ZodEnum<_vegaforge_tollway_core.EnumShape<readonly ["settled", "failed", "skipped"]>>;
         at: z.ZodISODateTime;
     }, z.core.$strict>>;
 }, z.core.$strict>;
@@ -246,19 +224,11 @@ export function parseServiceConfig(sources: ConfigSources): ServiceConfig;
 export const paymentMetricSchema: z.ZodObject<{
     payer: z.ZodString;
     payee: z.ZodString;
-    model: z.ZodEnum<{
-        x402: "x402";
-        "mpp-charge": "mpp-charge";
-        "mpp-channel": "mpp-channel";
-    }>;
+    model: z.ZodEnum<_vegaforge_tollway_core.EnumShape<readonly ["x402", "mpp-charge", "mpp-channel"]>>;
     amount: z.ZodString;
     asset: z.ZodString;
     latencyMs: z.ZodNumber;
-    outcome: z.ZodEnum<{
-        settled: "settled";
-        failed: "failed";
-        skipped: "skipped";
-    }>;
+    outcome: z.ZodEnum<_vegaforge_tollway_core.EnumShape<readonly ["settled", "failed", "skipped"]>>;
     at: z.ZodISODateTime;
 }, z.core.$strict>;
 
@@ -284,19 +254,10 @@ export type ReadinessReport = z.infer<typeof readinessReportSchema>;
 
 // @public (undocumented)
 export const readinessReportSchema: z.ZodObject<{
-    status: z.ZodEnum<{
-        "not-ready": "not-ready";
-        ready: "ready";
-    }>;
+    status: z.ZodEnum<_vegaforge_tollway_core.EnumShape<readonly ["ready", "not-ready"]>>;
     stores: z.ZodRecord<z.ZodString, z.ZodObject<{
-        status: z.ZodEnum<{
-            ok: "ok";
-            failing: "failing";
-        }>;
-        reason: z.ZodOptional<z.ZodEnum<{
-            error: "error";
-            timeout: "timeout";
-        }>>;
+        status: z.ZodEnum<_vegaforge_tollway_core.EnumShape<readonly ["ok", "failing"]>>;
+        reason: z.ZodOptional<z.ZodEnum<_vegaforge_tollway_core.EnumShape<readonly ["timeout", "error"]>>>;
     }, z.core.$strip>>;
 }, z.core.$strip>;
 
@@ -351,56 +312,26 @@ export type RouteResponse = {
 export const seriesQuerySchema: z.ZodObject<{
     from: z.ZodISODateTime;
     to: z.ZodISODateTime;
-    bucket: z.ZodEnum<{
-        "1m": "1m";
-        "5m": "5m";
-        "1h": "1h";
-        "1d": "1d";
-    }>;
-    groupBy: z.ZodOptional<z.ZodEnum<{
-        payer: "payer";
-        payee: "payee";
-        model: "model";
-    }>>;
+    bucket: z.ZodEnum<_vegaforge_tollway_core.EnumShape<readonly ["1m", "5m", "1h", "1d"]>>;
+    groupBy: z.ZodOptional<z.ZodEnum<_vegaforge_tollway_core.EnumShape<readonly ["model", "payer", "payee"]>>>;
     payer: z.ZodOptional<z.ZodString>;
     payee: z.ZodOptional<z.ZodString>;
-    model: z.ZodOptional<z.ZodEnum<{
-        x402: "x402";
-        "mpp-charge": "mpp-charge";
-        "mpp-channel": "mpp-channel";
-    }>>;
+    model: z.ZodOptional<z.ZodEnum<_vegaforge_tollway_core.EnumShape<readonly ["x402", "mpp-charge", "mpp-channel"]>>>;
     asset: z.ZodOptional<z.ZodString>;
-    outcome: z.ZodOptional<z.ZodEnum<{
-        settled: "settled";
-        failed: "failed";
-        skipped: "skipped";
-    }>>;
+    outcome: z.ZodOptional<z.ZodEnum<_vegaforge_tollway_core.EnumShape<readonly ["settled", "failed", "skipped"]>>>;
 }, z.core.$strict>;
 
 // @public
 export const seriesResponseSchema: z.ZodObject<{
-    bucket: z.ZodEnum<{
-        "1m": "1m";
-        "5m": "5m";
-        "1h": "1h";
-        "1d": "1d";
-    }>;
-    groupBy: z.ZodEnum<{
-        payer: "payer";
-        payee: "payee";
-        model: "model";
-    }>;
+    bucket: z.ZodEnum<_vegaforge_tollway_core.EnumShape<readonly ["1m", "5m", "1h", "1d"]>>;
+    groupBy: z.ZodEnum<_vegaforge_tollway_core.EnumShape<readonly ["model", "payer", "payee"]>>;
     from: z.ZodString;
     to: z.ZodString;
     buckets: z.ZodArray<z.ZodObject<{
         start: z.ZodString;
         end: z.ZodString;
         rows: z.ZodArray<z.ZodObject<{
-            model: z.ZodEnum<{
-                x402: "x402";
-                "mpp-charge": "mpp-charge";
-                "mpp-channel": "mpp-channel";
-            }>;
+            model: z.ZodEnum<_vegaforge_tollway_core.EnumShape<readonly ["x402", "mpp-charge", "mpp-channel"]>>;
             asset: z.ZodString;
             payer: z.ZodOptional<z.ZodString>;
             payee: z.ZodOptional<z.ZodString>;
@@ -449,11 +380,7 @@ export const serviceConfigSchema: z.ZodObject<{
     apiKeys: z.ZodArray<z.ZodObject<{
         name: z.ZodString;
         sha256: z.ZodString;
-        scopes: z.ZodArray<z.ZodEnum<{
-            read: "read";
-            ingest: "ingest";
-            admin: "admin";
-        }>>;
+        scopes: z.ZodArray<z.ZodEnum<_vegaforge_tollway_core.EnumShape<readonly ["read", "ingest", "admin"]>>>;
         revoked: z.ZodOptional<z.ZodBoolean>;
     }, z.core.$strict>>;
     readinessTimeoutMs: z.ZodDefault<z.ZodNumber>;
@@ -524,17 +451,9 @@ export const summaryQuerySchema: z.ZodObject<{
     to: z.ZodOptional<z.ZodISODateTime>;
     payer: z.ZodOptional<z.ZodString>;
     payee: z.ZodOptional<z.ZodString>;
-    model: z.ZodOptional<z.ZodEnum<{
-        x402: "x402";
-        "mpp-charge": "mpp-charge";
-        "mpp-channel": "mpp-channel";
-    }>>;
+    model: z.ZodOptional<z.ZodEnum<_vegaforge_tollway_core.EnumShape<readonly ["x402", "mpp-charge", "mpp-channel"]>>>;
     asset: z.ZodOptional<z.ZodString>;
-    outcome: z.ZodOptional<z.ZodEnum<{
-        settled: "settled";
-        failed: "failed";
-        skipped: "skipped";
-    }>>;
+    outcome: z.ZodOptional<z.ZodEnum<_vegaforge_tollway_core.EnumShape<readonly ["settled", "failed", "skipped"]>>>;
 }, z.core.$strict>;
 
 // @public (undocumented)
@@ -557,11 +476,7 @@ export const summaryResponseSchema: z.ZodObject<{
         asset: z.ZodString;
         amount: z.ZodString;
         count: z.ZodNumber;
-        model: z.ZodEnum<{
-            x402: "x402";
-            "mpp-charge": "mpp-charge";
-            "mpp-channel": "mpp-channel";
-        }>;
+        model: z.ZodEnum<_vegaforge_tollway_core.EnumShape<readonly ["x402", "mpp-charge", "mpp-channel"]>>;
     }, z.core.$strip>>;
     byPayer: z.ZodArray<z.ZodObject<{
         asset: z.ZodString;
@@ -582,7 +497,7 @@ export function toSummaryResponse(summary: SpendSummary): SummaryResponse;
 
 // Warnings were encountered during analysis:
 //
-// dist/index.d.ts:127:5 - (ae-forgotten-export) The symbol "Output" needs to be exported by the entry point index.d.ts
+// dist/index.d.ts:120:5 - (ae-forgotten-export) The symbol "Output" needs to be exported by the entry point index.d.ts
 
 // (No @packageDocumentation comment for this package)
 
