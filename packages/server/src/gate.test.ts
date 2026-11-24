@@ -1462,6 +1462,58 @@ describe("createPaywall observability (#106)", () => {
     await vi.waitFor(() => expect(errors).toHaveLength(2));
   });
 
+  it("records one metric and one event for concurrent copies of one payment", async () => {
+    const { observer, metrics, events } = recordingObserver();
+    const gate = observedGate(observer);
+    const request = {
+      ...baseRequest,
+      headers: { [PAYMENT_SIGNATURE_HEADER]: paymentHeader("mock-signed-auth-entry-observed") },
+    };
+    const outcomes = await Promise.all([gate(request), gate(request), gate(request)]);
+    expect(outcomes.map((outcome) => outcome.kind)).toEqual(["settled", "settled", "settled"]);
+    expect(metrics).toHaveLength(1);
+    expect(events).toHaveLength(1);
+  });
+
+  it("records one failed metric for concurrent copies of one failed settlement", async () => {
+    const { observer, metrics } = recordingObserver();
+    let release = () => {};
+    const held = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const gate = observedGate(observer, {
+      async settle() {
+        await held;
+        return { settled: false, reason: "facilitator declined" };
+      },
+    });
+    const request = {
+      ...baseRequest,
+      headers: { [PAYMENT_SIGNATURE_HEADER]: paymentHeader("mock-signed-auth-entry-declined") },
+    };
+    const runs = [gate(request), gate(request)];
+    release();
+    const outcomes = await Promise.all(runs);
+    expect(outcomes.map((outcome) => outcome.kind)).toEqual(["rejected", "rejected"]);
+    expect(metrics).toHaveLength(1);
+    expect(metrics[0]).toMatchObject({ outcome: "failed" });
+  });
+
+  it("records a failed metric when the facilitator throws, and still throws", async () => {
+    const { observer, metrics, events } = recordingObserver();
+    const gate = observedGate(observer, {
+      async settle() {
+        throw new Error("facilitator unreachable");
+      },
+    });
+    await expect(
+      gate({ ...baseRequest, headers: { [PAYMENT_SIGNATURE_HEADER]: paymentHeader() } }),
+    ).rejects.toThrow("facilitator unreachable");
+    expect(metrics).toHaveLength(1);
+    expect(metrics[0]).toMatchObject({ outcome: "failed", payer: "" });
+    expect(events).toHaveLength(0);
+  });
+
   it("does not await event delivery", async () => {
     let release: (() => void) | undefined;
     const gate = createPaywall(

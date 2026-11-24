@@ -779,6 +779,19 @@ function asError(value: unknown, message: string): Error {
   return value instanceof Error ? value : new Error(message, { cause: value });
 }
 
+/**
+ * Told the outcome of a payment attempt this request owns (#106): its
+ * verification, or the settlement it started. `undefined` means the attempt
+ * threw. Requests that only share another request's in-flight settlement,
+ * or answer from the cache, never call it, so one payment is reported once.
+ */
+type AttemptReporter = (outcome: GateOutcome | undefined) => void;
+
+function reported(report: AttemptReporter | undefined, outcome: GateOutcome): GateOutcome {
+  report?.(outcome);
+  return outcome;
+}
+
 async function settleWithHandler<TPayment>(
   payment: TPayment,
   offer: PaymentOffer,
@@ -787,6 +800,7 @@ async function settleWithHandler<TPayment>(
   handler: Handler<TPayment>,
   context: SettlementContext,
   replayOnly?: () => Promise<GateOutcome>,
+  report?: AttemptReporter,
 ): Promise<GateOutcome> {
   // A payment that already settled is answered from the cache before it is
   // verified again: on chain its authorization nonce is spent, so a second
@@ -828,26 +842,27 @@ async function settleWithHandler<TPayment>(
   } catch (error) {
     // Nothing has settled yet, so a retry is always safe here.
     if (error instanceof FacilitatorDeadlineError) {
-      return {
+      return reported(report, {
         kind: "rejected",
         status: 503,
         reason: `facilitator-timeout: /verify did not answer within ${error.timeoutMs}ms`,
         headers: { "retry-after": "1" },
-      };
+      });
     }
+    report?.(undefined);
     throw error;
   }
   if (!verification.valid) {
-    return { kind: "rejected", status: 402, reason: verification.reason };
+    return reported(report, { kind: "rejected", status: 402, reason: verification.reason });
   }
   // The cache lookup above used the derived nonce; a facilitator whose verify
   // disagrees with it would store under a key retries never look up.
   if (knownNonce !== undefined && verification.nonce !== knownNonce) {
-    return {
+    return reported(report, {
       kind: "rejected",
       status: 500,
       reason: "facilitator verify returned a nonce that differs from its idempotency key",
-    };
+    });
   }
 
   // The model is part of the key because two models can derive the same
@@ -883,9 +898,10 @@ async function settleWithHandler<TPayment>(
   try {
     const result = await attempt;
     if (!result.ok && result.hold) hold = result.hold;
-    return await toOutcome(result, offer, model, method, false);
+    return reported(report, await toOutcome(result, offer, model, method, false));
   } catch (error) {
     if (error instanceof AmbiguousSettlementFailure) hold = error.hold;
+    report?.(undefined);
     throw unwrapFailure(error);
   } finally {
     const clear = (): void => {
@@ -1490,7 +1506,7 @@ export function createPaywallWithInFlight(
   }
 
   function observeOutcome(
-    outcome: GateOutcome,
+    outcome: GateOutcome | undefined,
     offer: PaymentOffer,
     model: SettlementModel,
     startedAt: number,
@@ -1501,7 +1517,7 @@ export function createPaywallWithInFlight(
     const latencyMs = Math.max(0, endedAt - startedAt);
     const at = new Date(endedAt).toISOString();
 
-    if (outcome.kind === "settled" && !outcome.replayed) {
+    if (outcome?.kind === "settled" && !outcome.replayed) {
       const receipt = outcome.receipt.receipt;
       try {
         observer.record({
@@ -1540,8 +1556,9 @@ export function createPaywallWithInFlight(
       return;
     }
 
-    if (outcome.kind === "rejected") {
-      // A failed verify has no verified payer. Keeping payer as an empty
+    if (outcome === undefined || outcome.kind === "rejected") {
+      // A thrown or rejected attempt has no settled receipt, and a failed
+      // verify has no verified payer. Keeping payer as an empty
       // string rather than making it optional preserves PaymentMetric's
       // shape for every consumer (see the justification in issue #106).
       try {
@@ -1561,15 +1578,19 @@ export function createPaywallWithInFlight(
     }
   }
 
-  async function settleObserved(
-    settle: () => Promise<GateOutcome>,
+  /**
+   * Runs one settlement with a reporter that measures latency (verify plus
+   * settle) from the injected clock. The attempt calls it at most once, and
+   * only when this request owns the outcome.
+   */
+  function settleObserved(
+    settle: (report: AttemptReporter | undefined) => Promise<GateOutcome>,
     offer: PaymentOffer,
     model: SettlementModel,
   ): Promise<GateOutcome> {
+    if (!deps.observer) return settle(undefined);
     const startedAt = clock();
-    const outcome = await settle();
-    observeOutcome(outcome, offer, model, startedAt);
-    return outcome;
+    return settle((outcome) => observeOutcome(outcome, offer, model, startedAt));
   }
 
   return async function gate(request): Promise<GateOutcome> {
@@ -1667,7 +1688,17 @@ export function createPaywallWithInFlight(
       }
       const payment: MppChargePayment = { model: "mpp-charge", payload: mppCredential };
       return settleObserved(
-        () => settleWithHandler(payment, offer, "mpp-charge", method, handler, context),
+        (report) =>
+          settleWithHandler(
+            payment,
+            offer,
+            "mpp-charge",
+            method,
+            handler,
+            context,
+            undefined,
+            report,
+          ),
         offer,
         "mpp-charge",
       );
@@ -1705,7 +1736,7 @@ export function createPaywallWithInFlight(
         );
       };
       return settleObserved(
-        () =>
+        (report) =>
           settleWithHandler(
             payment,
             offer,
@@ -1714,6 +1745,7 @@ export function createPaywallWithInFlight(
             deps.facilitator,
             context,
             quoteExpired ? freshChallenge : undefined,
+            report,
           ),
         offer,
         "x402",
