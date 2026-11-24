@@ -449,7 +449,18 @@ async function decideModel(
   request: PayRequest,
   quarantined: boolean,
 ): Promise<RouteDecision> {
-  if (request.model) return { model: request.model, reason: "override" };
+  if (request.model) {
+    // An explicit model skips the router, so the quarantine rule the router
+    // applies has to be applied here too: a quarantined counterparty never
+    // gets a new channel commitment.
+    if (request.model === "mpp-channel" && quarantined) {
+      throw new TollwayError(
+        "counterparty-quarantined",
+        `counterparty "${request.offer.payTo}" is quarantined; cannot pay it through mpp-channel`,
+      );
+    }
+    return { model: request.model, reason: "override" };
+  }
   if (!router) return { model: "x402", reason: "default" };
   return router.decide({
     counterparty: request.offer.payTo,

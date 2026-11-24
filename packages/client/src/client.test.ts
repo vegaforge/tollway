@@ -669,6 +669,28 @@ describe("counterparty:quarantined events", () => {
     });
   });
 
+  it("refuses an explicit mpp-channel request for a quarantined counterparty", async () => {
+    // An explicit model skips the router, so the client itself must keep a
+    // quarantined counterparty out of channel mode.
+    const quarantine = createMemoryQuarantine();
+    await quarantine.quarantine({
+      counterparty: OFFER.payTo,
+      reason: "under-settled by 500",
+      drift: { kind: "under-settled", detail: "shortfall 500" },
+    });
+    const settler = mockSettler();
+    const client = createClient({ network: "testnet", settler, quarantine });
+
+    await expect(
+      client.pay({
+        resource: OFFER.resource,
+        offer: { ...OFFER, models: ["mpp-channel", "x402"] },
+        model: "mpp-channel",
+      }),
+    ).rejects.toMatchObject({ code: "counterparty-quarantined" });
+    expect(settler.settle).not.toHaveBeenCalled();
+  });
+
   it("emits counterparty:quarantined when the router itself flags quarantine", async () => {
     const quarantine = createMemoryQuarantine();
     await quarantine.quarantine({

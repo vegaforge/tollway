@@ -124,4 +124,36 @@ describe("createQuarantineEnforcer", () => {
     expect(DEFAULT_DRIFT_ACTIONS["recipient-mismatch"]).toBe("quarantine");
     expect(DEFAULT_DRIFT_ACTIONS["token-mismatch"]).toBe("quarantine");
   });
+  it("forgets the oldest processed result once maxRememberedResults is reached", async () => {
+    const quarantine = createMemoryQuarantine();
+    const onWarn = vi.fn();
+    const enforcer = createQuarantineEnforcer({ quarantine, onWarn, maxRememberedResults: 2 });
+    const result = (channelId: string): ReconciliationResult => ({
+      ok: false,
+      channelId,
+      drift: [{ kind: "sequence-gap", detail: `gap in ${channelId}` }],
+    });
+
+    await enforcer.process({ counterparty: "GPAYEE", result: result("ch-1") });
+    await enforcer.process({ counterparty: "GPAYEE", result: result("ch-2") });
+    await enforcer.process({ counterparty: "GPAYEE", result: result("ch-3") });
+
+    // ch-3 and ch-2 are remembered; ch-1 was forgotten to keep memory bounded.
+    expect(
+      (await enforcer.process({ counterparty: "GPAYEE", result: result("ch-3") })).duplicate,
+    ).toBe(true);
+    expect(
+      (await enforcer.process({ counterparty: "GPAYEE", result: result("ch-1") })).duplicate,
+    ).toBe(false);
+    expect(onWarn).toHaveBeenCalledTimes(4);
+  });
+
+  it("refuses a maxRememberedResults that is not a positive integer", () => {
+    const quarantine = createMemoryQuarantine();
+    for (const value of [0, -1, 1.5, Number.NaN]) {
+      expect(() => createQuarantineEnforcer({ quarantine, maxRememberedResults: value })).toThrow(
+        TypeError,
+      );
+    }
+  });
 });

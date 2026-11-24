@@ -34,6 +34,8 @@ Once a counterparty is quarantined:
 - `ChannelManager.open` and `ChannelManager.commit` refuse new commitments with a `counterparty-quarantined` error (`CounterpartyQuarantinedError`).
 - `createDefaultRouter` excludes `mpp-channel` for that counterparty and records `reason: "quarantined"` (failing closed if quarantine lookup fails).
 - `TollwayClient` emits a `counterparty:quarantined` event so callers and monitoring pipelines can react.
+- A `pay()` call that names `model: "mpp-channel"` for a quarantined counterparty is refused with `counterparty-quarantined`, the same as the router's rule. An explicit model skips the router, so the client checks it itself.
+- `createQuarantineEnforcer` remembers the last 10000 processed results (`maxRememberedResults`) so a result processed twice acts once. A result older than that runs its actions again; quarantining an already active counterparty is a no-op, so the only cost is a repeated `onWarn` or `onQuarantine` call.
 
 ## Operator workflow: inspect, close and recover, release
 

@@ -44,7 +44,17 @@ export type QuarantineEnforcerOptions = {
   onWarn?: (event: DriftWarnEvent) => void;
   /** Called once per drift kind configured with `"quarantine"`. */
   onQuarantine?: (event: DriftQuarantineEvent) => void;
+  /**
+   * How many processed result keys to remember for deduplication. The oldest
+   * key is forgotten first once the limit is reached, so memory stays bounded
+   * in a long-running process. Reprocessing a forgotten result runs its
+   * actions again; quarantining is idempotent for an active entry, so the
+   * cost is a repeated `onWarn` or `onQuarantine` call. Defaults to 10000.
+   */
+  maxRememberedResults?: number;
 };
+
+const DEFAULT_MAX_REMEMBERED_RESULTS = 10_000;
 
 export type ProcessReconciliationInput = {
   counterparty: string;
@@ -87,7 +97,23 @@ export function createQuarantineEnforcer(
   options: QuarantineEnforcerOptions,
 ): ReconciliationQuarantineEnforcer {
   const { quarantine, actions: overrides, onWarn, onQuarantine } = options;
+  const maxRemembered = options.maxRememberedResults ?? DEFAULT_MAX_REMEMBERED_RESULTS;
+  if (!Number.isSafeInteger(maxRemembered) || maxRemembered < 1) {
+    throw new TypeError(
+      `maxRememberedResults must be a positive integer, got ${String(options.maxRememberedResults)}`,
+    );
+  }
+  // A Set iterates in insertion order, so its first key is the oldest.
   const processedKeys = new Set<string>();
+
+  function remember(key: string): void {
+    processedKeys.add(key);
+    while (processedKeys.size > maxRemembered) {
+      const oldest = processedKeys.values().next().value;
+      if (oldest === undefined) break;
+      processedKeys.delete(oldest);
+    }
+  }
 
   function resolveAction(kind: string): DriftAction {
     if (overrides && Object.hasOwn(overrides, kind)) {
@@ -147,7 +173,7 @@ export function createQuarantineEnforcer(
         }
       }
 
-      processedKeys.add(key);
+      remember(key);
       return { duplicate: false, actions };
     },
   };
