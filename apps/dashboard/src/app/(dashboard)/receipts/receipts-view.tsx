@@ -8,38 +8,19 @@ import {
   type SignedReceipt,
   verifyReceipt,
 } from "@vegaforge/tollway-core";
+import Link from "next/link";
 import { useEffect, useMemo, useState } from "react";
 
 import { Panel } from "@/components/ui/panel";
 import type { ReceiptRow } from "@/data/receipts";
 import { useReceipts } from "@/data/use-receipts";
-
-/**
- * Stellar SACs use 7 decimal places. When the observability hub starts
- * attaching per-asset metadata, the data layer can override this.
- */
-const DEFAULT_ASSET_DECIMALS = 7;
+import { formatAmount } from "@/lib/amount";
 
 const MODEL_LABEL: Record<ReceiptBody["model"], string> = {
   x402: "x402",
   "mpp-charge": "MPP charge",
   "mpp-channel": "MPP channel",
 };
-
-function formatAmount(amount: string, asset: string): string {
-  let units: bigint;
-  try {
-    units = BigInt(amount);
-  } catch {
-    return `${amount} ${asset}`;
-  }
-  const divisor = 10n ** BigInt(DEFAULT_ASSET_DECIMALS);
-  const whole = units / divisor;
-  const fraction = units % divisor;
-  const fractionStr = fraction.toString().padStart(DEFAULT_ASSET_DECIMALS, "0").slice(0, 2);
-  const code = asset.split(":")[0] ?? asset;
-  return `${whole.toLocaleString("en-US")}.${fractionStr} ${code}`;
-}
 
 function truncate(value: string, head = 6, tail = 4): string {
   if (value.length <= head + tail + 3) return value;
@@ -53,10 +34,19 @@ function settlementSummary(ref: SettlementRef): string {
   return `${ref.channelId} · seq ${ref.sequence}`;
 }
 
-export function ReceiptsView() {
+/**
+ * `payee` limits the archive to receipts paid to one counterparty. The
+ * anomaly feed links here with it, so an operator sees every receipt behind a
+ * drift or a stop. Null shows the whole archive.
+ */
+export function ReceiptsView({ payee = null }: { payee?: string | null }) {
   const state = useReceipts();
 
-  const rows = state.status === "ready" ? state.rows : [];
+  const allRows = state.status === "ready" ? state.rows : [];
+  const rows = useMemo(
+    () => (payee === null ? allRows : allRows.filter((row) => row.receipt.payee === payee)),
+    [allRows, payee],
+  );
   const trustedKeys = state.status === "ready" ? state.trustedKeys : null;
 
   const [selectedId, setSelectedId] = useState<string | null>(null);
@@ -66,13 +56,30 @@ export function ReceiptsView() {
   );
 
   return (
-    <Panel title="Receipts" description="Payer, payee, amount, model, and settlement reference">
+    <Panel
+      title="Receipts"
+      description={
+        payee === null
+          ? "Payer, payee, amount, model, and settlement reference"
+          : "Receipts paid to one counterparty"
+      }
+    >
+      {payee === null ? null : (
+        <p data-testid="receipts-payee-filter" className="mb-4 text-sm">
+          Paid to <span className="font-mono">{payee}</span>.{" "}
+          <Link className="underline" href="/receipts">
+            Show all receipts
+          </Link>
+        </p>
+      )}
       {state.status === "loading" ? <ReceiptsTableSkeleton /> : null}
       {state.status === "error" ? <ReceiptsTableError error={state.error} /> : null}
       {state.status === "ready" ? (
         rows.length === 0 ? (
           <p className="text-sm text-muted">
-            No receipts yet. Wire a paid route and the archive will populate.
+            {payee === null
+              ? "No receipts yet. Wire a paid route and the archive will populate."
+              : "No receipts were paid to this counterparty."}
           </p>
         ) : (
           <div className="flex flex-col gap-6">
@@ -289,18 +296,13 @@ function SettlementDetail({ settlement }: { settlement: SettlementRef }) {
     <div className="sm:col-span-2">
       <dt className="text-[10px] uppercase tracking-wide text-muted">Settlement (channel)</dt>
       <dd className="mt-0.5 flex flex-wrap items-baseline gap-2 font-mono text-xs">
-        <a
-          // Channels view does not have per-channel routes yet; the channels
-          // table renders each row with `data-testid="channel-row-<id>"`,
-          // which doubles as a stable anchor target via the row's id-derived
-          // hash. When the per-channel detail page lands, switch this to
-          // /channels/{channelId} with no other change.
-          href={`/channels#channel-row-${settlement.channelId}`}
+        <Link
+          href={`/channels/${encodeURIComponent(settlement.channelId)}`}
           data-testid="receipt-channel-link"
           className="text-accent underline hover:no-underline"
         >
           {settlement.channelId}
-        </a>
+        </Link>
         <span className="text-muted">· seq {settlement.sequence}</span>
       </dd>
     </div>
