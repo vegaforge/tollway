@@ -1,4 +1,8 @@
-import { NotImplementedError } from "@vegaforge/tollway-core";
+import {
+  type CounterpartyQuarantine,
+  createMemoryQuarantine,
+  NotImplementedError,
+} from "@vegaforge/tollway-core";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type {
   CloseAdapterInput,
@@ -14,6 +18,7 @@ import {
   ChannelNotFoundError,
   ChannelNotOpenError,
   CommitmentExceedsDepositError,
+  CounterpartyQuarantinedError,
   InvalidAmountError,
   SettlementMismatchError,
 } from "./errors.js";
@@ -853,7 +858,13 @@ describe("typed error codes are distinguishable on .code", () => {
     expect(new InvalidAmountError("oops", "deposit").code).toBe("invalid-amount");
   });
 
-  it("the six channel error codes are pairwise distinct", () => {
+  it("CounterpartyQuarantinedError reports code 'counterparty-quarantined'", () => {
+    expect(new CounterpartyQuarantinedError("GRECIPIENT", "under-settled").code).toBe(
+      "counterparty-quarantined",
+    );
+  });
+
+  it("the seven channel error codes are pairwise distinct", () => {
     const codes = new Set([
       new ChannelNotFoundError("CTEST001").code,
       new ChannelNotOpenError("CTEST001", "closed").code,
@@ -861,7 +872,131 @@ describe("typed error codes are distinguishable on .code", () => {
       new CommitmentExceedsDepositError("CTEST001", "101", "100").code,
       new SettlementMismatchError("CTEST001", "100", "50").code,
       new InvalidAmountError("oops", "deposit").code,
+      new CounterpartyQuarantinedError("GRECIPIENT", "under-settled").code,
     ]);
-    expect(codes.size).toBe(6);
+    expect(codes.size).toBe(7);
+  });
+});
+
+// ── quarantine ────────────────────────────────────────────────────────────────
+
+describe("ChannelManager quarantine", () => {
+  it("refuses open and commit for a quarantined counterparty while allowing close", async () => {
+    const quarantine = createMemoryQuarantine();
+    const { adapter, calls } = createFakeAdapter();
+    const manager = createChannelManager({ adapter, quarantine });
+
+    const channel = await manager.open({
+      counterparty: "GRECIPIENT",
+      asset: "USDC:GA5Z",
+      deposit: "1000",
+      network: "testnet",
+    });
+    await manager.commit(channel.id, "200");
+
+    await quarantine.quarantine({
+      counterparty: "GRECIPIENT",
+      reason: "under-settled",
+      drift: { kind: "under-settled", detail: "shortfall 100", channelId: channel.id },
+    });
+
+    await expect(
+      manager.open({
+        counterparty: "GRECIPIENT",
+        asset: "USDC:GA5Z",
+        deposit: "1000",
+        network: "testnet",
+      }),
+    ).rejects.toMatchObject({ code: "counterparty-quarantined" });
+
+    await expect(manager.commit(channel.id, "100")).rejects.toMatchObject({
+      code: "counterparty-quarantined",
+    });
+
+    // Adapter should not have been called for the refused open/commit.
+    expect(calls.openChannel).toHaveLength(1);
+    expect(calls.signCommitment).toHaveLength(1);
+
+    // Close stays allowed so funds can be settled or recovered.
+    const closed = await manager.close(channel.id);
+    expect(closed.channelId).toBe(channel.id);
+    expect(calls.closeChannel).toHaveLength(1);
+  });
+
+  it("restores open and commit after explicit release", async () => {
+    const quarantine = createMemoryQuarantine();
+    const { adapter } = createFakeAdapter();
+    const manager = createChannelManager({ adapter, quarantine });
+
+    const channel = await manager.open({
+      counterparty: "GRECIPIENT",
+      asset: "USDC:GA5Z",
+      deposit: "1000",
+      network: "testnet",
+    });
+
+    await quarantine.quarantine({
+      counterparty: "GRECIPIENT",
+      reason: "under-settled",
+      drift: { kind: "under-settled", detail: "shortfall 100" },
+    });
+    await expect(manager.commit(channel.id, "100")).rejects.toBeInstanceOf(
+      CounterpartyQuarantinedError,
+    );
+
+    await quarantine.release({ counterparty: "GRECIPIENT", releasedBy: "operator" });
+
+    const commitment = await manager.commit(channel.id, "100");
+    expect(commitment.cumulativeAmount).toBe("100");
+  });
+
+  it("fails closed on open and commit when quarantine lookup fails", async () => {
+    const failingQuarantine: CounterpartyQuarantine = {
+      async quarantine() {
+        throw new Error("unreachable");
+      },
+      async release() {
+        throw new Error("unreachable");
+      },
+      async lookup() {
+        throw new Error("quarantine store unavailable");
+      },
+      async history() {
+        return [];
+      },
+    };
+    const { adapter } = createFakeAdapter();
+    const store = createMemoryCommitmentStore();
+    await store.putChannel({
+      id: "CTEST001",
+      counterparty: "GRECIPIENT",
+      asset: "USDC:GA5Z",
+      deposit: "1000",
+      committed: "0",
+      sequence: -1,
+      status: "open",
+      network: "testnet",
+      openTxHash: "tx-open-1",
+      openedAt: "2026-11-24T08:00:00.000Z",
+    });
+
+    const manager = createChannelManager({
+      adapter,
+      store,
+      quarantine: failingQuarantine,
+    });
+
+    await expect(
+      manager.open({
+        counterparty: "GRECIPIENT",
+        asset: "USDC:GA5Z",
+        deposit: "1000",
+        network: "testnet",
+      }),
+    ).rejects.toMatchObject({ code: "counterparty-quarantined" });
+
+    await expect(manager.commit("CTEST001", "100")).rejects.toMatchObject({
+      code: "counterparty-quarantined",
+    });
   });
 });

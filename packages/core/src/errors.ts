@@ -30,6 +30,7 @@ export type TollwayErrorCode =
   | "channel-already-closed"
   | "commitment-exceeds-deposit"
   | "settlement-mismatch"
+  | "counterparty-quarantined"
   | "invalid-metrics-query"
   | "invalid-metric"
   | "metrics-query-too-large"

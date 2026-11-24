@@ -25,6 +25,7 @@ export {
   ChannelNotFoundError,
   ChannelNotOpenError,
   CommitmentExceedsDepositError,
+  CounterpartyQuarantinedError,
   InvalidAmountError,
   SettlementMismatchError,
 } from "./errors.js";
