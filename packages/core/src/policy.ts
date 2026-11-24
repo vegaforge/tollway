@@ -1,3 +1,4 @@
+import { calendarDayKey, calendarMonthKey, calendarWeekKey } from "./budget-period.js";
 import { TollwayError } from "./errors.js";
 import {
   type Policy,
@@ -48,6 +49,9 @@ export type ChannelOpenIntent = {
 export type ChannelOpenRule =
   | "min-channel-deposit"
   | "budget-daily"
+  | "budget-weekly"
+  | "budget-monthly"
+  | "budget-rolling"
   | "budget-total"
   | "per-service"
   | "per-service-daily"
@@ -149,6 +153,9 @@ function parseAmount(s: string): bigint {
 type SpendCeilingLimit = {
   rule:
     | "budget-daily"
+    | "budget-weekly"
+    | "budget-monthly"
+    | "budget-rolling"
     | "budget-total"
     | "per-service"
     | "per-service-daily"
@@ -160,7 +167,13 @@ type SpendCeilingLimit = {
 /** Spend and request history the stateful rules read. */
 type EngineState = {
   day: string;
+  budgetDay: string;
+  budgetWeek: string;
+  budgetMonth: string;
   dailySpend: Map<string, bigint>;
+  weeklySpend: Map<string, bigint>;
+  monthlySpend: Map<string, bigint>;
+  rollingBudgetSpend: Map<string, RollingSum>;
   totalSpend: Map<string, bigint>;
   serviceSpend: Map<string, bigint>;
   /**
@@ -384,6 +397,9 @@ const minChannelDeposit: RuleEvaluator = ({ policy, intent }) => {
 
 type SpendCeilingId =
   | "budget-daily"
+  | "budget-weekly"
+  | "budget-monthly"
+  | "budget-rolling"
   | "budget-total"
   | "per-service"
   | "per-service-daily"
@@ -404,6 +420,9 @@ type SpendCeilingRule =
 function ruleOf(id: SpendCeilingId): SpendCeilingRule {
   switch (id) {
     case "budget-daily":
+    case "budget-weekly":
+    case "budget-monthly":
+    case "budget-rolling":
     case "budget-total":
       return "budget";
     case "per-service":
@@ -465,8 +484,9 @@ function spendCeiling(
   };
 }
 
-const budgetDaily: RuleEvaluator = ({ policy, intent, amount, state }) =>
-  spendCeiling(
+const budgetDaily: RuleEvaluator = ({ policy, intent, amount, state }) => {
+  const tz = policy.budgets?.timezone;
+  return spendCeiling(
     "budget-daily",
     "daily budget",
     `for ${intent.asset}`,
@@ -474,8 +494,65 @@ const budgetDaily: RuleEvaluator = ({ policy, intent, amount, state }) =>
     policy.budgets?.daily != null,
     state.dailySpend.get(intent.asset) ?? 0n,
     amount,
-    { kind: "utc-day", day: state.day },
+    tz != null ? { kind: "calendar-day", day: state.budgetDay, timezone: tz } : { kind: "utc-day", day: state.budgetDay },
   );
+};
+
+const budgetWeekly: RuleEvaluator = ({ policy, intent, amount, state }) => {
+  const tz = policy.budgets?.timezone ?? "UTC";
+  return spendCeiling(
+    "budget-weekly",
+    "weekly budget",
+    `for ${intent.asset}`,
+    policy.budgets?.weekly,
+    policy.budgets?.weekly != null,
+    state.weeklySpend.get(intent.asset) ?? 0n,
+    amount,
+    { kind: "calendar-week", weekStart: state.budgetWeek, timezone: tz },
+  );
+};
+
+const budgetMonthly: RuleEvaluator = ({ policy, intent, amount, state }) => {
+  const tz = policy.budgets?.timezone ?? "UTC";
+  return spendCeiling(
+    "budget-monthly",
+    "monthly budget",
+    `for ${intent.asset}`,
+    policy.budgets?.monthly,
+    policy.budgets?.monthly != null,
+    state.monthlySpend.get(intent.asset) ?? 0n,
+    amount,
+    { kind: "calendar-month", month: state.budgetMonth, timezone: tz },
+  );
+};
+
+const budgetRolling: RuleEvaluator = ({ policy, intent, amount, now, state }) => {
+  const config = policy.budgets?.rolling;
+  if (config == null) {
+    return {
+      id: "budget-rolling",
+      rule: "budget",
+      configured: false,
+      outcome: "not-applicable",
+      limit: null,
+      current: null,
+      projected: null,
+      window: null,
+      detail: `policy sets no rolling budget for ${intent.asset}`,
+    };
+  }
+  const current = state.rollingBudgetSpend.get(intent.asset)?.sum(now) ?? 0n;
+  return spendCeiling(
+    "budget-rolling",
+    `${config.windowSeconds}s rolling budget`,
+    `for ${intent.asset}`,
+    config.cap,
+    true,
+    current,
+    amount,
+    { kind: "sliding", seconds: config.windowSeconds },
+  );
+};
 
 const budgetTotal: RuleEvaluator = ({ policy, intent, amount, state }) =>
   spendCeiling(
@@ -794,6 +871,9 @@ const RULES: readonly RuleEvaluator[] = [
   perModelDisabled,
   minChannelDeposit,
   budgetDaily,
+  budgetWeekly,
+  budgetMonthly,
+  budgetRolling,
   budgetTotal,
   perService,
   perServiceDaily,
@@ -829,9 +909,18 @@ export function createPolicyEngine(
   const policy = parsed.policy;
   const clock = opts?.clock ?? Date.now;
   const mode: PolicyMode = policy.mode ?? "enforce";
+  const budgetTimezone = policy.budgets?.timezone ?? "UTC";
+  const weekStartsOn = policy.budgets?.weekStartsOn ?? "monday";
+  const initialNow = clock();
   const state: EngineState = {
-    day: utcDate(clock),
+    day: utcDate(() => initialNow),
+    budgetDay: calendarDayKey(initialNow, budgetTimezone),
+    budgetWeek: calendarWeekKey(initialNow, budgetTimezone, weekStartsOn),
+    budgetMonth: calendarMonthKey(initialNow, budgetTimezone),
     dailySpend: new Map(),
+    weeklySpend: new Map(),
+    monthlySpend: new Map(),
+    rollingBudgetSpend: new Map(),
     totalSpend: new Map(),
     serviceSpend: new Map(),
     serviceDailySpend: new Map(),
@@ -844,13 +933,27 @@ export function createPolicyEngine(
     adaptive: new Map(),
   };
 
-  function resetDailyIfNeeded(): void {
-    const today = utcDate(clock);
+  function resetDailyIfNeeded(now = clock()): void {
+    const today = utcDate(() => now);
     if (today !== state.day) {
-      state.dailySpend.clear();
       state.serviceDailySpend.clear();
       state.resourceDailySpend.clear();
       state.day = today;
+    }
+    const nextBudgetDay = calendarDayKey(now, budgetTimezone);
+    if (nextBudgetDay !== state.budgetDay) {
+      state.dailySpend.clear();
+      state.budgetDay = nextBudgetDay;
+    }
+    const nextBudgetWeek = calendarWeekKey(now, budgetTimezone, weekStartsOn);
+    if (nextBudgetWeek !== state.budgetWeek) {
+      state.weeklySpend.clear();
+      state.budgetWeek = nextBudgetWeek;
+    }
+    const nextBudgetMonth = calendarMonthKey(now, budgetTimezone);
+    if (nextBudgetMonth !== state.budgetMonth) {
+      state.monthlySpend.clear();
+      state.budgetMonth = nextBudgetMonth;
     }
   }
 
@@ -879,16 +982,29 @@ export function createPolicyEngine(
   }
 
   function applyRecord(intent: PaymentIntent): void {
-    resetDailyIfNeeded();
+    const now = clock();
+    resetDailyIfNeeded(now);
     const amount = parseAmount(intent.amount);
-    const { dailySpend, totalSpend, serviceSpend } = state;
+    const { dailySpend, weeklySpend, monthlySpend, totalSpend, serviceSpend } = state;
 
     dailySpend.set(intent.asset, (dailySpend.get(intent.asset) ?? 0n) + amount);
+    if (policy.budgets?.weekly != null) {
+      weeklySpend.set(intent.asset, (weeklySpend.get(intent.asset) ?? 0n) + amount);
+    }
+    if (policy.budgets?.monthly != null) {
+      monthlySpend.set(intent.asset, (monthlySpend.get(intent.asset) ?? 0n) + amount);
+    }
+    if (policy.budgets?.rolling != null) {
+      let accumulator = state.rollingBudgetSpend.get(intent.asset);
+      if (!accumulator) {
+        accumulator = new RollingSum({ windowMs: policy.budgets.rolling.windowSeconds * 1_000 });
+        state.rollingBudgetSpend.set(intent.asset, accumulator);
+      }
+      accumulator.add(now, amount);
+    }
     totalSpend.set(intent.asset, (totalSpend.get(intent.asset) ?? 0n) + amount);
     const svcKey = serviceKey(intent.payee, intent.asset);
     serviceSpend.set(svcKey, (serviceSpend.get(svcKey) ?? 0n) + amount);
-
-    const now = clock();
 
     // Issue #192: record into the per-service daily and rolling-window
     // accumulators when the policy declares them. The rolling-window
@@ -957,6 +1073,11 @@ export function createPolicyEngine(
    * bounded under traffic that bursts and then stops.
    */
   function pruneRollingSums(now: number): void {
+    for (const [key, accumulator] of state.rollingBudgetSpend) {
+      if (accumulator.prune(now)) {
+        state.rollingBudgetSpend.delete(key);
+      }
+    }
     for (const [key, accumulator] of state.serviceWindowSpend) {
       if (accumulator.prune(now)) {
         state.serviceWindowSpend.delete(key);
@@ -1024,7 +1145,8 @@ export function createPolicyEngine(
    * day rolls over, so yesterday's spend is not counted.
    */
   function spendCeilings(payee: string, asset: string): SpendCeilingLimit[] {
-    resetDailyIfNeeded();
+    const now = clock();
+    resetDailyIfNeeded(now);
     const ceilings: SpendCeilingLimit[] = [];
     const daily = policy.budgets?.daily;
     if (daily != null) {
@@ -1032,6 +1154,30 @@ export function createPolicyEngine(
         rule: "budget-daily",
         limit: parseAmount(daily),
         spent: state.dailySpend.get(asset) ?? 0n,
+      });
+    }
+    const weekly = policy.budgets?.weekly;
+    if (weekly != null) {
+      ceilings.push({
+        rule: "budget-weekly",
+        limit: parseAmount(weekly),
+        spent: state.weeklySpend.get(asset) ?? 0n,
+      });
+    }
+    const monthly = policy.budgets?.monthly;
+    if (monthly != null) {
+      ceilings.push({
+        rule: "budget-monthly",
+        limit: parseAmount(monthly),
+        spent: state.monthlySpend.get(asset) ?? 0n,
+      });
+    }
+    const rolling = policy.budgets?.rolling;
+    if (rolling != null) {
+      ceilings.push({
+        rule: "budget-rolling",
+        limit: parseAmount(rolling.cap),
+        spent: state.rollingBudgetSpend.get(asset)?.sum(now) ?? 0n,
       });
     }
     const total = policy.budgets?.total;

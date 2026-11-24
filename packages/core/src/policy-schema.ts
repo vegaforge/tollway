@@ -1,4 +1,5 @@
 import { z } from "zod";
+import { isValidTimeZone } from "./budget-period.js";
 import { TollwayError } from "./errors.js";
 import { policyModes } from "./policy-trace.js";
 import { settlementModels } from "./types.js";
@@ -255,8 +256,33 @@ export const policySchema = z.strictObject({
     .optional(),
   budgets: z
     .strictObject({
-      /** Spend ceiling per UTC day. */
-      daily: integerString.meta({ description: "Spend ceiling per UTC day." }).optional(),
+      /** Spend ceiling per calendar day (UTC by default, or in `timezone`). */
+      daily: integerString.meta({ description: "Spend ceiling per calendar day." }).optional(),
+      /** Spend ceiling per calendar week (UTC by default, or in `timezone`). */
+      weekly: integerString.meta({ description: "Spend ceiling per calendar week." }).optional(),
+      /** Spend ceiling per calendar month (UTC by default, or in `timezone`). */
+      monthly: integerString.meta({ description: "Spend ceiling per calendar month." }).optional(),
+      /** Rolling-window spend ceiling, e.g. 24 hours (86400s). */
+      rolling: windowCapSchema
+        .meta({ description: "Rolling-window spend ceiling." })
+        .optional(),
+      /** IANA time zone for calendar periods (daily, weekly, monthly). Defaults to "UTC". */
+      timezone: z
+        .string()
+        .min(1)
+        .refine(isValidTimeZone, "expected a valid IANA time zone")
+        .meta({
+          description:
+            "IANA time zone for calendar budget periods (daily, weekly, monthly). Defaults to UTC.",
+        })
+        .optional(),
+      /** First day of the week for `weekly` budgets. Defaults to "monday". */
+      weekStartsOn: z
+        .enum(["monday", "sunday"])
+        .meta({
+          description: "First day of the week for weekly budgets. Defaults to monday.",
+        })
+        .optional(),
       /** Lifetime ceiling for this policy. */
       total: integerString.meta({ description: "Lifetime ceiling for this policy." }).optional(),
     })
