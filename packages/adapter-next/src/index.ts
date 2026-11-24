@@ -11,10 +11,13 @@
  */
 
 import type { SignedReceipt } from "@vegaforge/tollway-core";
-import type { Gate, RouteTable } from "@vegaforge/tollway-server";
+import type { Gate, GateOutcome, RouteTable } from "@vegaforge/tollway-server";
 
 /** Extra argument a paid handler receives: the verified receipt. */
 export type PaidContext = { receipt: SignedReceipt };
+
+/** The one body every adapter returns when the gate itself throws (#107). */
+const GATE_ERROR_BODY = { error: "payment backend unavailable" } as const;
 
 /** A route handler that only runs after payment has settled. */
 export type PaidHandler = (request: Request, context: PaidContext) => Response | Promise<Response>;
@@ -42,11 +45,16 @@ export function withPaywall(
   handler: PaidHandler,
 ): (request: Request) => Promise<Response> {
   return async (request: Request): Promise<Response> => {
-    const outcome = await gate({
-      method: request.method,
-      url: requestUrl(request),
-      headers: requestHeaders(request),
-    });
+    let outcome: GateOutcome;
+    try {
+      outcome = await gate({
+        method: request.method,
+        url: requestUrl(request),
+        headers: requestHeaders(request),
+      });
+    } catch {
+      return jsonResponse(GATE_ERROR_BODY, 502);
+    }
 
     if (outcome.kind === "settled") {
       const response = await handler(request, { receipt: outcome.receipt });

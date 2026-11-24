@@ -75,6 +75,16 @@ export type Channel = {
     expectedAmount: string;
     observedAmount: string;
   };
+  /**
+   * Issue #38: ledger at which a funder-initiated close becomes effective.
+   * Recorded when `recover` starts the close so a later call knows whether a
+   * refund is permitted without guessing from wall-clock time.
+   */
+  closeEffectiveAtLedger?: number;
+  /** Issue #38: amount reclaimed by a completed funder refund, in base units. */
+  recoveredAmount?: string;
+  /** Issue #38: transaction hash of a completed funder refund. */
+  refundTxHash?: string;
 };
 
 export type Commitment = {
@@ -146,8 +156,32 @@ export interface ChannelManager {
    * stops the others.
    */
   resumeAll(): Promise<ResumeAllResult>;
+  /**
+   * Recovers uncommitted funds from a channel whose recipient stopped
+   * responding (#38). Reads the on-chain state first:
+   *
+   * - no close in progress: submits the funder's `close_start`, records its
+   *   effective ledger, and moves the channel to `recovering`;
+   * - close effective with a remaining balance: refunds in the same call and
+   *   moves the channel to `recovered`;
+   * - close not yet effective: throws `RecoveryNotYetEffectiveError` and
+   *   leaves the channel in `recovering` for a later call;
+   * - recipient already settled (no balance): records the settlement and
+   *   moves the channel to `closed` without refunding.
+   *
+   * `closed` and `recovered` channels are rejected with
+   * `ChannelAlreadyClosedError`, unknown ids with `ChannelNotFoundError`.
+   * Concurrent calls for one channel share a single run, so at most one
+   * refund is submitted.
+   */
   recover(channelId: string): Promise<RecoveryResult>;
 }
+
+/** Issue #38: lifecycle events surfaced by the manager's `onEvent` callback. */
+export type RecoveryEvent = {
+  type: "channel:recovering" | "channel:recovered";
+  channelId: string;
+};
 
 /**
  * What `resume` did (#176). `closed` recorded a settlement found on chain;

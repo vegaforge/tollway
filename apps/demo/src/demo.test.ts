@@ -20,6 +20,8 @@ describe("runDemo", () => {
     expect(result.receipt.receipt.model).toBe("x402");
     expect(result.receipt.receipt.settlement.kind).toBe("transaction");
     expect(result.receiptValid).toBe(true);
+    expect(result.summary?.count).toBe(1);
+    expect(result.summary?.byAsset[result.challenge.asset]).toBe("10000");
   });
 });
 

@@ -120,7 +120,51 @@ export interface MppChannelAdapter {
     network: StellarNetwork;
     startLedger: number;
   }): Promise<FoundChannelSettlement | null>;
+  /**
+   * Funder-side `close_start` (#38): starts a dispute on the one-way-channel
+   * contract and returns the transaction hash together with the ledger at
+   * which the close becomes effective. The waiting period is reported by
+   * `getState`; no wall-clock time is involved. The real contract invocation
+   * is implemented by the Stellar adapter's follow-up (#101).
+   */
+  startClose(input: { channelId: string; network: StellarNetwork }): Promise<StartCloseResult>;
+  /**
+   * Funder-side `refund` (#38): reclaims the uncommitted balance once the
+   * close is effective. Returns the transaction hash and the amount refunded,
+   * as an integer string in base units. The real contract invocation is
+   * implemented by the Stellar adapter's follow-up (#101).
+   */
+  refund(input: { channelId: string; network: StellarNetwork }): Promise<RefundResult>;
+  /**
+   * Reads the on-chain state the recovery path needs (#38): balance, the
+   * ledger a close is effective at, the current ledger, and the contract's
+   * refund waiting period. Never submits a transaction. The Stellar adapter
+   * maps `getChannelState` from `@stellar/mpp` onto this shape.
+   */
+  getState(input: { channelId: string; network: StellarNetwork }): Promise<ChannelState>;
 }
+
+/** Issue #38: result of a funder-initiated `close_start`. */
+export type StartCloseResult = {
+  /** On-chain transaction hash of the close_start. */
+  txHash: string;
+  /** Ledger at which the close becomes effective and refund becomes possible. */
+  closeEffectiveAtLedger: number;
+};
+
+/** Issue #38: result of a funder `refund`. */
+export type RefundResult = {
+  /** On-chain transaction hash of the refund. */
+  txHash: string;
+  /** Amount reclaimed, as an integer string in base units. */
+  refundedAmount: string;
+};
+
+/** Issue #38: the on-chain state recovery reads before deciding what to do. */
+export type ChannelState = ChannelChainState & {
+  /** Waiting period in ledgers between close_start and a permitted refund. */
+  refundWaitingPeriod: number;
+};
 
 /** Issue #176: the chain's view of a channel used by `resume`. */
 export type ChannelChainState = {

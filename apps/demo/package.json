@@ -14,6 +14,7 @@
     "@stellar/stellar-sdk": "^16.4.1",
     "@vegaforge/tollway-adapter-express": "workspace:*",
     "@vegaforge/tollway-core": "workspace:*",
+    "@vegaforge/tollway-observability": "workspace:*",
     "@vegaforge/tollway-server": "workspace:*",
     "@x402/core": "^2.31.0",
     "@x402/stellar": "^2.31.0",

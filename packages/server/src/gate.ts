@@ -154,6 +154,39 @@ export type GateOutcome =
 export type Gate = (request: TollwayRequest) => Promise<GateOutcome>;
 
 /**
+ * The one payment measurement the gate reports to an observer. Structurally
+ * compatible with `PaymentMetric` from @vegaforge/tollway-observability,
+ * without the server package taking a dependency on it.
+ */
+export type PaymentObserverMetric = {
+  payer: string;
+  payee: string;
+  model: SettlementModel;
+  amount: string;
+  asset: string;
+  latencyMs: number;
+  outcome: "settled" | "failed" | "skipped";
+  at: string;
+};
+
+/** The `receipt.created` event the gate emits to an observer. */
+export type PaymentObserverEvent = {
+  id?: string;
+  type: "receipt.created";
+  at: string;
+  data: Record<string, unknown>;
+};
+
+/**
+ * Minimal sink for settled and failed payments. An `ObservabilityHub`
+ * satisfies it; delivery failures must not change the gate's outcome.
+ */
+export type PaymentObserver = {
+  record(metric: PaymentObserverMetric): void;
+  emit(event: PaymentObserverEvent): Promise<unknown>;
+};
+
+/**
  * The services a gate uses: the receipt signer, the facilitator, and the
  * optional MPP charge handler, router and settlement cache.
  */
@@ -230,6 +263,17 @@ export type PaywallDeps = {
   ambiguousSettlementHoldMs?: number;
   /** Clock for quote expiry and service policy windows; injected tests can avoid waiting. */
   clock?: () => number;
+  /**
+   * Optional observability sink (#106). Called for a fresh settlement and for
+   * a rejected verification or settlement; a replayed cache hit is not
+   * reported again. The gate never awaits the event's delivery.
+   */
+  observer?: PaymentObserver;
+  /**
+   * Called when the observer throws or its event delivery rejects. The
+   * payment outcome is unchanged.
+   */
+  onObserverError?: (error: unknown) => void;
   /**
    * The receipt version this gate issues (Issue #166). Defaults to 1.
    *
@@ -1434,6 +1478,100 @@ export function createPaywallWithInFlight(
       : {}),
   };
 
+  /** Observer hooks are diagnostic; neither they nor their errors change a payment. */
+  function reportObserverError(error: unknown): void {
+    try {
+      deps.onObserverError?.(error);
+    } catch (hookError) {
+      // A second failure in the error hook also ends here: the gate must
+      // still answer with the settlement it already decided.
+      void hookError;
+    }
+  }
+
+  function observeOutcome(
+    outcome: GateOutcome,
+    offer: PaymentOffer,
+    model: SettlementModel,
+    startedAt: number,
+  ): void {
+    const observer = deps.observer;
+    if (!observer) return;
+    const endedAt = clock();
+    const latencyMs = Math.max(0, endedAt - startedAt);
+    const at = new Date(endedAt).toISOString();
+
+    if (outcome.kind === "settled" && !outcome.replayed) {
+      const receipt = outcome.receipt.receipt;
+      try {
+        observer.record({
+          payer: receipt.payer,
+          payee: receipt.payee,
+          model: receipt.model,
+          amount: receipt.amount,
+          asset: receipt.asset,
+          latencyMs,
+          outcome: "settled",
+          at,
+        });
+      } catch (error) {
+        reportObserverError(error);
+      }
+      try {
+        // Delivery is deliberately not awaited: webhook sends must not hold
+        // up the paid response. The rejection handler keeps it unobserved
+        // only in the sense of latency, never in the sense of error handling.
+        void Promise.resolve(
+          observer.emit({
+            id: receipt.id,
+            type: "receipt.created",
+            at,
+            data: {
+              receiptId: receipt.id,
+              resource: receipt.resource,
+              model: receipt.model,
+              amount: receipt.amount,
+            },
+          }),
+        ).catch(reportObserverError);
+      } catch (error) {
+        reportObserverError(error);
+      }
+      return;
+    }
+
+    if (outcome.kind === "rejected") {
+      // A failed verify has no verified payer. Keeping payer as an empty
+      // string rather than making it optional preserves PaymentMetric's
+      // shape for every consumer (see the justification in issue #106).
+      try {
+        observer.record({
+          payer: "",
+          payee: offer.payTo,
+          model,
+          amount: offer.amount,
+          asset: offer.asset,
+          latencyMs,
+          outcome: "failed",
+          at,
+        });
+      } catch (error) {
+        reportObserverError(error);
+      }
+    }
+  }
+
+  async function settleObserved(
+    settle: () => Promise<GateOutcome>,
+    offer: PaymentOffer,
+    model: SettlementModel,
+  ): Promise<GateOutcome> {
+    const startedAt = clock();
+    const outcome = await settle();
+    observeOutcome(outcome, offer, model, startedAt);
+    return outcome;
+  }
+
   return async function gate(request): Promise<GateOutcome> {
     const method = request.method.toUpperCase();
     const signatureHeader = readHeader(request.headers, PAYMENT_SIGNATURE_HEADER);
@@ -1519,7 +1657,8 @@ export function createPaywallWithInFlight(
     // An MPP credential answers an MPP challenge, so the agent has already
     // chosen the model; the router is not asked again.
     if (mppCredential) {
-      if (!deps.mppChargeHandler) {
+      const handler = deps.mppChargeHandler;
+      if (!handler) {
         return {
           kind: "rejected",
           status: 500,
@@ -1527,13 +1666,10 @@ export function createPaywallWithInFlight(
         };
       }
       const payment: MppChargePayment = { model: "mpp-charge", payload: mppCredential };
-      return settleWithHandler(
-        payment,
+      return settleObserved(
+        () => settleWithHandler(payment, offer, "mpp-charge", method, handler, context),
         offer,
         "mpp-charge",
-        method,
-        deps.mppChargeHandler,
-        context,
       );
     }
 
@@ -1568,14 +1704,19 @@ export function createPaywallWithInFlight(
           fresh,
         );
       };
-      return settleWithHandler(
-        payment,
+      return settleObserved(
+        () =>
+          settleWithHandler(
+            payment,
+            offer,
+            "x402",
+            method,
+            deps.facilitator,
+            context,
+            quoteExpired ? freshChallenge : undefined,
+          ),
         offer,
         "x402",
-        method,
-        deps.facilitator,
-        context,
-        quoteExpired ? freshChallenge : undefined,
       );
     }
 

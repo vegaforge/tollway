@@ -13,11 +13,20 @@ import type { NextFunction, Request, RequestHandler, Response } from "express";
 /** Where the verified receipt is stashed on res.locals for downstream handlers. */
 export const RECEIPT_LOCALS_KEY = "tollwayReceipt";
 
+/** The one body every adapter returns when the gate itself throws (#107). */
+const GATE_ERROR_BODY = { error: "payment backend unavailable" } as const;
+
 /**
  * Wraps a gate as Express middleware. On a settled payment it sets the
  * PAYMENT-RESPONSE and TOLLWAY-RECEIPT headers, attaches the receipt to res.locals, and calls
  * next() so the route handler can serve the resource. Otherwise it answers
  * the request itself (402 with the challenge, or the rejection status).
+ *
+ * Decision for #107: a gate that throws is answered here as 502 with a fixed
+ * body, not forwarded to `next(err)`. Fastify, Hono and Next have no
+ * equivalent error channel, and Express's default error page would leak the
+ * internal message and break the shared conformance suite. Error reporting is
+ * the gate's or an outer middleware's job; this adapter owns the response.
  */
 export function expressPaywall(gate: Gate): RequestHandler {
   return (req: Request, res: Response, next: NextFunction): void => {
@@ -40,7 +49,10 @@ export function expressPaywall(gate: Gate): RequestHandler {
         if (outcome.headers) res.set(outcome.headers);
         res.status(outcome.status).json({ error: outcome.reason });
       })
-      .catch(next);
+      .catch(() => {
+        if (res.headersSent) return;
+        res.status(502).json(GATE_ERROR_BODY);
+      });
   };
 }
 
