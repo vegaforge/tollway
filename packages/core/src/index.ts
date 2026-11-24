@@ -16,9 +16,13 @@ export {
 } from "./errors.js";
 export {
   type AdaptiveAnomalyEvent,
+  type ChannelOpenDecision,
+  type ChannelOpenIntent,
+  type ChannelOpenRule,
   createPolicyEngine,
   type PaymentIntent,
   type PolicyEngine,
+  type PolicyHeadroom,
 } from "./policy.js";
 export {
   formatPolicyIssues,

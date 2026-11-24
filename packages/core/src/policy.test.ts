@@ -124,24 +124,44 @@ describe("createPolicyEngine", () => {
       expect(result).toEqual({ allowed: true });
     });
 
-    it("blocks when amount is below min channel deposit", async () => {
+    // #181: the minimum deposit guards opening a channel. A per-request channel
+    // payment is priced far below any deposit, so comparing the two blocked
+    // every channel payment. Before the fix, the first test below was blocked.
+    it("does not block a channel payment because its price is below the minimum deposit", async () => {
+      const engine = createPolicyEngine({
+        perModel: { "mpp-channel": { minChannelDeposit: "1000000" } },
+      });
+      const result = await engine.check(intent({ model: "mpp-channel", amount: "100" }));
+      expect(result).toEqual({ allowed: true });
+    });
+
+    it("blocks a channel open whose deposit is below the minimum", async () => {
       const engine = createPolicyEngine({
         perModel: { "mpp-channel": { minChannelDeposit: "200" } },
       });
-      const result = await engine.check(intent({ model: "mpp-channel", amount: "100" }));
+      const result = await engine.evaluateChannelOpen?.({
+        payee: "GSERVICE",
+        asset: "USDC:GA5Z",
+        deposit: "100",
+      });
       expect(result).toEqual({
         allowed: false,
+        wouldBlock: true,
         rule: "min-channel-deposit",
         detail: expect.stringContaining("below minimum channel deposit"),
       });
     });
 
-    it("allows when amount meets min channel deposit", async () => {
+    it("allows a channel open at the minimum deposit", async () => {
       const engine = createPolicyEngine({
         perModel: { "mpp-channel": { minChannelDeposit: "100" } },
       });
-      const result = await engine.check(intent({ model: "mpp-channel", amount: "100" }));
-      expect(result).toEqual({ allowed: true });
+      const result = await engine.evaluateChannelOpen?.({
+        payee: "GSERVICE",
+        asset: "USDC:GA5Z",
+        deposit: "100",
+      });
+      expect(result).toMatchObject({ allowed: true, wouldBlock: false, rule: null });
     });
 
     it("reports a disabled model before budget", async () => {

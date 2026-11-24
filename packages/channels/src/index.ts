@@ -28,6 +28,7 @@ export {
   ChannelNotFoundError,
   ChannelNotOpenError,
   CloseNotSubmittedError,
+  CommitmentConflictError,
   CommitmentExceedsDepositError,
   CounterpartyQuarantinedError,
   InvalidAmountError,
@@ -48,10 +49,33 @@ export {
 } from "./events.js";
 export { type CreateChannelManagerOptions, createChannelManager } from "./manager.js";
 export {
+  RATE_PRECISION,
+  type SizeDepositDecision,
+  type SizeDepositInput,
+  sizeDeposit,
+} from "./sizing.js";
+export {
   createStellarMppChannelAdapter,
   type StellarMppChannelAdapterOptions,
 } from "./stellar-adapter.js";
-export { type CommitmentStore, createMemoryCommitmentStore } from "./store.js";
+export {
+  type CommitmentAppendExpectation,
+  type CommitmentStore,
+  createMemoryCommitmentStore,
+} from "./store.js";
+export {
+  createPostgresCommitmentStore,
+  type PostgresClient,
+  type PostgresCommitmentStoreOptions,
+  type PostgresConnection,
+  type PostgresQueryable,
+  type PostgresQueryResult,
+} from "./stores/postgres.js";
+export {
+  createRedisCommitmentStore,
+  type RedisCommitmentStoreOptions,
+  type RedisLikeClient,
+} from "./stores/redis.js";
 export type {
   Channel,
   ChannelListFilter,

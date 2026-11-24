@@ -20,6 +20,7 @@ import {
   ChannelNotFoundError,
   ChannelNotOpenError,
   CloseNotSubmittedError,
+  CommitmentConflictError,
   CommitmentExceedsDepositError,
   CounterpartyQuarantinedError,
   InvalidAmountError,
@@ -33,6 +34,7 @@ import type {
   ChannelListFilter,
   ChannelManager,
   ChannelPage,
+  ChannelStatus,
   ClosePolicy,
   CloseResult,
   Commitment,
@@ -144,16 +146,34 @@ export function createChannelManager(options: CreateChannelManagerOptions): Chan
    * other failure may have reached the chain, so the channel stays
    * `closing` for `resume` instead of being closed a second time.
    */
-  async function submitClose(channel: Channel, startedAtLedger: number): Promise<CloseResult> {
-    const stream = await store.listCommitments(channel.id);
-    const latest = stream.at(-1);
-    const cumulativeAmount = latest?.cumulativeAmount ?? "0";
+  async function submitClose(
+    channel: Channel,
+    startedAtLedger: number,
+    expectedStatus: ChannelStatus,
+  ): Promise<CloseResult> {
     const closeAttempt = {
       attemptId: globalThis.crypto.randomUUID(),
       startedAtLedger,
       startedAt: now(),
     };
-    await store.updateChannel(channel.id, { status: "closing", closeAttempt });
+    // Move to `closing` first, as a compare-and-set on the status. Commits
+    // are conditioned on `open`, so once this lands no commitment can follow,
+    // and the stream read below is the final one. A concurrent close loses
+    // here and is refused instead of submitting a second close (#175).
+    try {
+      await store.transitionChannel(channel.id, expectedStatus, {
+        status: "closing",
+        closeAttempt,
+      });
+    } catch (error) {
+      if (error instanceof CommitmentConflictError && error.field === "status") {
+        throw new ChannelAlreadyClosedError(channel.id, error.actual);
+      }
+      throw error;
+    }
+    const stream = await store.listCommitments(channel.id);
+    const latest = stream.at(-1);
+    const cumulativeAmount = latest?.cumulativeAmount ?? "0";
     emit({ type: "channel:closing", ...eventBase(channel), cumulativeAmount });
 
     let settlement: CloseAdapterResult;
@@ -237,7 +257,7 @@ export function createChannelManager(options: CreateChannelManagerOptions): Chan
     if (chain.closeEffectiveAtLedger === undefined) {
       // Nothing closed on chain: the earlier attempt never landed. Close
       // again with the same commitment stream.
-      const closed = await submitClose(current, chain.currentLedger);
+      const closed = await submitClose(current, chain.currentLedger, "closing");
       return { kind: "reclosed", ...closed };
     }
 
@@ -359,10 +379,12 @@ export function createChannelManager(options: CreateChannelManagerOptions): Chan
         commitment: signed.commitment,
       };
 
-      await store.appendCommitment(commitment);
-      await store.updateChannel(channelId, {
-        committed: cumulativeAmount,
-        sequence: nextSequence,
+      // A compare-and-set on the sequence and the status we read above. If
+      // another commit or a close got there first, this throws
+      // CommitmentConflictError, and the signed blob is dropped with it.
+      await store.appendCommitment(commitment, {
+        expectedSequence: current.sequence,
+        expectedStatus: "open",
         lastCommitAt: now(),
       });
 
@@ -439,7 +461,7 @@ export function createChannelManager(options: CreateChannelManagerOptions): Chan
       // Read the chain height before anything is written: if this fails,
       // nothing happened and the channel is still simply open.
       const chain = await adapter.getChannelState({ channelId, network: current.network });
-      return submitClose(current, chain.currentLedger);
+      return submitClose(current, chain.currentLedger, "open");
     },
 
     resume(channelId: string): Promise<ResumeOutcome> {
