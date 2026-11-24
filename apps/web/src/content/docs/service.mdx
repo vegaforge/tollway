@@ -1,11 +1,11 @@
 ---
 title: Shared service
-description: The optional, self-hosted Tollway service, what it holds, how it is configured, and how API keys work
+description: The optional, self-hosted Tollway service, multi-tenant isolation, configuration, API keys, and endpoints
 ---
 
-Tollway is a library first. A gate in your server and a client in your agent need nothing else: budgets, receipts and metrics live in the process that uses them. The shared service, `@vegaforge/tollway-service`, is for teams that want those things shared across many processes, for example one budget for a fleet of agents, or one dashboard over every gate.
+Tollway is a library first. A gate in your server and a client in your agent need nothing else: budgets, receipts and metrics live in the process that uses them. The shared service, `@vegaforge/tollway-service`, is for teams and platforms that want those things shared across many processes or isolated cleanly across organisations and projects.
 
-This page covers the skeleton every service feature builds on: the trust boundary, configuration, API keys, and the health, readiness and OpenAPI endpoints. Receipts, metrics, channels and the policy store mount their routes on it.
+This page covers the trust boundary, multi-tenant isolation model, configuration, API keys, quotas, PostgreSQL row-level security, and the HTTP routes mounted on the service.
 
 ## Library or service
 
@@ -18,11 +18,48 @@ Run the service when you need state that more than one process reads or writes: 
 The service is deliberately limited:
 
 - **It holds no keys that sign or pay.** There is no receipt signing key, no Stellar secret and no facilitator credential in its configuration. It cannot move funds or issue a receipt, so compromising it cannot either. Receipts it stores were signed elsewhere, and anyone can re-verify them.
-- **It calls nothing Tollway runs.** It makes no outbound network call of its own: no telemetry, no update check, no license server. The only traffic it can cause is to the stores and webhook targets you configure. A test runs every route with `fetch` stubbed to fail and asserts it is never called.
-- **It stores only what you send it.** Receipts, payment metrics, channel state and policies arrive from your gates and clients over the authenticated API. The current release keeps them in memory; persistent stores are configured by you.
+- **It calls nothing Tollway runs.** It makes no outbound network call of its own: no telemetry, no update check, no license server. The only traffic it can cause is to the stores and webhook targets you configure. Tests run every route with `fetch` stubbed to fail and assert it is never called.
+- **It stores only what you send it.** Receipts, payment metrics, channel state, policies and audit entries arrive from your gates and clients over the authenticated API.
 - **It never reveals a credential.** API keys are configured as SHA-256 hashes. No response or log line contains a key, a key hash, or a request's `Authorization` header.
 
-Anyone with access to the service's host or stores can read everything it stores. Treat it like any other database of payment records.
+Anyone with access to the service's host or database can read everything it stores. See [Multi-tenancy and security](#multi-tenancy-and-security) for what tenancy isolates and where its boundary ends.
+
+## Multi-tenancy and security
+
+Every stored record in `@vegaforge/tollway-service` (receipt, payment metric, channel, commitment, policy version and audit entry) belongs to one organisation and project (`{ orgId, projectId }`), and every store method takes `TenantScope` as its first argument.
+
+### How tenant isolation works
+
+1. **Tenant comes only from the API key.** Every configured entry in `apiKeys` is bound to one `orgId` and `projectId` at startup. Request handlers read the tenant from the authenticated key (`tenantOf(c)`), never from a path parameter, query parameter or JSON body field. Unknown query parameters such as `?orgId=...` fail validation with `400 invalid-request`.
+2. **Composite keys prevent ID collisions.** Callers choose receipt IDs, channel IDs and agent IDs. Isolation lives in the partition and primary key (`(org_id, project_id, id)`), not in a post-query filter, so two projects can store identical receipt IDs, channel IDs or agent IDs without conflict or leakage.
+3. **Signed pagination cursors.** Every cursor returned by `/v1/receipts`, `/v1/channels`, `/v1/channels/{id}/commitments` and `/v1/audit` is signed with HMAC-SHA256 over `(orgId, projectId, route, query)` and checked in constant time before decoding. Replaying a cursor under another tenant's key, or changing a filter parameter on the next page, returns `400 invalid-request`. Set `TOLLWAY_SERVICE_CURSOR_SECRET` (at least 32 characters) when running multiple replicas behind a load balancer.
+4. **Batch ingest tenant verification.** When gates or clients push batches to `POST /v1/ingest`, `POST /v1/metrics` or `POST /v1/receipts` with optional `orgId` or `projectId` claims, any batch or item claiming a different tenant from the calling key is refused whole with `403 tenant-mismatch` before a single record is verified or written. Batch `idempotencyKey` deduplication is also partitioned per tenant. An event's caller-chosen `id` is emitted as `<orgId>/<projectId>/<id>`, because webhook receivers dedupe on the event id and one observability hub may serve every tenant.
+5. **Explicitly separated operator overview.** None of `ReceiptStore`, `MetricsStore`, `ChannelStore`, `PolicyStore` or `AuditStore` has a cross-tenant read method. The only cross-tenant route is `GET /v1/admin/tenants`, backed by `AdminStore` and guarded by separate `operatorKeys` (`TOLLWAY_SERVICE_OPERATOR_KEYS`). It returns per-tenant record counts only, never raw payment records, and refuses normal tenant keys (including keys with the `admin` scope) with `403 forbidden`. Operator keys are likewise refused with `403` on every tenant route.
+
+### Composite keys and PostgreSQL row-level security
+
+The service ships only in-memory stores today. `serviceTenantMigrations`, `withTenantTransaction` and `withOperatorReadTransaction` are the schema and transaction helpers a PostgreSQL-backed `ReceiptStore`, `MetricsStore`, `ChannelStore`, `PolicyStore` and `AuditStore` must use; no such store exists yet (the PostgreSQL deployment is tracked in #230). Their tests run against a fake client, not a live database. A store built on them gets two layers of isolation:
+
+- **Primary layer (composite schema keys):** `(org_id, project_id)` leads every `PRIMARY KEY`, `FOREIGN KEY` and secondary index across `receipts`, `metrics`, `channels`, `commitments`, `policy_versions` and `audit_entries`. Queries use the composite index directly and allow identical caller-chosen IDs across projects.
+- **Second layer (forced row-level security):** Every tenant table runs with both `ENABLE ROW LEVEL SECURITY` and `FORCE ROW LEVEL SECURITY`, checking `org_id = NULLIF(current_setting('tollway.org_id', true), '')` and `project_id = NULLIF(current_setting('tollway.project_id', true), '')`. `withTenantTransaction` checks out a dedicated connection when given a pool, starts a transaction, binds both settings with `set_config(..., true)` (transaction-local), and destroys the pooled connection (`release(true)`) if `ROLLBACK` itself fails. A separate `FOR SELECT` policy gated on `tollway.operator_read = 'on'` lets `withOperatorReadTransaction` compute read-only `AdminStore` count rollups without granting `BYPASSRLS`. If a future query omits a `WHERE` clause or runs outside `withTenantTransaction`, `current_setting(..., true)` resolves to `NULL` after `NULLIF` and matches zero rows instead of leaking across tenants (#231).
+
+### Limits of shared-instance multi-tenancy
+
+Application-level tenancy and PostgreSQL RLS isolate **API callers** from each other. They do **not** isolate tenants from the operator of the shared deployment:
+
+- Anyone with PostgreSQL superuser access, a database role carrying `BYPASSRLS`, filesystem access to snapshots or backups, or shell/memory access to the `tollway-service` host can inspect every tenant's receipts, counterparties, channel balances and policies.
+- Process resources (CPU, memory and network sockets) are shared across tenants, although optional per-tenant quotas bound ingest rates and stored row counts.
+- Database encryption keys and backup retention schedules are shared across every tenant in one PostgreSQL cluster.
+
+### Running one instance per tenant instead
+
+Run one `tollway-service` deployment and one dedicated database per tenant whenever you require:
+
+- Separate database credentials, KMS encryption keys, backup schedules or data-residency regions per customer.
+- Hard blast-radius separation so a database operator or maintenance script for tenant A has no network route or credential for tenant B's store.
+- Customer-dedicated rate limits, network allowlists or VPC peering.
+
+To run single-tenant per instance, deploy one `tollway-service` process and backing store per customer, configure only that customer's `(orgId, projectId)` in `TOLLWAY_SERVICE_API_KEYS`, leave `TOLLWAY_SERVICE_OPERATOR_KEYS` unset, and isolate each stack at the container, network and database level. Because every API route and store contract already carries `orgId` and `projectId`, moving a tenant between a shared instance and a dedicated instance requires no client code change beyond rotating its service URL and API key.
 
 ## Running it
 
@@ -30,7 +67,7 @@ The package ships a `tollway-service` binary that reads its configuration from t
 
 ```bash
 export TOLLWAY_SERVICE_PORT=8787
-export TOLLWAY_SERVICE_API_KEYS='[{"name":"ops","sha256":"<hash>","scopes":["read","admin"]}]'
+export TOLLWAY_SERVICE_API_KEYS='[{"name":"ops","orgId":"acme","projectId":"payments","sha256":"<hash>","scopes":["read","admin"]}]'
 npx tollway-service
 ```
 
@@ -60,18 +97,23 @@ Every field can come from an environment variable or from a JSON file named by `
 | Field | Variable | Required | Default | Meaning |
 | --- | --- | --- | --- | --- |
 | `port` | `TOLLWAY_SERVICE_PORT` | yes | none | TCP port to listen on, 1 to 65535. |
-| `apiKeys` | `TOLLWAY_SERVICE_API_KEYS` | yes | none | JSON array of keys, at least one. See below. |
+| `apiKeys` | `TOLLWAY_SERVICE_API_KEYS` | yes | none | JSON array of tenant keys, at least one. See below. |
+| `operatorKeys` | `TOLLWAY_SERVICE_OPERATOR_KEYS` | no | none | JSON array of operator keys for `/v1/admin/tenants`. |
+| `cursorSecret` | `TOLLWAY_SERVICE_CURSOR_SECRET` | no | random per process | HMAC secret (at least 32 characters) signing tenant-bound cursors across replicas. |
+| `quotas` | `TOLLWAY_SERVICE_QUOTAS` | no | none | Optional `default` and per-tenant `maxIngestItemsPerMinute` and `maxStoredRecords` caps. |
 | `host` | `TOLLWAY_SERVICE_HOST` | no | `127.0.0.1` | Interface to bind. Loopback by default, so exposing the service is a choice you make. |
 | `readinessTimeoutMs` | `TOLLWAY_SERVICE_READINESS_TIMEOUT_MS` | no | `2000` | How long `/readyz` waits for each store. |
 | `maxBodyBytes` | `TOLLWAY_SERVICE_MAX_BODY_BYTES` | no | `1048576` | Largest request body `/v1/*` accepts. Larger bodies get 413. |
 
-## API keys
+## API keys and quotas
 
-Every route under `/v1/` requires `Authorization: Bearer <key>`. Each configured key has:
+Every route under `/v1/` requires `Authorization: Bearer <key>`. Each configured tenant key in `apiKeys` has:
 
 - `name`: shown in request logs and audit records in place of the key.
+- `orgId`: the organisation that owns this key (`1` to `64` letters, digits, `.`, `_` or `-`).
+- `projectId`: the project within `orgId` that owns this key.
 - `sha256`: the lowercase hex SHA-256 of the key. The key itself is never configured.
-- `scopes`: one or more of `read`, `ingest` and `admin`. Each route names the one scope it needs, and no scope implies another, so a key that reads and administers lists both.
+- `scopes`: one or more of `read`, `ingest` and `admin`. Each tenant route names the one scope it needs, and no scope implies another, so a key that reads and administers lists both.
 - `revoked` (optional): `true` refuses the key with 401.
 
 Generate a key with any source of randomness, then hash it. `hash-key` reads the key on stdin, so it never lands in shell history or the process list:
@@ -85,13 +127,32 @@ Give `$KEY` to the client and configure the printed hash. To rotate, add the new
 
 The service hashes each presented key and compares the digest with every configured hash in constant time, so response timing does not reveal which entry matched or how close a guess came.
 
+Optional per-tenant quotas bound shared-instance usage and return `429` with a `Retry-After` header before receipt signature verification runs:
+
+```json
+{
+  "default": { "maxIngestItemsPerMinute": 600, "maxStoredRecords": 100000 },
+  "tenants": [
+    {
+      "orgId": "acme",
+      "projectId": "payments",
+      "maxIngestItemsPerMinute": 5000,
+      "maxStoredRecords": 1000000
+    }
+  ]
+}
+```
+
 | Situation | Status | `error.code` |
 | --- | --- | --- |
 | No `Authorization` header, another scheme, or a malformed value | 401 | `unauthorized` |
 | A key that is not configured, or is revoked | 401 | `unauthorized` |
-| A valid key without the route's scope | 403 | `forbidden` |
+| A valid key without the route's scope, or a tenant key on `/v1/admin/*` | 403 | `forbidden` |
+| An ingest batch or item claiming another `orgId` or `projectId` | 403 | `tenant-mismatch` |
+| Tenant exceeded `maxIngestItemsPerMinute` | 429 | `rate-limited` |
+| Tenant reached `maxStoredRecords` | 429 | `quota-exceeded` |
 
-`GET /v1/whoami` returns the name and scopes of the calling key, which is a quick way to check a key works.
+`GET /v1/whoami` returns `{ name, orgId, projectId, scopes }` for the calling tenant key.
 
 ## Endpoints
 
@@ -100,58 +161,71 @@ The service hashes each presented key and compares the digest with every configu
 | `GET /healthz` | none | Liveness. Answers while the process serves, and calls no store. |
 | `GET /readyz` | none | Readiness. Checks every backing store; 200 when all are ok, 503 naming each failing one. |
 | `GET /openapi.json` | none | The OpenAPI 3.1 document for every mounted route. |
-| `GET /v1/whoami` | any scope | The calling key's name and scopes. |
-| `POST /v1/metrics` | `ingest` | Records a batch of payment metrics. See [Metrics](#metrics). |
-| `GET /v1/metrics/summary` | `read` | Settled spend per asset, with counts per outcome. |
-| `GET /v1/metrics/series` | `read` | Spend, counts and latency per time bucket. |
-| `GET /v1/metrics/export` | `read` | The matched metrics as a JSON or CSV download. |
-| `PUT /v1/agents/{agentId}/policy` | `admin` | Creates or updates an agent's policy with `If-Match` concurrency control. |
-| `GET /v1/agents/{agentId}/policy` | `read` | Reads the active policy with `ETag` and `If-None-Match` (`304`) support. |
-| `GET /v1/agents/{agentId}/policy/versions` | `read` | Lists every immutable policy version (including retired tombstones). |
-| `GET /v1/agents/{agentId}/policy/versions/{version}` | `read` | Reads a single immutable policy version. |
-| `DELETE /v1/agents/{agentId}/policy` | `admin` | Retires an agent's policy by appending a tombstone version. |
-| `GET /v1/audit` | `read` | Lists immutable policy audit records with cursor pagination. |
+| `GET /v1/whoami` | any tenant scope | The calling key's name, `orgId`, `projectId` and scopes. |
+| `POST /v1/receipts` | `ingest` | Verifies and archives signed receipts in the caller's tenant. |
+| `GET /v1/receipts` | `read` | Searches the caller's receipts, newest first, with signed cursor paging. |
+| `GET /v1/receipts/{id}` | `read` | Reads one signed receipt in the caller's tenant. |
+| `POST /v1/metrics` | `ingest` | Records a batch of payment metrics in the caller's tenant. See [Metrics](#metrics). |
+| `GET /v1/metrics/summary` | `read` | Settled spend per asset, with counts per outcome, for the caller's tenant. |
+| `GET /v1/metrics/series` | `read` | Spend, counts and latency per time bucket for the caller's tenant. |
+| `GET /v1/metrics/export` | `read` | The matched tenant metrics as a JSON or CSV download. |
+| `GET /v1/channels` | `read` | Tracked channels in the caller's tenant, newest first. |
+| `GET /v1/channels/{id}` | `read` | One channel in the caller's tenant. |
+| `GET /v1/channels/{id}/commitments` | `read` | The channel's commitment stream (`include=blob` requires `admin`). |
+| `POST /v1/channels/{id}/close` | `admin` | Settles the channel on chain with its latest commitment. |
+| `PUT /v1/agents/{agentId}/policy` | `admin` | Appends an immutable policy version and audit entry for the agent. |
+| `GET /v1/agents/{agentId}/policy` | `read` | Current policy version for the agent in the caller's tenant. |
+| `GET /v1/agents/{agentId}/policy/versions` | `read` | Full policy history for the agent in the caller's tenant. |
+| `GET /v1/audit` | `read` | Tenant audit log, newest first, with signed cursor paging. |
+| `POST /v1/ingest` | `ingest` | Batch ingest for receipts, metrics and events with tenant verification and `idempotencyKey` deduplication. |
+| `GET /v1/admin/tenants` | `operator` | Per-tenant record counts from `AdminStore` (operator keys only). |
 
 `/readyz` reports a store as failing with `reason: "timeout"` or `reason: "error"`. The error itself goes to the service log, never the response, because it can name a host or carry a connection string.
 
 The OpenAPI document is generated from the zod schemas each route validates its path, query and body with, so it cannot drift from what the service accepts.
 
+The `tollway-service` CLI mounts `metricsModule()`, `policiesModule()`, `receiptsModule()`, `ingestModule()` and `adminModule()` by default. The CLI configures no `ReceiptVerifier`, so `POST /v1/receipts`, and `POST /v1/ingest` with receipts, answer `503 not-ready` there. Programmatic callers pass a `ReceiptVerifier` (`receiptsModule({ verifier })`, `ingestModule({ verifier })`) to accept signed receipt writes and `createChannelsModule()` with `channelManagers` to serve the channel endpoints.
+
 ## Channels
 
-The channels API lists the MPP channels this deployment tracks, shows one channel with its commitment stream, and triggers a close. Mount it with the deployment's own `ChannelManager`:
+The channels API lists the MPP channels tracked for each `(orgId, projectId)` tenant, shows one channel with its commitment stream, and triggers a close. Mount it with `createTenantChannelManagers` over a shared `ChannelStore`:
 
 ```ts
-import { createChannelManager } from "@vegaforge/tollway-channels";
-import { createChannelsModule, createService } from "@vegaforge/tollway-service";
+import {
+  createChannelsModule,
+  createMemoryStores,
+  createService,
+  createTenantChannelManagers,
+} from "@vegaforge/tollway-service";
 
+const stores = createMemoryStores();
 const service = createService({
   config,
-  channelManager: createChannelManager({ adapter, store }),
-  observability: hub, // optional: receives channel.closed
+  stores,
+  channelManagers: createTenantChannelManagers({ store: stores.channels, adapter }),
+  observability: hub, // optional: receives tenant-scoped channel.closed
   modules: [createChannelsModule()],
 });
 ```
 
-`createChannelsModule` throws when the service has no `channelManager`, so a deployment never serves an empty channels API by mistake. The service only shows channels that manager tracks, and the manager's store is pluggable.
+`createChannelsModule` throws when the service has no `channelManagers`, so a deployment never serves an empty channels API by mistake.
 
 | Route | Key | Purpose |
 | --- | --- | --- |
-| `GET /v1/channels` | `read` | Every tracked channel, newest first. Filters: `status`, `counterparty`, `asset`. Paged with `limit` (1 to 200, default 50) and the opaque `cursor` from the previous page's `nextCursor`. |
-| `GET /v1/channels/{id}` | `read` | One channel. |
+| `GET /v1/channels` | `read` | Every tracked channel in the caller's tenant, newest first. Filters: `status`, `counterparty`, `asset`. Paged with `limit` (1 to 200, default 50) and the tenant-bound `cursor` from `nextCursor`. |
+| `GET /v1/channels/{id}` | `read` | One channel in the caller's tenant. |
 | `GET /v1/channels/{id}/commitments` | `read` | The commitment stream ordered by sequence, paged the same way. The signed blob is left out unless `include=blob` is passed with an `admin` key. |
 | `POST /v1/channels/{id}/close` | `admin` | Settles the channel on chain with its latest commitment. |
 
-Each channel carries its stored fields, plus `remaining` (`deposit` minus `committed`, computed as a bigint) and `shouldClose` (what the manager's close policy says now). Amounts are integer strings in the asset's smallest unit. `reconcileStatus` is reserved and stays absent until #212 or #213 persists reconcile results. An unknown channel id returns 404.
+Each channel carries its stored fields, plus `remaining` (`deposit` minus `committed`, computed as a bigint) and `shouldClose` (what the manager's close policy says now). Amounts are integer strings in the asset's smallest unit. `reconcileStatus` is reserved and stays absent until #212 or #213 persists reconcile results. An unknown channel id, or a channel belonging to another tenant, returns 404.
 
-**Closing.** A close request on an open channel calls `ChannelManager.close` and returns the closed channel. The response's `closeRequest` records the key name that asked and when, and the service emits `channel.closed` through the configured observability hub. The close is idempotent:
+**Closing.** A close request on an open channel calls the tenant's `ChannelManager.close`, writes a tenant-scoped audit entry, and returns the closed channel. The response's `closeRequest` records the key name that asked and when, and the service emits `channel.closed` (including `orgId` and `projectId`) through the configured observability hub. Close metadata and in-flight close guards are keyed by `(orgId, projectId, channelId)`. The close is idempotent:
 - A channel already `closing` or `closed` is returned as it is, and is never closed a second time.
 - Concurrent requests for one channel in the same process share a single close, so the adapter submits once.
 - A channel in any other state, such as `recovering`, returns 409 `conflict`.
 - A close that fails returns 502 `close-failed`, with the channel's current status in `details`. The cause goes to the log, not the response.
 
 The service does not hold channel funds. They stay in the channel contract until the close settles them, and the service runs the same close the funder side would otherwise run.
-
-**Running more than one replica.** The guard against a second close is per process. Two replicas that both receive a close request can each submit one until the store gains the compare-and-set from #175. Until then, give the `admin` scope to one replica only. Close requests are recorded for the life of the process; the close itself is recorded by the manager's store.
 
 ## Metrics
 
@@ -166,7 +240,7 @@ const app = createService({
 });
 ```
 
-Every route reads and writes through the `MetricsStore`, so the counting rules are the observability hub's, and a persistent store changes where metrics live, never how they are counted.
+Every route reads and writes through the tenant-scoped `MetricsStore`, so the counting rules stay the observability hub's and each `(orgId, projectId)` sees only its own rollups and exports.
 
 ### Ingest
 
@@ -191,7 +265,7 @@ Content-Type: application/json
 }
 ```
 
-Each metric is validated field by field: `amount` is an integer string in the asset's smallest unit, `at` is ISO 8601 with a zone, and `latencyMs` is a finite non-negative number. Unknown fields are refused. A batch holds 1 to 1000 metrics, and the answer is `202 {"accepted": n}` once the store has recorded them.
+Each metric is validated field by field: `amount` is an integer string in the asset's smallest unit, `at` is ISO 8601 with a zone, and `latencyMs` is a finite non-negative number. Unknown fields are refused. If the batch or any metric carries `orgId` or `projectId`, it must match the calling key's tenant or the whole batch is refused with `403 tenant-mismatch`. A batch holds 1 to 1000 metrics, and the answer is `202 {"accepted": n}` once the store has recorded them.
 
 ### Summary
 
@@ -199,7 +273,7 @@ Each metric is validated field by field: `amount` is an integer string in the as
 GET /v1/metrics/summary?asset=USDC:GA5Z...&from=2026-11-01T00:00:00Z&to=2026-11-24T00:00:00Z
 ```
 
-The filters are `payer`, `payee`, `model`, `asset`, `outcome`, `from` and `to`. An unknown query parameter is a `400`, so a typo cannot silently widen a query.
+The filters are `payer`, `payee`, `model`, `asset`, `outcome`, `from` and `to`. An unknown query parameter is a `400`, so a typo or `?orgId=` override cannot silently alter a query.
 
 ```json
 {
@@ -228,7 +302,7 @@ GET /v1/metrics/series?from=2026-11-23T00:00:00Z&to=2026-11-24T00:00:00Z&bucket=
 GET /v1/metrics/export?format=csv&from=2026-11-01T00:00:00Z
 ```
 
-`format` is `json` or `csv`, and the filters are the summary's. The body is what `ObservabilityHub.export` writes, with `Content-Type` `application/json` or `text/csv` and a `Content-Disposition: attachment` file name. CSV cells that a spreadsheet could read as a formula are prefixed with a single quote.
+`format` is `json` or `csv`, and the filters are the summary's. The body is what `ObservabilityHub.export` writes for the calling key's tenant, with `Content-Type` `application/json` or `text/csv` and a `Content-Disposition: attachment` file name. CSV cells that a spreadsheet could read as a formula are prefixed with a single quote.
 
 ### Limits
 
@@ -242,16 +316,6 @@ A dashboard query cannot exhaust the process. Each of these is a `400` whose `de
 
 `metricsModule({ limits })` checks each limit when the module is created, so a bad value fails at startup.
 
-## Policy store
-
-The policy routes (`policyModule()`, mounted by `tollway-service`) store and serve per-agent `Policy` documents over HTTP without enforcing payments themselves. **Enforcement still happens in each agent process** via `createPolicyEngine(policy)` from `@vegaforge/tollway-core`; the service gives operators a single place to validate, version, distribute, and audit policy updates.
-
-- **Validation (`422 invalid-policy`)**: `PUT /v1/agents/{agentId}/policy` validates the body using `parsePolicy` from `@vegaforge/tollway-core`. Amounts must be integer strings in the asset's smallest unit, unknown keys are rejected, and any failure returns `422` with `details.issues` listing every failing path.
-- **Immutable versions & optimistic concurrency**: Each accepted `PUT` appends a monotonically increasing version (`1, 2, ...`) and returns an `ETag` header (`"<version>"`). Subsequent updates must send `If-Match` with the current version; a missing or stale `If-Match` returns `412 precondition-failed` so concurrent edits never overwrite each other.
-- **Retirement without deletion**: `DELETE /v1/agents/{agentId}/policy` appends a retired tombstone version (`retired: true`, `policy: null`) rather than deleting history. `GET /v1/agents/{agentId}/policy` then returns `404`, while `/versions` and `/versions/{version}` continue to serve every historical version.
-- **Audit trail**: Every create, update, and retirement atomically records an immutable audit entry containing the agent id, version, API key name (`actor`), timestamp, and a deterministic JSON-path structural diff from the previous version. `GET /v1/audit?agentId=...` lists records newest-first with cursor pagination, and no route edits or deletes audit history.
-- **Agent-side loading**: `@vegaforge/tollway-client` exports `fetchPolicy(serviceUrl, agentId, apiKey)`, which sends `If-None-Match`, reuses its cached `Policy` on `304 Not Modified`, validates `200` responses with `parsePolicy`, and returns a policy ready for `createPolicyEngine`.
-
 ## Errors
 
 Every error response has one shape:
@@ -260,12 +324,12 @@ Every error response has one shape:
 { "error": { "code": "invalid-request", "message": "the request did not match the schema", "details": [] } }
 ```
 
-`code` is stable and machine-readable: `unauthorized`, `forbidden`, `invalid-request`, `invalid-policy`, `precondition-failed`, `not-found`, `payload-too-large`, `not-ready`, `conflict`, `close-failed` and `internal-error`, plus the metrics limits above. `details` carries structured context, such as each failing field with its location and path. An unexpected failure returns `internal-error`; its cause is logged, never returned.
+`code` is stable and machine-readable: `unauthorized`, `forbidden`, `tenant-mismatch`, `invalid-request`, `not-found`, `payload-too-large`, `rate-limited`, `quota-exceeded`, `not-ready`, `conflict`, `close-failed` and `internal-error`, plus the metrics limits above. `details` carries structured context, such as each failing field with its location and path. An unexpected failure returns `internal-error`; its cause is logged, never returned.
 
 ## Logs
 
-The binary writes one JSON object per line. Each request logs its method, path, status, duration and the calling key's name. Headers and query strings are never logged.
+The binary writes one JSON object per line. Each request logs its method, path, status, duration, the calling key's name, and its `orgId` and `projectId` (`null` for unauthenticated or operator requests). Headers and query strings are never logged.
 
 ## Storage
 
-Receipts, metrics, channels and policies each sit behind an interface (`ReceiptStore`, `MetricsStore`, `ChannelStore`, `PolicyStore`), and every store answers the readiness check. This release ships in-memory stores, which keep state for the life of the process. Persistent backends plug in through the `stores` option of `createService` without changing any route.
+Receipts, metrics, channels, policies and audit entries each sit behind a tenant-scoped interface (`ReceiptStore`, `MetricsStore`, `ChannelStore`, `PolicyStore`, `AuditStore`), while `AdminStore` provides operator-only tenant record counts, and every data store answers `/readyz`. Only in-memory stores ship today, so data lasts for the life of the process. A persistent store implements the same interfaces over `serviceTenantMigrations` and runs every query inside `withTenantTransaction`; routes do not change.

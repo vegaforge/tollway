@@ -1,357 +1,810 @@
-import { type CommitmentStore, createMemoryCommitmentStore } from "@vegaforge/tollway-channels";
+import {
+  type Channel,
+  type ChannelListFilter,
+  type ChannelManager,
+  type ChannelStatus,
+  type ClosePolicy,
+  type Commitment,
+  type CommitmentAppendExpectation,
+  type CommitmentStore,
+  createChannelManager,
+  createMemoryCommitmentStore,
+  type MppChannelAdapter,
+} from "@vegaforge/tollway-channels";
 import {
   base64UrlToBytes,
   bytesToBase64Url,
-  canonicalJson,
-  type JsonValue,
+  type CounterpartyQuarantine,
   type Policy,
   type SignedReceipt,
+  TollwayError,
   utf8Bytes,
 } from "@vegaforge/tollway-core";
 import {
+  type ArchiveSearchOptions,
+  createMemoryReceiptArchive,
   createObservabilityHub,
   type ExportFormat,
   type MetricsQuery,
   type PaymentMetric,
+  type ReceiptArchive,
+  type ReceiptFilter,
   type SpendSummary,
   type TimeseriesQuery,
   type TimeseriesResult,
 } from "@vegaforge/tollway-observability";
+import { scopedRecordKey, type TenantScope, tenantPartitionKey } from "./tenancy.js";
 
 /**
- * Storage behind the service. Each kind of record sits behind an interface,
- * so the routes in #225 to #228 and the persistent backends in #217, #222,
- * #177 and #230 plug in without changing the skeleton. The in-memory
- * implementations here keep state for the life of the process only.
+ * Multi-tenant storage behind the service (#231). Every store method takes a
+ * {@link TenantScope} (`{ orgId, projectId }`), and every stored record
+ * carries it. Isolation lives in the partition and primary key rather than a
+ * post-query filter, so two projects can use identical receipt ids, channel
+ * ids or agent ids without conflict.
+ *
+ * None of the five tenant stores exposes a cross-tenant read. The only
+ * cross-tenant overview sits behind the separate {@link AdminStore}, which
+ * returns per-tenant counts and never raw payment records.
  *
  * Every store answers `check()` for `/readyz`: it resolves when the store can
- * serve requests and rejects when it cannot. A memory store is always ready.
+ * serve requests and rejects when it cannot.
  */
 export interface ServiceStore {
+  /** Resolves when the store is healthy and rejects when it cannot serve requests. */
   check(): Promise<void>;
 }
 
 /** What {@link ReceiptStore.put} did with a receipt. */
 export type ReceiptPutResult =
-  /** First time this receipt id was seen. */
+  /** First time this receipt id was seen in this tenant. */
   | "stored"
-  /** The same receipt was stored before; nothing changed. */
+  /** The same receipt was stored before in this tenant; nothing changed. */
   | "duplicate"
-  /** A different receipt is already stored under this id; nothing changed. */
+  /** A different receipt is already stored under this id in this tenant; nothing changed. */
   | "conflict";
 
-/** Signed receipts, stored exactly as received. */
+/** A signed receipt together with the tenant that owns it. */
+export type StoredReceipt = TenantScope & {
+  receipt: SignedReceipt;
+};
+
+/** One page of tenant-scoped receipts returned by {@link ReceiptStore.list}. */
+export type StoredReceiptPage = {
+  items: StoredReceipt[];
+  nextCursor: string | null;
+};
+
+/** Signed receipts, partitioned by `(orgId, projectId, receipt.id)`. */
 export interface ReceiptStore extends ServiceStore {
-  put(receipt: SignedReceipt): Promise<ReceiptPutResult>;
-  get(id: string): Promise<SignedReceipt | undefined>;
+  put(tenant: TenantScope, receipt: SignedReceipt): Promise<ReceiptPutResult>;
+  get(tenant: TenantScope, id: string): Promise<StoredReceipt | undefined>;
+  list(
+    tenant: TenantScope,
+    filter?: ReceiptFilter,
+    page?: ArchiveSearchOptions,
+  ): Promise<StoredReceiptPage>;
+  count(tenant: TenantScope): Promise<number>;
 }
 
 /**
- * Payment metrics and their rollups. The rollup rules are the observability
- * hub's (`summarize`, `timeseries`, `export`), so a persistent backend (#217)
- * changes where metrics live, never how they are counted.
+ * Payment metrics and their rollups, partitioned by `(orgId, projectId)`. The
+ * rollup rules stay the observability hub's (`summarize`, `timeseries`,
+ * `export`).
  */
 export interface MetricsStore extends ServiceStore {
-  record(metrics: readonly PaymentMetric[]): Promise<void>;
-  summarize(query?: MetricsQuery): Promise<SpendSummary>;
+  record(tenant: TenantScope, metrics: readonly PaymentMetric[]): Promise<void>;
+  summarize(tenant: TenantScope, query?: MetricsQuery): Promise<SpendSummary>;
   /**
    * Bucketed spend, counts and latency. Rejects with
    * `MetricsQueryTooLargeError` when the range needs more buckets or rows
    * than the store allows.
    */
-  timeseries(query: TimeseriesQuery): Promise<TimeseriesResult>;
+  timeseries(tenant: TenantScope, query: TimeseriesQuery): Promise<TimeseriesResult>;
   /** The matched metrics as JSON or CSV, as `ObservabilityHub.export` writes them. */
-  export(format: ExportFormat, query?: MetricsQuery): Promise<string>;
+  export(tenant: TenantScope, format: ExportFormat, query?: MetricsQuery): Promise<string>;
+  count(tenant: TenantScope): Promise<number>;
 }
 
-/** MPP channels and their commitment streams, as `@vegaforge/tollway-channels` defines them. */
-export interface ChannelStore extends ServiceStore, CommitmentStore {}
+/** A tracked channel together with the tenant that owns it. */
+export type ScopedChannel = Channel & TenantScope;
 
-/** One immutable version of an agent's policy. `policy` is `null` for a retired tombstone version. */
-export type PolicyVersion = {
+/** A channel commitment together with the tenant that owns it. */
+export type ScopedCommitment = Commitment & TenantScope;
+
+/** One page of tenant-scoped channels returned by {@link ChannelStore.listChannels}. */
+export type ScopedChannelPage = {
+  channels: ScopedChannel[];
+  nextCursor?: string;
+};
+
+/** MPP channels and their commitment streams, partitioned by `(orgId, projectId, channelId)`. */
+export interface ChannelStore extends ServiceStore {
+  putChannel(tenant: TenantScope, channel: Channel): Promise<void>;
+  getChannel(tenant: TenantScope, channelId: string): Promise<ScopedChannel | undefined>;
+  updateChannel(
+    tenant: TenantScope,
+    channelId: string,
+    patch: Partial<Channel>,
+  ): Promise<ScopedChannel | undefined>;
+  appendCommitment(
+    tenant: TenantScope,
+    commitment: Commitment,
+    expectation: CommitmentAppendExpectation,
+  ): Promise<ScopedChannel>;
+  transitionChannel(
+    tenant: TenantScope,
+    channelId: string,
+    expectedStatus: ChannelStatus,
+    patch: Partial<Channel>,
+  ): Promise<ScopedChannel>;
+  listCommitments(tenant: TenantScope, channelId: string): Promise<readonly ScopedCommitment[]>;
+  listChannelsByStatus(
+    tenant: TenantScope,
+    status: Channel["status"],
+  ): Promise<readonly ScopedChannel[]>;
+  listChannels(tenant: TenantScope, filter?: ChannelListFilter): Promise<ScopedChannelPage>;
+  count(tenant: TenantScope): Promise<number>;
+}
+
+/** One immutable version of an agent's policy inside a tenant. */
+export type PolicyVersion = TenantScope & {
   agentId: string;
-  /** Starts at 1 and increases by one per change. */
+  /** Starts at 1 within `(orgId, projectId, agentId)` and increases by one per change. */
   version: number;
+  /** `null` when the policy was retired with a tombstone version. */
   policy: Policy | null;
   /** ISO 8601 time the version was stored. */
   createdAt: string;
 };
 
-/** One structural change between two policy versions. */
-export type PolicyDiffOp = "add" | "remove" | "replace";
+/** Versioned policies per `(orgId, projectId, agentId)`. A version, once stored, never changes. */
+export interface PolicyStore extends ServiceStore {
+  current(tenant: TenantScope, agentId: string): Promise<PolicyVersion | undefined>;
+  versions(tenant: TenantScope, agentId: string): Promise<readonly PolicyVersion[]>;
+  /**
+   * Stores `policy` as the next version when the current version in this
+   * tenant is `expectedVersion` (`null` when the agent has none yet). Returns
+   * `"version-conflict"` otherwise, so a concurrent edit is never overwritten.
+   */
+  append(
+    tenant: TenantScope,
+    agentId: string,
+    policy: Policy | null,
+    expectedVersion: number | null,
+  ): Promise<PolicyVersion | "version-conflict">;
+  count(tenant: TenantScope): Promise<number>;
+}
 
-/** A deterministic JSON-path diff entry between two policy documents. */
-export type PolicyDiffEntry = {
-  /** Dot-separated JSON path (e.g. `budgets.daily`), or `(root)` for whole-document create/retire. */
+/** One field change recorded in a policy or administrative audit entry. */
+export type AuditDiffEntry = {
   path: string;
-  op: PolicyDiffOp;
   before?: unknown;
   after?: unknown;
 };
 
-/** Kind of policy change recorded in the audit log. */
-export type PolicyAuditAction = "create" | "update" | "retire";
-
-/** One immutable audit record written for each policy version. */
-export type PolicyAuditEntry = {
-  /** Monotonic 1-based sequence across all audit records in the store. */
-  sequence: number;
-  agentId: string;
-  version: number;
-  action: PolicyAuditAction;
-  /** Name of the API key that performed the change (never the key itself). */
-  actor: string;
-  /** ISO 8601 timestamp when the change was recorded. */
-  createdAt: string;
-  diff: readonly PolicyDiffEntry[];
-};
-
-/** Filter and pagination options for {@link PolicyStore.listAudit}. */
-export type PolicyAuditQuery = {
+/** An immutable, tenant-scoped audit record. */
+export type AuditEntry = TenantScope & {
+  id: string;
+  action: string;
+  /** Name of the API key that triggered the change, never the key itself. */
+  actorKey: string;
   agentId?: string;
-  cursor?: string;
-  limit?: number;
+  resourceId?: string;
+  version?: number;
+  changes?: readonly AuditDiffEntry[];
+  createdAt: string;
 };
 
-/** One page of {@link PolicyAuditEntry} records. */
-export type PolicyAuditPage = {
-  entries: readonly PolicyAuditEntry[];
+/** Fields passed to {@link AuditStore.append}. */
+export type AuditEntryInput = {
+  id?: string;
+  action: string;
+  actorKey: string;
+  agentId?: string;
+  resourceId?: string;
+  version?: number;
+  changes?: readonly AuditDiffEntry[];
+  createdAt?: string;
+};
+
+/** Filter parameters accepted by {@link AuditStore.list}. */
+export type AuditListFilter = {
+  agentId?: string;
+  action?: string;
+};
+
+/** Cursor pagination parameters accepted by {@link AuditStore.list}. */
+export type AuditPageOptions = {
+  limit?: number;
+  cursor?: string;
+};
+
+/** One page of tenant-scoped audit entries returned by {@link AuditStore.list}. */
+export type AuditPage = {
+  entries: AuditEntry[];
   nextCursor?: string;
 };
 
-/** Thrown when an audit cursor cannot be decoded. */
-export class InvalidAuditCursorError extends Error {
-  constructor(cursor: string) {
-    super(`invalid audit cursor: ${cursor}`);
-    this.name = "InvalidAuditCursorError";
-  }
+/** Append-only audit log partitioned by `(orgId, projectId)`. */
+export interface AuditStore extends ServiceStore {
+  append(tenant: TenantScope, entry: AuditEntryInput): Promise<AuditEntry>;
+  list(tenant: TenantScope, filter?: AuditListFilter, page?: AuditPageOptions): Promise<AuditPage>;
+  count(tenant: TenantScope): Promise<number>;
 }
 
-/** Versioned policies per agent. A version, once stored, never changes. */
-export interface PolicyStore extends ServiceStore {
-  current(agentId: string): Promise<PolicyVersion | undefined>;
-  versions(agentId: string): Promise<readonly PolicyVersion[]>;
-  getVersion(agentId: string, version: number): Promise<PolicyVersion | undefined>;
-  /**
-   * Stores `policy` (or `null` for a retired tombstone) as the next version
-   * when the current version is `expectedVersion` (`null` when the agent has
-   * none yet). Returns `"version-conflict"` otherwise, so a concurrent edit
-   * is never overwritten.
-   */
-  append(
-    agentId: string,
-    policy: Policy | null,
-    expectedVersion: number | null,
-    actor?: string,
-  ): Promise<PolicyVersion | "version-conflict">;
-  listAudit(query?: PolicyAuditQuery): Promise<PolicyAuditPage>;
+/** Per-tenant record counts returned to operator keys through {@link AdminStore}. */
+export type TenantSummary = TenantScope & {
+  receipts: number;
+  metrics: number;
+  channels: number;
+  commitments: number;
+  policyVersions: number;
+  auditEntries: number;
+  totalRecords: number;
+};
+
+/**
+ * Explicit cross-tenant operator store. Kept off {@link ServiceStores} so
+ * tenant routes cannot call it by mistake.
+ */
+export interface AdminStore extends ServiceStore {
+  listTenants(): Promise<readonly TenantSummary[]>;
 }
 
+/** The five tenant-scoped backing stores used by `/v1/*` tenant routes. */
 export type ServiceStores = {
   receipts: ReceiptStore;
   metrics: MetricsStore;
   channels: ChannelStore;
   policies: PolicyStore;
+  audit: AuditStore;
 };
+
+/**
+ * Adapts a multi-tenant {@link ChannelStore} to `@vegaforge/tollway-channels`'s
+ * `CommitmentStore` for one specific tenant.
+ */
+export function bindTenantChannelStore(store: ChannelStore, tenant: TenantScope): CommitmentStore {
+  const stripChannel = ({ orgId: _o, projectId: _p, ...rest }: ScopedChannel): Channel => rest;
+  const stripCommitment = ({ orgId: _o, projectId: _p, ...rest }: ScopedCommitment): Commitment =>
+    rest;
+
+  return {
+    async putChannel(channel) {
+      await store.putChannel(tenant, channel);
+    },
+    async getChannel(channelId) {
+      const found = await store.getChannel(tenant, channelId);
+      return found === undefined ? undefined : stripChannel(found);
+    },
+    async updateChannel(channelId, patch) {
+      const updated = await store.updateChannel(tenant, channelId, patch);
+      return updated === undefined ? undefined : stripChannel(updated);
+    },
+    async appendCommitment(commitment, expectation) {
+      return stripChannel(await store.appendCommitment(tenant, commitment, expectation));
+    },
+    async transitionChannel(channelId, expectedStatus, patch) {
+      return stripChannel(await store.transitionChannel(tenant, channelId, expectedStatus, patch));
+    },
+    async listCommitments(channelId) {
+      return (await store.listCommitments(tenant, channelId)).map(stripCommitment);
+    },
+    async listChannelsByStatus(status) {
+      return (await store.listChannelsByStatus(tenant, status)).map(stripChannel);
+    },
+    async listChannels(filter) {
+      const page = await store.listChannels(tenant, filter);
+      return page.nextCursor === undefined
+        ? { channels: page.channels.map(stripChannel) }
+        : { channels: page.channels.map(stripChannel), nextCursor: page.nextCursor };
+    },
+  };
+}
+
+/** Options passed to {@link createTenantChannelManagers}. */
+export type TenantChannelManagersOptions = {
+  store: ChannelStore;
+  adapter: MppChannelAdapter | ((tenant: TenantScope) => MppChannelAdapter);
+  closePolicy?: ClosePolicy;
+  quarantine?: CounterpartyQuarantine;
+  now?: () => string;
+};
+
+/**
+ * Builds a lazy per-tenant `ChannelManager` resolver backed by one shared
+ * {@link ChannelStore}, isolating each `(orgId, projectId)` partition.
+ */
+export function createTenantChannelManagers(
+  options: TenantChannelManagersOptions,
+): (tenant: TenantScope) => ChannelManager {
+  const byTenant = new Map<string, ChannelManager>();
+  return (tenant) => {
+    const key = tenantPartitionKey(tenant);
+    const existing = byTenant.get(key);
+    if (existing !== undefined) return existing;
+    const adapter =
+      typeof options.adapter === "function" ? options.adapter(tenant) : options.adapter;
+    const manager = createChannelManager({
+      adapter,
+      store: bindTenantChannelStore(options.store, tenant),
+      ...(options.closePolicy === undefined ? {} : { closePolicy: options.closePolicy }),
+      ...(options.quarantine === undefined ? {} : { quarantine: options.quarantine }),
+      ...(options.now === undefined ? {} : { now: options.now }),
+    });
+    byTenant.set(key, manager);
+    return manager;
+  };
+}
 
 const ready = async (): Promise<void> => {};
 
+type TenantRegistry = {
+  touch(tenant: TenantScope): void;
+  tenants(): readonly TenantScope[];
+};
+
+const storeRegistries = new WeakMap<ServiceStore, TenantRegistry>();
+const channelBreakdown = new WeakMap<
+  ChannelStore,
+  (tenant: TenantScope) => { channels: number; commitments: number }
+>();
+
+function createTenantRegistry(): TenantRegistry {
+  const known = new Map<string, TenantScope>();
+  return {
+    touch(tenant) {
+      const key = tenantPartitionKey(tenant);
+      if (!known.has(key)) known.set(key, { orgId: tenant.orgId, projectId: tenant.projectId });
+    },
+    tenants() {
+      return [...known.values()];
+    },
+  };
+}
+
+/** Creates an in-memory, tenant-partitioned {@link ReceiptStore}. */
 export function createMemoryReceiptStore(): ReceiptStore {
-  const receipts = new Map<string, { receipt: SignedReceipt; canonical: string }>();
-  return {
+  const registry = createTenantRegistry();
+  const partitions = new Map<string, { archive: ReceiptArchive; count: number }>();
+
+  const getPartition = (tenant: TenantScope) => {
+    const key = tenantPartitionKey(tenant);
+    let partition = partitions.get(key);
+    if (partition === undefined) {
+      partition = { archive: createMemoryReceiptArchive(), count: 0 };
+      partitions.set(key, partition);
+    }
+    return partition;
+  };
+
+  const store: ReceiptStore = {
     check: ready,
-    async put(receipt) {
-      const id = receipt.receipt.id;
-      // Identity is the canonical form, the same bytes the signature covers,
-      // so key order in the submitted JSON does not make a duplicate look new.
-      const canonical = canonicalJson(receipt);
-      const existing = receipts.get(id);
-      if (existing !== undefined)
-        return existing.canonical === canonical ? "duplicate" : "conflict";
-      receipts.set(id, { receipt: structuredClone(receipt), canonical });
-      return "stored";
+    async put(tenant, receipt) {
+      registry.touch(tenant);
+      const partition = getPartition(tenant);
+      try {
+        const outcome = await partition.archive.append(receipt);
+        if (outcome === "appended") {
+          partition.count += 1;
+          return "stored";
+        }
+        return "duplicate";
+      } catch (error) {
+        if (error instanceof TollwayError && error.code === "receipt-conflict") {
+          return "conflict";
+        }
+        throw error;
+      }
     },
-    async get(id) {
-      const found = receipts.get(id);
-      return found === undefined ? undefined : structuredClone(found.receipt);
+    async get(tenant, id) {
+      const partition = partitions.get(tenantPartitionKey(tenant));
+      if (partition === undefined) return undefined;
+      const found = await partition.archive.get(id);
+      return found === undefined
+        ? undefined
+        : { orgId: tenant.orgId, projectId: tenant.projectId, receipt: found };
+    },
+    async list(tenant, filter, page) {
+      const partition = getPartition(tenant);
+      const result = await partition.archive.search(filter, page);
+      return {
+        items: result.items.map((receipt) => ({
+          orgId: tenant.orgId,
+          projectId: tenant.projectId,
+          receipt,
+        })),
+        nextCursor: result.nextCursor,
+      };
+    },
+    async count(tenant) {
+      return partitions.get(tenantPartitionKey(tenant))?.count ?? 0;
     },
   };
+  storeRegistries.set(store, registry);
+  return store;
 }
 
+/** Creates an in-memory, tenant-partitioned {@link MetricsStore}. */
 export function createMemoryMetricsStore(): MetricsStore {
-  // The observability hub already owns the rollup rules; the store only
-  // adapts it to the asynchronous interface a database backend needs.
-  const hub = createObservabilityHub();
-  return {
+  const registry = createTenantRegistry();
+  const partitions = new Map<
+    string,
+    { hub: ReturnType<typeof createObservabilityHub>; count: number }
+  >();
+
+  const getPartition = (tenant: TenantScope) => {
+    const key = tenantPartitionKey(tenant);
+    let partition = partitions.get(key);
+    if (partition === undefined) {
+      partition = { hub: createObservabilityHub(), count: 0 };
+      partitions.set(key, partition);
+    }
+    return partition;
+  };
+
+  const store: MetricsStore = {
     check: ready,
-    async record(metrics) {
-      for (const metric of metrics) hub.record(metric);
+    async record(tenant, metrics) {
+      if (metrics.length > 0) registry.touch(tenant);
+      const partition = getPartition(tenant);
+      for (const metric of metrics) {
+        partition.hub.record(metric);
+        partition.count += 1;
+      }
     },
-    async summarize(query) {
-      return hub.summarize(query);
+    async summarize(tenant, query) {
+      return getPartition(tenant).hub.summarize(query);
     },
-    async timeseries(query) {
-      return hub.timeseries(query);
+    async timeseries(tenant, query) {
+      return getPartition(tenant).hub.timeseries(query);
     },
-    async export(format, query) {
-      return hub.export(format, query);
+    async export(tenant, format, query) {
+      return getPartition(tenant).hub.export(format, query);
+    },
+    async count(tenant) {
+      return partitions.get(tenantPartitionKey(tenant))?.count ?? 0;
     },
   };
+  storeRegistries.set(store, registry);
+  return store;
 }
 
+type ChannelPartition = {
+  store: CommitmentStore;
+  channelIds: Set<string>;
+  commitmentCount: number;
+};
+
+/** Creates an in-memory, tenant-partitioned {@link ChannelStore}. */
 export function createMemoryChannelStore(): ChannelStore {
-  return { ...createMemoryCommitmentStore(), check: ready };
+  const registry = createTenantRegistry();
+  const partitions = new Map<string, ChannelPartition>();
+
+  const getPartition = (tenant: TenantScope): ChannelPartition => {
+    const key = tenantPartitionKey(tenant);
+    let partition = partitions.get(key);
+    if (partition === undefined) {
+      partition = {
+        store: createMemoryCommitmentStore(),
+        channelIds: new Set<string>(),
+        commitmentCount: 0,
+      };
+      partitions.set(key, partition);
+    }
+    return partition;
+  };
+
+  const withTenantChannel = (tenant: TenantScope, channel: Channel): ScopedChannel => ({
+    ...structuredClone(channel),
+    orgId: tenant.orgId,
+    projectId: tenant.projectId,
+  });
+
+  const withTenantCommitment = (tenant: TenantScope, commitment: Commitment): ScopedCommitment => ({
+    ...structuredClone(commitment),
+    orgId: tenant.orgId,
+    projectId: tenant.projectId,
+  });
+
+  const store: ChannelStore = {
+    check: ready,
+    async putChannel(tenant, channel) {
+      registry.touch(tenant);
+      const partition = getPartition(tenant);
+      await partition.store.putChannel(structuredClone(channel));
+      partition.channelIds.add(channel.id);
+    },
+    async getChannel(tenant, channelId) {
+      const partition = partitions.get(tenantPartitionKey(tenant));
+      if (partition === undefined) return undefined;
+      const channel = await partition.store.getChannel(channelId);
+      return channel === undefined ? undefined : withTenantChannel(tenant, channel);
+    },
+    async updateChannel(tenant, channelId, patch) {
+      const partition = partitions.get(tenantPartitionKey(tenant));
+      if (partition === undefined) return undefined;
+      const updated = await partition.store.updateChannel(channelId, structuredClone(patch));
+      return updated === undefined ? undefined : withTenantChannel(tenant, updated);
+    },
+    async appendCommitment(tenant, commitment, expectation) {
+      registry.touch(tenant);
+      const partition = getPartition(tenant);
+      const updated = await partition.store.appendCommitment(
+        structuredClone(commitment),
+        expectation,
+      );
+      partition.commitmentCount += 1;
+      return withTenantChannel(tenant, updated);
+    },
+    async transitionChannel(tenant, channelId, expectedStatus, patch) {
+      const partition = getPartition(tenant);
+      const updated = await partition.store.transitionChannel(
+        channelId,
+        expectedStatus,
+        structuredClone(patch),
+      );
+      return withTenantChannel(tenant, updated);
+    },
+    async listCommitments(tenant, channelId) {
+      const partition = partitions.get(tenantPartitionKey(tenant));
+      if (partition === undefined) return [];
+      const list = await partition.store.listCommitments(channelId);
+      return list.map((commitment) => withTenantCommitment(tenant, commitment));
+    },
+    async listChannelsByStatus(tenant, status) {
+      const partition = partitions.get(tenantPartitionKey(tenant));
+      if (partition === undefined) return [];
+      const list = await partition.store.listChannelsByStatus(status);
+      return list.map((channel) => withTenantChannel(tenant, channel));
+    },
+    async listChannels(tenant, filter) {
+      const partition = getPartition(tenant);
+      const page = await partition.store.listChannels(filter);
+      const channels = page.channels.map((channel) => withTenantChannel(tenant, channel));
+      return page.nextCursor === undefined
+        ? { channels }
+        : { channels, nextCursor: page.nextCursor };
+    },
+    async count(tenant) {
+      const partition = partitions.get(tenantPartitionKey(tenant));
+      if (partition === undefined) return 0;
+      return partition.channelIds.size + partition.commitmentCount;
+    },
+  };
+  storeRegistries.set(store, registry);
+  channelBreakdown.set(store, (tenant) => {
+    const partition = partitions.get(tenantPartitionKey(tenant));
+    return {
+      channels: partition?.channelIds.size ?? 0,
+      commitments: partition?.commitmentCount ?? 0,
+    };
+  });
+  return store;
 }
 
-function isPlainObject(value: unknown): value is Record<string, unknown> {
-  return typeof value === "object" && value !== null && !Array.isArray(value);
+/** Creates an in-memory, tenant-partitioned {@link PolicyStore}. */
+export function createMemoryPolicyStore(options?: { clock?: () => number }): PolicyStore {
+  const registry = createTenantRegistry();
+  const clock = options?.clock ?? Date.now;
+  const byScopedAgent = new Map<string, PolicyVersion[]>();
+  const countsByTenant = new Map<string, number>();
+
+  const store: PolicyStore = {
+    check: ready,
+    async current(tenant, agentId) {
+      const latest = byScopedAgent.get(scopedRecordKey(tenant, agentId))?.at(-1);
+      return latest === undefined ? undefined : structuredClone(latest);
+    },
+    async versions(tenant, agentId) {
+      const history = byScopedAgent.get(scopedRecordKey(tenant, agentId)) ?? [];
+      return history.map((entry) => structuredClone(entry));
+    },
+    async append(tenant, agentId, policy, expectedVersion) {
+      const key = scopedRecordKey(tenant, agentId);
+      const history = byScopedAgent.get(key) ?? [];
+      const currentVersion = history.at(-1)?.version ?? null;
+      if (currentVersion !== expectedVersion) return "version-conflict";
+      registry.touch(tenant);
+      const next: PolicyVersion = {
+        orgId: tenant.orgId,
+        projectId: tenant.projectId,
+        agentId,
+        version: (currentVersion ?? 0) + 1,
+        policy: policy === null ? null : structuredClone(policy),
+        createdAt: new Date(clock()).toISOString(),
+      };
+      history.push(next);
+      byScopedAgent.set(key, history);
+      const partKey = tenantPartitionKey(tenant);
+      countsByTenant.set(partKey, (countsByTenant.get(partKey) ?? 0) + 1);
+      return structuredClone(next);
+    },
+    async count(tenant) {
+      return countsByTenant.get(tenantPartitionKey(tenant)) ?? 0;
+    },
+  };
+  storeRegistries.set(store, registry);
+  return store;
 }
 
-function collectDiff(
-  before: Record<string, unknown>,
-  after: Record<string, unknown>,
-  prefix: string,
-  out: PolicyDiffEntry[],
-): void {
-  const keys = [...new Set([...Object.keys(before), ...Object.keys(after)])].sort();
-  for (const key of keys) {
-    const path = prefix === "" ? key : `${prefix}.${key}`;
-    const prev = before[key];
-    const next = after[key];
-    if (prev === undefined && next === undefined) continue;
-    if (prev === undefined) {
-      out.push({ path, op: "add", after: structuredClone(next) });
-      continue;
-    }
-    if (next === undefined) {
-      out.push({ path, op: "remove", before: structuredClone(prev) });
-      continue;
-    }
-    if (isPlainObject(prev) && isPlainObject(next)) {
-      collectDiff(prev, next, path, out);
-      continue;
-    }
-    if (canonicalJson(prev as JsonValue) !== canonicalJson(next as JsonValue)) {
-      out.push({
-        path,
-        op: "replace",
-        before: structuredClone(prev),
-        after: structuredClone(next),
-      });
-    }
+const DEFAULT_AUDIT_PAGE_LIMIT = 50;
+const MAX_AUDIT_PAGE_LIMIT = 200;
+
+type StoredAuditRow = {
+  seq: number;
+  entry: AuditEntry;
+};
+
+function encodeAuditPosition(seq: number): string {
+  return bytesToBase64Url(utf8Bytes(JSON.stringify({ seq })));
+}
+
+function decodeAuditPosition(cursor: string): number {
+  let decoded: string;
+  try {
+    decoded = new TextDecoder("utf-8", { fatal: true }).decode(base64UrlToBytes(cursor));
+  } catch {
+    throw new RangeError("cursor is not an audit cursor");
   }
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(decoded);
+  } catch {
+    throw new RangeError("cursor is not an audit cursor");
+  }
+  if (
+    typeof parsed !== "object" ||
+    parsed === null ||
+    Array.isArray(parsed) ||
+    Object.keys(parsed).length !== 1
+  ) {
+    throw new RangeError("cursor is not an audit cursor");
+  }
+  const seq = (parsed as { seq?: unknown }).seq;
+  if (typeof seq !== "number" || !Number.isSafeInteger(seq) || seq < 1) {
+    throw new RangeError("cursor is not an audit cursor");
+  }
+  if (encodeAuditPosition(seq) !== cursor) {
+    throw new RangeError("cursor is not canonical");
+  }
+  return seq;
+}
+
+/** Creates an in-memory, tenant-partitioned {@link AuditStore}. */
+export function createMemoryAuditStore(options?: { clock?: () => number }): AuditStore {
+  const registry = createTenantRegistry();
+  const clock = options?.clock ?? Date.now;
+  const partitions = new Map<string, StoredAuditRow[]>();
+
+  const store: AuditStore = {
+    check: ready,
+    async append(tenant, input) {
+      registry.touch(tenant);
+      const key = tenantPartitionKey(tenant);
+      const rows = partitions.get(key) ?? [];
+      const seq = rows.length + 1;
+      const entry: AuditEntry = {
+        orgId: tenant.orgId,
+        projectId: tenant.projectId,
+        id: input.id ?? `aud_${seq}`,
+        action: input.action,
+        actorKey: input.actorKey,
+        ...(input.agentId === undefined ? {} : { agentId: input.agentId }),
+        ...(input.resourceId === undefined ? {} : { resourceId: input.resourceId }),
+        ...(input.version === undefined ? {} : { version: input.version }),
+        ...(input.changes === undefined ? {} : { changes: structuredClone(input.changes) }),
+        createdAt: input.createdAt ?? new Date(clock()).toISOString(),
+      };
+      rows.push({ seq, entry });
+      partitions.set(key, rows);
+      return structuredClone(entry);
+    },
+    async list(tenant, filter = {}, page = {}) {
+      const limit = page.limit ?? DEFAULT_AUDIT_PAGE_LIMIT;
+      if (!Number.isSafeInteger(limit) || limit < 1 || limit > MAX_AUDIT_PAGE_LIMIT) {
+        throw new RangeError(
+          `limit must be an integer from 1 to ${MAX_AUDIT_PAGE_LIMIT}, got ${String(limit)}`,
+        );
+      }
+      const beforeSeq =
+        page.cursor === undefined ? Number.POSITIVE_INFINITY : decodeAuditPosition(page.cursor);
+      const rows = partitions.get(tenantPartitionKey(tenant)) ?? [];
+      const matched: StoredAuditRow[] = [];
+      for (let index = rows.length - 1; index >= 0; index -= 1) {
+        const row = rows[index];
+        if (row === undefined || row.seq >= beforeSeq) continue;
+        if (filter.agentId !== undefined && row.entry.agentId !== filter.agentId) continue;
+        if (filter.action !== undefined && row.entry.action !== filter.action) continue;
+        matched.push(row);
+        if (matched.length > limit) break;
+      }
+      const slice = matched.slice(0, limit);
+      const last = slice.at(-1);
+      const entries = slice.map((row) => structuredClone(row.entry));
+      return last !== undefined && matched.length > slice.length
+        ? { entries, nextCursor: encodeAuditPosition(last.seq) }
+        : { entries };
+    },
+    async count(tenant) {
+      return partitions.get(tenantPartitionKey(tenant))?.length ?? 0;
+    },
+  };
+  storeRegistries.set(store, registry);
+  return store;
 }
 
 /**
- * Computes a deterministic, sorted-key JSON-path diff between two policy
- * documents (or `null` when creating or retiring).
+ * Builds an in-memory {@link AdminStore} aggregating per-tenant counts across
+ * any combination of memory-backed {@link ServiceStores}.
  */
-export function diffPolicies(before: Policy | null, after: Policy | null): PolicyDiffEntry[] {
-  if (before === null && after === null) return [];
-  if (before === null) return [{ path: "(root)", op: "add", after: structuredClone(after) }];
-  if (after === null) return [{ path: "(root)", op: "remove", before: structuredClone(before) }];
-  const out: PolicyDiffEntry[] = [];
-  collectDiff(before as Record<string, unknown>, after as Record<string, unknown>, "", out);
-  return out;
-}
-
-const DEFAULT_AUDIT_PAGE = 50;
-const MAX_AUDIT_PAGE = 200;
-
-function encodeAuditCursor(sequence: number): string {
-  return bytesToBase64Url(utf8Bytes(JSON.stringify(sequence)));
-}
-
-function decodeAuditCursor(cursor: string): number {
-  let decoded: unknown;
-  try {
-    decoded = JSON.parse(new TextDecoder().decode(base64UrlToBytes(cursor)));
-  } catch {
-    throw new InvalidAuditCursorError(cursor);
-  }
-  if (typeof decoded !== "number" || !Number.isSafeInteger(decoded) || decoded < 1) {
-    throw new InvalidAuditCursorError(cursor);
-  }
-  return decoded;
-}
-
-export function createMemoryPolicyStore(options?: { clock?: () => number }): PolicyStore {
-  const clock = options?.clock ?? Date.now;
-  const byAgent = new Map<string, PolicyVersion[]>();
-  const audit: PolicyAuditEntry[] = [];
+export function createMemoryAdminStore(stores: ServiceStores): AdminStore {
   return {
     check: ready,
-    async current(agentId) {
-      const latest = byAgent.get(agentId)?.at(-1);
-      return latest === undefined ? undefined : structuredClone(latest);
-    },
-    async versions(agentId) {
-      return structuredClone(byAgent.get(agentId) ?? []);
-    },
-    async getVersion(agentId, version) {
-      const found = (byAgent.get(agentId) ?? []).find((entry) => entry.version === version);
-      return found === undefined ? undefined : structuredClone(found);
-    },
-    async append(agentId, policy, expectedVersion, actor = "system") {
-      const history = byAgent.get(agentId) ?? [];
-      const prev = history.at(-1);
-      const currentVersion = prev?.version ?? null;
-      if (currentVersion !== expectedVersion) return "version-conflict";
-      const createdAt = new Date(clock()).toISOString();
-      const next: PolicyVersion = {
-        agentId,
-        version: (currentVersion ?? 0) + 1,
-        policy: structuredClone(policy),
-        createdAt,
-      };
-      history.push(next);
-      byAgent.set(agentId, history);
+    async listTenants() {
+      const merged = new Map<string, TenantScope>();
+      for (const store of Object.values(stores)) {
+        for (const tenant of storeRegistries.get(store)?.tenants() ?? []) {
+          merged.set(tenantPartitionKey(tenant), tenant);
+        }
+      }
+      const ordered = [...merged.values()].sort((left, right) => {
+        if (left.orgId !== right.orgId) return left.orgId < right.orgId ? -1 : 1;
+        if (left.projectId === right.projectId) return 0;
+        return left.projectId < right.projectId ? -1 : 1;
+      });
 
-      const action: PolicyAuditAction =
-        policy === null
-          ? "retire"
-          : prev === undefined || prev.policy === null
-            ? "create"
-            : "update";
-      audit.push({
-        sequence: audit.length + 1,
-        agentId,
-        version: next.version,
-        action,
-        actor,
-        createdAt,
-        diff: diffPolicies(prev?.policy ?? null, policy),
-      });
-      return structuredClone(next);
-    },
-    async listAudit(query) {
-      const limit = Math.min(Math.max(query?.limit ?? DEFAULT_AUDIT_PAGE, 1), MAX_AUDIT_PAGE);
-      const cursorSequence =
-        query?.cursor === undefined ? undefined : decodeAuditCursor(query.cursor);
-      const filtered = [...audit].reverse().filter((entry) => {
-        if (query?.agentId !== undefined && entry.agentId !== query.agentId) return false;
-        if (cursorSequence !== undefined && entry.sequence >= cursorSequence) return false;
-        return true;
-      });
-      const pageEntries = filtered.slice(0, limit).map((entry) => structuredClone(entry));
-      const last = pageEntries.at(-1);
-      const nextCursor =
-        filtered.length > limit && last !== undefined
-          ? encodeAuditCursor(last.sequence)
-          : undefined;
-      return nextCursor === undefined
-        ? { entries: pageEntries }
-        : { entries: pageEntries, nextCursor };
+      const breakdown = channelBreakdown.get(stores.channels);
+      const summaries: TenantSummary[] = [];
+      for (const tenant of ordered) {
+        const [receiptCount, metricCount, totalChannelRecords, policyCount, auditCount] =
+          await Promise.all([
+            stores.receipts.count(tenant),
+            stores.metrics.count(tenant),
+            stores.channels.count(tenant),
+            stores.policies.count(tenant),
+            stores.audit.count(tenant),
+          ]);
+        const channelCounts = breakdown
+          ? breakdown(tenant)
+          : { channels: totalChannelRecords, commitments: 0 };
+        const totalRecords =
+          receiptCount +
+          metricCount +
+          channelCounts.channels +
+          channelCounts.commitments +
+          policyCount +
+          auditCount;
+        summaries.push({
+          orgId: tenant.orgId,
+          projectId: tenant.projectId,
+          receipts: receiptCount,
+          metrics: metricCount,
+          channels: channelCounts.channels,
+          commitments: channelCounts.commitments,
+          policyVersions: policyCount,
+          auditEntries: auditCount,
+          totalRecords,
+        });
+      }
+      return summaries;
     },
   };
 }
 
-/** One memory store of each kind. */
+/** One memory store of each tenant-scoped kind. */
 export function createMemoryStores(): ServiceStores {
   return {
     receipts: createMemoryReceiptStore(),
     metrics: createMemoryMetricsStore(),
     channels: createMemoryChannelStore(),
     policies: createMemoryPolicyStore(),
+    audit: createMemoryAuditStore(),
   };
+}
+
+/** One memory store of each tenant-scoped kind, plus its matching {@link AdminStore}. */
+export function createMemoryStoresWithAdmin(): { stores: ServiceStores; adminStore: AdminStore } {
+  const stores = createMemoryStores();
+  return { stores, adminStore: createMemoryAdminStore(stores) };
 }
