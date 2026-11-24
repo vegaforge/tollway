@@ -1,0 +1,133 @@
+name: Mutation
+
+# Mutation testing for @vegaforge/tollway-core and @vegaforge/tollway-server,
+# issue #247. Line coverage says a test ran the code; a surviving mutant says
+# no test would notice if that code were wrong.
+#
+# - On a pull request that touches either package, Stryker runs in
+#   incremental mode: it restores the report from the last full run and
+#   re-tests only the mutants the change affects.
+# - A full run happens every Monday and on manual dispatch. It saves the
+#   report that pull requests restore.
+#
+# Each package fails its run when its mutation score drops below the `break`
+# threshold in its stryker.config.mjs; the clear-text report in the log lists
+# the surviving mutants. This check is not part of the quality aggregate in
+# ci.yml and branch protection does not require it.
+#
+# Actions are pinned to the same commit SHAs as ci.yml, with the release tag
+# in a comment. Dependabot updates both together.
+
+on:
+  pull_request:
+    paths:
+      - "packages/core/**"
+      - "packages/server/**"
+      - ".github/workflows/mutation.yml"
+  schedule:
+    - cron: "17 3 * * 1"
+  workflow_dispatch:
+
+concurrency:
+  group: mutation-${{ github.ref }}
+  cancel-in-progress: true
+
+# Nothing by default; each job asks for what it needs.
+permissions: {}
+
+env:
+  CI: true
+
+jobs:
+  incremental:
+    name: mutation (incremental, core and server)
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - uses: pnpm/action-setup@ea17c68df8912ef543352723c149a84f56e3d413 # v6.1.0
+
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version-file: .nvmrc
+          cache: pnpm
+
+      - name: Install
+        run: pnpm install --frozen-lockfile
+
+      # Restore only. A pull request never writes the baseline, so a branch
+      # cannot plant a report that later runs would trust.
+      - name: Restore the last full report
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: |
+            packages/core/reports/stryker-incremental.json
+            packages/server/reports/stryker-incremental.json
+          key: stryker-incremental-${{ github.event.pull_request.base.sha }}
+          restore-keys: |
+            stryker-incremental-
+
+      - name: Mutation test (incremental)
+        run: pnpm mutation:incremental
+
+      - name: Upload the reports
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: mutation-incremental-report
+          path: |
+            packages/core/reports/mutation
+            packages/server/reports/mutation
+          retention-days: 7
+
+  full:
+    name: mutation (full, core and server)
+    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - uses: pnpm/action-setup@ea17c68df8912ef543352723c149a84f56e3d413 # v6.1.0
+
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version-file: .nvmrc
+          cache: pnpm
+
+      - name: Install
+        run: pnpm install --frozen-lockfile
+
+      # A full run writes the incremental file too, so it becomes the
+      # baseline the next pull requests restore.
+      - name: Mutation test (full)
+        run: pnpm mutation
+
+      - name: Save the report for incremental runs
+        if: always()
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: |
+            packages/core/reports/stryker-incremental.json
+            packages/server/reports/stryker-incremental.json
+          key: stryker-incremental-${{ github.sha }}
+
+      - name: Upload the reports
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: mutation-full-report
+          path: |
+            packages/core/reports/mutation
+            packages/server/reports/mutation
+          retention-days: 30
