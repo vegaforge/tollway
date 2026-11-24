@@ -77,6 +77,12 @@ export type WebhookDispatcherOptions = WebhookDispatcherTuning & {
     attempts: number;
   }) => void;
   /**
+   * Called once a delivery is recorded as delivered. Not called when the
+   * receiver answered but the lease had already passed to another
+   * dispatcher, since that one records the result.
+   */
+  onDelivered?: (delivery: WebhookDelivery) => void;
+  /**
    * Called when a pass fails, for example because the store rejected a
    * claim, and with a {@link WebhookLeaseLostError} when a result could not
    * be recorded because the lease had already passed to another dispatcher.
@@ -289,7 +295,9 @@ export function createWebhookDispatcher(options: WebhookDispatcherOptions): Webh
       }
       return;
     }
-    checkApplied(await options.outbox.markDelivered(lease, now()), delivery, "delivered");
+    if (checkApplied(await options.outbox.markDelivered(lease, now()), delivery, "delivered")) {
+      options.onDelivered?.(delivery);
+    }
   }
 
   /** Purges delivered rows past retention, at most once per purge interval. */

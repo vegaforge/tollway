@@ -82,7 +82,7 @@ The helper is exported as `nearestRankPercentile(sorted, p)` for callers that ne
 | ----- | -------------------- | ----------- |
 | In-memory hub (the only store today) | Computed in process | Exact nearest rank over every sample in the row |
 
-There is no SQL store in `@vegaforge/tollway-observability` yet; it is tracked in [#217](https://github.com/vegaforge/tollway/issues/217). When it lands, the plan is to push bucketing (`floor(epoch_ms / width) * width`) and the per-outcome counts and settled sums into `GROUP BY` queries, keep the half-open range and UTC alignment above, and either compute percentiles exactly in SQL where the database has a nearest-rank aggregate (PostgreSQL's `percentile_disc` is one) or fetch the row's latency samples and apply the same nearest-rank method in process (SQLite has no percentile aggregate). This table will then list the method each store uses.
+`timeseries` runs over the hub's in-memory metrics. With a metrics store (see "Storing metrics" below) the hub has no in-memory copy, so `timeseries` throws; computing time series from a store is tracked in [#223](https://github.com/vegaforge/tollway/issues/223). The plan there is to push bucketing (`floor(epoch_ms / width) * width`) and the per-outcome counts and settled sums into `GROUP BY` queries, keep the half-open range and UTC alignment above, and either compute percentiles exactly in SQL where the database has a nearest-rank aggregate (PostgreSQL's `percentile_disc` is one) or fetch the latency samples and apply the same nearest-rank method in process (SQLite has no percentile aggregate).
 
 ## Spend summaries
 
@@ -95,6 +95,72 @@ There is no SQL store in `@vegaforge/tollway-observability` yet; it is tracked i
 - Amounts in different assets are never added together, and no cross-asset total is offered.
 
 `totalAmount`, `byModel`, `byPayer` and `byPayee` are **deprecated**. They add settled amounts across assets, so they only make sense when the window holds a single asset. They keep their shape for existing callers; new code should read `byAsset` and the per-asset breakdowns. For latency, use `timeseries`.
+
+## Storing metrics
+
+By default the hub keeps metrics in an in-memory array, which a restart loses and which each gate process holds separately. Pass a `store` to keep them durably and share them between processes:
+
+```ts
+import { createObservabilityHub, createPostgresMetricsStore, migratePostgresMetricsStore } from "@vegaforge/tollway-observability";
+import { createSqliteMetricsStore } from "@vegaforge/tollway-observability/sqlite";
+
+// One process, one file:
+const hub = createObservabilityHub({
+  store: createSqliteMetricsStore({ filename: "./metrics.db" }),
+  onStoreError: (error, metrics) => log.error({ error, lost: metrics.length }, "metrics write failed"),
+});
+
+// Several processes, one database. `pool` is a `pg` Pool or any client with `query(text, params)`.
+await migratePostgresMetricsStore(pool);
+const shared = createObservabilityHub({
+  store: createPostgresMetricsStore({ client: pool }),
+  onStoreError: (error, metrics) => log.error({ error, lost: metrics.length }, "metrics write failed"),
+});
+```
+
+| Store | Import | Survives a restart | Shared between processes | Notes |
+| --- | --- | --- | --- | --- |
+| Memory (`createMemoryMetricsStore`) | main entry | no | no | For tests. Validates like the durable stores. |
+| SQLite (`createSqliteMetricsStore`) | `@vegaforge/tollway-observability/sqlite` | yes | one host, one writer at a time | Built-in `node:sqlite`, Node 22.13 or later. No dependency. |
+| Postgres (`createPostgresMetricsStore`) | main entry | yes | yes | Takes your client; no driver is a dependency. |
+
+**Flush semantics.** `record` stays synchronous and cheap. With a store, it validates the metric (amounts must be integer strings in the asset's smallest unit, and a bad metric throws `InvalidMetricError` at once), adds it to a buffer, and returns. The buffer is written as one batch when it holds `storeBuffer.maxBatchSize` metrics (default 100) or every `storeBuffer.flushIntervalMs` (default 1000ms), whichever comes first. `await hub.flush()` writes what is buffered now, and `await hub.close()` flushes, stops the timer and closes the store; call it on shutdown, or the last second of metrics is lost. A batch the store fails to write goes to `onStoreError` with the metrics it held. The hub does not retry it, and `onStoreError` is required with a store so a failure is never silent.
+
+**Reading.** A store cannot answer synchronously, so with a store `summarize`, `export` and `timeseries` throw. Use `await hub.summarizeAsync(query)`, `await hub.exportAsync(format, query)` and `await hub.queryMetrics(query, { limit, cursor })`, which pages through metrics in recording order. Without a store these async methods read the in-memory metrics, so code can use them either way. Metrics still in the buffer are not visible until they are flushed.
+
+**Exactness and schema.** SQLite stores amounts as TEXT and sums them in TypeScript with `bigint`, because its `SUM` is not exact for large integers. Postgres stores them as `NUMERIC(78, 0)` and sums in one SQL statement. Timestamps keep the text you recorded, and filters compare instants, so `11:04:00+01:00` and `10:04:00Z` are the same time. Each store creates its tables through versioned migrations that are safe to run again, with indexes on time, payer, payee and model. With Postgres, run `migratePostgresMetricsStore` once at startup. Paging is consistent for rows already written; a row committed in the middle of a paged read may land before the cursor and be missed by that read.
+
+## Prometheus
+
+`createPrometheusExporter({ hub })` returns a framework-agnostic handler that renders the [text exposition format 0.0.4](https://prometheus.io/docs/instrumenting/exposition_formats/). Its counters are updated as the hub records metrics and finishes deliveries, so they only go up and do not depend on what a store keeps. They count from the moment the exporter is created.
+
+```ts
+import { createPrometheusExporter } from "@vegaforge/tollway-observability";
+
+const exporter = createPrometheusExporter({ hub, bearerToken: process.env.METRICS_TOKEN });
+
+// Express
+app.get("/metrics", (req, res) => {
+  const out = exporter.handle({ headers: req.headers });
+  res.status(out.status).set(out.headers).send(out.body);
+});
+
+// Hono
+app.get("/metrics", (c) => {
+  const out = exporter.handle({ headers: c.req.raw.headers });
+  return c.body(out.body, out.status as 200 | 401, out.headers);
+});
+```
+
+| Metric | Type | Labels | Meaning |
+| --- | --- | --- | --- |
+| `tollway_payments_total` | counter | `model`, `outcome`, `asset` | Payments recorded. |
+| `tollway_payment_amount_base_units_total` | counter | `model`, `asset` | Settled amount in the asset's smallest unit. Prometheus samples are 64-bit floats, exact only up to 2^53 (about 900 million USDC at 7 decimals); above that the value is approximate. Use it for dashboards and alerts, never for accounting. |
+| `tollway_payment_latency_seconds` | histogram | `model`, `outcome` | Payment latency. Buckets: 0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1, 2.5, 5 and 10 seconds; set `latencyBucketsSeconds` to change them. |
+| `tollway_webhook_deliveries_total` | counter | `result` (`delivered`, `failed`) | Webhook deliveries that finished, inline or through the outbox. |
+| `tollway_webhook_delivery_failures_total` | counter | `target_kind` (`handler`, `webhook`) | Deliveries that exhausted their attempts. |
+
+Payer and payee addresses are never labels by default: they are unbounded, and anyone who can scrape would see your counterparties. `labelAllowlist: { payee: ["G..."] }` adds a `payee` label to the two payment counters for a known, bounded set of services, and reports every other payee as `other`. With `bearerToken`, a scrape must send `Authorization: Bearer <token>`; the comparison takes the same time whatever is sent.
 
 ## Exports and webhooks
 

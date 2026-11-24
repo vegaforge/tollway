@@ -18,6 +18,11 @@
       "types": "./dist/index.d.ts",
       "import": "./dist/index.js",
       "require": "./dist/index.cjs"
+    },
+    "./sqlite": {
+      "types": "./dist/sqlite.d.ts",
+      "import": "./dist/sqlite.js",
+      "require": "./dist/sqlite.cjs"
     }
   },
   "files": [
