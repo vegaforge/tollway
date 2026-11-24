@@ -73,7 +73,11 @@ const responseEnvelopeSchema = z.object({
 });
 
 function policyEndpointUrl(serviceUrl: string, agentId: string): string {
-  const base = serviceUrl.replace(/\/+$/, "");
+  let end = serviceUrl.length;
+  while (end > 0 && serviceUrl.charCodeAt(end - 1) === 47) {
+    end -= 1;
+  }
+  const base = serviceUrl.slice(0, end);
   return `${base}/v1/agents/${encodeURIComponent(agentId)}/policy`;
 }
 
