@@ -33,6 +33,19 @@ export const DRIFT_COPY: Record<DriftKind, string> = {
   "non-monotonic-cumulative": "A cumulative amount falls below an earlier one.",
   "foreign-commitment": "A commitment names a different channel than its settlement.",
   "duplicate-sequence": "Two commitments share one sequence.",
+  "closed-on-chain": "The channel is open here, but a close has started on chain.",
+  "recipient-mismatch": "The channel contract pays a different recipient than the counterparty.",
+  "funder-mismatch": "The channel contract was funded by a different account than expected.",
+  "token-mismatch": "The channel contract holds a different token than the channel's asset.",
+  "balance-mismatch": "The channel contract holds less than the deposit minus what was committed.",
+  "tx-failed": "The settlement transaction failed on chain.",
+  "tx-not-found": "The settlement transaction is not on chain.",
+  "transfer-missing": "The settlement transaction moved no tokens.",
+  "amount-mismatch": "The on-chain transfer amount differs from the receipt.",
+  "payee-mismatch": "The on-chain transfer went to a different payee than the receipt.",
+  "payer-mismatch": "The on-chain transfer came from a different payer than the receipt.",
+  "asset-mismatch": "The on-chain transfer moved a different asset than the receipt.",
+  "network-mismatch": "The transaction was checked on a different network than the receipt names.",
 };
 
 export const KIND_LABEL: Record<AnomalyKind, string> = {

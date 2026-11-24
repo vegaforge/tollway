@@ -11,8 +11,9 @@ describe("createQuarantineEnforcer", () => {
     const enforcer = createQuarantineEnforcer({ quarantine, onWarn, onQuarantine });
 
     const result: ReconciliationResult = {
+      status: "drift" as const,
       ok: false,
-      channelId: "ch-1",
+      subject: { kind: "channel" as const, channelId: "ch-1" },
       drift: [
         { kind: "sequence-gap", detail: "missing seq 1" },
         { kind: "under-settled", detail: "settled 100 vs 200" },
@@ -40,8 +41,9 @@ describe("createQuarantineEnforcer", () => {
     const enforcer = createQuarantineEnforcer({ quarantine, onWarn, onQuarantine });
 
     const result: ReconciliationResult = {
+      status: "drift" as const,
       ok: false,
-      channelId: "ch-1",
+      subject: { kind: "channel" as const, channelId: "ch-1" },
       drift: [
         { kind: "under-settled", detail: "shortfall 1" },
         { kind: "under-settled", detail: "shortfall 2" },
@@ -77,8 +79,9 @@ describe("createQuarantineEnforcer", () => {
     });
 
     const underResult: ReconciliationResult = {
+      status: "drift" as const,
       ok: false,
-      channelId: "ch-1",
+      subject: { kind: "channel" as const, channelId: "ch-1" },
       drift: [{ kind: "under-settled", detail: "ignored" }],
     };
     const out1 = await enforcer.process({ counterparty: "G1", result: underResult });
@@ -87,8 +90,9 @@ describe("createQuarantineEnforcer", () => {
     expect(onWarn).not.toHaveBeenCalled();
 
     const overResult: ReconciliationResult = {
+      status: "drift" as const,
       ok: false,
-      channelId: "ch-2",
+      subject: { kind: "channel" as const, channelId: "ch-2" },
       drift: [{ kind: "over-settled", detail: "now quarantined" }],
     };
     const out2 = await enforcer.process({ counterparty: "G2", result: overResult });
@@ -102,7 +106,7 @@ describe("createQuarantineEnforcer", () => {
 
     const okOut = await enforcer.process({
       counterparty: "G1",
-      result: { ok: true, channelId: "ch-1" },
+      result: { status: "ok", ok: true, subject: { kind: "channel", channelId: "ch-1" } },
     });
     expect(okOut).toEqual({ duplicate: false, actions: [] });
 
@@ -113,7 +117,12 @@ describe("createQuarantineEnforcer", () => {
     } satisfies Drift;
     const out = await enforcer.process({
       counterparty: "G1",
-      result: { ok: false, channelId: "ch-1", drift: [transientDrift] },
+      result: {
+        status: "drift" as const,
+        ok: false,
+        subject: { kind: "channel" as const, channelId: "ch-1" },
+        drift: [transientDrift],
+      },
     });
     expect(out.actions[0]).toMatchObject({ action: "ignore", quarantined: false });
     expect(await quarantine.lookup("G1")).toBeUndefined();
@@ -129,8 +138,9 @@ describe("createQuarantineEnforcer", () => {
     const onWarn = vi.fn();
     const enforcer = createQuarantineEnforcer({ quarantine, onWarn, maxRememberedResults: 2 });
     const result = (channelId: string): ReconciliationResult => ({
+      status: "drift",
       ok: false,
-      channelId,
+      subject: { kind: "channel", channelId },
       drift: [{ kind: "sequence-gap", detail: `gap in ${channelId}` }],
     });
 
@@ -154,6 +164,62 @@ describe("createQuarantineEnforcer", () => {
       expect(() => createQuarantineEnforcer({ quarantine, maxRememberedResults: value })).toThrow(
         TypeError,
       );
+    }
+  });
+});
+
+describe("createQuarantineEnforcer with charge and unchecked results", () => {
+  it.each([
+    { status: "retryable", reason: "RPC timed out" },
+    { status: "unverifiable", reason: "older than retention" },
+  ] as const)("takes no action on a $status result", async (outcome) => {
+    const quarantine = createMemoryQuarantine();
+    const onWarn = vi.fn();
+    const enforcer = createQuarantineEnforcer({ quarantine, onWarn });
+    const out = await enforcer.process({
+      counterparty: "GSERVICE",
+      result: { ...outcome, ok: false, subject: { kind: "channel", channelId: "ch-1" } },
+    });
+    expect(out).toEqual({ duplicate: false, actions: [] });
+    expect(onWarn).not.toHaveBeenCalled();
+    expect(await quarantine.lookup("GSERVICE")).toBeUndefined();
+  });
+
+  it("passes a transaction subject to the hooks and leaves channelId off the entry", async () => {
+    const quarantine = createMemoryQuarantine();
+    const onQuarantine = vi.fn();
+    const enforcer = createQuarantineEnforcer({
+      quarantine,
+      onQuarantine,
+      actions: { "payee-mismatch": "quarantine" },
+    });
+    const subject = { kind: "transaction", txHash: "tx-9", network: "testnet" } as const;
+    await enforcer.process({
+      counterparty: "GSERVICE",
+      result: {
+        status: "drift",
+        ok: false,
+        subject,
+        drift: [{ kind: "payee-mismatch", detail: "expected payee GA, got GB" }],
+      },
+    });
+    expect(onQuarantine).toHaveBeenCalledWith(expect.objectContaining({ subject }));
+    const entry = await quarantine.lookup("GSERVICE");
+    expect(entry?.drift).toEqual({ kind: "payee-mismatch", detail: "expected payee GA, got GB" });
+  });
+
+  it("warns, and does not quarantine, on charge drift by default", () => {
+    for (const kind of [
+      "tx-failed",
+      "tx-not-found",
+      "transfer-missing",
+      "amount-mismatch",
+      "payee-mismatch",
+      "payer-mismatch",
+      "asset-mismatch",
+      "network-mismatch",
+    ] as const) {
+      expect(DEFAULT_DRIFT_ACTIONS[kind]).toBe("warn");
     }
   });
 });

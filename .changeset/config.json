@@ -11,6 +11,7 @@
     "@vegaforge/tollway-dashboard",
     "@vegaforge/tollway-demo",
     "@vegaforge/tollway-web",
+    "@vegaforge/tollway-example-agent-tools",
     "@vegaforge/tollway-example-content-paywall",
     "@vegaforge/tollway-example-data-feed",
     "@vegaforge/tollway-example-inference",

@@ -141,7 +141,8 @@ Tollway is a pnpm and Turborepo monorepo. Each package is independently buildabl
 | Package | Responsibility |
 | ------- | -------------- |
 | `@vegaforge/tollway-core` | model router, policy schema, canonical receipt, shared types |
-| `@vegaforge/tollway-client` | agent-side client wrapper |
+| `@vegaforge/tollway-client` | agent-side client wrapper, with MCP tool payments in `/mcp` |
+| `@vegaforge/tollway-ai-sdk` | `paid_fetch` tool for the Vercel AI SDK |
 | `@vegaforge/tollway-server` | service-side payment gate, framework agnostic |
 | `@vegaforge/tollway-adapter-express` | Express adapter (the reference adapter) |
 | `@vegaforge/tollway-adapter-fastify` | Fastify adapter |
@@ -343,7 +344,8 @@ Implemented and tested:
 | `@vegaforge/tollway-core` | Canonical receipt (build, sign, verify) with a swappable Ed25519 signer, zod schemas, the policy engine (`createPolicyEngine`: budgets, per-service caps, rate limits, and anomaly stops, held in memory, with per-rule decision traces and a dry-run mode), and the default model router. |
 | `@vegaforge/tollway-server` | The payment gate (`createPaywall`) for x402 and MPP charge, an HTTP facilitator client built on `@x402/core` and `@x402/stellar`, a mock facilitator, an MPP charge handler built on `mppx` and `@stellar/mpp` (plus a mock), and in-memory (bounded) and Redis settlement caches. |
 | `@vegaforge/tollway-adapter-express`, `-fastify`, `-next`, `-hono` | All four adapters wrap the gate, each with its own tests. |
-| `@vegaforge/tollway-client` | Agent-side orchestration: policy check, routing, receipt verification, and events, plus `createX402Settler`, a `ClientSettler` that pays x402 V2 routes on Stellar with `@x402/stellar`, and `createMppChargeSettler`, which pays MPP charge routes with `@stellar/mpp`. |
+| `@vegaforge/tollway-client` | Agent-side orchestration: policy check, routing, receipt verification, and events, plus `createX402Settler`, a `ClientSettler` that pays x402 V2 routes on Stellar with `@x402/stellar`, and `createMppChargeSettler`, which pays MPP charge routes with `@stellar/mpp`. The `/mcp` subpath pays for MCP tool calls through the same client. |
+| `@vegaforge/tollway-ai-sdk` | A Vercel AI SDK `paid_fetch` tool with origin and method allowlists, a body cap, and structured policy results. |
 | `@vegaforge/tollway-channels` | Channel `open`, `commit`, `shouldClose`, `close`, `resume` and `recover` against an injected `MppChannelAdapter`, and `createStellarMppChannelAdapter`, the adapter backed by `@stellar/mpp/channel`. |
 | `@vegaforge/tollway-reconcile` | The reconciler and drift detection, with unit and property tests. |
 | `@vegaforge/tollway-observability` | Metric recording, spend summaries, JSON and CSV export, and webhook delivery with retry and timeout. |
