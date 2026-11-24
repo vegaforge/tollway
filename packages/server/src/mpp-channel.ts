@@ -57,8 +57,9 @@ const sdkCumulativeSchema = z.object({ amount: z.string().regex(/^[0-9]+$/) });
 
 /**
  * Decodes an `Authorization: Payment ...` credential for the `stellar/channel`
- * method into an {@link MppChannelPayment}. Nothing is trusted yet: the
- * handler's `verify` checks that this server issued the challenge.
+ * method into an `MppChannelPayment` from `@vegaforge/tollway-core`. Nothing
+ * is trusted yet: the handler's `verify` checks that this server issued the
+ * challenge.
  */
 export function parseMppChannelCredential(
   credential: string,

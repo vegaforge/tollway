@@ -358,9 +358,10 @@ export interface ModelRouter {
 export type MppChannelPayment = {
     model: "mpp-channel";
     channelId: string;
-    sequence: number;
     cumulativeAmount: string;
-    commitment: string;
+    signature: string;
+    action: "voucher" | "close";
+    credential: string;
 };
 
 // @public
@@ -638,6 +639,7 @@ export type PolicyTraceEntry = z.infer<typeof policyTraceEntrySchema>;
 // @public
 export const policyTraceEntrySchema: z.ZodObject<{
     id: z.ZodEnum<{
+        anomaly: "anomaly";
         "per-model-disabled": "per-model-disabled";
         "min-channel-deposit": "min-channel-deposit";
         "budget-daily": "budget-daily";
@@ -649,10 +651,10 @@ export const policyTraceEntrySchema: z.ZodObject<{
         "per-resource-daily": "per-resource-daily";
         "per-resource-window": "per-resource-window";
         "rate-limit": "rate-limit";
-        anomaly: "anomaly";
         "anomaly-adaptive": "anomaly-adaptive";
     }>;
     rule: z.ZodEnum<{
+        anomaly: "anomaly";
         "per-model-disabled": "per-model-disabled";
         "min-channel-deposit": "min-channel-deposit";
         "per-service": "per-service";
@@ -662,7 +664,6 @@ export const policyTraceEntrySchema: z.ZodObject<{
         "per-resource-daily": "per-resource-daily";
         "per-resource-window": "per-resource-window";
         "rate-limit": "rate-limit";
-        anomaly: "anomaly";
         "anomaly-adaptive": "anomaly-adaptive";
         budget: "budget";
     }>;
@@ -709,6 +710,7 @@ export const policyTraceSchema: z.ZodObject<{
     allowed: z.ZodBoolean;
     wouldBlock: z.ZodBoolean;
     blockedBy: z.ZodNullable<z.ZodEnum<{
+        anomaly: "anomaly";
         "per-model-disabled": "per-model-disabled";
         "min-channel-deposit": "min-channel-deposit";
         "budget-daily": "budget-daily";
@@ -720,11 +722,11 @@ export const policyTraceSchema: z.ZodObject<{
         "per-resource-daily": "per-resource-daily";
         "per-resource-window": "per-resource-window";
         "rate-limit": "rate-limit";
-        anomaly: "anomaly";
         "anomaly-adaptive": "anomaly-adaptive";
     }>>;
     entries: z.ZodArray<z.ZodObject<{
         id: z.ZodEnum<{
+            anomaly: "anomaly";
             "per-model-disabled": "per-model-disabled";
             "min-channel-deposit": "min-channel-deposit";
             "budget-daily": "budget-daily";
@@ -736,10 +738,10 @@ export const policyTraceSchema: z.ZodObject<{
             "per-resource-daily": "per-resource-daily";
             "per-resource-window": "per-resource-window";
             "rate-limit": "rate-limit";
-            anomaly: "anomaly";
             "anomaly-adaptive": "anomaly-adaptive";
         }>;
         rule: z.ZodEnum<{
+            anomaly: "anomaly";
             "per-model-disabled": "per-model-disabled";
             "min-channel-deposit": "min-channel-deposit";
             "per-service": "per-service";
@@ -749,7 +751,6 @@ export const policyTraceSchema: z.ZodObject<{
             "per-resource-daily": "per-resource-daily";
             "per-resource-window": "per-resource-window";
             "rate-limit": "rate-limit";
-            anomaly: "anomaly";
             "anomaly-adaptive": "anomaly-adaptive";
             budget: "budget";
         }>;

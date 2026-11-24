@@ -29,6 +29,7 @@ export {
 } from "./channel-settlement.js";
 export {
   type AcceptedVoucher,
+  acceptedVoucherSchema,
   type ChannelRecord,
   type ChannelSettlementRecord,
   type ChannelStatus,
@@ -36,6 +37,7 @@ export {
   type CloseRateGuard,
   type CloseRateLimit,
   channelRecordSchema,
+  channelStatuses,
   createInMemoryChannelStore,
   createInMemoryCloseRateGuard,
 } from "./channel-store.js";

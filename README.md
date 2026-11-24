@@ -354,7 +354,7 @@ Implemented and tested:
 Open work:
 
 - `ChannelManager.recover`, which throws `NotImplementedError` today ([#38](https://github.com/vegaforge/tollway/issues/38)).
-- Router promotion to `mpp-channel` under sustained traffic ([#105](https://github.com/vegaforge/tollway/issues/105)). The gate answers `501` if a router selects `mpp-channel`.
+- Router promotion to `mpp-channel` under sustained traffic ([#105](https://github.com/vegaforge/tollway/issues/105)). The gate already accepts mpp-channel vouchers when the agent sends them ([docs/mpp-channels.md](docs/mpp-channels.md)); an x402 payment routed to `mpp-channel` gets a 400.
 - x402 V2 wire compatibility for the gate's headers ([#43](https://github.com/vegaforge/tollway/issues/43)).
 - Feeding gate outcomes into `@vegaforge/tollway-observability` ([#106](https://github.com/vegaforge/tollway/issues/106)) and signing webhook deliveries ([#104](https://github.com/vegaforge/tollway/issues/104)).
 - A shared conformance suite for the four adapters ([#107](https://github.com/vegaforge/tollway/issues/107)).
