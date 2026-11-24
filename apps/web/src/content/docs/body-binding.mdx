@@ -46,10 +46,16 @@ Send exactly those bytes. `bodyDigest(bytes)` returns the digest alone.
 
 | Request | Answer |
 | --- | --- |
-| Body larger than `maxBytes` | 413, before any payment is decoded or any facilitator is called. A `Content-Length` over the limit is refused without reading; a chunked body is refused as soon as the limit is passed, never buffered whole. |
-| `Content-Encoding` other than `identity` | 415. The digest is over the bytes on the wire, which a client cannot reproduce from a body it meant to compress, so compressed bodies are refused rather than half supported. |
-| A media type outside `contentTypes` | 415. Media types are compared without parameters. |
-| The adapter passed no body | 500: binding nothing would make the binding meaningless, so the gate fails closed. |
+| Body larger than `maxBytes` | 413 `body-too-large`, before any payment is decoded or any facilitator is called. A `Content-Length` over the limit is refused without reading; a chunked body is refused as soon as the limit is passed, never buffered whole. |
+| `Content-Encoding` other than `identity` | 415 `body-not-supported`. The digest is over the bytes on the wire, which a client cannot reproduce from a body it meant to compress, so compressed bodies are refused rather than half supported. |
+| A media type outside `contentTypes` | 415 `body-not-supported`. Media types are compared without parameters. |
+| The adapter passed no body | 500 `body-not-provided`: binding nothing would make the binding meaningless, so the gate fails closed. |
+
+Every refusal uses the same `{ error: { code, message } }` body as the other [gate error codes](/docs/gate-errors), in all four adapters, including the 413 that `fastifyRawBody` sends from its hook.
+
+## Several payment options
+
+Body binding applies to a route with several payment options (`accepts`, see [payment options](/docs/payment-options)) the same way. The 402 lists every option under the one bound resource identity, so a payment made through any option is tied to the body it was priced for. The same payment presented with a different body is refused with 409 `offer-mismatch` before any facilitator call.
 
 Reading the body holds it in memory for the request. Keep `maxBytes` as small as the route allows: tens of kilobytes for prompts, not megabytes.
 

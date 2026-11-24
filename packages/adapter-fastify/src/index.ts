@@ -12,10 +12,12 @@ import { Readable } from "node:stream";
 import {
   BodyTooLargeError,
   concatChunks,
+  GATE_ERRORS,
   type Gate,
   type GateOutcome,
   type RequestBodySource,
   type RouteTable,
+  renderGateRejection,
 } from "@vegaforge/tollway-server";
 import type {
   FastifyReply,
@@ -60,10 +62,22 @@ export function fastifyRawBody(options: { maxBytes?: number } = {}): preParsingH
       bytes = await readCapped(payload, maxBytes);
     } catch (error) {
       if (error instanceof BodyTooLargeError) {
-        // The rest of the upload stays unread, so the connection cannot be
+        // Answer here, in the same `body-too-large` shape the gate uses
+        // (#161), rather than through Fastify's own error handler. Sending
+        // from the hook stops the chain, so no parser or handler runs. The
+        // rest of the upload stays unread, so the connection cannot be
         // reused: close it once the 413 is sent.
-        reply.header("Connection", "close");
-        throw Object.assign(error, { statusCode: 413 });
+        const rejection = renderGateRejection({
+          kind: "rejected",
+          status: GATE_ERRORS["body-too-large"].status,
+          code: "body-too-large",
+          reason: error.message,
+        });
+        await reply
+          .headers({ ...rejection.headers, Connection: "close" })
+          .status(rejection.status)
+          .send(rejection.body);
+        return payload;
       }
       throw error;
     }
@@ -178,8 +192,11 @@ async function runGate(gate: Gate, request: FastifyRequest, reply: FastifyReply)
     return;
   }
 
-  applyHeaders(reply, outcome.headers ?? {});
-  await reply.status(outcome.status).send({ error: outcome.reason });
+  // The body and headers come from the server's one renderer, so every
+  // adapter answers each error code the same way (#161).
+  const rejection = renderGateRejection(outcome);
+  applyHeaders(reply, rejection.headers);
+  await reply.status(rejection.status).send(rejection.body);
 }
 
 function applyHeaders(reply: FastifyReply, headers: Record<string, string>): void {

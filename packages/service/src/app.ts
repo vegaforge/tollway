@@ -4,31 +4,52 @@ import type { ObservabilityHub } from "@vegaforge/tollway-observability";
 import { Hono } from "hono";
 import { bodyLimit } from "hono/body-limit";
 import { z } from "zod";
-import { authenticate } from "./auth.js";
+import { authenticate, requireTenantKey } from "./auth.js";
 import { apiKeyScopes, type ServiceConfig } from "./config.js";
 import { errorBody, errorBodySchema } from "./errors.js";
 import { createConsoleLogger, describeError, type ServiceLogger } from "./logger.js";
 import { buildOpenApiDocument, type OpenApiDocument } from "./openapi.js";
+import { createQuotaEnforcer, type QuotaEnforcer } from "./quotas.js";
 import { checkReadiness, readinessReportSchema } from "./readiness.js";
 import { defineRoute, mountRoutes, type ServiceRoute } from "./routes.js";
-import { createMemoryStores, type ServiceStores } from "./stores.js";
+import {
+  type AdminStore,
+  createMemoryAdminStore,
+  createMemoryStores,
+  type ServiceStores,
+} from "./stores.js";
+import { type CursorCodec, createCursorCodec, type TenantScope } from "./tenancy.js";
 import type { ServiceEnv } from "./types.js";
 
 /** The service API version reported in `/openapi.json`. */
 export const SERVICE_API_VERSION = "0.1.0";
 
+/** Minimal `ObservabilityHub` surface modules emit lifecycle events through. */
+export type ObservabilitySink = Pick<ObservabilityHub, "emit">;
+
+/** Either a single deployment sink or a per-tenant sink resolver. */
+export type ObservabilitySource =
+  | ObservabilitySink
+  | ((tenant: TenantScope) => ObservabilitySink | undefined);
+
 /** What a route module receives: the parsed config, the stores and the logger. */
 export type ServiceContext = {
   config: ServiceConfig;
   stores: ServiceStores;
+  /** Separate cross-tenant summary store, reachable only by operator-scoped routes. */
+  adminStore: AdminStore;
   logger: ServiceLogger;
+  /** HMAC-SHA256 codec that binds pagination cursors to `(orgId, projectId, route, query)`. */
+  cursors: CursorCodec;
+  /** Per-tenant ingest rate and record-count quota enforcer. */
+  quotas: QuotaEnforcer;
   /**
-   * The deployment's own channel manager, for the channels API (#227). The
-   * service only exposes channels this manager tracks.
+   * Per-tenant channel manager resolver (#227, #231). Each tenant gets an
+   * isolated manager over its own channel partition.
    */
-  channelManager?: ChannelManager;
-  /** Where modules emit events, for example `channel.closed`. */
-  observability?: Pick<ObservabilityHub, "emit">;
+  channelManagers?: (tenant: TenantScope) => ChannelManager | undefined;
+  /** Resolves the observability sink for `tenant`, preventing cross-tenant webhook fan-out. */
+  observabilityFor: (tenant: TenantScope) => ObservabilitySink | undefined;
 };
 
 /**
@@ -37,6 +58,7 @@ export type ServiceContext = {
  */
 export type ServiceModule = (context: ServiceContext) => readonly ServiceRoute[];
 
+/** Options passed to {@link createService}. */
 export type CreateServiceOptions = {
   /** Parsed configuration; see `parseServiceConfig`. */
   config: ServiceConfig;
@@ -45,19 +67,34 @@ export type CreateServiceOptions = {
    * which keeps state only for the life of the process.
    */
   stores?: Partial<ServiceStores>;
+  /** Cross-tenant summary store for `adminModule()`. Defaults to an in-memory aggregator. */
+  adminStore?: AdminStore;
   /** Route modules mounted after the built-in routes. */
   modules?: readonly ServiceModule[];
   /** Defaults to JSON lines through `console`. */
   logger?: ServiceLogger;
   /**
-   * The channel manager the channels module reads and closes through. Its
-   * store is pluggable, so a persistent backend (#177, #178) needs no change
-   * here.
+   * Resolves the `ChannelManager` for a tenant. Use
+   * `createTenantChannelManagers` to share one `ChannelStore` safely across
+   * tenants.
    */
-  channelManager?: ChannelManager;
-  /** The observability hub modules emit events through. */
-  observability?: Pick<ObservabilityHub, "emit">;
+  channelManagers?: (tenant: TenantScope) => ChannelManager | undefined;
+  /**
+   * Where modules emit events. Pass `(tenant) => hub` when tenants subscribe
+   * their own webhooks so one tenant's events never fan out to another's.
+   */
+  observability?: ObservabilitySource;
+  /** Optional millisecond clock for quota enforcement in tests. */
+  quotaClock?: () => number;
 };
+
+function toObservabilityResolver(
+  source: ObservabilitySource | undefined,
+): (tenant: TenantScope) => ObservabilitySink | undefined {
+  if (source === undefined) return () => undefined;
+  if (typeof source === "function") return source;
+  return () => source;
+}
 
 /**
  * Builds the service as a Hono app. Nothing listens: the `tollway-service`
@@ -72,12 +109,24 @@ export function createService(options: CreateServiceOptions): Hono<ServiceEnv> {
   const { config } = options;
   const logger = options.logger ?? createConsoleLogger();
   const stores: ServiceStores = { ...createMemoryStores(), ...options.stores };
+  const adminStore: AdminStore = options.adminStore ?? createMemoryAdminStore(stores);
+  const readinessStores = { ...stores, admin: adminStore };
+  const cursors = createCursorCodec(config.cursorSecret);
+  const quotas = createQuotaEnforcer({
+    quotas: config.quotas,
+    stores,
+    ...(options.quotaClock === undefined ? {} : { now: options.quotaClock }),
+  });
+
   const context: ServiceContext = {
     config,
     stores,
+    adminStore,
     logger,
-    ...(options.channelManager === undefined ? {} : { channelManager: options.channelManager }),
-    ...(options.observability === undefined ? {} : { observability: options.observability }),
+    cursors,
+    quotas,
+    ...(options.channelManagers === undefined ? {} : { channelManagers: options.channelManagers }),
+    observabilityFor: toObservabilityResolver(options.observability),
   };
 
   const app = new Hono<ServiceEnv>();
@@ -85,6 +134,8 @@ export function createService(options: CreateServiceOptions): Hono<ServiceEnv> {
   app.use(async (c, next) => {
     const started = performance.now();
     await next();
+    const apiKey = c.get("apiKey");
+    const operatorKey = c.get("operatorKey");
     // Only these fields are logged. Headers, including Authorization, and
     // the query string never reach a log line.
     logger.info("request", {
@@ -92,7 +143,9 @@ export function createService(options: CreateServiceOptions): Hono<ServiceEnv> {
       path: c.req.path,
       status: c.res.status,
       durationMs: Math.round(performance.now() - started),
-      key: c.get("apiKey")?.name ?? null,
+      key: apiKey?.name ?? operatorKey?.name ?? null,
+      orgId: apiKey?.orgId ?? null,
+      projectId: apiKey?.projectId ?? null,
     });
   });
 
@@ -110,7 +163,7 @@ export function createService(options: CreateServiceOptions): Hono<ServiceEnv> {
         ),
     }),
   );
-  app.use("/v1/*", authenticate(config.apiKeys));
+  app.use("/v1/*", authenticate(config.apiKeys, config.operatorKeys));
 
   app.notFound((c) =>
     c.json(errorBody("not-found", `no route for ${c.req.method} ${c.req.path}`), 404),
@@ -156,7 +209,7 @@ export function createService(options: CreateServiceOptions): Hono<ServiceEnv> {
         },
       },
       handler: async (c) => {
-        const report = await checkReadiness(stores, config.readinessTimeoutMs, logger);
+        const report = await checkReadiness(readinessStores, config.readinessTimeoutMs, logger);
         if (report.status === "ready") return c.json(report);
         return c.json(errorBody("not-ready", "a backing store is not ready", report), 503);
       },
@@ -179,18 +232,29 @@ export function createService(options: CreateServiceOptions): Hono<ServiceEnv> {
       method: "get",
       path: "/v1/whoami",
       summary: "The calling API key",
-      description: "Returns the name and scopes of the key that made the request, never the key.",
+      description:
+        "Returns the name, owning org and project, and scopes of the key that made the request, never the key.",
       tags: ["system"],
       scope: null,
       responses: {
         200: {
-          description: "The key's name and scopes.",
-          schema: z.object({ name: z.string(), scopes: z.array(enumSchema(apiKeyScopes)) }),
+          description: "The key's name, tenant and scopes.",
+          schema: z.object({
+            name: z.string(),
+            orgId: z.string(),
+            projectId: z.string(),
+            scopes: z.array(enumSchema(apiKeyScopes)),
+          }),
         },
       },
       handler: (c) => {
-        const key = c.get("apiKey");
-        return c.json({ name: key.name, scopes: [...key.scopes] });
+        const key = requireTenantKey(c);
+        return c.json({
+          name: key.name,
+          orgId: key.orgId,
+          projectId: key.projectId,
+          scopes: [...key.scopes],
+        });
       },
     }),
   );

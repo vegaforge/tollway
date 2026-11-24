@@ -76,6 +76,7 @@ describe("Fastify: body binding (#164)", () => {
       [PAYMENT_SIGNATURE_HEADER]: "any",
     });
     expect(response.statusCode).toBe(413);
+    expect(response.json()).toMatchObject({ error: { code: "body-too-large" } });
     expect(calls()).toBe(0);
   });
 
@@ -85,6 +86,7 @@ describe("Fastify: body binding (#164)", () => {
       [PAYMENT_SIGNATURE_HEADER]: "any",
     });
     expect(response.statusCode).toBe(413);
+    expect(response.json()).toMatchObject({ error: { code: "body-too-large" } });
     expect(calls()).toBe(0);
   });
 
@@ -134,6 +136,7 @@ describe("Fastify over a real socket: body limit (#164)", () => {
       } as RequestInit);
       expect(response.status).toBe(413);
       expect(response.headers.get("connection")).toBe("close");
+      expect(await response.json()).toMatchObject({ error: { code: "body-too-large" } });
       expect(calls()).toBe(0);
     } finally {
       await app.close();

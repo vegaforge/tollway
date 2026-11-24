@@ -107,6 +107,9 @@ export type ChannelWatchtower = {
 };
 
 // @public
+export function checkStellarExactPayment(transaction: string, terms: StellarExactTerms, options?: StellarExactCheckOptions): PrevalidationResult;
+
+// @public
 export function concatChunks(chunks: readonly Uint8Array[], total: number): Uint8Array;
 
 // @public (undocumented)
@@ -144,10 +147,16 @@ export function createHorizonSponsorBalanceReader(clientForNetwork?: (network: S
 export function createHttpFacilitator(baseUrl: string, options?: HttpFacilitatorOptions): FacilitatorClient;
 
 // @public
+export function createInMemoryPaymentReceiptArchive(options?: InMemoryPaymentReceiptArchiveOptions): PaymentReceiptArchive;
+
+// @public
 export function createInMemoryServicePolicyStore(options?: InMemoryServicePolicyStoreOptions): ServicePolicyStore;
 
 // @public
 export function createInMemorySettlementCache(ttlMs?: number, options?: InMemorySettlementCacheOptions): SettlementCache;
+
+// @public
+export function createLatestLedgerSource(options: LatestLedgerSourceOptions): LatestLedgerSource;
 
 // @public
 export function createMemoryPinStore(clock?: () => number): SettlementPinStore;
@@ -163,6 +172,9 @@ export function createMppChargeHandler(options: MppChargeOptions): MppChargeHand
 
 // @public
 export function createPaywall(config: PaywallConfig, deps: PaywallDeps): Gate;
+
+// @public
+export function createRedisPaymentReceiptArchive(options: RedisPaymentReceiptArchiveOptions): PaymentReceiptArchive;
 
 // @public
 export function createRedisSettlementCache(options: RedisSettlementCacheOptions): LockingSettlementCache;
@@ -184,6 +196,9 @@ export { decodePaymentRequiredHeader }
 export { decodePaymentResponseHeader }
 
 export { decodePaymentSignatureHeader }
+
+// @public
+export const DEFAULT_MAX_PAYMENT_SIGNATURE_LENGTH: number;
 
 // @public
 export const DEFAULT_MAX_TIMEOUT_SECONDS = 60;
@@ -251,6 +266,7 @@ export type FacilitatorCheckReport = {
 
 // @public
 export interface FacilitatorClient {
+    readonly acceptsMockPayments?: true;
     idempotencyKey?(input: {
         payment: X402Payment;
     }): Promise<string | undefined>;
@@ -336,6 +352,61 @@ export function findMatchingKind(capabilities: FacilitatorCapabilities, network:
 export type Gate = (request: TollwayRequest) => Promise<GateOutcome>;
 
 // @public
+export const GATE_ERROR_CODES: GateErrorCode[];
+
+// @public
+export const GATE_ERRORS: Readonly<Record<GateErrorCode, GateErrorSpec>>;
+
+// @public
+export type GateErrorBody = {
+    error: {
+        code: GateErrorCode;
+        message: string;
+        upstreamReason?: string;
+    };
+};
+
+// @public
+export type GateErrorCode =
+/** The PAYMENT-SIGNATURE header could not be read as an x402 V2 payment. */
+"payment-malformed"
+/** The payment was checked and refused, locally or by the facilitator. */
+| "payment-invalid"
+/** The service policy refused this payer (#160). */
+| (typeof SERVICE_POLICY_DENIALS)[keyof typeof SERVICE_POLICY_DENIALS]
+/** This payment already settled for another offer, route or method. */
+| "offer-mismatch"
+/** The same payment is being settled right now by another request. */
+| "settlement-in-progress"
+/** The facilitator refused to settle the payment. */
+| "settlement-failed"
+/** The facilitator could not be reached, or did not answer `/verify` in time. */
+| "facilitator-unavailable"
+/** `/settle` may or may not have landed; the payment is held until it is known. */
+| "settlement-unknown"
+/** The facilitator answered with something the gate cannot trust. */
+| "facilitator-invalid-response"
+/** The route's dynamic price function failed or returned an invalid price. */
+| "price-unavailable"
+/** The gate is missing a handler or is not ready to take payments. */
+| "handler-not-configured"
+/** The router chose a settlement model this gate does not implement. */
+| "model-not-supported"
+/** The body is larger than the route's `bindBody.maxBytes` (#164). */
+| "body-too-large"
+/** The route binds the body and does not accept its content type or encoding. */
+| "body-not-supported"
+/** The route binds the body, but the adapter did not pass it to the gate. */
+| "body-not-provided";
+
+// @public
+export type GateErrorSpec = {
+    status: number;
+    retrySamePayment: boolean;
+    headers: readonly string[];
+};
+
+// @public
 export type GateOutcome = {
     kind: "payment-required";
     status: 402;
@@ -349,11 +420,28 @@ export type GateOutcome = {
     replayed: boolean;
     cacheError?: Error;
     lockLost?: true;
-} | {
+}
+/**
+* A refusal with a machine-readable `code` (#161). Adapters render it with
+* `renderGateRejection`, so every framework sends the same body.
+*/
+| GateRejection;
+
+// @public
+export type GateRejection = {
     kind: "rejected";
     status: number;
+    code: GateErrorCode;
     reason: string;
+    upstreamReason?: string;
     headers?: Record<string, string>;
+};
+
+// @public (undocumented)
+export type InMemoryPaymentReceiptArchiveOptions = {
+    retentionMs?: number;
+    maxEntries?: number;
+    now?: () => number;
 };
 
 // @public (undocumented)
@@ -380,6 +468,20 @@ export type KeySetResponse = {
 // @public
 export type KeySetResponseOptions = {
     maxAgeSeconds?: number;
+};
+
+// @public
+export interface LatestLedgerSource {
+    latest(): Promise<number | undefined>;
+}
+
+// @public (undocumented)
+export type LatestLedgerSourceOptions = {
+    rpcUrl?: string;
+    getLatestLedger?: () => Promise<number>;
+    ttlMs?: number;
+    onError?: (error: Error) => void;
+    now?: () => number;
 };
 
 // @public
@@ -413,6 +515,9 @@ export type MppChargeChallengeInput = {
 // @public
 export interface MppChargeHandler {
     challenge?(input: MppChargeChallengeInput): Promise<MppChargeChallenge>;
+    idempotencyKey?(input: {
+        payment: MppChargeVerifyInput["payment"];
+    }): Promise<string | undefined>;
     settle(input: MppChargeSettleInput): Promise<MppChargeSettleResult>;
     verify(input: MppChargeVerifyInput): Promise<MppChargeVerifyResult>;
 }
@@ -478,29 +583,54 @@ export const PAYMENT_RESPONSE_HEADER = "PAYMENT-RESPONSE";
 export const PAYMENT_SIGNATURE_HEADER = "PAYMENT-SIGNATURE";
 
 // @public
-export type PaywallConfig = {
-    amount: string | DynamicPriceFunction;
-    minAmount?: string;
-    maxAmount?: string;
-    quoteSecret?: string;
-    previousQuoteSecrets?: readonly string[];
-    quoteTtlSeconds?: number;
+export type PaymentOption = {
+    amount: string;
     asset: string;
     payTo: string;
     network: StellarNetwork;
-    models?: SettlementModel[];
-    resource?: string;
+    facilitator?: FacilitatorClient;
     facilitatorUrl?: string;
     maxTimeoutSeconds?: number;
     extra?: Record<string, unknown>;
-    discovery?: DiscoveryDeclaration;
-    bindBody?: BodyBinding;
 };
+
+// @public
+export type PaymentOptionsConfig = {
+    accepts: readonly PaymentOption[];
+    amount?: never;
+    asset?: never;
+    payTo?: never;
+    network?: never;
+    facilitatorUrl?: never;
+    maxTimeoutSeconds?: never;
+    extra?: never;
+};
+
+// @public
+export type PaymentPrevalidationOptions = {
+    maxPaymentSignatureLength?: number;
+    latestLedger?: LatestLedgerSource;
+    onRejected?: (event: PrevalidationRejection) => void;
+};
+
+// @public
+export interface PaymentReceiptArchive {
+    findByPaymentKey(key: string): Promise<SettlementEntry | undefined>;
+    put(key: string, entry: SettlementEntry): Promise<void>;
+}
+
+// @public
+export function paymentTargets(config: PaywallConfig): PaywallTarget[];
+
+// Warning: (ae-forgotten-export) The symbol "PaywallCommon" needs to be exported by the entry point index.d.ts
+//
+// @public
+export type PaywallConfig = PaywallCommon & (SinglePaymentOptionConfig | PaymentOptionsConfig);
 
 // @public
 export type PaywallDeps = {
     signer: ReceiptSigner;
-    facilitator: FacilitatorClient;
+    facilitator?: FacilitatorClient;
     mppChargeHandler?: MppChargeHandler;
     router?: ModelRouter;
     cache?: SettlementCache;
@@ -508,10 +638,17 @@ export type PaywallDeps = {
     servicePolicyStore?: ServicePolicyStore;
     onServicePolicyError?: (error: Error, payer: string) => void;
     onCacheError?: (error: Error, key: string) => void;
+    receiptArchive?: PaymentReceiptArchive;
+    onArchiveError?: (error: Error, key: string) => void;
     onPriceError?: (error: unknown, request: TollwayRequest) => void;
     settlementLockTtlMs?: number;
     facilitatorTimeoutMs?: number;
     ambiguousSettlementHoldMs?: number;
+    paymentPrevalidation?: PaymentPrevalidationOptions;
+    retryAfterSeconds?: {
+        settlementInProgress?: number;
+        facilitatorUnavailable?: number;
+    };
     clock?: () => number;
     receiptVersion?: 1 | 2;
 };
@@ -525,7 +662,13 @@ export type PaywallMismatch = {
 };
 
 // @public
-export type PaywallTarget = Pick<PaywallConfig, "asset" | "payTo" | "network" | "models" | "extra">;
+export type PaywallTarget = {
+    asset: string;
+    payTo: string;
+    network: StellarNetwork;
+    models?: SettlementModel[];
+    extra?: Record<string, unknown>;
+};
 
 // @public
 export type PaywallValidation = {
@@ -539,6 +682,24 @@ export type PaywallValidation = {
 };
 
 // @public
+export type PrevalidationReason = "payment_signature_too_large" | "unsupported_scheme" | "network_mismatch" | "invalid_network" | "invalid_exact_stellar_payload_malformed" | "invalid_exact_stellar_payload_wrong_operation" | "invalid_exact_stellar_payload_wrong_asset" | "invalid_exact_stellar_payload_wrong_function_name" | "invalid_exact_stellar_payload_wrong_recipient" | "invalid_exact_stellar_payload_wrong_amount" | "invalid_exact_stellar_payload_no_auth_entries" | "invalid_exact_stellar_payload_unsupported_credential_type" | "invalid_exact_stellar_signature_expired";
+
+// @public
+export type PrevalidationRejection = {
+    reason: PrevalidationReason;
+    resource: string;
+    rejectedTotal: number;
+};
+
+// @public (undocumented)
+export type PrevalidationResult = {
+    valid: true;
+} | {
+    valid: false;
+    reason: PrevalidationReason;
+};
+
+// @public
 export function readBodyStream(stream: ReadableStream<Uint8Array> | null, maxBytes: number): Promise<Uint8Array>;
 
 // @public
@@ -546,6 +707,16 @@ export function readHeader(headers: Record<string, string | string[] | undefined
 
 // @public
 export function readMppCredential(headers: Record<string, string | string[] | undefined>): string | undefined;
+
+// @public
+export interface RedisArchiveClient {
+    // (undocumented)
+    get(key: string): Promise<string | null>;
+    // (undocumented)
+    set(key: string, value: string): Promise<unknown>;
+    // (undocumented)
+    set(key: string, value: string, mode: "PX", ttlMs: number): Promise<unknown>;
+}
 
 // @public
 export interface RedisLikeClient {
@@ -560,11 +731,28 @@ export interface RedisLikeClient {
 }
 
 // @public (undocumented)
+export type RedisPaymentReceiptArchiveOptions = {
+    client: RedisArchiveClient;
+    keyPrefix?: string;
+    retentionMs?: number;
+};
+
+// @public (undocumented)
 export type RedisSettlementCacheOptions = {
     client: RedisLikeClient;
     ttlMs?: number;
     keyPrefix?: string;
 };
+
+// @public
+export type RenderedGateRejection = {
+    status: number;
+    headers: Record<string, string>;
+    body: GateErrorBody;
+};
+
+// @public
+export function renderGateRejection(rejection: GateRejection): RenderedGateRejection;
 
 // @public
 export function renderKeySetResponse(document: KeySetDocument, options?: KeySetResponseOptions): KeySetResponse;
@@ -584,6 +772,7 @@ export interface RouteTable {
 
 // @public
 export interface RouteTableEntry {
+    accepts: readonly RouteTableOption[];
     // (undocumented)
     amount: string | DynamicPriceFunction;
     // (undocumented)
@@ -593,7 +782,7 @@ export interface RouteTableEntry {
     // (undocumented)
     method: string;
     // (undocumented)
-    network: PaywallConfig["network"];
+    network: StellarNetwork;
     // (undocumented)
     pattern: string;
     // (undocumented)
@@ -607,6 +796,18 @@ export interface RouteTableMatch {
     // (undocumented)
     gate: Gate;
     resource: string;
+}
+
+// @public
+export interface RouteTableOption {
+    // (undocumented)
+    amount: string | DynamicPriceFunction;
+    // (undocumented)
+    asset: string;
+    // (undocumented)
+    network: StellarNetwork;
+    // (undocumented)
+    payTo: string;
 }
 
 // @public
@@ -716,6 +917,18 @@ export type SettleResult = {
 };
 
 // @public
+export type SinglePaymentOptionConfig = {
+    amount: string | DynamicPriceFunction;
+    asset: string;
+    payTo: string;
+    network: StellarNetwork;
+    facilitatorUrl?: string;
+    maxTimeoutSeconds?: number;
+    extra?: Record<string, unknown>;
+    accepts?: never;
+};
+
+// @public
 export type SponsorBalanceReader = (account: string, network: StellarNetwork) => Promise<string>;
 
 // @public
@@ -755,6 +968,22 @@ export const STELLAR_EXACT_SCHEME = "exact";
 
 // @public
 export function stellarCaip2(network: StellarNetwork): Network;
+
+// @public (undocumented)
+export type StellarExactCheckOptions = {
+    accepted?: Pick<StellarExactTerms, "scheme" | "network">;
+    latestLedger?: number;
+    maxTransactionLength?: number;
+};
+
+// @public
+export type StellarExactTerms = {
+    scheme: string;
+    network: string;
+    asset: string;
+    payTo: string;
+    amount: string;
+};
 
 // @public
 export const TOLLWAY_QUOTE_HEADER = "TOLLWAY-QUOTE";
@@ -820,7 +1049,7 @@ export type X402Terms = {
 // dist/index.d.ts:176:9 - (ae-forgotten-export) The symbol "WatchtowerEvent" needs to be exported by the entry point index.d.ts
 // dist/index.d.ts:180:5 - (ae-forgotten-export) The symbol "ChannelState" needs to be exported by the entry point index.d.ts
 // dist/index.d.ts:218:5 - (ae-forgotten-export) The symbol "WatchtowerCursorStore" needs to be exported by the entry point index.d.ts
-// dist/index.d.ts:351:9 - (ae-forgotten-export) The symbol "StellarSigner" needs to be exported by the entry point index.d.ts
+// dist/index.d.ts:598:9 - (ae-forgotten-export) The symbol "StellarSigner" needs to be exported by the entry point index.d.ts
 
 // (No @packageDocumentation comment for this package)
 

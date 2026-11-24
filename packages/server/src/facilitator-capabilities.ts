@@ -1,4 +1,4 @@
-import type { StellarNetwork } from "@vegaforge/tollway-core";
+import type { SettlementModel, StellarNetwork } from "@vegaforge/tollway-core";
 import { TollwayError } from "@vegaforge/tollway-core";
 import { validateStellarAssetAddress, validateStellarDestinationAddress } from "@x402/stellar";
 import { z } from "zod";
@@ -88,10 +88,36 @@ export function parseFacilitatorCapabilities(raw: unknown): FacilitatorCapabilit
 }
 
 /**
- * The part of a paywall the capability check reads. A `PaywallConfig` fits
- * as is.
+ * One payment option as the capability check reads it. A single-option
+ * `PaywallConfig` fits as is; for a paywall with several options, check
+ * each of {@link paymentTargets} (#158).
  */
-export type PaywallTarget = Pick<PaywallConfig, "asset" | "payTo" | "network" | "models" | "extra">;
+export type PaywallTarget = {
+  asset: string;
+  payTo: string;
+  network: StellarNetwork;
+  models?: SettlementModel[];
+  extra?: Record<string, unknown>;
+};
+
+/**
+ * One capability-check target per payment option of a paywall, in its
+ * preference order, so `validatePaywall` runs per option (#158, #155). A
+ * single-option paywall gives one target.
+ */
+export function paymentTargets(config: PaywallConfig): PaywallTarget[] {
+  const models = config.models === undefined ? {} : { models: config.models };
+  const options = config.accepts ?? [
+    { asset: config.asset, payTo: config.payTo, network: config.network, extra: config.extra },
+  ];
+  return options.map((option) => ({
+    asset: option.asset,
+    payTo: option.payTo,
+    network: option.network,
+    ...models,
+    ...(option.extra === undefined ? {} : { extra: option.extra }),
+  }));
+}
 
 /**
  * One field where a paywall and the facilitator disagree. `expected` is

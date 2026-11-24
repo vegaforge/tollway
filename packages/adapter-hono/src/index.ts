@@ -12,6 +12,7 @@ import {
   type GateOutcome,
   type RouteTable,
   readBodyStream,
+  renderGateRejection,
 } from "@vegaforge/tollway-server";
 import type { Context, MiddlewareHandler } from "hono";
 
@@ -58,8 +59,11 @@ export function honoPaywall(gate: Gate): MiddlewareHandler {
       return c.json(outcome.challenge, outcome.status);
     }
 
-    if (outcome.headers) applyHeaders(c, outcome.headers);
-    return c.json({ error: outcome.reason }, outcome.status as JsonStatus);
+    // The body and headers come from the server's one renderer, so every
+    // adapter answers each error code the same way (#161).
+    const rejection = renderGateRejection(outcome);
+    applyHeaders(c, rejection.headers);
+    return c.json(rejection.body, rejection.status as JsonStatus);
   };
 }
 

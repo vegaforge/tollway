@@ -14,6 +14,6 @@ Running it found one defect, fixed at its source. Each runtime reports a failed 
 
 The CAIP-2 network ids are now defined in the server rather than imported from `@x402/stellar`'s package entry, with a test that they equal upstream's. `deriveMppChargeNonce` has a regression test pinning its output.
 
-Workers need the `nodejs_compat` flag: the Stellar SDK imports `buffer` and the x402 Bazaar extension imports `url`. A minimal Worker using `@vegaforge/tollway-server` is about 770 KiB, 178 KiB gzipped; CI fails if it grows past 200,000 bytes gzipped. The new "Supported runtimes" docs page lists versions, limits and a minimal Workers example.
+Workers need the `nodejs_compat` flag: the Stellar SDK imports `buffer` and the x402 Bazaar extension imports `url`. A minimal Worker using `@vegaforge/tollway-server` is about 870 KiB, 210 KiB gzipped; CI fails if it grows past 235,000 bytes gzipped. That budget is pending the maintainer's decision: it was 200,000, and #342's local Stellar pre-validation brings the Stellar SDK's XDR layer into the gate, taking the minimal Worker from 153,048 to 214,619 bytes gzipped. The new "Supported runtimes" docs page lists versions, limits and a minimal Workers example.
 
 Closes #163. Pull request: #338.

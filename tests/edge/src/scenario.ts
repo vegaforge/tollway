@@ -28,11 +28,23 @@ export type StepResult = { step: string; ok: boolean; detail?: string };
 const CONFIG = {
   amount: "10000",
   asset: "CBIELTK6YBZJU5UP2WWQEUCYKLPU6AUNZ2BQ4WWFEIE3USCIHMXQDAMA",
-  payTo: "GDSERVICEEDGEXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX",
+  payTo: "GDVEU3DD4KOFECV66VIHWEZOYX4ZKR3WV27L464SIIPOU2IUI3JCZA57",
   network: "testnet",
 } satisfies PaywallConfig;
 
 const FACILITATOR_URL = "https://facilitator.edge.test";
+
+/**
+ * A real signed Stellar x402 exact payment for CONFIG: a SAC `transfer` of
+ * 10000 to CONFIG.payTo, with one address auth entry. The gate checks an
+ * envelope like this locally before it calls a real facilitator (#159), so
+ * the createHttpFacilitator step needs one. It is built exactly like
+ * `envelope()` in packages/server/src/testing/stellar-envelopes.ts, from the
+ * same deterministic test keys (no funds, not secrets), with time bounds
+ * fixed at zero so it never changes. The facilitator here is a stub.
+ */
+const STELLAR_PAYMENT =
+  "AAAAAgAAAAD9FyQ4WqDHW2T7eM1gL6HZkf3r92sTxY7XAurINen2GAAAAGQAAAAAAAAAAgAAAAEAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAEAAAAAAAAAGAAAAAAAAAABUEXNXsBymnaP1a0CUFhS308Cjc6DDlrFIgm6SEg7LwEAAAAIdHJhbnNmZXIAAAADAAAAEgAAAAAAAAAA/RckOFqgx1tk+3jNYC+h2ZH96/drE8WO1wLqyDXp9hgAAAASAAAAAAAAAADqSmxj4pxSCr71UHsTLsX5lUd2rr6+e5JCHuppFEbSLAAAAAoAAAAAAAAAAAAAAAAAACcQAAAAAQAAAAEAAAAAAAAAAP0XJDhaoMdbZPt4zWAvodmR/ev3axPFjtcC6sg16fYYAAAAAAAAACoAAAPoAAAAAQAAAAAAAAABUEXNXsBymnaP1a0CUFhS308Cjc6DDlrFIgm6SEg7LwEAAAAIdHJhbnNmZXIAAAADAAAAEgAAAAAAAAAA/RckOFqgx1tk+3jNYC+h2ZH96/drE8WO1wLqyDXp9hgAAAASAAAAAAAAAADqSmxj4pxSCr71UHsTLsX5lUd2rr6+e5JCHuppFEbSLAAAAAoAAAAAAAAAAAAAAAAAACcQAAAAAAAAAAAAAAABNen2GAAAAEBzVDrJlyl4A2HSjbmFnlLQS3iESlnEYIjRX/QdCeTQy4eR0CfhglKCKKtz7DzYCuYlE27vDp0TGgyuEKoWaDQC";
 
 function payFrom(paymentRequired: string | null, transaction: string): string {
   const accepted = decodePaymentRequiredHeader(paymentRequired ?? "").accepts[0];
@@ -147,7 +159,7 @@ export async function runScenario(): Promise<StepResult[]> {
         "createHttpFacilitator",
         async (request) => httpApp.fetch(request),
         verifier,
-        "AAAAAgAAAAA=",
+        STELLAR_PAYMENT,
       )),
     );
   } finally {

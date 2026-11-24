@@ -46,11 +46,11 @@ function post(body: string, headers: Record<string, string> = {}): TollwayReques
   };
 }
 
-function pay(challenge: GateOutcome): string {
+function pay(challenge: GateOutcome, option = 0): string {
   if (challenge.kind !== "payment-required")
     throw new Error(`expected a 402, got ${challenge.kind}`);
   const accepted = decodePaymentRequiredHeader(challenge.headers[PAYMENT_REQUIRED_HEADER] ?? "")
-    .accepts[0];
+    .accepts[option];
   if (!accepted) throw new Error("no payment requirements");
   return encodePaymentSignatureHeader({
     x402Version: 2,
@@ -122,12 +122,52 @@ describe("body binding (#164)", () => {
     expect(challenge.challenge.resource.url).toBe("/infer");
   });
 
+  it.each([
+    0, 1,
+  ])("binds the body for every payment option: option %i paid for body A does not unlock body B", async (option) => {
+    // Two payment options (#158) on one body-bound route. Each option's
+    // offer carries the bound resource, so a payment made through either
+    // one is tied to the body it was priced for.
+    const twoOptions = {
+      resource: "/infer",
+      bindBody: { maxBytes: 1024 },
+      accepts: [
+        { amount: "10000", asset: "USDC:GA5Z", payTo: "GSERVICE", network: "testnet" },
+        { amount: "9000", asset: "EURC:GB7T", payTo: "GSERVICE", network: "testnet" },
+      ],
+    } satisfies PaywallConfig;
+    const cache = createInMemorySettlementCache();
+    const facilitator = countingFacilitator();
+    const gate = createPaywall(twoOptions, { signer, facilitator, cache });
+    const cheap = '{"prompt":"hi"}';
+    const challenge = await gate(post(cheap));
+    if (challenge.kind !== "payment-required") throw new Error("expected 402");
+    const bound = await bindBodyToResource("/infer", utf8Bytes(cheap));
+    expect(challenge.challenge.resource.url).toBe(bound);
+    expect(challenge.challenge.accepts).toHaveLength(2);
+    const header = pay(challenge, option);
+
+    const first = await gate(post(cheap, { [PAYMENT_SIGNATURE_HEADER]: header }));
+    if (first.kind !== "settled") throw new Error(`expected settled, got ${first.kind}`);
+    expect(first.receipt.receipt.resource).toBe(bound);
+    const settledCalls = facilitator.calls();
+
+    // The same payment, now presented with a different body.
+    const other = await gate(
+      post('{"prompt":"write a novel"}', { [PAYMENT_SIGNATURE_HEADER]: header }),
+    );
+    // Refused as a payment already settled for another offer, before any
+    // facilitator call: the bound identity differs, so no receipt is reused.
+    expect(other).toMatchObject({ kind: "rejected", code: "offer-mismatch", status: 409 });
+    expect(facilitator.calls()).toBe(settledCalls);
+  });
+
   it("answers 413 over maxBytes without calling the facilitator", async () => {
     const facilitator = countingFacilitator();
     const gate = createPaywall(config, { signer, facilitator });
     const big = "x".repeat(1025);
     const unpaid = await gate(post(big));
-    expect(unpaid).toMatchObject({ kind: "rejected", status: 413 });
+    expect(unpaid).toMatchObject({ kind: "rejected", status: 413, code: "body-too-large" });
     const paid = await gate(post(big, { [PAYMENT_SIGNATURE_HEADER]: "anything" }));
     expect(paid).toMatchObject({ status: 413 });
     expect(facilitator.calls()).toBe(0);
@@ -142,7 +182,7 @@ describe("body binding (#164)", () => {
       headers: { "content-length": "4096" },
       body: { read },
     });
-    expect(outcome).toMatchObject({ kind: "rejected", status: 413 });
+    expect(outcome).toMatchObject({ kind: "rejected", status: 413, code: "body-too-large" });
     expect(read).not.toHaveBeenCalled();
   });
 
@@ -151,6 +191,7 @@ describe("body binding (#164)", () => {
     expect(await gate(post("{}", { "content-encoding": "gzip" }))).toMatchObject({
       kind: "rejected",
       status: 415,
+      code: "body-not-supported",
     });
   });
 
@@ -161,6 +202,7 @@ describe("body binding (#164)", () => {
     );
     expect(await gate(post("hi", { "content-type": "text/plain" }))).toMatchObject({
       status: 415,
+      code: "body-not-supported",
     });
     expect(
       await gate(post("{}", { "content-type": "application/json; charset=utf-8" })),
@@ -172,6 +214,7 @@ describe("body binding (#164)", () => {
     expect(await gate({ method: "POST", url: "/infer", headers: {} })).toMatchObject({
       kind: "rejected",
       status: 500,
+      code: "body-not-provided",
     });
   });
 

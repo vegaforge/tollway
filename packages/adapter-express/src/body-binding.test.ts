@@ -126,6 +126,7 @@ describe("Express: body limit (#164)", () => {
     try {
       const response = await post(chunked("x".repeat(2000)), { [PAYMENT_SIGNATURE_HEADER]: "any" });
       expect(response.status).toBe(413);
+      expect(await response.json()).toMatchObject({ error: { code: "body-too-large" } });
       expect(calls()).toBe(0);
     } finally {
       await close();
@@ -139,6 +140,7 @@ describe("Express: body limit (#164)", () => {
         [PAYMENT_SIGNATURE_HEADER]: "any",
       });
       expect(response.status).toBe(413);
+      expect(await response.json()).toMatchObject({ error: { code: "body-too-large" } });
       expect(response.headers.get("connection")).toBe("close");
       expect(calls()).toBe(0);
     } finally {

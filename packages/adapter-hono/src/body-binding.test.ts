@@ -61,6 +61,7 @@ describe("Hono: body binding (#164)", () => {
     const { post, calls } = await build();
     const response = await post(chunked("x".repeat(2000)), { [PAYMENT_SIGNATURE_HEADER]: "any" });
     expect(response.status).toBe(413);
+    expect(await response.json()).toMatchObject({ error: { code: "body-too-large" } });
     expect(calls()).toBe(0);
   });
 

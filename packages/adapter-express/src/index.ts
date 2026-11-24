@@ -13,6 +13,7 @@ import {
   type Gate,
   type RequestBodySource,
   type RouteTable,
+  renderGateRejection,
 } from "@vegaforge/tollway-server";
 import type { NextFunction, Request, RequestHandler, Response } from "express";
 
@@ -44,11 +45,14 @@ export function expressPaywall(gate: Gate): RequestHandler {
           res.set(outcome.headers).status(outcome.status).json(outcome.challenge);
           return;
         }
-        if (outcome.headers) res.set(outcome.headers);
+        // The body and headers come from the server's one renderer, so every
+        // adapter answers each error code the same way (#161).
+        const rejection = renderGateRejection(outcome);
+        res.set(rejection.headers);
         // A 413 leaves the rest of the upload unread, so the connection
         // cannot be reused: close it once the answer is sent.
-        if (outcome.status === 413) res.set("Connection", "close");
-        res.status(outcome.status).json({ error: outcome.reason });
+        if (rejection.status === 413) res.set("Connection", "close");
+        res.status(rejection.status).json(rejection.body);
       })
       .catch(next);
   };

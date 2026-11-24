@@ -26,7 +26,7 @@ The edge job is part of the `quality` check, so a change that breaks a runtime c
 
 **Workers need `nodejs_compat`.** The Stellar SDK, which `@stellar/mpp` and `@x402/stellar` depend on, imports Node's `buffer`, and the x402 Bazaar extension (`@x402/extensions/bazaar`, used for discovery) imports `url`. workerd provides both only with the `nodejs_compat` compatibility flag. Without it, the Worker fails to load with "no matching module rules" for `buffer`.
 
-**Bundle size.** A minimal Worker with one paid route through `createHttpFacilitator` bundles to about 770 KiB, 178 KiB gzipped, measured with esbuild on 2026-11-24. Almost all of it is the Stellar SDK. Check it against Cloudflare's current Worker size limits for your plan. CI fails if the gzipped size grows past the budget in `tests/edge/bundle-budget.json` (200,000 bytes), so a dependency that balloons the bundle is caught in review.
+**Bundle size.** A minimal Worker with one paid route through `createHttpFacilitator` bundles to about 870 KiB, 210 KiB gzipped, measured with esbuild on 2026-11-24. The largest parts are Zod, the Stellar SDK's XDR layer (used by the gate's local payment pre-validation) and Ajv. Check it against Cloudflare's current Worker size limits for your plan. CI fails if the gzipped size grows past the budget in `tests/edge/bundle-budget.json` (235,000 bytes), so a dependency that balloons the bundle is caught in review.
 
 **Settlement cache.** The in-memory cache works everywhere, but on Workers each isolate has its own memory, so use a shared cache in production. `createRedisSettlementCache` needs a Redis client that works on the runtime. A client built on Node's `net` module, such as `ioredis`, runs on Deno and Bun; on Workers, use a client that supports them.
 
