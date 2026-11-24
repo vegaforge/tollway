@@ -73,6 +73,17 @@ export {
   type SettlementOutcomeKind,
   type SignedTerms,
 } from "./retry.js";
+export {
+  type AgentSigner,
+  assertKeypairSigner,
+  createKeypairSigner,
+  createSmartAccountSigner,
+  isKeypairSigner,
+  type KeypairAgentSigner,
+  type KeypairSignerOptions,
+  type SmartAccountAgentSigner,
+  type SmartAccountSignerOptions,
+} from "./signer.js";
 
 /** Events the client emits so callers and observability can follow along. */
 export type ClientEvent =

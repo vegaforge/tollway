@@ -30,6 +30,7 @@ import type { ClientSettler, SettleRequest } from "./index.js";
 import { type OfferChecks, passesAllowlists, validateOfferChecks } from "./offer-checks.js";
 import { messageOf, readReceiptHeader } from "./receipt-header.js";
 import { SettlementOutcomeError, type SignedTerms } from "./retry.js";
+import type { AgentSigner } from "./signer.js";
 
 export { TOLLWAY_RECEIPT_HEADER } from "./receipt-header.js";
 export const PAYMENT_REQUIRED_HEADER = "PAYMENT-REQUIRED";
@@ -37,11 +38,10 @@ export const PAYMENT_SIGNATURE_HEADER = "PAYMENT-SIGNATURE";
 
 export type X402SettlerOptions = {
   /**
-   * Signs the Soroban auth entry. Build it with
-   * `createEd25519Signer("S...", "stellar:testnet")` from @x402/stellar; the
-   * settler never sees the secret.
+   * Signs the Soroban auth entry. Pass an {@link AgentSigner} (keypair or
+   * smart-account) or a raw `@x402/stellar` `ClientStellarSigner`.
    */
-  signer: ClientStellarSigner;
+  signer: AgentSigner | ClientStellarSigner;
   network: StellarNetwork;
   /** Defaults to the global `fetch`. Inject one in tests. */
   fetch?: typeof globalThis.fetch;
@@ -75,20 +75,37 @@ const CONTRACT_ADDRESS = /^C[A-Z2-7]{55}$/;
  * It only pays what the client already approved: the 402's amount and payee
  * must match the offer the policy engine checked, or nothing is signed.
  */
+function resolveX402Signer(
+  signer: AgentSigner | ClientStellarSigner,
+  network: StellarNetwork,
+): ClientStellarSigner {
+  if ("kind" in signer) {
+    if (signer.network !== network) {
+      throw new TollwayError(
+        "payment-failed",
+        `the x402 settler is configured for ${network}, but the signer is on ${signer.network}`,
+      );
+    }
+    return signer.x402;
+  }
+  return signer;
+}
+
 export function createX402Settler(options: X402SettlerOptions): ClientSettler {
   const network = CAIP2[options.network];
   const doFetch = options.fetch ?? globalThis.fetch;
   const method = options.method ?? "GET";
   if (options.offerChecks) validateOfferChecks(options.offerChecks, options.network);
   const offerChecks = options.offerChecks;
+  const stellarSigner = resolveX402Signer(options.signer, options.network);
   const scheme = new ExactStellarScheme(
-    options.signer,
+    stellarSigner,
     options.rpcUrl ? { url: options.rpcUrl } : undefined,
   );
 
   return {
     // The client requires the receipt's payer to be the account that signed.
-    payer: options.signer.address,
+    payer: stellarSigner.address,
     async settle({ resource, offer, model, pinned }: SettleRequest): Promise<SignedReceipt> {
       if (model !== "x402") {
         throw new TollwayError("payment-failed", `the x402 settler cannot settle model "${model}"`);

@@ -33,20 +33,29 @@ import { Mppx } from "mppx/client";
 import { z } from "zod";
 import type { ClientSettler, SettleRequest } from "./index.js";
 import { messageOf, readReceiptHeader, TOLLWAY_RECEIPT_HEADER } from "./receipt-header.js";
+import { type AgentSigner, assertKeypairSigner } from "./signer.js";
 
 /** How the charge transaction reaches the chain; see the `mode` option. */
 export type MppChargeMode = "pull" | "push";
 
 type SignerOption =
   | {
+      /** Unified agent signer (#205). Must be a keypair signer; smart-account signers are rejected. */
+      signer: AgentSigner;
+      secretKey?: undefined;
+      keypair?: undefined;
+    }
+  | {
       /** Stellar secret key (S...). Provide this or `keypair`, not both. */
+      signer?: undefined;
       secretKey: string;
       keypair?: undefined;
     }
   | {
       /** Stellar keypair. Provide this or `secretKey`, not both. */
-      keypair: Keypair;
+      signer?: undefined;
       secretKey?: undefined;
+      keypair: Keypair;
     };
 
 export type MppChargeSettlerOptions = SignerOption & {
@@ -123,8 +132,14 @@ export function offerAssetContract(asset: string, network: StellarNetwork): stri
  * credential, and returns the Tollway receipt.
  */
 export function createMppChargeSettler(options: MppChargeSettlerOptions): ClientSettler {
-  if ((options.secretKey === undefined) === (options.keypair === undefined)) {
-    throw new TypeError("createMppChargeSettler: provide exactly one of secretKey or keypair");
+  const provided =
+    (options.signer !== undefined ? 1 : 0) +
+    (options.secretKey !== undefined ? 1 : 0) +
+    (options.keypair !== undefined ? 1 : 0);
+  if (provided !== 1) {
+    throw new TypeError(
+      "createMppChargeSettler: provide exactly one of signer, secretKey, or keypair",
+    );
   }
   const { network } = options;
   const networkId = MPP_NETWORK_ID[network];
@@ -132,11 +147,25 @@ export function createMppChargeSettler(options: MppChargeSettlerOptions): Client
   const method = options.method ?? "GET";
   const receiptHeader = options.receiptHeader ?? TOLLWAY_RECEIPT_HEADER;
 
+  let resolvedKeypair: Keypair | undefined = options.keypair;
+  let payerAddress: string | undefined = options.keypair?.publicKey();
+  if (options.signer !== undefined) {
+    const kpSigner = assertKeypairSigner(options.signer, "mpp-charge");
+    if (kpSigner.network !== network) {
+      throw new TollwayError(
+        "payment-failed",
+        `the MPP charge settler is configured for ${network}, but the signer is on ${kpSigner.network}`,
+      );
+    }
+    resolvedKeypair = kpSigner.keypair;
+    payerAddress = kpSigner.address;
+  }
+
   // The key is handed to @stellar/mpp here and not kept anywhere else.
   const chargeMethod = stellar.charge({
     ...(options.secretKey !== undefined
       ? { secretKey: options.secretKey }
-      : { keypair: options.keypair }),
+      : { keypair: resolvedKeypair }),
     // Tollway amounts are already base units, and so are MPP challenge amounts.
     decimals: 0,
     ...(options.rpcUrl !== undefined ? { rpcUrl: options.rpcUrl } : {}),
@@ -147,6 +176,7 @@ export function createMppChargeSettler(options: MppChargeSettlerOptions): Client
   const mppx = Mppx.create({ methods: [chargeMethod], fetch: doFetch, polyfill: false });
 
   return {
+    ...(payerAddress !== undefined ? { payer: payerAddress } : {}),
     async settle({ resource, offer, model }: SettleRequest): Promise<SignedReceipt> {
       if (model !== "mpp-charge") {
         throw new TollwayError(
