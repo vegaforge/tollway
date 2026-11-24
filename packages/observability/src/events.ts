@@ -13,6 +13,7 @@ export const webhookEvents = [
   "channel.closed",
   "budget.warning",
   "anomaly.detected",
+  "sponsor.low_balance",
 ] as const;
 
 export type WebhookEvent = (typeof webhookEvents)[number];

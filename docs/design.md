@@ -84,6 +84,8 @@ SHARED OPTIONAL SERVICE
   - Receipt archive
 ```
 
+The shared service is `packages/service` (`@vegaforge/tollway-service`), which an operator runs themselves. It holds no key that signs receipts or moves funds and calls nothing Tollway operates. See [the service docs](../apps/web/src/content/docs/service.mdx) for the trust boundary, configuration and API-key model.
+
 ### The model router
 
 The router is the conceptual core of the project. Per interaction or per counterparty, it decides which settlement model to use.
@@ -128,7 +130,7 @@ This engine is the safety net that catches a counterparty who under-settles rela
 
 ### Observability
 
-A dashboard and an exporter. Per-agent and per-service spend over time, model mix, latency per model, failure and retry rates, open channels and their remaining budget, and anomaly events. Machine-readable exports in JSON and CSV, and webhooks (`receipt.created`, `channel.opened`, `channel.closed`, `budget.warning`, `anomaly.detected`) for whatever you want to wire up.
+A dashboard and an exporter. Per-agent and per-service spend over time, model mix, latency per model, failure and retry rates, open channels and their remaining budget, and anomaly events. Machine-readable exports in JSON and CSV, and webhooks (`receipt.created`, `channel.opened`, `channel.closed`, `budget.warning`, `anomaly.detected`, `sponsor.low_balance`) for whatever you want to wire up.
 
 For how the dashboard views actually consume this data, including the three UI primitives every widget composes from and the data-layer seam each wired view holds with its source, see `docs/dashboard-data-contracts.md`.
 
@@ -171,6 +173,7 @@ tollway/
     channels/             # MPP channel lifecycle manager
     reconcile/            # reconciliation engine (TS; Go variant later)
     observability/        # metrics, exports, webhooks
+    service/              # optional self-hosted shared service (Hono, API keys, OpenAPI)
     theme/                # shared design tokens
   apps/
     dashboard/            # Next.js observability UI

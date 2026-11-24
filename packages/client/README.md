@@ -84,6 +84,15 @@ still unauthenticated: the checks catch a service that returns the wrong
 receipt by mistake, but anyone who can answer the request can forge one that
 passes them. Configure a verifier in production.
 
+
+## Settlers
+
+Two settlers ship with the package, one per per-request model:
+
+- `createX402Settler({ signer, network })` pays x402 V2 routes with `@x402/stellar`.
+- `createMppChargeSettler({ secretKey | keypair, network, mode? })` pays MPP charge routes with `@stellar/mpp`. It refuses a challenge unless the amount, recipient, token contract and network match the approved offer, and nothing is signed until they do. In `pull` mode (the default) the service submits the transaction and pays the fee; in `push` mode the agent submits it, so its account also needs XLM. It never patches `globalThis.fetch`.
+
+Both read the Tollway receipt from the `TOLLWAY-RECEIPT` header.
 ## Hardening an agent
 
 A 402 challenge is attacker-controlled input. Before the policy engine and
@@ -188,6 +197,62 @@ settler call, resends included. Each fresh authorization is a new payment
 attempt for the policy: it is checked again, and it counts toward a rate
 limit with `count: "attempts"`. The policy records spend once, after the
 payment settles, however many attempts it took.
+
+## Falling back when a channel cannot open
+
+`docs/design.md` promises that a failed channel open falls back to per-request
+payment. Pass `fallback` to turn that on:
+
+```ts
+const client = createClient({
+  network: "testnet",
+  settler: channelSettler,
+  fallback: {
+    x402: createX402Settler({ signer, network: "testnet" }),
+    cooldownMs: 60_000, // first rest after a failed open; doubles, up to maxCooldownMs
+    maxCooldownMs: 15 * 60_000,
+    onOrphanedChannel: ({ counterparty, channelId, txHash }) =>
+      alert("channel open may have landed", { counterparty, channelId, txHash }),
+  },
+});
+```
+
+The fallback is taken for one error only: code `channel-open-failed`
+(`ChannelOpenFailedError` in `@vegaforge/tollway-core`), which a channel
+settler throws when the open failed before any voucher was signed. Then:
+
+- If the offer accepts `x402`, the client asks the policy again for the x402
+  payment, emits `fallback`, and pays once by x402. A policy block on x402
+  rejects with `PolicyBlockedError`. The spend is recorded once, for x402, and
+  the `payment` event and the result name `x402`.
+- The counterparty's channel path rests. Until the cooldown ends, its payments
+  go straight to x402; then one request at a time tries the channel again.
+- An open that may have landed (`submission: "ambiguous"`) is reported to
+  `onOrphanedChannel`, so the funder side can resume or recover the channel.
+
+Any other failure on the channel path, including one after a voucher was
+sent, a receipt that fails verification and a policy block, is never retried
+on x402: the service may already have been paid. Without `fallback`, a failed
+open rejects like any other settler error.
+
+## Channel events from a settler
+
+The client never opens channels itself. A channel settler reports its
+channels' lifecycle on the client's `on()` stream through
+`ClientSettler.subscribe`, which `createClient` calls once:
+
+```ts
+const settler: ClientSettler = {
+  settle: (request) => payByVoucher(request),
+  subscribe(emit) {
+    forwardChannelEvents = (event) => {
+      if (event.type === "channel:opened" || event.type === "channel:closed") {
+        emit({ type: event.type, channelId: event.channelId });
+      }
+    };
+  },
+};
+```
 
 ## Receipt store
 

@@ -14,6 +14,7 @@ import {
   WEBHOOK_DELIVERY_ID_HEADER,
   WEBHOOK_EVENT_ID_HEADER,
 } from "./events.js";
+import { loadSqlite } from "./sqlite.js";
 
 export { WEBHOOK_DELIVERY_ID_HEADER, WEBHOOK_EVENT_ID_HEADER };
 
@@ -389,31 +390,7 @@ export type SqliteWebhookOutbox = WebhookOutbox & {
   close(): void;
 };
 
-/** The first Node release where `node:sqlite` works without a flag. */
-const SQLITE_MINIMUM_NODE = "22.13.0";
-
 const DEFAULT_BUSY_TIMEOUT_MS = 500;
-
-/**
- * Loads `node:sqlite`, or throws an error that names the Node version it
- * needs. Older releases either lack `process.getBuiltinModule` or keep the
- * module behind `--experimental-sqlite`.
- */
-function loadSqlite(): typeof import("node:sqlite") {
-  const unavailable = () =>
-    new Error(
-      `createSqliteWebhookOutbox needs node:sqlite, available without a flag from Node ${SQLITE_MINIMUM_NODE}; this is Node ${process.versions.node}`,
-    );
-  if (typeof process.getBuiltinModule !== "function") throw unavailable();
-  let sqlite: typeof import("node:sqlite") | undefined;
-  try {
-    sqlite = process.getBuiltinModule("node:sqlite");
-  } catch (cause) {
-    throw Object.assign(unavailable(), { cause });
-  }
-  if (!sqlite) throw unavailable();
-  return sqlite;
-}
 
 /**
  * SQLite-backed outbox using the built-in `node:sqlite` module, so it adds no
@@ -429,7 +406,7 @@ export function createSqliteWebhookOutbox(
 ): SqliteWebhookOutbox {
   const busyTimeoutMs = options.busyTimeoutMs ?? DEFAULT_BUSY_TIMEOUT_MS;
   assertNonNegativeInteger(busyTimeoutMs, "busyTimeoutMs");
-  const { DatabaseSync } = loadSqlite();
+  const { DatabaseSync } = loadSqlite("createSqliteWebhookOutbox");
   const db = new DatabaseSync(options.filename);
   // Set first, so even the schema statements below wait for a lock held by
   // another process instead of failing at once.
