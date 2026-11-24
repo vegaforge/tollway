@@ -904,11 +904,7 @@ export const receiptLogEntrySchema: z.ZodObject<{
             amount: z.ZodString;
             asset: z.ZodString;
             resource: z.ZodString;
-            model: z.ZodEnum<{
-                x402: "x402";
-                "mpp-charge": "mpp-charge";
-                "mpp-channel": "mpp-channel";
-            }>;
+            model: z.ZodEnum<EnumShape<readonly ["x402", "mpp-charge", "mpp-channel"]>>;
             settlement: z.ZodDiscriminatedUnion<[z.ZodObject<{
                 kind: z.ZodLiteral<"transaction">;
                 txHash: z.ZodString;
@@ -917,10 +913,7 @@ export const receiptLogEntrySchema: z.ZodObject<{
                 channelId: z.ZodString;
                 sequence: z.ZodNumber;
             }, z.core.$strict>], "kind">;
-            network: z.ZodEnum<{
-                testnet: "testnet";
-                mainnet: "mainnet";
-            }>;
+            network: z.ZodEnum<EnumShape<readonly ["testnet", "mainnet"]>>;
             issuedAt: z.ZodISODateTime;
             version: z.ZodLiteral<1>;
         }, z.core.$strict>, z.ZodObject<{
@@ -933,11 +926,7 @@ export const receiptLogEntrySchema: z.ZodObject<{
             amount: z.ZodString;
             asset: z.ZodString;
             resource: z.ZodString;
-            model: z.ZodEnum<{
-                x402: "x402";
-                "mpp-charge": "mpp-charge";
-                "mpp-channel": "mpp-channel";
-            }>;
+            model: z.ZodEnum<EnumShape<readonly ["x402", "mpp-charge", "mpp-channel"]>>;
             settlement: z.ZodDiscriminatedUnion<[z.ZodObject<{
                 kind: z.ZodLiteral<"transaction">;
                 txHash: z.ZodString;
@@ -946,10 +935,7 @@ export const receiptLogEntrySchema: z.ZodObject<{
                 channelId: z.ZodString;
                 sequence: z.ZodNumber;
             }, z.core.$strict>], "kind">;
-            network: z.ZodEnum<{
-                testnet: "testnet";
-                mainnet: "mainnet";
-            }>;
+            network: z.ZodEnum<EnumShape<readonly ["testnet", "mainnet"]>>;
             issuedAt: z.ZodISODateTime;
             version: z.ZodLiteral<2>;
         }, z.core.$strict>], "version">;
