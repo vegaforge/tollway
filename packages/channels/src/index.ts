@@ -28,6 +28,7 @@ export {
   ChannelNotFoundError,
   ChannelNotOpenError,
   CloseNotSubmittedError,
+  CommitmentConflictError,
   CommitmentExceedsDepositError,
   CounterpartyQuarantinedError,
   InvalidAmountError,
@@ -40,7 +41,11 @@ export {
   createStellarMppChannelAdapter,
   type StellarMppChannelAdapterOptions,
 } from "./stellar-adapter.js";
-export { type CommitmentStore, createMemoryCommitmentStore } from "./store.js";
+export {
+  type CommitmentAppendExpectation,
+  type CommitmentStore,
+  createMemoryCommitmentStore,
+} from "./store.js";
 export type {
   Channel,
   ChannelManager,

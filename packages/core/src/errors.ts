@@ -30,6 +30,8 @@ export type TollwayErrorCode =
   | "channel-not-found"
   | "channel-not-open"
   | "channel-already-closed"
+  | "commitment-conflict"
+  | "invalid-channel-query"
   | "commitment-exceeds-deposit"
   | "settlement-mismatch"
   | "counterparty-quarantined"
