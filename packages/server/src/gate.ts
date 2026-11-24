@@ -9,6 +9,7 @@ import {
   type PaymentOffer,
   type ReceiptSigner,
   type SettlementModel,
+  type SettlementRef,
   type SignedReceipt,
   type StellarNetwork,
   signReceipt,
@@ -39,6 +40,11 @@ import {
   TOLLWAY_QUOTE_HEADER,
   TOLLWAY_RECEIPT_HEADER,
 } from "./headers.js";
+import {
+  isMppChannelCredential,
+  type MppChannelHandler,
+  parseMppChannelCredential,
+} from "./mpp-channel.js";
 import type { MppChargeHandler } from "./mpp-charge.js";
 import {
   buildOfferReceiptChallengeExtension,
@@ -176,6 +182,7 @@ export type PaywallDeps = {
   signer: ReceiptSigner;
   facilitator: FacilitatorClient;
   mppChargeHandler?: MppChargeHandler;
+  mppChannelHandler?: MppChannelHandler;
   router?: ModelRouter;
   cache?: SettlementCache;
   /**
@@ -260,6 +267,11 @@ export type PaywallDeps = {
   receiptVersion?: 1 | 2;
 };
 
+type HandlerSettlement =
+  | { settled: true; txHash: string }
+  | { settled: true; settlement: SettlementRef; txHash?: string }
+  | { settled: false; reason: string };
+
 type Handler<TPayment> = {
   idempotencyKey?(input: { payment: TPayment }): Promise<string | undefined>;
   verify(input: {
@@ -271,7 +283,7 @@ type Handler<TPayment> = {
     offer: PaymentOffer;
     payer: string;
     nonce: string;
-  }): Promise<{ settled: true; txHash: string } | { settled: false; reason: string }>;
+  }): Promise<HandlerSettlement>;
 };
 
 type RejectedOutcome = Extract<GateOutcome, { kind: "rejected" }>;
@@ -1224,7 +1236,7 @@ async function settleAndRecord<TPayment>(
   // The hold starts with the call, so it bounds how long after sending the
   // payment can stay ambiguous. A definite answer in time ends it at once.
   const hold = startHold(context.ambiguousHoldMs);
-  let settlement: { settled: true; txHash: string } | { settled: false; reason: string };
+  let settlement: HandlerSettlement;
   try {
     settlement = await withDeadline(
       handler.settle({
@@ -1261,7 +1273,7 @@ async function settleAndRecord<TPayment>(
     return { ok: false, outcome: { kind: "rejected", status: 502, reason: settlement.reason } };
   }
 
-  const receipt = await receiptFor(settlement.txHash, offer, model, method, verification, context);
+  const receipt = await receiptFor(settlementRef(settlement), offer, model, method, verification, context);
 
   if (!context.cache) {
     return { ok: true, receipt, method, replayed: false };
@@ -1279,6 +1291,12 @@ async function settleAndRecord<TPayment>(
   return { ok: true, receipt, method, replayed: false };
 }
 
+function settlementRef(settlement: Extract<HandlerSettlement, { settled: true }>): SettlementRef {
+  return "settlement" in settlement
+    ? settlement.settlement
+    : { kind: "transaction", txHash: settlement.txHash };
+}
+
 /**
  * Signs the receipt for a completed settlement.
  *
@@ -1289,7 +1307,7 @@ async function settleAndRecord<TPayment>(
  * until the operator switches (see `PaywallDeps.receiptVersion`).
  */
 async function receiptFor(
-  txHash: string,
+  settlement: SettlementRef,
   offer: PaymentOffer,
   model: SettlementModel,
   method: string,
@@ -1306,7 +1324,7 @@ async function receiptFor(
       asset: offer.asset,
       resource: offer.resource,
       model,
-      settlement: { kind: "transaction", txHash },
+      settlement,
       network: offer.network,
       ...v2,
     }),
@@ -1323,7 +1341,7 @@ async function receiptFor(
  * throws: the request that timed out has already been answered.
  */
 async function settleLateAnswer(
-  late: LateAnswer<{ settled: true; txHash: string } | { settled: false; reason: string }>,
+  late: LateAnswer<HandlerSettlement>,
   hold: SettlementHold,
   offer: PaymentOffer,
   model: SettlementModel,
@@ -1339,7 +1357,7 @@ async function settleLateAnswer(
   if (late.value.settled && context.cache) {
     try {
       const receipt = await receiptFor(
-        late.value.txHash,
+        settlementRef(late.value),
         offer,
         model,
         method,
@@ -1372,6 +1390,7 @@ async function paymentRequired(
   request: TollwayRequest,
   acceptedModels: SettlementModel[],
   mppChargeHandler: MppChargeHandler | undefined,
+  mppChannelHandler: MppChannelHandler | undefined,
   config: PaywallConfig,
   quote: string | undefined,
   context: Pick<SettlementContext, "signer" | "offerReceipt" | "clock">,
@@ -1416,6 +1435,17 @@ async function paymentRequired(
     for (const [name, value] of Object.entries(mpp.headers)) {
       // The adapters send the offer as the JSON body, so headers that
       // describe mppx's own body would mislabel it.
+      if (!BODY_HEADERS.has(name.toLowerCase())) {
+        headers[name] = value;
+      }
+    }
+  }
+  if (acceptedModels.includes("mpp-channel") && mppChannelHandler?.challenge) {
+    const mppChannel = await mppChannelHandler.challenge({
+      offer,
+      request: { method: request.method, url: request.url, headers: request.headers },
+    });
+    for (const [name, value] of Object.entries(mppChannel.headers)) {
       if (!BODY_HEADERS.has(name.toLowerCase())) {
         headers[name] = value;
       }
@@ -1481,9 +1511,10 @@ export function createPaywallWithInFlight(
   return async function gate(request): Promise<GateOutcome> {
     const method = request.method.toUpperCase();
     const signatureHeader = readHeader(request.headers, PAYMENT_SIGNATURE_HEADER);
-    const mppCredential = acceptedModels.includes("mpp-charge")
-      ? readMppCredential(request.headers)
-      : undefined;
+    const mppCredential =
+      acceptedModels.includes("mpp-charge") || acceptedModels.includes("mpp-channel")
+        ? readMppCredential(request.headers)
+        : undefined;
 
     // The x402 payment is decoded before pricing, because a dynamic-price
     // quote comes back inside it, in `accepted.extra.tollwayQuote`.
@@ -1562,6 +1593,7 @@ export function createPaywallWithInFlight(
         request,
         acceptedModels,
         deps.mppChargeHandler,
+        deps.mppChannelHandler,
         config,
         quote,
         context,
@@ -1571,6 +1603,36 @@ export function createPaywallWithInFlight(
     // An MPP credential answers an MPP challenge, so the agent has already
     // chosen the model; the router is not asked again.
     if (mppCredential) {
+      const useChannel =
+        acceptedModels.includes("mpp-channel") &&
+        (!acceptedModels.includes("mpp-charge") || isMppChannelCredential(mppCredential));
+
+      if (useChannel) {
+        if (!deps.mppChannelHandler) {
+          return {
+            kind: "rejected",
+            status: 500,
+            reason: "mpp-channel handler not configured",
+          };
+        }
+        const channelPayment = parseMppChannelCredential(mppCredential);
+        if (!channelPayment) {
+          return {
+            kind: "rejected",
+            status: 400,
+            reason: "Authorization: Payment credential is not a valid mpp-channel voucher",
+          };
+        }
+        return settleWithHandler(
+          channelPayment,
+          offer,
+          "mpp-channel",
+          method,
+          deps.mppChannelHandler,
+          context,
+        );
+      }
+
       if (!deps.mppChargeHandler) {
         return {
           kind: "rejected",
@@ -1595,6 +1657,7 @@ export function createPaywallWithInFlight(
         request,
         acceptedModels,
         deps.mppChargeHandler,
+        deps.mppChannelHandler,
         config,
         quote,
         context,
@@ -1624,6 +1687,7 @@ export function createPaywallWithInFlight(
           request,
           acceptedModels,
           deps.mppChargeHandler,
+          deps.mppChannelHandler,
           config,
           fresh,
           context,
@@ -1640,12 +1704,11 @@ export function createPaywallWithInFlight(
       );
     }
 
-    if (decision.model === "mpp-charge") {
+    if (decision.model === "mpp-charge" || decision.model === "mpp-channel") {
       return {
         kind: "rejected",
         status: 400,
-        reason:
-          "mpp-charge payments carry an Authorization: Payment credential, not PAYMENT-SIGNATURE",
+        reason: `${decision.model} payments carry an Authorization: Payment credential, not PAYMENT-SIGNATURE`,
       };
     }
 
