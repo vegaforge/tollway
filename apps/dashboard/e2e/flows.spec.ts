@@ -39,7 +39,14 @@ test("a channel-commitment receipt links to its channel", async ({ page }) => {
 test("the theme choice survives a reload", async ({ page }) => {
   await page.goto("/");
   const toggle = page.getByRole("button", { name: "Toggle color theme" });
-  const startsDark = (await toggle.getAttribute("aria-pressed")) === "true";
+  // next-themes sets the class on <html> before paint, so it is the theme the
+  // page starts in. The button renders aria-pressed="false" until React has
+  // hydrated it, whatever the theme, so reading the button here, or clicking
+  // before it reflects the theme, races hydration.
+  const startsDark = /(^|\s)dark(\s|$)/.test(
+    (await page.locator("html").getAttribute("class")) ?? "",
+  );
+  await expect(toggle).toHaveAttribute("aria-pressed", startsDark ? "true" : "false");
 
   await toggle.click();
   const expected = startsDark ? "false" : "true";
