@@ -150,6 +150,8 @@ Tollway is a pnpm and Turborepo monorepo. Each package is independently buildabl
 | `@vegaforge/tollway-channels` | MPP channel lifecycle manager |
 | `@vegaforge/tollway-reconcile` | reconciliation engine |
 | `@vegaforge/tollway-observability` | metrics, exports, webhooks |
+| `@vegaforge/tollway-signer-vault` | receipt signer backed by a HashiCorp Vault Transit key |
+| `@vegaforge/tollway-cli` | `tollway` command: decode headers, verify receipts, inspect 402s |
 | `@vegaforge/tollway-theme` | shared design tokens |
 
 Apps: `apps/web` (landing page and docs), `apps/dashboard` (observability UI), `apps/demo` (end-to-end x402 demo).
