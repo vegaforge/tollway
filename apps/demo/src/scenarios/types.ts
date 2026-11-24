@@ -7,7 +7,7 @@
 import type { SignedReceipt } from "@vegaforge/tollway-core";
 
 /** The settlement models a scenario can run today. */
-export type ScenarioName = "x402" | "mpp-charge";
+export type ScenarioName = "x402" | "mpp-charge" | "payment-options";
 
 /** What one scenario run produced. */
 export type ScenarioResult = {

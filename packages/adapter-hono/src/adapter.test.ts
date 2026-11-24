@@ -208,7 +208,13 @@ describe("honoPaywall with mpp-charge", () => {
       headers: { authorization: "Payment refused" },
     });
     expect(response.status).toBe(402);
-    expect(await response.json()).toEqual({ error: "mpp challenge was not issued by this server" });
+    expect(await response.json()).toEqual({
+      error: {
+        code: "payment-invalid",
+        message: "the payment was refused",
+        upstreamReason: "mpp challenge was not issued by this server",
+      },
+    });
   });
 });
 
@@ -266,7 +272,9 @@ describe("honoPaywall with a service policy", () => {
     });
     expect(response.status).toBe(429);
     expect(response.headers.get("retry-after")).toBe("60");
-    expect(await response.json()).toEqual({ error: "service-policy:spend-exceeded" });
+    expect(await response.json()).toEqual({
+      error: { code: "service-policy:spend-exceeded", message: "service-policy:spend-exceeded" },
+    });
   });
 });
 

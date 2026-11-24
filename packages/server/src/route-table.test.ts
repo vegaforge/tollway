@@ -68,6 +68,7 @@ describe("route-table matching", () => {
     expect(replay).toEqual({
       kind: "rejected",
       status: 409,
+      code: "offer-mismatch",
       reason: "payment already settled for a different offer",
     });
   });
