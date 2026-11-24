@@ -91,7 +91,7 @@ describe("API reference", () => {
       {
         options: join(folder, "typedoc.json"),
         tsconfig: join(folder, "tsconfig.json"),
-        entryPoints: [join(folder, "index.ts")],
+        entryPoints: [join(folder, "index.ts").replaceAll("\\", "/")],
         plugin: [],
         logLevel: LogLevel.None,
         validation: {
