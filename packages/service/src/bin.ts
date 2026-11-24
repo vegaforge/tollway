@@ -1,11 +1,13 @@
 #!/usr/bin/env node
 import { serve } from "@hono/node-server";
+import { adminModule } from "./admin.js";
 import { createService } from "./app.js";
 import { hashApiKey } from "./auth.js";
 import { ServiceConfigError } from "./config.js";
 import { createConsoleLogger, describeError } from "./logger.js";
 import { metricsModule } from "./metrics.js";
 import { loadServiceConfig } from "./node-config.js";
+import { policiesModule } from "./policies.js";
 
 /**
  * The `tollway-service` command.
@@ -35,8 +37,11 @@ async function hashKeyCommand(): Promise<void> {
 function startCommand(): void {
   const logger = createConsoleLogger();
   const config = loadServiceConfig(process.env);
-  // The metrics routes (#226) are the service's first module.
-  const app = createService({ config, logger, modules: [metricsModule()] });
+  const app = createService({
+    config,
+    logger,
+    modules: [metricsModule(), policiesModule(), adminModule()],
+  });
   const server = serve({ fetch: app.fetch, port: config.port, hostname: config.host }, (info) => {
     logger.info("listening", { host: config.host, port: info.port });
   });
