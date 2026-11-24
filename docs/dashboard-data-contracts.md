@@ -49,6 +49,17 @@ The placeholder a widget shows when its data is unavailable. Every unwired widge
 Wired views (Overview, Agents, Channels, Channel detail, Receipts, Anomalies and Exports) follow one pattern, and unwired views (Overview spend over time, Services, Webhooks) follow another.
 
 ### Wired views: the `useXxx` / `fetchXxx` seam
+### Services
+
+- **Hook:** `useServices()` in `apps/dashboard/src/data/use-services.ts`
+- **Data:** `ServiceSummary[]` from `apps/dashboard/src/data/services.ts`
+  - `payees[]`: revenue per payee, as integer micro-units in a string
+  - `models[]`: per settlement model, `calls` and `avgLatencyMs`
+- **Derived in the UI layer:** total revenue and settlement mix (share of calls per model),
+  via `data/services-summary.ts`
+- **Swapping the stub:** replace the body of `useServices()` with a call into
+  `@vegaforge/tollway-observability` that returns the same `ServiceSummary[]`; the page and
+  `ServicesTable` don't change.
 
 A wired view depends on exactly one hook in `apps/dashboard/src/data/`, and that hook depends on exactly one `fetchXxx` function in the same directory. The hook returns a discriminated union over the three render states the view cares about:
 
