@@ -1,5 +1,11 @@
 import type { CounterpartyQuarantine, QuarantineEntry } from "@vegaforge/tollway-core";
-import type { Drift, DriftKind, ReconciliationResult } from "./index.js";
+import {
+  type Drift,
+  type DriftKind,
+  type ReconciliationResult,
+  type ReconciliationSubject,
+  reconciliationSubjectId,
+} from "./index.js";
 
 /** Action taken when a drift kind is observed in a reconciliation result. */
 export type DriftAction = "quarantine" | "warn" | "ignore";
@@ -7,7 +13,9 @@ export type DriftAction = "quarantine" | "warn" | "ignore";
 /**
  * Conservative defaults: proven counterparty cheating (`under-settled`,
  * `recipient-mismatch`, `token-mismatch`) quarantines; other proven drift
- * kinds warn. Unknown or transient/unverifiable outcomes never quarantine.
+ * kinds warn. Charge drift warns: a failed or mismatched settlement is as
+ * likely a facilitator or configuration fault as a counterparty's. Only
+ * `drift` results act; `unverifiable` and `retryable` outcomes never do.
  */
 export const DEFAULT_DRIFT_ACTIONS: Record<DriftKind, DriftAction> & Record<string, DriftAction> = {
   "under-settled": "quarantine",
@@ -19,25 +27,30 @@ export const DEFAULT_DRIFT_ACTIONS: Record<DriftKind, DriftAction> & Record<stri
   "non-monotonic-cumulative": "warn",
   "foreign-commitment": "warn",
   "duplicate-sequence": "warn",
-  "transaction-not-found": "warn",
-  "transaction-failed": "warn",
+  "tx-failed": "warn",
+  "tx-not-found": "warn",
+  "transfer-missing": "warn",
+  "amount-mismatch": "warn",
+  "payee-mismatch": "warn",
+  "payer-mismatch": "warn",
+  "asset-mismatch": "warn",
   "network-mismatch": "warn",
-  "transfer-mismatch": "quarantine",
-  "unexpected-close": "warn",
-  "balance-mismatch": "warn",
+  "closed-on-chain": "warn",
   "recipient-mismatch": "quarantine",
+  "funder-mismatch": "warn",
   "token-mismatch": "quarantine",
+  "balance-mismatch": "warn",
 };
 
 export type DriftWarnEvent = {
   counterparty: string;
-  channelId: string;
+  subject: ReconciliationSubject;
   drift: Drift;
 };
 
 export type DriftQuarantineEvent = {
   counterparty: string;
-  channelId: string;
+  subject: ReconciliationSubject;
   drift: Drift;
   entry: QuarantineEntry;
 };
@@ -67,7 +80,7 @@ export type ProcessReconciliationInput = {
   result: ReconciliationResult;
   /**
    * Optional deduplication key for this result. Defaults to a deterministic
-   * key derived from `counterparty`, `result.channelId`, and the drift list.
+   * key derived from `counterparty`, the result's subject, and the drift list.
    */
   resultKey?: string;
 };
@@ -88,9 +101,11 @@ export interface ReconciliationQuarantineEnforcer {
   process(input: ProcessReconciliationInput): Promise<ProcessReconciliationOutput>;
 }
 
-function defaultResultKey(counterparty: string, result: ReconciliationResult): string {
-  if (result.ok) return `${counterparty}:${result.channelId}:ok`;
-  return `${counterparty}:${result.channelId}:${JSON.stringify(result.drift)}`;
+function defaultResultKey(
+  counterparty: string,
+  result: Extract<ReconciliationResult, { status: "drift" }>,
+): string {
+  return `${counterparty}:${reconciliationSubjectId(result.subject)}:${JSON.stringify(result.drift)}`;
 }
 
 /**
@@ -135,9 +150,12 @@ export function createQuarantineEnforcer(
   return {
     async process(input: ProcessReconciliationInput): Promise<ProcessReconciliationOutput> {
       const { counterparty, result } = input;
-      if (result.ok) {
+      // Only proven drift acts. An unverifiable or retryable outcome says
+      // nothing about the counterparty.
+      if (result.status !== "drift") {
         return { duplicate: false, actions: [] };
       }
+      const { subject } = result;
 
       const key = input.resultKey ?? defaultResultKey(counterparty, result);
       if (processedKeys.has(key)) {
@@ -166,13 +184,13 @@ export function createQuarantineEnforcer(
             drift: {
               kind: drift.kind,
               detail: drift.detail,
-              channelId: result.channelId,
+              ...(subject.kind === "channel" ? { channelId: subject.channelId } : {}),
             },
           });
-          onQuarantine?.({ counterparty, channelId: result.channelId, drift, entry });
+          onQuarantine?.({ counterparty, subject, drift, entry });
           actions.push({ drift, action, quarantined: true });
         } else if (action === "warn") {
-          onWarn?.({ counterparty, channelId: result.channelId, drift });
+          onWarn?.({ counterparty, subject, drift });
           actions.push({ drift, action, quarantined: false });
         } else {
           actions.push({ drift, action, quarantined: false });

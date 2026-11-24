@@ -1,179 +1,220 @@
-import { Asset, Keypair, Networks } from "@stellar/stellar-sdk";
 import { describe, expect, it, vi } from "vitest";
+import type { ChannelStateReader, OnChainChannelState } from "./chain.js";
 import { createReconciler } from "./index.js";
-import {
-  type OnChainChannelState,
-  type OpenChannelRecord,
-  startOpenChannelWatcher,
-} from "./open-channel.js";
+import { type OpenChannelSnapshot, reconcileOpenChannel } from "./open-channel.js";
 
-const FUNDER = Keypair.random().publicKey();
-const COUNTERPARTY = Keypair.random().publicKey();
-const ISSUER = Keypair.random().publicKey();
-const CHANNEL_ID = "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAD2KM";
-const USDC_CONTRACT = new Asset("USDC", ISSUER).contractId(Networks.TESTNET);
+const CHANNEL = `C${"A".repeat(55)}`;
+const TOKEN = `C${"B".repeat(55)}`;
+const OTHER_TOKEN = `C${"C".repeat(55)}`;
+const FUNDER = `G${"D".repeat(55)}`;
+const RECIPIENT = `G${"E".repeat(55)}`;
+const STRANGER = `G${"F".repeat(55)}`;
 
-function makeChannel(overrides?: Partial<OpenChannelRecord>): OpenChannelRecord {
+function snapshot(overrides: Partial<OpenChannelSnapshot> = {}): OpenChannelSnapshot {
   return {
-    id: CHANNEL_ID,
-    counterparty: COUNTERPARTY,
-    asset: `USDC:${ISSUER}`,
+    channelId: CHANNEL,
+    network: "testnet",
+    status: "open",
+    counterparty: RECIPIENT,
+    tokenContract: TOKEN,
     deposit: "10000",
     committed: "3000",
-    status: "open",
-    network: "testnet",
+    funder: FUNDER,
     ...overrides,
   };
 }
 
-function makeChainState(overrides?: Partial<OnChainChannelState>): OnChainChannelState {
+function state(overrides: Partial<OnChainChannelState> = {}): OnChainChannelState {
   return {
-    balance: 10000n,
-    refundWaitingPeriod: 100,
-    token: USDC_CONTRACT,
+    balance: "10000",
+    token: TOKEN,
     from: FUNDER,
-    to: COUNTERPARTY,
+    to: RECIPIENT,
     closeEffectiveAtLedger: null,
     currentLedger: 500,
+    refundWaitingPeriod: 100,
     ...overrides,
   };
 }
 
+const kindsOf = (drift: ReturnType<typeof reconcileOpenChannel>) => drift.map((d) => d.kind);
+
 describe("reconcileOpenChannel", () => {
-  const reconciler = createReconciler();
+  it("finds no drift when the contract matches the snapshot", () => {
+    expect(reconcileOpenChannel(snapshot(), state())).toEqual([]);
+  });
 
-  it("returns ok when open channel matches on-chain state and commitment stream", async () => {
-    const res = await reconciler.reconcileOpenChannel(
-      makeChannel(),
-      [
-        { channelId: CHANNEL_ID, sequence: 0, cumulativeAmount: "1000" },
-        { channelId: CHANNEL_ID, sequence: 1, cumulativeAmount: "3000" },
-      ],
+  describe("closed-on-chain", () => {
+    it("reports a pending close with its effective ledger, the current ledger and ledgers left", () => {
+      const drift = reconcileOpenChannel(
+        snapshot(),
+        state({ closeEffectiveAtLedger: 620, currentLedger: 500 }),
+      );
+      expect(drift).toEqual([
+        {
+          kind: "closed-on-chain",
+          detail: expect.stringMatching(/ledger 620 \(current ledger 500, 120 ledgers left/),
+        },
+      ]);
+    });
+
+    it("says when the close has already taken effect", () => {
+      const drift = reconcileOpenChannel(
+        snapshot(),
+        state({ closeEffectiveAtLedger: 450, currentLedger: 500 }),
+      );
+      expect(drift[0]?.detail).toContain("took effect at ledger 450 (current ledger 500)");
+    });
+
+    it("is not drift when the channel is already closing locally", () => {
+      const drift = reconcileOpenChannel(
+        snapshot({ status: "closing" }),
+        state({ closeEffectiveAtLedger: 620 }),
+      );
+      expect(drift).toEqual([]);
+    });
+  });
+
+  it("reports recipient-mismatch naming both addresses", () => {
+    const drift = reconcileOpenChannel(snapshot(), state({ to: STRANGER }));
+    expect(drift).toEqual([
       {
-        funder: FUNDER,
-        readChannelState: vi.fn().mockResolvedValue(makeChainState()),
+        kind: "recipient-mismatch",
+        detail: `expected recipient ${RECIPIENT}, but the contract pays ${STRANGER}`,
       },
-    );
-
-    expect(res).toEqual({ ok: true, channelId: CHANNEL_ID });
+    ]);
   });
 
-  it("accounts for observed withdrawals when checking on-chain balance", async () => {
-    const res = await reconciler.reconcileOpenChannel(
-      makeChannel({ deposit: "10000", committed: "4000" }),
-      [{ channelId: CHANNEL_ID, sequence: 0, cumulativeAmount: "4000" }],
+  it("reports funder-mismatch, not recipient-mismatch, for a wrong funder", () => {
+    // Regression: the original code reported a wrong funder as recipient-mismatch.
+    const drift = reconcileOpenChannel(snapshot(), state({ from: STRANGER }));
+    expect(kindsOf(drift)).toEqual(["funder-mismatch"]);
+    expect(drift[0]?.detail).toContain(`expected funder ${FUNDER}`);
+  });
+
+  it("does not check the funder when the snapshot does not name one", () => {
+    const drift = reconcileOpenChannel(snapshot({ funder: undefined }), state({ from: STRANGER }));
+    expect(drift).toEqual([]);
+  });
+
+  it("reports token-mismatch naming both contracts", () => {
+    const drift = reconcileOpenChannel(snapshot(), state({ token: OTHER_TOKEN }));
+    expect(drift).toEqual([
       {
-        observedWithdrawn: "2500",
-        readChannelState: vi.fn().mockResolvedValue(makeChainState({ balance: 7500n })),
+        kind: "token-mismatch",
+        detail: `expected token contract ${TOKEN}, but the contract holds ${OTHER_TOKEN}`,
       },
+    ]);
+  });
+
+  describe("balance-mismatch", () => {
+    it("reports a balance below the deposit minus everything committed", () => {
+      const drift = reconcileOpenChannel(snapshot(), state({ balance: "6500" }));
+      expect(drift).toEqual([
+        {
+          kind: "balance-mismatch",
+          detail: expect.stringContaining(
+            "at least 7000 (deposit 10000 minus committed 3000), but it holds 6500; 500 left",
+          ),
+        },
+      ]);
+    });
+
+    it("is not drift after a withdraw within the committed amount", () => {
+      // Regression: the original code flagged a legitimate settle that
+      // Tollway had not observed yet.
+      expect(reconcileOpenChannel(snapshot(), state({ balance: "7000" }))).toEqual([]);
+    });
+
+    it("is not drift when a top-up raised the balance above the deposit", () => {
+      // Regression: top_up and direct transfers raise the balance without an
+      // event, so a higher balance proves nothing.
+      expect(reconcileOpenChannel(snapshot(), state({ balance: "15000" }))).toEqual([]);
+    });
+
+    it("is not checked once a close is pending, since the funder may refund", () => {
+      const drift = reconcileOpenChannel(
+        snapshot({ status: "closing" }),
+        state({ balance: "0", closeEffectiveAtLedger: 400 }),
+      );
+      expect(drift).toEqual([]);
+    });
+
+    it("compares as bigint beyond Number precision", () => {
+      const drift = reconcileOpenChannel(
+        snapshot({ deposit: "9007199254740993", committed: "0" }),
+        state({ balance: "9007199254740992" }),
+      );
+      expect(kindsOf(drift)).toEqual(["balance-mismatch"]);
+    });
+  });
+
+  it("reports malformed snapshot amounts and skips the balance rule", () => {
+    const drift = reconcileOpenChannel(snapshot({ deposit: "1e4" }), state({ balance: "0" }));
+    expect(kindsOf(drift)).toEqual(["malformed-record"]);
+  });
+
+  it("reports every independent drift at once", () => {
+    const drift = reconcileOpenChannel(
+      snapshot(),
+      state({ to: STRANGER, token: OTHER_TOKEN, closeEffectiveAtLedger: 900 }),
     );
-
-    expect(res).toEqual({ ok: true, channelId: CHANNEL_ID });
-  });
-
-  it("flags unexpected-close when closeEffectiveAtLedger is set on an open channel", async () => {
-    const res = await reconciler.reconcileOpenChannel(makeChannel(), [], {
-      readChannelState: vi.fn().mockResolvedValue(makeChainState({ closeEffectiveAtLedger: 550 })),
-    });
-
-    expect(res.ok).toBe(false);
-    if (!res.ok) {
-      expect(res.drift.map((d) => d.kind)).toContain("unexpected-close");
-    }
-  });
-
-  it("flags recipient-mismatch when on-chain recipient or funder differs", async () => {
-    const wrongRecipient = Keypair.random().publicKey();
-    const wrongFunder = Keypair.random().publicKey();
-
-    const res = await reconciler.reconcileOpenChannel(makeChannel(), [], {
-      funder: FUNDER,
-      readChannelState: vi
-        .fn()
-        .mockResolvedValue(makeChainState({ to: wrongRecipient, from: wrongFunder })),
-    });
-
-    expect(res.ok).toBe(false);
-    if (!res.ok) {
-      expect(res.drift.filter((d) => d.kind === "recipient-mismatch")).toHaveLength(2);
-    }
-  });
-
-  it("flags token-mismatch when on-chain token differs from channel asset", async () => {
-    const otherToken = new Asset("EURC", ISSUER).contractId(Networks.TESTNET);
-
-    const res = await reconciler.reconcileOpenChannel(makeChannel(), [], {
-      readChannelState: vi.fn().mockResolvedValue(makeChainState({ token: otherToken })),
-    });
-
-    expect(res.ok).toBe(false);
-    if (!res.ok) {
-      expect(res.drift.map((d) => d.kind)).toContain("token-mismatch");
-    }
-  });
-
-  it("flags balance-mismatch when on-chain balance does not match deposit minus withdrawals", async () => {
-    const res = await reconciler.reconcileOpenChannel(makeChannel({ deposit: "10000" }), [], {
-      observedWithdrawn: "1000",
-      readChannelState: vi.fn().mockResolvedValue(makeChainState({ balance: 5000n })),
-    });
-
-    expect(res.ok).toBe(false);
-    if (!res.ok) {
-      expect(res.drift.map((d) => d.kind)).toContain("balance-mismatch");
-    }
-  });
-
-  it("flags commitment stream anomalies alongside on-chain drift", async () => {
-    const res = await reconciler.reconcileOpenChannel(
-      makeChannel({ deposit: "1000", committed: "1500" }),
-      [
-        { channelId: CHANNEL_ID, sequence: 0, cumulativeAmount: "1500" },
-        { channelId: CHANNEL_ID, sequence: 2, cumulativeAmount: "1200" },
-      ],
-      {
-        readChannelState: vi.fn().mockResolvedValue(makeChainState({ balance: 1000n })),
-      },
-    );
-
-    expect(res.ok).toBe(false);
-    if (!res.ok) {
-      const kinds = res.drift.map((d) => d.kind);
-      expect(kinds).toContain("sequence-gap");
-      expect(kinds).toContain("non-monotonic-cumulative");
-      expect(kinds).toContain("balance-mismatch");
-    }
+    expect(kindsOf(drift)).toEqual(["closed-on-chain", "recipient-mismatch", "token-mismatch"]);
   });
 });
 
-describe("startOpenChannelWatcher", () => {
-  it("tracks withdrawals from watchChannel events and calls onDrift on mismatch", async () => {
-    let capturedOnEvent: ((event: unknown) => Promise<void>) | undefined;
-    const stopMock = vi.fn();
-    const onDrift = vi.fn();
+describe("checkOpenChannel", () => {
+  function reader(result: OnChainChannelState | Error | unknown): ChannelStateReader {
+    return {
+      getChannelState: vi.fn(async () => {
+        if (result instanceof Error) throw result;
+        return result as OnChainChannelState;
+      }),
+    };
+  }
 
-    const stop = startOpenChannelWatcher({
-      channel: makeChannel({ deposit: "10000" }),
-      getCommitments: () => [{ channelId: CHANNEL_ID, sequence: 0, cumulativeAmount: "2000" }],
-      onDrift,
-      readChannelState: vi
-        .fn()
-        // After 2000 withdraw, expected balance is 8000, but chain says 7000 -> drift!
-        .mockResolvedValue(makeChainState({ balance: 7000n })),
-      watch: (opts) => {
-        capturedOnEvent = opts.onEvent as (event: unknown) => Promise<void>;
-        return stopMock;
-      },
+  it("reads the state for the snapshot's channel and network", async () => {
+    const channels = reader(state());
+    const result = await createReconciler({ channels }).checkOpenChannel(snapshot());
+    expect(result).toEqual({
+      status: "ok",
+      ok: true,
+      subject: { kind: "channel", channelId: CHANNEL },
     });
+    expect(channels.getChannelState).toHaveBeenCalledWith(CHANNEL, "testnet");
+  });
 
-    expect(capturedOnEvent).toBeDefined();
-    await capturedOnEvent?.({ type: "withdraw", amount: 2000n, ledger: 505 });
+  it("returns drift from the comparison", async () => {
+    const result = await createReconciler({
+      channels: reader(state({ to: STRANGER })),
+    }).checkOpenChannel(snapshot());
+    expect(result.status === "drift" ? result.drift.map((d) => d.kind) : []).toEqual([
+      "recipient-mismatch",
+    ]);
+  });
 
-    expect(onDrift).toHaveBeenCalledTimes(1);
-    const drifts = onDrift.mock.calls[0]?.[0] as Array<{ kind: string }>;
-    expect(drifts.map((d) => d.kind)).toContain("balance-mismatch");
+  it("is retryable, never drift, when the read fails", async () => {
+    // Regression: the original code let the RPC error escape.
+    const result = await createReconciler({
+      channels: reader(new Error("simulate balance timed out after 10000ms")),
+    }).checkOpenChannel(snapshot());
+    expect(result).toEqual({
+      status: "retryable",
+      ok: false,
+      subject: { kind: "channel", channelId: CHANNEL },
+      reason: expect.stringContaining("timed out"),
+    });
+  });
 
-    stop();
-    expect(stopMock).toHaveBeenCalledTimes(1);
+  it("is retryable when the reader returns a malformed state", async () => {
+    const result = await createReconciler({
+      channels: reader({ ...state(), balance: 10000n }),
+    }).checkOpenChannel(snapshot());
+    expect(result.status).toBe("retryable");
+    if (result.status === "retryable") expect(result.reason).toContain("balance");
+  });
+
+  it("throws when no reader is configured", async () => {
+    await expect(createReconciler().checkOpenChannel(snapshot())).rejects.toThrow(TypeError);
   });
 });

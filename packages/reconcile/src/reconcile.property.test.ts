@@ -84,7 +84,7 @@ function hasDrift(
   result: Awaited<ReturnType<typeof reconciler.reconcileChannel>>,
   kind: DriftKind,
 ): boolean {
-  return result.ok === false && result.drift.some((d) => d.kind === kind);
+  return result.status === "drift" && result.drift.some((d) => d.kind === kind);
 }
 
 // Honest path
@@ -94,7 +94,11 @@ describe("reconcileChannel property: honest path", () => {
     await fc.assert(
       fc.asyncProperty(honestStreamArb, async ({ commitments, settlement }) => {
         const result = await reconciler.reconcileChannel(commitments, settlement);
-        return result.ok === true && result.channelId === settlement.channelId;
+        return (
+          result.status === "ok" &&
+          result.subject.kind === "channel" &&
+          result.subject.channelId === settlement.channelId
+        );
       }),
       ASSERT_OPTS,
     );
@@ -390,10 +394,11 @@ describe("reconcileChannel property: stream integrity", () => {
   });
 });
 
-// Exhaustiveness: if a new variant is added to the DriftKind union without an
-// accompanying property below, this list will fall out of sync with the type
-// and TypeScript will fail to compile the assertion. The static check is the
-// point.
+// Exhaustiveness: if a new variant is added to the ChannelDriftKind union
+// without an accompanying property below, this list will fall out of sync with
+// the type and TypeScript will fail to compile the assertion. The static check
+// is the point. Charge and open-channel kinds are covered in charge.test.ts and
+// open-channel.test.ts.
 
 describe("reconcileChannel property: taxonomy", () => {
   it("the ChannelDriftKind union has the nine members the property suite covers", () => {

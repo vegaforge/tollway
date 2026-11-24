@@ -1,4 +1,9 @@
-import type { Drift, DriftKind, ReconciliationResult } from "./index.js";
+import {
+  type Drift,
+  type DriftKind,
+  type ReconciliationResult,
+  reconciliationSubjectId,
+} from "./index.js";
 import { type DriftSeverity, resolveDriftSeverity } from "./report.js";
 
 export type DriftAlertPayload = {
@@ -69,11 +74,14 @@ export function createMemoryDriftAlertStore(
   const state = new Map<string, Record<string, string>>();
 
   for (const result of initialResults) {
-    if (result.ok) {
-      state.delete(result.channelId);
-    } else {
-      state.set(result.channelId, groupDriftsByKind(result.drift));
+    const subject = reconciliationSubjectId(result.subject);
+    if (result.status === "ok") {
+      state.delete(subject);
+    } else if (result.status === "drift") {
+      state.set(subject, groupDriftsByKind(result.drift));
     }
+    // An unverifiable or retryable result says nothing new about the
+    // subject, so it leaves whatever state came before it.
   }
 
   return {
@@ -136,10 +144,15 @@ export function createDriftAlertBridge(options: DriftAlertBridgeOptions): DriftA
       const failures: Error[] = [];
 
       for (const result of results) {
-        const subject = result.channelId;
+        // A check that could not run neither raises nor resolves an alert:
+        // treating it as clean would close a real alert after one RPC error.
+        if (result.status === "unverifiable" || result.status === "retryable") {
+          continue;
+        }
+        const subject = reconciliationSubjectId(result.subject);
         const previous = (await store.getActive(subject)) ?? {};
 
-        if (result.ok) {
+        if (result.status === "ok") {
           resolved += Object.keys(previous).length;
           if (Object.keys(previous).length > 0) {
             await store.setActive(subject, {});
