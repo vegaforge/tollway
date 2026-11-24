@@ -700,22 +700,18 @@ export function createObservabilityHub(options: ObservabilityHubOptions = {}): O
 }
 
 export {
-  createMemoryReceiptArchive,
-  DEFAULT_ARCHIVE_PAGE_SIZE,
-  MAX_ARCHIVE_PAGE_SIZE,
-  ReceiptArchiveError,
   type AppendOutcome,
   type ArchiveSearchOptions,
   type ArchiveSearchResult,
-  type MemoryReceiptArchiveOptions,
+  createMemoryReceiptArchive,
+  DEFAULT_ARCHIVE_PAGE_SIZE,
+  MAX_ARCHIVE_PAGE_SIZE,
   type ReceiptArchive,
+  type ReceiptArchiveOptions,
   type ReceiptFilter,
-  type ReceiptVerifier,
 } from "./receipt-archive.js";
 export {
-  createServiceSink,
-  type DropReport,
-  type ServiceSink,
-  type ServiceSinkOptions,
-  type SinkItem,
-} from "./service-sink.js";
+  createSqliteReceiptArchive,
+  type SqliteReceiptArchive,
+  type SqliteReceiptArchiveOptions,
+} from "./receipt-archive-sqlite.js";

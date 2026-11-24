@@ -40,6 +40,11 @@ export type ReceiptRow = SignedReceipt;
 export type ReceiptsSnapshot = {
   rows: ReceiptRow[];
   trustedKeys: Record<string, Uint8Array>;
+  /**
+   * The archive's cursor for the next page (#222), or null when there is
+   * none. The stub holds every receipt on one page, so it is always null.
+   */
+  nextCursor: string | null;
 };
 
 /**
@@ -151,5 +156,6 @@ async function buildStub(): Promise<ReceiptsSnapshot> {
   return {
     rows,
     trustedKeys: { [signer.keyId]: signer.publicKey },
+    nextCursor: null,
   };
 }
