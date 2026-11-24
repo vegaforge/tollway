@@ -2,9 +2,12 @@ import { type CommitmentStore, createMemoryCommitmentStore } from "@vegaforge/to
 import { canonicalJson, type Policy, type SignedReceipt } from "@vegaforge/tollway-core";
 import {
   createObservabilityHub,
+  type ExportFormat,
   type MetricsQuery,
   type PaymentMetric,
   type SpendSummary,
+  type TimeseriesQuery,
+  type TimeseriesResult,
 } from "@vegaforge/tollway-observability";
 
 /**
@@ -35,10 +38,22 @@ export interface ReceiptStore extends ServiceStore {
   get(id: string): Promise<SignedReceipt | undefined>;
 }
 
-/** Payment metrics and their rollups. */
+/**
+ * Payment metrics and their rollups. The rollup rules are the observability
+ * hub's (`summarize`, `timeseries`, `export`), so a persistent backend (#217)
+ * changes where metrics live, never how they are counted.
+ */
 export interface MetricsStore extends ServiceStore {
   record(metrics: readonly PaymentMetric[]): Promise<void>;
   summarize(query?: MetricsQuery): Promise<SpendSummary>;
+  /**
+   * Bucketed spend, counts and latency. Rejects with
+   * `MetricsQueryTooLargeError` when the range needs more buckets or rows
+   * than the store allows.
+   */
+  timeseries(query: TimeseriesQuery): Promise<TimeseriesResult>;
+  /** The matched metrics as JSON or CSV, as `ObservabilityHub.export` writes them. */
+  export(format: ExportFormat, query?: MetricsQuery): Promise<string>;
 }
 
 /** MPP channels and their commitment streams, as `@vegaforge/tollway-channels` defines them. */
@@ -112,6 +127,12 @@ export function createMemoryMetricsStore(): MetricsStore {
     },
     async summarize(query) {
       return hub.summarize(query);
+    },
+    async timeseries(query) {
+      return hub.timeseries(query);
+    },
+    async export(format, query) {
+      return hub.export(format, query);
     },
   };
 }

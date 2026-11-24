@@ -34,7 +34,7 @@ const series = hub.timeseries({
   to: "2026-11-20T00:00:00Z",
   bucket: "1h", // "1m" | "5m" | "1h" | "1d"
   groupBy: "payee", // optional: "model" (default), "payee" or "payer"
-  model: "x402", // optional filters, as in summarize: payer, payee, model
+  model: "x402", // optional filters: payer, payee, model, asset, outcome
 });
 
 for (const bucket of series.buckets) {
@@ -86,9 +86,15 @@ There is no SQL store in `@vegaforge/tollway-observability` yet; it is tracked i
 
 ## Spend summaries
 
-`hub.summarize(query?)` returns one flat summary over the whole window. Use `byAsset` for amounts: it holds the amount per asset and never adds different assets together.
+`hub.summarize(query?)` returns totals over the whole window. The filters are `payer`, `payee`, `model`, `asset`, `outcome`, `from` and `to`.
 
-`totalAmount`, `byModel`, `byPayer` and `byPayee` are **deprecated**. They add amounts across assets, so they only make sense when the window holds a single asset, and like `byAsset` they include failed and skipped metrics. They keep their values for existing callers. For settled-only amounts, per-model or per-counterparty amounts in one asset, an outcome split, or latency, use `timeseries` and add up the rows you need.
+- `count` is every matched metric, whatever its outcome.
+- `byOutcome` splits those counts into `settled`, `failed` and `skipped`, so a failure rate is `failed / count`.
+- `byAsset` holds the settled amount per asset, and `byModelAsset`, `byPayerAsset` and `byPayeeAsset` hold the settled amount and the settled count per group, always keyed by asset.
+- Only settled metrics add to an amount. A failed or skipped payment moves no money, so it never inflates a spend total.
+- Amounts in different assets are never added together, and no cross-asset total is offered.
+
+`totalAmount`, `byModel`, `byPayer` and `byPayee` are **deprecated**. They add settled amounts across assets, so they only make sense when the window holds a single asset. They keep their shape for existing callers; new code should read `byAsset` and the per-asset breakdowns. For latency, use `timeseries`.
 
 ## Exports and webhooks
 

@@ -86,47 +86,91 @@ export type MetricsQuery = {
   payer?: string;
   payee?: string;
   model?: SettlementModel;
+  /** Asset identifier exactly as the recorded metric carries it. */
+  asset?: string;
+  /** Only metrics with this outcome. */
+  outcome?: PaymentMetric["outcome"];
   /** Inclusive ISO 8601 bounds. */
   from?: string;
   to?: string;
 };
 
+/** How many matched metrics ended in each outcome. */
+export type SpendOutcomeCounts = {
+  settled: number;
+  failed: number;
+  skipped: number;
+};
+
+/** Spend settled through one model in one asset. */
+export type ModelAssetSpend = {
+  model: SettlementModel;
+  asset: string;
+  amount: string;
+  count: number;
+};
+
+/** Spend paid by one payer in one asset. */
+export type PayerAssetSpend = {
+  payer: string;
+  asset: string;
+  amount: string;
+  count: number;
+};
+
+/** Spend paid to one payee in one asset. */
+export type PayeeAssetSpend = {
+  payee: string;
+  asset: string;
+  amount: string;
+  count: number;
+};
+
 /**
  * Aggregated spend over a query window. Amounts are integer strings in the
  * asset's smallest unit (same convention as `PaymentMetric.amount` and the
- * canonical receipt). Every amount field counts metrics of every outcome
- * (settled, failed and skipped); `count` is the number of matched metrics.
- * Keys for `byPayer` / `byPayee` are the payer / payee addresses exactly as
- * they appear on the recorded metrics. For settled-only amounts, an outcome
- * split and latency, use `ObservabilityHub.timeseries`.
+ * canonical receipt), summed with `bigint`.
+ *
+ * Only metrics with outcome `"settled"` add to an amount: a failed or skipped
+ * payment moves no money, so counting it as spend overstates what was paid.
+ * `count` is the number of matched metrics whatever their outcome, so it is
+ * the denominator for the failure rate `byOutcome` describes. A breakdown's
+ * `count` is the number of settled receipts behind its amount. Amounts in
+ * different assets are never added together; every breakdown that carries
+ * money is keyed by asset.
  */
 export type SpendSummary = {
   /**
-   * @deprecated Adds amounts across assets, so it is only meaningful when the
-   * window holds a single asset. Use `byAsset`.
+   * @deprecated Adds settled amounts across assets, so it is only meaningful
+   * when the window holds a single asset. Use `byAsset`.
    */
   totalAmount: string;
   count: number;
+  /** Matched metrics by outcome, the denominator for a failure rate. */
+  byOutcome: SpendOutcomeCounts;
   /**
-   * Amount per asset, keyed by `PaymentMetric.asset`. Amounts in different
-   * assets are never added together.
+   * Settled amount per asset, keyed by `PaymentMetric.asset`. Amounts in
+   * different assets are never added together.
    */
   byAsset: Record<string, string>;
   /**
-   * @deprecated Adds amounts across assets. Use `timeseries`, whose rows are
-   * keyed by model and asset.
+   * @deprecated Adds settled amounts across assets. Use `byModelAsset`.
    */
   byModel: Partial<Record<SettlementModel, string>>;
   /**
-   * @deprecated Adds amounts across assets. Use `timeseries` with
-   * `groupBy: "payer"`.
+   * @deprecated Adds settled amounts across assets. Use `byPayerAsset`.
    */
   byPayer: Record<string, string>;
   /**
-   * @deprecated Adds amounts across assets. Use `timeseries` with
-   * `groupBy: "payee"`.
+   * @deprecated Adds settled amounts across assets. Use `byPayeeAsset`.
    */
   byPayee: Record<string, string>;
+  /** Settled amount and matched count per model and asset, in asset order. */
+  byModelAsset: ModelAssetSpend[];
+  /** Settled amount and matched count per payer and asset, in asset order. */
+  byPayerAsset: PayerAssetSpend[];
+  /** Settled amount and matched count per payee and asset, in asset order. */
+  byPayeeAsset: PayeeAssetSpend[];
 };
 
 export type ExportFormat = "json" | "csv";
@@ -312,6 +356,8 @@ function filterMetrics(metrics: PaymentMetric[], query?: MetricsQuery): PaymentM
     if (query.payer !== undefined && m.payer !== query.payer) return false;
     if (query.payee !== undefined && m.payee !== query.payee) return false;
     if (query.model !== undefined && m.model !== query.model) return false;
+    if (query.asset !== undefined && m.asset !== query.asset) return false;
+    if (query.outcome !== undefined && m.outcome !== query.outcome) return false;
     // `at` is ISO 8601; string comparison is order-preserving for that grammar.
     if (query.from !== undefined && m.at < query.from) return false;
     if (query.to !== undefined && m.at > query.to) return false;
@@ -329,6 +375,138 @@ function stringifyBigintMap<K extends string>(
     }
   }
   return out;
+}
+
+// One group of a per-asset breakdown while it is being summed. The amount is a
+// bigint here and becomes an integer string in the returned summary.
+type ModelAssetTotal = {
+  model: SettlementModel;
+  asset: string;
+  amount: bigint;
+  count: number;
+};
+
+type PayerAssetTotal = {
+  payer: string;
+  asset: string;
+  amount: bigint;
+  count: number;
+};
+
+type PayeeAssetTotal = {
+  payee: string;
+  asset: string;
+  amount: bigint;
+  count: number;
+};
+
+/** Adds one settled amount to a per-asset group, creating it on first sight. */
+function bumpAssetGroup<T extends { asset: string; amount: bigint; count: number }>(
+  groups: Map<string, T>,
+  key: string,
+  create: () => T,
+  amount: bigint,
+): void {
+  const total = groups.get(key);
+  if (total) {
+    total.amount += amount;
+    total.count += 1;
+    return;
+  }
+  groups.set(key, { ...create(), amount, count: 1 });
+}
+
+/** Asset first, then the group's label, so output order never depends on input order. */
+function compareAssetGroups<T extends { asset: string }>(label: (total: T) => string) {
+  return (a: T, b: T): number => {
+    if (a.asset !== b.asset) return a.asset < b.asset ? -1 : 1;
+    const left = label(a);
+    const right = label(b);
+    if (left === right) return 0;
+    return left < right ? -1 : 1;
+  };
+}
+
+/**
+ * Roll matched metrics into the summary. Only settled metrics add to an
+ * amount; failed and skipped ones still count towards `count` and
+ * `byOutcome`, because they are real attempts the dashboard needs to show.
+ */
+function summarizeMetrics(matched: PaymentMetric[]): SpendSummary {
+  let totalAmount = 0n;
+  const byAsset: Record<string, bigint> = {};
+  const byModel: Partial<Record<SettlementModel, bigint>> = {};
+  const byPayer: Record<string, bigint> = {};
+  const byPayee: Record<string, bigint> = {};
+  const byOutcome: SpendOutcomeCounts = { settled: 0, failed: 0, skipped: 0 };
+  const modelAsset = new Map<string, ModelAssetTotal>();
+  const payerAsset = new Map<string, PayerAssetTotal>();
+  const payeeAsset = new Map<string, PayeeAssetTotal>();
+
+  for (const m of matched) {
+    if (m.outcome === "settled" || m.outcome === "failed" || m.outcome === "skipped") {
+      byOutcome[m.outcome] += 1;
+    }
+    // A payment that did not settle moves no money, so it never adds to spend.
+    if (m.outcome !== "settled") continue;
+
+    let amount: bigint;
+    try {
+      amount = BigInt(m.amount);
+    } catch {
+      // A settled metric with a non-integer amount cannot be summed safely. It
+      // still counts as an attempt and is visible through export().
+      continue;
+    }
+
+    totalAmount += amount;
+    byAsset[m.asset] = (byAsset[m.asset] ?? 0n) + amount;
+    byModel[m.model] = (byModel[m.model] ?? 0n) + amount;
+    byPayer[m.payer] = (byPayer[m.payer] ?? 0n) + amount;
+    byPayee[m.payee] = (byPayee[m.payee] ?? 0n) + amount;
+
+    // JSON of an array cannot collide for different field values, unlike a
+    // join on a separator that may appear inside an asset code.
+    bumpAssetGroup(
+      modelAsset,
+      JSON.stringify([m.model, m.asset]),
+      () => ({ model: m.model, asset: m.asset, amount: 0n, count: 0 }),
+      amount,
+    );
+    bumpAssetGroup(
+      payerAsset,
+      JSON.stringify([m.payer, m.asset]),
+      () => ({ payer: m.payer, asset: m.asset, amount: 0n, count: 0 }),
+      amount,
+    );
+    bumpAssetGroup(
+      payeeAsset,
+      JSON.stringify([m.payee, m.asset]),
+      () => ({ payee: m.payee, asset: m.asset, amount: 0n, count: 0 }),
+      amount,
+    );
+  }
+
+  const money = (total: { amount: bigint }): string => total.amount.toString();
+
+  return {
+    totalAmount: totalAmount.toString(),
+    count: matched.length,
+    byOutcome,
+    byAsset: stringifyBigintMap(byAsset),
+    byModel: stringifyBigintMap(byModel) as Partial<Record<SettlementModel, string>>,
+    byPayer: stringifyBigintMap(byPayer),
+    byPayee: stringifyBigintMap(byPayee),
+    byModelAsset: [...modelAsset.values()]
+      .sort(compareAssetGroups((total) => total.model))
+      .map((total) => ({ ...total, amount: money(total) })),
+    byPayerAsset: [...payerAsset.values()]
+      .sort(compareAssetGroups((total) => total.payer))
+      .map((total) => ({ ...total, amount: money(total) })),
+    byPayeeAsset: [...payeeAsset.values()]
+      .sort(compareAssetGroups((total) => total.payee))
+      .map((total) => ({ ...total, amount: money(total) })),
+  };
 }
 
 const FORMULA_PREFIX = /^[=+\-@\t\r]/;
@@ -502,38 +680,7 @@ export function createObservabilityHub(options: ObservabilityHubOptions = {}): O
       metrics.push({ ...metric });
     },
     summarize(query) {
-      const matched = filterMetrics(metrics, query);
-      let totalAmount = 0n;
-      const byAsset: Record<string, bigint> = {};
-      const byModel: Partial<Record<SettlementModel, bigint>> = {};
-      const byPayer: Record<string, bigint> = {};
-      const byPayee: Record<string, bigint> = {};
-
-      for (const m of matched) {
-        let amount: bigint;
-        try {
-          amount = BigInt(m.amount);
-        } catch {
-          // A non-integer amount cannot be summed safely; skip it rather
-          // than poison the rollups for the whole window. The metric is
-          // still visible via export().
-          continue;
-        }
-        totalAmount += amount;
-        byAsset[m.asset] = (byAsset[m.asset] ?? 0n) + amount;
-        byModel[m.model] = (byModel[m.model] ?? 0n) + amount;
-        byPayer[m.payer] = (byPayer[m.payer] ?? 0n) + amount;
-        byPayee[m.payee] = (byPayee[m.payee] ?? 0n) + amount;
-      }
-
-      return {
-        totalAmount: totalAmount.toString(),
-        count: matched.length,
-        byAsset: stringifyBigintMap(byAsset),
-        byModel: stringifyBigintMap(byModel) as Partial<Record<SettlementModel, string>>,
-        byPayer: stringifyBigintMap(byPayer),
-        byPayee: stringifyBigintMap(byPayee),
-      };
+      return summarizeMetrics(filterMetrics(metrics, query));
     },
     timeseries(query) {
       return computeTimeseries(metrics, query, timeseriesLimits);
