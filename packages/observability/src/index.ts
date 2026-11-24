@@ -894,3 +894,10 @@ export {
   type SqliteReceiptArchive,
   type SqliteReceiptArchiveOptions,
 } from "./receipt-archive-sqlite.js";
+export {
+  type JsonlReceiptLogRepair,
+  type JsonlReceiptLogStore,
+  type JsonlReceiptLogStoreOptions,
+  openJsonlReceiptLogStore,
+  repairJsonlReceiptLog,
+} from "./receipt-log-file.js";

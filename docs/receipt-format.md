@@ -4,6 +4,8 @@ Every settlement path in Tollway, regardless of model, ends in exactly one canon
 
 Source of truth: `packages/core/src/receipt/schema.ts` (the zod schemas), `packages/core/src/receipt/receipt.ts` (`buildReceipt`, `signReceipt`, `verifyReceipt`), and `packages/core/src/receipt/signer.ts` (the signer / verifier interfaces and the default Ed25519 implementation). See also `docs/design.md`, "One receipt format".
 
+To keep a tamper-evident record of many receipts, append them to a hash-chained receipt log with signed checkpoints: see [receipt-log.md](receipt-log.md).
+
 ## Shape at a glance
 
 A signed receipt is two parts: the receipt body and a detached signature over the body's canonical bytes.

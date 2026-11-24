@@ -43,7 +43,9 @@ export type TollwayErrorCode =
   | "invalid-receipt-query"
   | "invalid-cursor"
   | "corrupt-receipt"
-  | "receipt-conflict";
+  | "receipt-conflict"
+  | "receipt-log-conflict"
+  | "corrupt-receipt-log";
 
 /** An error Tollway throws on purpose. Branch on `code`, which is stable across releases. */
 export class TollwayError extends Error {

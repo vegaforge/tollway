@@ -1,138 +1,120 @@
+/**
+ * Hash-chained receipt log with signed checkpoints (#171).
+ *
+ * Every entry commits to the one before it by SHA-256, and a checkpoint signs
+ * the size and head hash of the log at a moment in time. Anyone holding the
+ * entries and a trusted checkpoint can check that no receipt covered by the
+ * checkpoint was modified, removed or reordered.
+ *
+ * This module is the format, the verifier and the append logic. Storage sits
+ * behind {@link ReceiptLogStore}: the in-memory store lives here, and the
+ * JSON Lines file store lives in `@vegaforge/tollway-observability`, so this
+ * package never touches `node:fs`. See docs/receipt-log.md.
+ */
+
 import { z } from "zod";
 import { base64UrlToBytes, bytesToBase64Url } from "../encoding.js";
 import { TollwayError } from "../errors.js";
 import { canonicalBytes, type JsonValue } from "./canonical.js";
 import { verifyReceipt } from "./receipt.js";
-import {
-  receiptSignatureSchema,
-  type SignedReceipt,
-  signedReceiptSchema,
-} from "./schema.js";
-import type { ReceiptSigner, ReceiptVerifier } from "./signer.js";
+import { receiptSignatureSchema, signedReceiptSchema } from "./schema.js";
+import type { ReceiptSigner, ReceiptVerifier, SignatureCheck } from "./signer.js";
+
+/** A SHA-256 digest as 64 lowercase hex characters. */
+const SHA256_HEX = /^[0-9a-f]{64}$/;
 
 /**
- * Tamper-evident, hash-chained receipt log with signed checkpoints (#171).
- *
- * Every entry commits to the previous entry by SHA-256 hash over its
- * canonical bytes, and periodic signed checkpoints commit to the head of the
- * chain. Anyone holding the log and a trusted checkpoint can verify that no
- * receipt was modified, removed, or reordered.
+ * The `prevHash` of entry 0. A fixed value rather than `null`, so every entry
+ * has the same shape and the hash input never changes type.
  */
+export const RECEIPT_LOG_GENESIS_HASH = "0".repeat(64);
 
-const BASE64URL_SHA256 = /^[A-Za-z0-9_-]{43}$/;
+/** The `type` tag on a checkpoint body, so its signature can never be read as a receipt's. */
+export const RECEIPT_LOG_CHECKPOINT_TYPE = "tollway-receipt-log-checkpoint";
 
-const sha256Base64UrlSchema = z
-  .string()
-  .regex(BASE64URL_SHA256, "expected base64url-encoded 32-byte SHA-256 digest");
+const sha256HexSchema = z.string().regex(SHA256_HEX, "expected a lowercase hex SHA-256 digest");
 
 /**
- * One entry in the append-only receipt log. `prevHash` is `null` for the
- * genesis entry (`index === 0`) and equals `entry[index - 1].entryHash` for
- * every subsequent entry.
+ * One log entry. `entryHash` is the SHA-256 of the canonical bytes (#165) of
+ * `{ seq, prevHash, receipt, appendedAt }`, and `prevHash` is the previous
+ * entry's `entryHash`, or {@link RECEIPT_LOG_GENESIS_HASH} for `seq` 0.
  */
-export const receiptLogEntrySchema = z
-  .strictObject({
-    index: z.number().int().nonnegative(),
-    prevHash: sha256Base64UrlSchema.nullable(),
-    receipt: signedReceiptSchema,
-    receiptHash: sha256Base64UrlSchema,
-    entryHash: sha256Base64UrlSchema,
-    recordedAt: z.iso.datetime(),
-  })
-  .superRefine((entry, ctx) => {
-    if (entry.index === 0 && entry.prevHash !== null) {
-      ctx.addIssue({
-        code: "custom",
-        path: ["prevHash"],
-        message: "genesis entry (index 0) must have prevHash === null",
-      });
-    }
-    if (entry.index > 0 && entry.prevHash === null) {
-      ctx.addIssue({
-        code: "custom",
-        path: ["prevHash"],
-        message: "non-genesis entry (index > 0) must have a non-null prevHash",
-      });
-    }
-  });
+export const receiptLogEntrySchema = z.strictObject({
+  seq: z.number().int().nonnegative(),
+  prevHash: sha256HexSchema,
+  receipt: signedReceiptSchema,
+  appendedAt: z.iso.datetime(),
+  entryHash: sha256HexSchema,
+});
 
-/** One entry in a hash-chained receipt log; see {@link receiptLogEntrySchema}. */
 export type ReceiptLogEntry = z.infer<typeof receiptLogEntrySchema>;
 
-/** The signed body of a receipt log checkpoint. */
-export const receiptLogCheckpointBodySchema = z
-  .strictObject({
-    version: z.literal(1),
-    logId: z.string().min(1),
-    headIndex: z.number().int().nonnegative(),
-    headHash: sha256Base64UrlSchema,
-    entryCount: z.number().int().positive(),
-    issuedAt: z.iso.datetime(),
-  })
-  .superRefine((body, ctx) => {
-    if (body.entryCount !== body.headIndex + 1) {
-      ctx.addIssue({
-        code: "custom",
-        path: ["entryCount"],
-        message: `entryCount (${body.entryCount}) must equal headIndex + 1 (${body.headIndex + 1})`,
-      });
-    }
-  });
+/**
+ * The signed part of a checkpoint. `size` is the number of entries the
+ * checkpoint covers and `headHash` is the `entryHash` of entry `size - 1`
+ * (the genesis hash when `size` is 0). `logId` names the log so checkpoints
+ * of two logs are not mixed up; it is not part of any entry.
+ */
+export const receiptLogCheckpointSchema = z.strictObject({
+  type: z.literal(RECEIPT_LOG_CHECKPOINT_TYPE),
+  version: z.literal(1),
+  logId: z.string().min(1),
+  size: z.number().int().nonnegative(),
+  headHash: sha256HexSchema,
+  issuedAt: z.iso.datetime(),
+});
 
-/** The unsigned checkpoint payload; see {@link receiptLogCheckpointBodySchema}. */
-export type ReceiptLogCheckpointBody = z.infer<typeof receiptLogCheckpointBodySchema>;
+export type ReceiptLogCheckpoint = z.infer<typeof receiptLogCheckpointSchema>;
 
-/** A checkpoint signed with the service's {@link ReceiptSigner}. */
+/** A checkpoint and the signature over its canonical bytes. */
 export const signedReceiptLogCheckpointSchema = z.strictObject({
-  checkpoint: receiptLogCheckpointBodySchema,
+  checkpoint: receiptLogCheckpointSchema,
   signature: receiptSignatureSchema,
 });
 
-/** A signed receipt log checkpoint; see {@link signedReceiptLogCheckpointSchema}. */
 export type SignedReceiptLogCheckpoint = z.infer<typeof signedReceiptLogCheckpointSchema>;
 
-async function sha256Base64Url(bytes: Uint8Array): Promise<string> {
-  const digest = new Uint8Array(await crypto.subtle.digest("SHA-256", bytes as BufferSource));
-  return bytesToBase64Url(digest);
+/** The head of a log: how many entries it holds and the last `entryHash`. */
+export type ReceiptLogHead = {
+  size: number;
+  headHash: string;
+};
+
+function bytesToHex(bytes: Uint8Array): string {
+  let out = "";
+  for (const byte of bytes) {
+    out += byte.toString(16).padStart(2, "0");
+  }
+  return out;
 }
 
-/**
- * Computes the canonical SHA-256 digest (base64url) of a {@link SignedReceipt}.
- */
-export async function computeReceiptHash(receipt: SignedReceipt): Promise<string> {
-  return sha256Base64Url(canonicalBytes(receipt as unknown as JsonValue));
+async function sha256Hex(bytes: Uint8Array): Promise<string> {
+  const digest = await crypto.subtle.digest("SHA-256", bytes as BufferSource);
+  return bytesToHex(new Uint8Array(digest));
 }
 
-/**
- * Computes the canonical SHA-256 digest (base64url) of a log entry's
- * commitment fields (`index`, `prevHash`, `receiptHash`, `recordedAt`).
- */
-export async function computeEntryHash(input: {
-  index: number;
-  prevHash: string | null;
-  receiptHash: string;
-  recordedAt: string;
-}): Promise<string> {
-  const payload: JsonValue = {
-    index: input.index,
-    prevHash: input.prevHash,
-    receiptHash: input.receiptHash,
-    recordedAt: input.recordedAt,
+/** Computes `entryHash` for an entry: SHA-256 over the canonical bytes of every field but `entryHash`. */
+export async function computeReceiptLogEntryHash(
+  entry: Omit<ReceiptLogEntry, "entryHash">,
+): Promise<string> {
+  const unhashed = {
+    seq: entry.seq,
+    prevHash: entry.prevHash,
+    receipt: entry.receipt,
+    appendedAt: entry.appendedAt,
   };
-  return sha256Base64Url(canonicalBytes(payload));
+  return sha256Hex(canonicalBytes(unhashed as unknown as JsonValue));
 }
 
-/**
- * Signs a receipt log checkpoint body using {@link ReceiptSigner}.
- */
+/** Signs a checkpoint with any {@link ReceiptSigner}, the same way receipts are signed. */
 export async function signReceiptLogCheckpoint(
-  body: ReceiptLogCheckpointBody,
+  checkpoint: ReceiptLogCheckpoint,
   signer: ReceiptSigner,
 ): Promise<SignedReceiptLogCheckpoint> {
-  const checkpoint = receiptLogCheckpointBodySchema.parse(body);
-  const signature = await signer.sign(canonicalBytes(checkpoint as unknown as JsonValue));
+  const body = receiptLogCheckpointSchema.parse(checkpoint);
+  const signature = await signer.sign(canonicalBytes(body as unknown as JsonValue));
   return {
-    checkpoint,
+    checkpoint: body,
     signature: {
       keyId: signer.keyId,
       algorithm: signer.algorithm,
@@ -141,354 +123,423 @@ export async function signReceiptLogCheckpoint(
   };
 }
 
-/** Outcome of {@link verifyReceiptLogCheckpoint}. */
-export type CheckpointVerification =
+/** The result of {@link verifyReceiptLogCheckpoint}. */
+export type ReceiptLogCheckpointVerification =
   | { valid: true; checkpoint: SignedReceiptLogCheckpoint }
   | { valid: false; reason: string };
 
 /**
- * Verifies a signed receipt log checkpoint's schema, optional `expectedLogId`,
- * and cryptographic signature against `verifier`.
+ * Checks a checkpoint's shape and signature. Takes `unknown` because a
+ * checkpoint usually comes from outside the log (a webhook, a published
+ * file), and never throws.
  */
 export async function verifyReceiptLogCheckpoint(
   candidate: unknown,
   verifier: ReceiptVerifier,
-  options: { expectedLogId?: string } = {},
-): Promise<CheckpointVerification> {
+  options: { logId?: string } = {},
+): Promise<ReceiptLogCheckpointVerification> {
   const parsed = signedReceiptLogCheckpointSchema.safeParse(candidate);
   if (!parsed.success) {
-    return {
-      valid: false,
-      reason: parsed.error.issues.map((issue) => `${issue.path.join(".") || "$"}: ${issue.message}`).join("; "),
-    };
+    return { valid: false, reason: describeIssues(parsed.error.issues) };
   }
   const { checkpoint, signature } = parsed.data;
-  if (options.expectedLogId !== undefined && checkpoint.logId !== options.expectedLogId) {
+  if (options.logId !== undefined && checkpoint.logId !== options.logId) {
     return {
       valid: false,
-      reason: `checkpoint logId "${checkpoint.logId}" does not match expected "${options.expectedLogId}"`,
+      reason: `checkpoint is for log "${checkpoint.logId}", expected "${options.logId}"`,
     };
   }
   let signatureBytes: Uint8Array;
   try {
     signatureBytes = base64UrlToBytes(signature.value);
   } catch {
-    return { valid: false, reason: "checkpoint signature value is not valid base64url" };
+    return { valid: false, reason: "signature.value is not base64url" };
   }
-  const message = canonicalBytes(checkpoint as unknown as JsonValue);
-  const input = {
-    message,
+  const check = await checkSignature(verifier, {
+    message: canonicalBytes(checkpoint as unknown as JsonValue),
     signature: signatureBytes,
     keyId: signature.keyId,
     algorithm: signature.algorithm,
-  };
-  if (verifier.check) {
-    const check = await verifier.check(input);
-    if (!check.valid) {
-      return { valid: false, reason: check.reason };
-    }
-  } else {
-    const ok = await verifier.verify(input);
-    if (!ok) {
-      return { valid: false, reason: "checkpoint signature verification failed" };
-    }
+  });
+  if (!check.valid) {
+    return check;
   }
   return { valid: true, checkpoint: parsed.data };
 }
 
+/**
+ * Why a log failed verification. `seq` in the failure is the first entry
+ * position at fault.
+ *
+ * - `malformed-entry`: the entry does not parse as a log entry.
+ * - `gap-or-reorder`: the entry at position `n` does not carry `seq` `n`.
+ * - `broken-link`: `prevHash` is not the previous entry's `entryHash`.
+ * - `modified-entry`: `entryHash` does not match the entry's contents.
+ * - `receipt-signature`: the receipt's own signature does not verify.
+ * - `truncated`: the log is shorter than the checkpoint says it was.
+ * - `checkpoint-mismatch`: the entry the checkpoint names has another hash,
+ *   so the log was rewritten after the checkpoint was signed.
+ * - `invalid-checkpoint`: the checkpoint itself does not verify (`seq` is null).
+ */
+export type ReceiptLogFailureKind =
+  | "malformed-entry"
+  | "gap-or-reorder"
+  | "broken-link"
+  | "modified-entry"
+  | "receipt-signature"
+  | "truncated"
+  | "checkpoint-mismatch"
+  | "invalid-checkpoint";
+
+/** The result of {@link verifyReceiptLog}. */
+export type ReceiptLogVerification =
+  | { valid: true; size: number; headHash: string }
+  | { valid: false; kind: ReceiptLogFailureKind; seq: number | null; reason: string };
+
 /** Options for {@link verifyReceiptLog}. */
 export type VerifyReceiptLogOptions = {
-  /** Optional signed checkpoint the log must be consistent with. */
+  /**
+   * Checks every receipt's own signature. Without it only the chain is
+   * checked, which proves the log is internally consistent but not that the
+   * receipts came from a trusted key.
+   */
+  verifier?: ReceiptVerifier;
+  /** A checkpoint held outside the log. Without one, tail truncation cannot be detected. */
   checkpoint?: unknown;
-  /** Verifier for `checkpoint`. Required whenever `checkpoint` is provided. */
+  /** Verifies the checkpoint's signature. Defaults to `verifier`. */
   checkpointVerifier?: ReceiptVerifier;
-  /** Optional verifier to also check each receipt's own signature. */
-  receiptVerifier?: ReceiptVerifier;
-  /** Expected `logId` on `checkpoint`. */
-  expectedLogId?: string;
-  /** Current time in ms for v2 receipt expiry checks when `receiptVerifier` is set. */
-  now?: number;
+  /** When set, the checkpoint must name this log. */
+  logId?: string;
 };
 
-/** Outcome of {@link verifyReceiptLog}. */
-export type ReceiptLogVerification =
-  | {
-      valid: true;
-      entryCount: number;
-      headIndex: number | null;
-      headHash: string | null;
-    }
-  | {
-      valid: false;
-      reason: string;
-      /** Index of the entry where verification failed, when applicable. */
-      index?: number;
-    };
-
 /**
- * Verifies the integrity of a hash-chained receipt log from genesis (`index 0`).
- *
- * Checks every entry's schema, sequential indexing, `prevHash` linkage,
- * `receiptHash`, and `entryHash`. When `receiptVerifier` is supplied, each
- * receipt's own signature is verified as well. When `checkpoint` is supplied,
- * the checkpoint signature is verified and the entry at `checkpoint.headIndex`
- * must match `checkpoint.headHash`, proving no prefix entry was modified,
- * deleted, or reordered.
+ * Verifies a log from entry 0. It reports the first failing `seq` and why;
+ * see {@link ReceiptLogFailureKind}. A receipt is checked against the time it
+ * was appended, so a v2 receipt that has expired since is still valid in the
+ * log. Never throws.
  */
 export async function verifyReceiptLog(
   entries: readonly unknown[],
   options: VerifyReceiptLogOptions = {},
 ): Promise<ReceiptLogVerification> {
-  if (options.checkpoint !== undefined && !options.checkpointVerifier) {
-    return {
-      valid: false,
-      reason: "checkpointVerifier is required when verifying against a checkpoint",
-    };
-  }
-
-  let verifiedCheckpoint: SignedReceiptLogCheckpoint | undefined;
-  if (options.checkpoint !== undefined && options.checkpointVerifier) {
-    const cp = await verifyReceiptLogCheckpoint(options.checkpoint, options.checkpointVerifier, {
-      expectedLogId: options.expectedLogId,
+  let anchor: ReceiptLogCheckpoint | undefined;
+  if (options.checkpoint !== undefined) {
+    const checkpointVerifier = options.checkpointVerifier ?? options.verifier;
+    if (!checkpointVerifier) {
+      return {
+        valid: false,
+        kind: "invalid-checkpoint",
+        seq: null,
+        reason: "a checkpoint was given without a verifier for its signature",
+      };
+    }
+    const verified = await verifyReceiptLogCheckpoint(options.checkpoint, checkpointVerifier, {
+      ...(options.logId !== undefined ? { logId: options.logId } : {}),
     });
-    if (!cp.valid) {
-      return { valid: false, reason: `invalid checkpoint: ${cp.reason}` };
+    if (!verified.valid) {
+      return { valid: false, kind: "invalid-checkpoint", seq: null, reason: verified.reason };
     }
-    verifiedCheckpoint = cp.checkpoint;
+    anchor = verified.checkpoint.checkpoint;
   }
 
-  if (entries.length === 0) {
-    if (verifiedCheckpoint) {
-      return {
-        valid: false,
-        reason: `log is empty but checkpoint commits to ${verifiedCheckpoint.checkpoint.entryCount} entries`,
-      };
-    }
-    return { valid: true, entryCount: 0, headIndex: null, headHash: null };
-  }
-
-  let prevEntryHash: string | null = null;
-  const parsedEntries: ReceiptLogEntry[] = [];
-
-  for (let i = 0; i < entries.length; i += 1) {
-    const parsed = receiptLogEntrySchema.safeParse(entries[i]);
+  const hashes: string[] = [];
+  let prevHash = RECEIPT_LOG_GENESIS_HASH;
+  for (let position = 0; position < entries.length; position += 1) {
+    const parsed = receiptLogEntrySchema.safeParse(entries[position]);
     if (!parsed.success) {
-      return {
-        valid: false,
-        index: i,
-        reason: `entry ${i} failed schema validation: ${parsed.error.issues.map((issue) => issue.message).join("; ")}`,
-      };
+      return fail("malformed-entry", position, describeIssues(parsed.error.issues));
     }
     const entry = parsed.data;
-    if (entry.index !== i) {
-      return {
-        valid: false,
-        index: i,
-        reason: `expected entry index ${i}, got ${entry.index}`,
-      };
+    if (entry.seq !== position) {
+      return fail("gap-or-reorder", position, `entry at position ${position} has seq ${entry.seq}`);
     }
-    if (i === 0 && entry.prevHash !== null) {
-      return {
-        valid: false,
-        index: i,
-        reason: "genesis entry must have prevHash === null",
-      };
+    if (entry.prevHash !== prevHash) {
+      return fail(
+        "broken-link",
+        position,
+        `prevHash does not match the entryHash of seq ${position - 1}`,
+      );
     }
-    if (i > 0 && entry.prevHash !== prevEntryHash) {
-      return {
-        valid: false,
-        index: i,
-        reason: `entry ${i} prevHash does not match entry ${i - 1} entryHash`,
-      };
+    if ((await computeReceiptLogEntryHash(entry)) !== entry.entryHash) {
+      return fail("modified-entry", position, "entryHash does not match the entry's contents");
     }
-
-    const expectedReceiptHash = await computeReceiptHash(entry.receipt);
-    if (entry.receiptHash !== expectedReceiptHash) {
-      return {
-        valid: false,
-        index: i,
-        reason: `entry ${i} receiptHash does not match receipt contents`,
-      };
-    }
-
-    const expectedEntryHash = await computeEntryHash({
-      index: entry.index,
-      prevHash: entry.prevHash,
-      receiptHash: entry.receiptHash,
-      recordedAt: entry.recordedAt,
-    });
-    if (entry.entryHash !== expectedEntryHash) {
-      return {
-        valid: false,
-        index: i,
-        reason: `entry ${i} entryHash does not match entry commitment`,
-      };
-    }
-
-    if (options.receiptVerifier) {
-      const receiptCheck = await verifyReceipt(entry.receipt, options.receiptVerifier, {
-        now: options.now,
+    if (options.verifier) {
+      const receiptCheck = await verifyReceipt(entry.receipt, options.verifier, {
+        now: Date.parse(entry.appendedAt),
       });
       if (!receiptCheck.valid) {
-        return {
-          valid: false,
-          index: i,
-          reason: `entry ${i} receipt signature invalid: ${receiptCheck.reason}`,
-        };
+        return fail("receipt-signature", position, receiptCheck.reason);
       }
     }
-
-    prevEntryHash = entry.entryHash;
-    parsedEntries.push(entry);
+    hashes.push(entry.entryHash);
+    prevHash = entry.entryHash;
   }
 
-  if (verifiedCheckpoint) {
-    const { headIndex, headHash, entryCount } = verifiedCheckpoint.checkpoint;
-    if (parsedEntries.length < entryCount) {
-      return {
-        valid: false,
-        reason: `log has ${parsedEntries.length} entries, fewer than checkpoint entryCount ${entryCount}`,
-      };
+  if (anchor) {
+    if (entries.length < anchor.size) {
+      return fail(
+        "truncated",
+        entries.length,
+        `log has ${entries.length} entries; the checkpoint covers ${anchor.size}`,
+      );
     }
-    const anchored = parsedEntries[headIndex];
-    if (!anchored || anchored.entryHash !== headHash) {
-      return {
-        valid: false,
-        index: headIndex,
-        reason: `entry ${headIndex} entryHash does not match checkpoint headHash`,
-      };
+    const anchoredHash = anchor.size === 0 ? RECEIPT_LOG_GENESIS_HASH : hashes[anchor.size - 1];
+    if (anchoredHash !== anchor.headHash) {
+      return fail(
+        "checkpoint-mismatch",
+        anchor.size === 0 ? null : anchor.size - 1,
+        "the log does not match the checkpoint's headHash",
+      );
     }
   }
 
-  const head = parsedEntries[parsedEntries.length - 1]!;
+  return { valid: true, size: entries.length, headHash: prevHash };
+}
+
+function fail(
+  kind: ReceiptLogFailureKind,
+  seq: number | null,
+  reason: string,
+): ReceiptLogVerification {
+  return { valid: false, kind, seq, reason };
+}
+
+/**
+ * Where a {@link ReceiptLog} keeps its entries. The log serialises its own
+ * appends, so a store only needs to be safe for a single writer. `append`
+ * must still refuse an entry whose `seq` is not the current size or whose
+ * `prevHash` is not the current head hash: that compare-and-set is what keeps
+ * the chain from forking if two writers ever share a store. A store for
+ * several processes has to make that check atomic in the backing system.
+ */
+export interface ReceiptLogStore {
+  head(): Promise<ReceiptLogHead>;
+  /** Durably stores `entry`, or throws `receipt-log-conflict` when it does not extend the head. */
+  append(entry: ReceiptLogEntry): Promise<void>;
+  /** Up to `limit` entries starting at `fromSeq`, in order. */
+  read(fromSeq: number, limit: number): Promise<ReceiptLogEntry[]>;
+}
+
+/**
+ * Throws `receipt-log-conflict` unless `entry` extends `head`. Stores call it
+ * before writing.
+ */
+export function assertExtendsHead(head: ReceiptLogHead, entry: ReceiptLogEntry): void {
+  if (entry.seq !== head.size || entry.prevHash !== head.headHash) {
+    throw new TollwayError(
+      "receipt-log-conflict",
+      `entry seq ${entry.seq} does not extend the log head (size ${head.size})`,
+    );
+  }
+}
+
+/** Checks the `fromSeq` and `limit` arguments of {@link ReceiptLogStore.read}. */
+export function assertReadRange(fromSeq: number, limit: number): void {
+  if (!Number.isSafeInteger(fromSeq) || fromSeq < 0) {
+    throw new RangeError(`fromSeq must be a non-negative integer, got ${fromSeq}`);
+  }
+  if (!Number.isSafeInteger(limit) || limit < 1) {
+    throw new RangeError(`limit must be a positive integer, got ${limit}`);
+  }
+}
+
+/** An in-memory {@link ReceiptLogStore}. Entries are lost when the process exits. */
+export function createMemoryReceiptLogStore(): ReceiptLogStore {
+  const entries: ReceiptLogEntry[] = [];
+  const head = (): ReceiptLogHead => ({
+    size: entries.length,
+    headHash: entries.at(-1)?.entryHash ?? RECEIPT_LOG_GENESIS_HASH,
+  });
   return {
-    valid: true,
-    entryCount: parsedEntries.length,
-    headIndex: head.index,
-    headHash: head.entryHash,
+    async head() {
+      return head();
+    },
+    async append(entry) {
+      assertExtendsHead(head(), entry);
+      entries.push(entry);
+    },
+    async read(fromSeq, limit) {
+      assertReadRange(fromSeq, limit);
+      return entries.slice(fromSeq, fromSeq + limit);
+    },
   };
 }
 
-/** Append-only hash-chained receipt log interface. */
+/** When {@link createReceiptLog} signs checkpoints by itself. */
+export type ReceiptLogCheckpointSchedule =
+  | { checkpointEvery?: undefined; onCheckpointError?: undefined }
+  | {
+      /** Signs a checkpoint after every `checkpointEvery` appends. Needs `signer`. */
+      checkpointEvery: number;
+      /**
+       * Receives a failure to sign or deliver an automatic checkpoint. The
+       * entry that triggered it is already stored, so the append itself
+       * still resolves; the next scheduled checkpoint covers it.
+       */
+      onCheckpointError: (error: unknown, size: number) => void;
+    };
+
+/** Options for {@link createReceiptLog}. */
+export type ReceiptLogOptions = {
+  store: ReceiptLogStore;
+  /** Names the log in its checkpoints. */
+  logId: string;
+  /** Every receipt is checked with this before it is written. */
+  verifier: ReceiptVerifier;
+  /** Signs checkpoints. Required for {@link ReceiptLog.checkpoint} and `checkpointEvery`. */
+  signer?: ReceiptSigner;
+  /**
+   * Called with every new checkpoint. Use it to send the checkpoint somewhere
+   * the log's operator cannot rewrite, such as a webhook or a published file.
+   */
+  onCheckpoint?: (checkpoint: SignedReceiptLogCheckpoint) => void | Promise<void>;
+  /** Clock in ms, for `appendedAt` and `issuedAt`. Defaults to `Date.now`. */
+  now?: () => number;
+} & ReceiptLogCheckpointSchedule;
+
+/** An append-only, hash-chained receipt log. */
 export interface ReceiptLog {
   readonly logId: string;
-  append(receipt: SignedReceipt, options?: { recordedAt?: string }): Promise<ReceiptLogEntry>;
-  head(): Promise<ReceiptLogEntry | undefined>;
-  get(index: number): Promise<ReceiptLogEntry | undefined>;
-  range(fromIndex?: number, toIndex?: number): Promise<readonly ReceiptLogEntry[]>;
-  checkpoint(signer: ReceiptSigner, options?: { issuedAt?: string }): Promise<SignedReceiptLogCheckpoint>;
-  latestCheckpoint(): Promise<SignedReceiptLogCheckpoint | undefined>;
-  checkpoints(): Promise<readonly SignedReceiptLogCheckpoint[]>;
+  /**
+   * Verifies the receipt's signature, then appends it. Concurrent calls are
+   * queued, so each one extends the entry the previous one wrote. Throws
+   * `receipt-verification-failed` for a receipt that does not verify.
+   */
+  append(receipt: unknown): Promise<ReceiptLogEntry>;
+  head(): Promise<ReceiptLogHead>;
+  /** Up to `limit` entries starting at `fromSeq`, in order. */
+  read(fromSeq: number, limit: number): Promise<ReceiptLogEntry[]>;
+  /** Signs a checkpoint of the current head now. Throws `invalid-signing-key` without a signer. */
+  checkpoint(): Promise<SignedReceiptLogCheckpoint>;
+  /** The newest checkpoint this instance signed, if any. Not persisted. */
+  latestCheckpoint(): SignedReceiptLogCheckpoint | undefined;
 }
 
-/** Options for {@link createInMemoryReceiptLog}. */
-export type InMemoryReceiptLogOptions = {
-  /** Stable identifier for this log. Defaults to a fresh UUID. */
-  logId?: string;
-  /**
-   * When set with `signer`, automatically signs a checkpoint every
-   * `checkpointInterval` appended entries.
-   */
-  checkpointInterval?: number;
-  /** Signer used for automatic periodic checkpoints. */
-  signer?: ReceiptSigner;
-  /** Clock returning ISO 8601 timestamps. Defaults to `() => new Date().toISOString()`. */
-  now?: () => string;
-};
-
 /**
- * Creates an in-memory append-only hash-chained receipt log with optional
- * automatic periodic signed checkpoints.
+ * Builds a {@link ReceiptLog} over a store. Writes go through one queue, so
+ * the log is safe for concurrent callers in one process. Run one writer per
+ * log: two processes over the same store are only safe when the store's
+ * `append` is an atomic compare-and-set.
  */
-export function createInMemoryReceiptLog(options: InMemoryReceiptLogOptions = {}): ReceiptLog {
-  const logId = options.logId ?? crypto.randomUUID();
-  const now = options.now ?? (() => new Date().toISOString());
-  const interval = options.checkpointInterval;
-  if (interval !== undefined && (!Number.isInteger(interval) || interval < 1)) {
-    throw new RangeError(`checkpointInterval must be a positive integer, got ${interval}`);
+export function createReceiptLog(options: ReceiptLogOptions): ReceiptLog {
+  if (options.logId.length === 0) {
+    throw new TypeError("logId must not be empty");
   }
-  if (interval !== undefined && !options.signer) {
-    throw new TypeError("signer is required when checkpointInterval is configured");
+  const { checkpointEvery } = options;
+  if (checkpointEvery !== undefined) {
+    if (!Number.isSafeInteger(checkpointEvery) || checkpointEvery < 1) {
+      throw new RangeError(`checkpointEvery must be a positive integer, got ${checkpointEvery}`);
+    }
+    if (!options.signer) {
+      throw new TypeError("checkpointEvery needs a signer");
+    }
+  }
+  const now = options.now ?? Date.now;
+  let latest: SignedReceiptLogCheckpoint | undefined;
+  // Every operation that reads the head and acts on it runs on this chain,
+  // so two appends can never compute the same seq.
+  let queue: Promise<unknown> = Promise.resolve();
+
+  function serialised<T>(task: () => Promise<T>): Promise<T> {
+    const run = queue.then(task);
+    // Keep the queue alive after a failure; the caller still gets the rejection.
+    queue = run.catch(() => undefined);
+    return run;
   }
 
-  const entries: ReceiptLogEntry[] = [];
-  const savedCheckpoints: SignedReceiptLogCheckpoint[] = [];
-
-  async function createCheckpoint(
-    signer: ReceiptSigner,
-    issuedAt?: string,
-  ): Promise<SignedReceiptLogCheckpoint> {
-    const headEntry = entries[entries.length - 1];
-    if (!headEntry) {
-      throw new TollwayError("invalid-receipt", "cannot create a checkpoint for an empty receipt log");
+  async function signHead(head: ReceiptLogHead): Promise<SignedReceiptLogCheckpoint> {
+    if (!options.signer) {
+      throw new TollwayError(
+        "invalid-signing-key",
+        "the receipt log has no signer for checkpoints",
+      );
     }
     const signed = await signReceiptLogCheckpoint(
       {
+        type: RECEIPT_LOG_CHECKPOINT_TYPE,
         version: 1,
-        logId,
-        headIndex: headEntry.index,
-        headHash: headEntry.entryHash,
-        entryCount: entries.length,
-        issuedAt: issuedAt ?? now(),
+        logId: options.logId,
+        size: head.size,
+        headHash: head.headHash,
+        issuedAt: new Date(now()).toISOString(),
       },
-      signer,
+      options.signer,
     );
-    savedCheckpoints.push(signed);
+    latest = signed;
+    await options.onCheckpoint?.(signed);
     return signed;
   }
 
   return {
-    logId,
-    async append(receipt, appendOptions) {
-      const parsed = signedReceiptSchema.safeParse(receipt);
-      if (!parsed.success) {
-        throw new TollwayError(
-          "invalid-receipt",
-          `cannot append invalid receipt: ${parsed.error.issues.map((issue) => issue.message).join("; ")}`,
-        );
-      }
-      const index = entries.length;
-      const prevHash = index === 0 ? null : entries[index - 1]!.entryHash;
-      const recordedAt = appendOptions?.recordedAt ?? now();
-      const receiptHash = await computeReceiptHash(parsed.data);
-      const entryHash = await computeEntryHash({ index, prevHash, receiptHash, recordedAt });
-      const entry: ReceiptLogEntry = {
-        index,
-        prevHash,
-        receipt: parsed.data,
-        receiptHash,
-        entryHash,
-        recordedAt,
-      };
-      entries.push(entry);
-
-      if (interval !== undefined && options.signer && entries.length % interval === 0) {
-        await createCheckpoint(options.signer, recordedAt);
-      }
-      return entry;
+    logId: options.logId,
+    append(receipt) {
+      return serialised(async () => {
+        const appendedAtMs = now();
+        const verified = await verifyReceipt(receipt, options.verifier, { now: appendedAtMs });
+        if (!verified.valid) {
+          throw new TollwayError(
+            "receipt-verification-failed",
+            `receipt not appended: ${verified.reason}`,
+          );
+        }
+        const head = await options.store.head();
+        const unhashed = {
+          seq: head.size,
+          prevHash: head.headHash,
+          receipt: verified.receipt,
+          appendedAt: new Date(appendedAtMs).toISOString(),
+        };
+        const entry: ReceiptLogEntry = {
+          ...unhashed,
+          entryHash: await computeReceiptLogEntryHash(unhashed),
+        };
+        await options.store.append(entry);
+        const size = entry.seq + 1;
+        if (checkpointEvery !== undefined && size % checkpointEvery === 0) {
+          try {
+            await signHead({ size, headHash: entry.entryHash });
+          } catch (error) {
+            options.onCheckpointError?.(error, size);
+          }
+        }
+        return entry;
+      });
     },
-    async head() {
-      return entries[entries.length - 1];
+    head() {
+      return serialised(() => options.store.head());
     },
-    async get(index) {
-      if (!Number.isInteger(index) || index < 0) return undefined;
-      return entries[index];
+    async read(fromSeq, limit) {
+      assertReadRange(fromSeq, limit);
+      return options.store.read(fromSeq, limit);
     },
-    async range(fromIndex = 0, toIndex = entries.length - 1) {
-      if (entries.length === 0) return [];
-      const start = Math.max(0, fromIndex);
-      const end = Math.min(entries.length - 1, toIndex);
-      if (end < start) return [];
-      return entries.slice(start, end + 1);
+    checkpoint() {
+      return serialised(async () => signHead(await options.store.head()));
     },
-    async checkpoint(signer, checkpointOptions) {
-      return createCheckpoint(signer, checkpointOptions?.issuedAt);
-    },
-    async latestCheckpoint() {
-      return savedCheckpoints[savedCheckpoints.length - 1];
-    },
-    async checkpoints() {
-      return [...savedCheckpoints];
+    latestCheckpoint() {
+      return latest;
     },
   };
+}
+
+async function checkSignature(
+  verifier: ReceiptVerifier,
+  input: Parameters<ReceiptVerifier["verify"]>[0],
+): Promise<SignatureCheck> {
+  try {
+    if (verifier.check) {
+      return await verifier.check(input);
+    }
+    return (await verifier.verify(input))
+      ? { valid: true }
+      : { valid: false, reason: "signature does not verify against any trusted key" };
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    return { valid: false, reason: `the verifier failed: ${message}` };
+  }
+}
+
+function describeIssues(issues: readonly { path: PropertyKey[]; message: string }[]): string {
+  return issues
+    .map((issue) => `${issue.path.length > 0 ? issue.path.join(".") : "(root)"}: ${issue.message}`)
+    .join("; ");
 }

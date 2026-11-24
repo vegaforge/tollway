@@ -104,6 +104,12 @@ if (result.valid) {
 }
 ```
 
+## Receipt log
+
+A single receipt cannot be forged, but a collection of receipts can still lose a member without trace. `createReceiptLog` in `@vegaforge/tollway-core` keeps receipts in an append-only log where every entry commits to the previous one by SHA-256, and signs checkpoints of the log's size and head hash with the same signer as receipts. `verifyReceiptLog(entries, { verifier, checkpoint })` then reports the first modified, missing or reordered entry. `openJsonlReceiptLogStore` in `@vegaforge/tollway-observability` stores the log as an fsynced JSON Lines file.
+
+Removing entries from the end of a log cannot be detected without a checkpoint kept outside it, so send checkpoints somewhere the log's operator cannot rewrite. The format, the guarantees and offline verification are in [`docs/receipt-log.md`](https://github.com/vegaforge/tollway/blob/main/docs/receipt-log.md).
+
 ## Reference
 
 For the field-by-field walk through every property on the receipt body, the signature shape, and the canonical-bytes serialization that signatures cover, see [`docs/receipt-format.md`](https://github.com/vegaforge/tollway/blob/main/docs/receipt-format.md). The architectural context is in [`docs/design.md`, "One receipt format"](https://github.com/vegaforge/tollway/blob/main/docs/design.md#one-receipt-format).
