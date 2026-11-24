@@ -475,7 +475,7 @@ describe("createMppChargeHandler", () => {
       });
     });
 
-    it("turns a transport failure into a payment-failed TollwayError", async () => {
+    it("turns a transport failure into a facilitator-unavailable TollwayError", async () => {
       stub.mppx.verifyCredential.mockRejectedValue(new TypeError("fetch failed"));
       const handler = createMppChargeHandler(options());
       const settling = handler.settle({
@@ -486,7 +486,7 @@ describe("createMppChargeHandler", () => {
       });
       await expect(settling).rejects.toBeInstanceOf(TollwayError);
       await expect(settling).rejects.toMatchObject({
-        code: "payment-failed",
+        code: "facilitator-unavailable",
         message: "mpp charge settlement failed: fetch failed",
       });
     });
@@ -513,8 +513,8 @@ describe("createMppChargeHandler", () => {
       ["an axios error", Object.assign(new Error("socket hang up"), { isAxiosError: true })],
       ["an abort", Object.assign(new Error("aborted"), { name: "AbortError" })],
       ["a refused connection", Object.assign(new Error("connect"), { code: "ECONNREFUSED" })],
-    ])("throws payment-failed on %s", async (_name, error) => {
-      await expect(settleWith(error)).rejects.toMatchObject({ code: "payment-failed" });
+    ])("throws facilitator-unavailable on %s", async (_name, error) => {
+      await expect(settleWith(error)).rejects.toMatchObject({ code: "facilitator-unavailable" });
     });
   });
 
@@ -614,7 +614,10 @@ describe("createMppChargeHandler", () => {
       expect(failed).toEqual({
         kind: "rejected",
         status: 502,
-        reason: "mpp charge rejected: [stellar:charge] simulation failed",
+        code: "settlement-failed",
+        reason: "the facilitator refused to settle the payment",
+        // The handler's own words travel apart from the code (#161).
+        upstreamReason: "mpp charge rejected: [stellar:charge] simulation failed",
       });
       const retried = await paywall(request);
       expect(retried.kind).toBe("settled");

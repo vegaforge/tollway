@@ -26,6 +26,7 @@ import {
   PAYMENT_RESPONSE_HEADER,
   PAYMENT_SIGNATURE_HEADER,
   type PaywallConfig,
+  type SinglePaymentOptionConfig,
   type SponsorBalanceReader,
   TOLLWAY_RECEIPT_HEADER,
 } from "@vegaforge/tollway-server";
@@ -134,7 +135,7 @@ function createStellarPayer(config: LiveDemoConfig): DemoPayer {
 type DemoSetup = {
   mock: boolean;
   facilitator: FacilitatorClient;
-  paywall: Pick<PaywallConfig, "asset" | "payTo" | "network">;
+  paywall: Pick<SinglePaymentOptionConfig, "asset" | "payTo" | "network">;
   payer: DemoPayer;
 };
 
@@ -176,7 +177,7 @@ export async function runDemo(options: DemoOptions = {}): Promise<DemoResult> {
 
   // The gate's challenge must carry the same `extra` the live payer signs
   // against, or @x402/stellar refuses to build the payment.
-  const config: PaywallConfig = {
+  const config: PaywallConfig & SinglePaymentOptionConfig = {
     ...paywall,
     amount: DEMO_AMOUNT,
     models: ["x402"],

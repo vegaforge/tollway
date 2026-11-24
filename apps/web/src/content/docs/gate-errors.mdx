@@ -1,0 +1,54 @@
+---
+title: Gate error codes
+description: The machine-readable code, status and headers every gate rejection carries.
+---
+
+Every rejection from a Tollway gate carries a stable `code`. Branch on the code, not on the message. Express, Fastify, Hono and Next (including `paywallProxy`) all render rejections with `renderGateRejection`, so the same code produces the same status, headers and body in every framework.
+
+```json
+{
+  "error": {
+    "code": "settlement-in-progress",
+    "message": "settlement in progress"
+  }
+}
+```
+
+`upstreamReason` appears next to `code` and `message` only when the facilitator, the MPP handler or the local pre-validator gave a reason of its own, such as `invalid_exact_stellar_payload_wrong_amount`. It is there for logs; its vocabulary belongs to the upstream library.
+
+| Code | Status | Retry the same payment | Headers |
+| ---- | ------ | ---------------------- | ------- |
+| `payment-malformed` | 400 | no | |
+| `payment-invalid` | 402 | no, pay the fresh challenge | `PAYMENT-REQUIRED` |
+| `service-policy:not-allowed` | 403 | no | |
+| `service-policy:rate-limited` | 429 | yes, after `Retry-After` | `Retry-After` |
+| `service-policy:spend-exceeded` | 429 | yes, after `Retry-After` | `Retry-After` |
+| `offer-mismatch` | 409 | no | |
+| `settlement-in-progress` | 409 | yes, after `Retry-After` | `Retry-After` |
+| `settlement-failed` | 502 | no | |
+| `facilitator-unavailable` | 503 | yes, after `Retry-After` | `Retry-After` |
+| `settlement-unknown` | 503 | yes, after `Retry-After`; never pay again | `Retry-After` |
+| `facilitator-invalid-response` | 500 | no | |
+| `price-unavailable` | 500 | no | |
+| `handler-not-configured` | 500 | no | |
+| `model-not-supported` | 501 | no | |
+
+The same table is exported as `GATE_ERRORS`, so code can read the status and retry guidance instead of copying them.
+
+## Retry-After
+
+`settlement-in-progress` and `facilitator-unavailable` default to one second. Change them with `retryAfterSeconds`:
+
+```ts
+createPaywall(config, {
+  signer,
+  facilitator,
+  retryAfterSeconds: { settlementInProgress: 2, facilitatorUnavailable: 5 },
+});
+```
+
+`settlement-unknown` always waits out the hold (`ambiguousSettlementHoldMs`): before then the gate cannot know whether the payment landed.
+
+## Errors that are not rejections
+
+A facilitator that cannot be reached is a `facilitator-unavailable` rejection, not an exception: `createHttpFacilitator`, the failover client and the MPP charge handler throw `TollwayError("facilitator-unavailable")`, which the gate turns into a 503. Anything else thrown inside the gate is a bug and still reaches your framework's error handler.

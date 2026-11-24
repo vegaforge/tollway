@@ -8,7 +8,12 @@
  * @vegaforge/tollway-adapter-next. See docs/design.md, "Repository layout".
  */
 
-import type { Gate, GateOutcome, RouteTable } from "@vegaforge/tollway-server";
+import {
+  type Gate,
+  type GateOutcome,
+  type RouteTable,
+  renderGateRejection,
+} from "@vegaforge/tollway-server";
 import type { FastifyReply, FastifyRequest, preHandlerHookHandler } from "fastify";
 
 type SettledReceipt = Extract<GateOutcome, { kind: "settled" }>["receipt"];
@@ -74,8 +79,11 @@ async function runGate(gate: Gate, request: FastifyRequest, reply: FastifyReply)
     return;
   }
 
-  applyHeaders(reply, outcome.headers ?? {});
-  await reply.status(outcome.status).send({ error: outcome.reason });
+  // The body and headers come from the server's one renderer, so every
+  // adapter answers each error code the same way (#161).
+  const rejection = renderGateRejection(outcome);
+  applyHeaders(reply, rejection.headers);
+  await reply.status(rejection.status).send(rejection.body);
 }
 
 function applyHeaders(reply: FastifyReply, headers: Record<string, string>): void {

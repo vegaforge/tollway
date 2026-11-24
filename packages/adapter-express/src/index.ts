@@ -7,7 +7,7 @@
  * "Repository layout".
  */
 
-import type { Gate, RouteTable } from "@vegaforge/tollway-server";
+import { type Gate, type RouteTable, renderGateRejection } from "@vegaforge/tollway-server";
 import type { NextFunction, Request, RequestHandler, Response } from "express";
 
 /** Where the verified receipt is stashed on res.locals for downstream handlers. */
@@ -46,8 +46,10 @@ export function expressPaywall(gate: Gate): RequestHandler {
           res.set(outcome.headers).status(outcome.status).json(outcome.challenge);
           return;
         }
-        if (outcome.headers) res.set(outcome.headers);
-        res.status(outcome.status).json({ error: outcome.reason });
+        // The body and headers come from the server's one renderer, so every
+        // adapter answers each error code the same way (#161).
+        const rejection = renderGateRejection(outcome);
+        res.set(rejection.headers).status(rejection.status).json(rejection.body);
       })
       .catch(() => {
         if (res.headersSent) return;

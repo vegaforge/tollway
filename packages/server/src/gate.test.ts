@@ -323,6 +323,9 @@ describe("createPaywall", () => {
     let calls = 0;
     const seenAmounts: string[] = [];
     const facilitator: FacilitatorClient = {
+      // A stub that, like the mock, takes non-Stellar test payments, so the
+      // gate's local Stellar pre-validation (#159) is not what this tests.
+      acceptsMockPayments: true,
       async verify({ offer }) {
         seenAmounts.push(offer.amount);
         return { valid: true, payer: "GPAYER", nonce: "NONCE-DYNAMIC" };
@@ -432,7 +435,8 @@ describe("createPaywall", () => {
         const challenge = await gate(baseRequest);
         expect(challenge).toMatchObject({ kind: "rejected", status: 500 });
         if (challenge.kind !== "rejected") return;
-        expect(challenge.reason).toMatch(/^invalid-amount: dynamic price/);
+        expect(challenge.code).toBe("price-unavailable");
+        expect(challenge.reason).toMatch(/^dynamic price/);
 
         const paid = await gate({
           ...baseRequest,
@@ -774,6 +778,7 @@ describe("createPaywall", () => {
       expect(outcome).toEqual({
         kind: "rejected",
         status: 400,
+        code: "payment-malformed",
         reason:
           "mpp-charge payments carry an Authorization: Payment credential, not PAYMENT-SIGNATURE",
       });
@@ -784,7 +789,10 @@ describe("createPaywall", () => {
 describe("TM-02 cross-offer replay", () => {
   const headers = { [PAYMENT_SIGNATURE_HEADER]: paymentHeader() };
 
-  function gateFor(overrides: Partial<PaywallConfig>, cache: SettlementCache) {
+  function gateFor(
+    overrides: Partial<Extract<PaywallConfig, { amount: unknown }>>,
+    cache: SettlementCache,
+  ) {
     return createPaywall(
       { ...config, ...overrides },
       {
@@ -805,6 +813,7 @@ describe("TM-02 cross-offer replay", () => {
     expect(replay).toEqual({
       kind: "rejected",
       status: 409,
+      code: "offer-mismatch",
       reason: "payment already settled for a different offer",
     });
   });
@@ -814,16 +823,26 @@ describe("TM-02 cross-offer replay", () => {
     const first = await gateFor({ resource: "/a" }, cache)({ ...baseRequest, headers });
     expect(first.kind).toBe("settled");
 
-    const replay = await gateFor(
-      { resource: "/a", amount: "99999999" },
-      cache,
-    )({
+    const repriced = gateFor({ resource: "/a", amount: "99999999" }, cache);
+    // As paid, the payment's accepted terms name the old amount, which this
+    // offer does not list: refused before any lookup (#158).
+    expect(await repriced({ ...baseRequest, headers })).toMatchObject({
+      kind: "rejected",
+      status: 402,
+      code: "payment-invalid",
+    });
+    // With accepted rewritten to the new amount, the same signed payment
+    // reaches the cached receipt, whose binding refuses it.
+    const rewritten = decodePaymentSignatureHeader(headers[PAYMENT_SIGNATURE_HEADER]);
+    rewritten.accepted = { ...rewritten.accepted, amount: "99999999" };
+    const replay = await repriced({
       ...baseRequest,
-      headers,
+      headers: { [PAYMENT_SIGNATURE_HEADER]: encodePaymentSignatureHeader(rewritten) },
     });
     expect(replay).toEqual({
       kind: "rejected",
       status: 409,
+      code: "offer-mismatch",
       reason: "payment already settled for a different offer",
     });
   });
@@ -961,6 +980,7 @@ describe("TM-04 shared-lock duplicate settlement", () => {
     expect(outcome).toEqual({
       kind: "rejected",
       status: 409,
+      code: "settlement-in-progress",
       reason: "settlement in progress",
       // Issue #203: Retry-After is what tells a client this 409 is the same
       // payment still settling, safe to resend, unlike an offer mismatch.
@@ -1010,6 +1030,7 @@ describe("TM-04 shared-lock duplicate settlement", () => {
       expect(second).toEqual({
         kind: "rejected",
         status: 409,
+        code: "settlement-in-progress",
         reason: "settlement in progress",
         // Issue #203: Retry-After is what tells a client this 409 is the same
         // payment still settling, safe to resend, unlike an offer mismatch.
@@ -1141,6 +1162,7 @@ describe("method binding", () => {
     expect(write).toEqual({
       kind: "rejected",
       status: 409,
+      code: "offer-mismatch",
       reason: "payment already settled for a different offer",
     });
     expect(calls.settle).toBe(1);
@@ -1190,7 +1212,7 @@ describe("receipt v2 issuance and binding (#166)", () => {
   const headers = { [PAYMENT_SIGNATURE_HEADER]: paymentHeader() };
 
   function gateFor(
-    overrides: Partial<PaywallConfig>,
+    overrides: Partial<Extract<PaywallConfig, { amount: unknown }>>,
     cache: SettlementCache,
     receiptVersion?: 1 | 2,
   ) {
@@ -1249,6 +1271,7 @@ describe("receipt v2 issuance and binding (#166)", () => {
     expect(replay).toEqual({
       kind: "rejected",
       status: 409,
+      code: "offer-mismatch",
       reason: "payment already settled for a different offer",
     });
   });
@@ -1868,6 +1891,7 @@ describe("settlement lock edge cases (#247)", () => {
     expect(outcome).toEqual({
       kind: "rejected",
       status: 409,
+      code: "offer-mismatch",
       reason: "payment already settled for a different offer",
     });
   });

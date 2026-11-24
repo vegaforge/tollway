@@ -13,11 +13,15 @@ import {
   createMockFacilitator,
   createPaywall,
   encodePaymentSignatureHeader,
+  GATE_ERROR_CODES,
+  GATE_ERRORS,
   type Gate,
+  type GateRejection,
   PAYMENT_REQUIRED_HEADER,
   PAYMENT_RESPONSE_HEADER,
   PAYMENT_SIGNATURE_HEADER,
   type PaywallConfig,
+  renderGateRejection,
   TOLLWAY_RECEIPT_HEADER,
 } from "../index.js";
 
@@ -59,7 +63,7 @@ export type ConformanceRunner = {
 const PATH = "/quotes/latest";
 
 /** A repeated payment header reaches the gate as one joined value, which does not decode. */
-const REPEATED_PAYMENT_STATUS = 400;
+const REPEATED_PAYMENT_CODE = "payment-malformed";
 
 const config = {
   amount: "10000",
@@ -163,20 +167,29 @@ export function runAdapterConformance(driver: AdapterDriver, runner: Conformance
       }
     });
 
-    for (const status of [400, 402, 409, 429, 500, 501, 502, 503]) {
-      it(`passes a ${status} rejection through as { error }`, async () => {
-        const gate: Gate = async () => ({
+    // One case per catalogued code (#161): every adapter must send the
+    // status, headers and body the server's renderer produces for it.
+    for (const code of GATE_ERROR_CODES) {
+      it(`passes a ${code} rejection through as the rendered { error }`, async () => {
+        const spec = GATE_ERRORS[code];
+        const rejection: GateRejection = {
           kind: "rejected",
-          status,
-          reason: `gate says ${status}`,
-          ...(status === 429 ? { headers: { "retry-after": "7" } } : {}),
-        });
+          status: spec.status,
+          code,
+          reason: `gate says ${code}`,
+          upstreamReason: `upstream says ${code}`,
+          headers: Object.fromEntries(spec.headers.map((name) => [name, `value-of-${name}`])),
+        };
+        const gate: Gate = async () => rejection;
         const app = await driver.create({ gate, onPaid: () => {} });
         try {
           const response = await app.send({ path: PATH });
-          assert.equal(response.status, status);
-          assert.deepEqual(await jsonBody(response), { error: `gate says ${status}` });
-          if (status === 429) assert.equal(response.header("retry-after"), "7");
+          const rendered = renderGateRejection(rejection);
+          assert.equal(response.status, rendered.status);
+          assert.deepEqual(await jsonBody(response), rendered.body);
+          for (const [name, value] of Object.entries(rendered.headers)) {
+            assert.equal(response.header(name), value, `the ${name} header is missing`);
+          }
         } finally {
           await app.close();
         }
@@ -202,9 +215,9 @@ export function runAdapterConformance(driver: AdapterDriver, runner: Conformance
             ],
           },
         });
-        assert.equal(response.status, REPEATED_PAYMENT_STATUS);
-        const body = await jsonBody(response);
-        assert.equal(typeof body.error, "string", "the rejection has no { error }");
+        assert.equal(response.status, GATE_ERRORS[REPEATED_PAYMENT_CODE].status);
+        const body = (await jsonBody(response)) as { error?: { code?: string } };
+        assert.equal(body.error?.code, REPEATED_PAYMENT_CODE);
         assert.equal(receipts.length, 0, "the paid handler ran for an ambiguous payment");
         assert.equal(response.header(PAYMENT_RESPONSE_HEADER), null);
       } finally {
