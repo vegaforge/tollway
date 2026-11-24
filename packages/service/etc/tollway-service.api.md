@@ -799,6 +799,14 @@ export const policyVersionResponseSchema: z.ZodObject<{
         mode: z.ZodOptional<z.ZodEnum<_vegaforge_tollway_core.EnumShape<readonly ["enforce", "dry-run"]>>>;
         budgets: z.ZodOptional<z.ZodObject<{
             daily: z.ZodOptional<z.ZodString>;
+            weekly: z.ZodOptional<z.ZodString>;
+            monthly: z.ZodOptional<z.ZodString>;
+            rolling: z.ZodOptional<z.ZodObject<{
+                windowSeconds: z.ZodNumber;
+                cap: z.ZodString;
+            }, z.core.$strict>>;
+            timezone: z.ZodOptional<z.ZodString>;
+            weekStartsOn: z.ZodOptional<z.ZodEnum<_vegaforge_tollway_core.EnumShape<readonly ["monday", "sunday"]>>>;
             total: z.ZodOptional<z.ZodString>;
         }, z.core.$strict>>;
         perService: z.ZodOptional<z.ZodRecord<z.ZodString, z.ZodObject<{

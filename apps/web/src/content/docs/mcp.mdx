@@ -1,0 +1,75 @@
+---
+title: Paid MCP tools
+description: Charging for MCP tool calls with x402, settled only after the tool succeeds
+---
+
+Agents reach many paid capabilities as Model Context Protocol (MCP) tools rather than HTTP routes. `@vegaforge/tollway-mcp` charges for a tool call with the same price configuration, facilitator, settlement cache and signed receipt a service uses for its HTTP routes.
+
+## The x402 MCP transport
+
+x402 defines how a payment travels over MCP (`specs/transports-v2/mcp.md` in the x402 repository):
+
+1. The agent calls the tool without a payment. The server answers with a tool result that has `isError: true` and carries the x402 `PaymentRequired` twice: as the object in `structuredContent`, and as its JSON in `content[0].text`.
+2. The agent signs a payment for one of the `accepts` entries and calls the tool again with the x402 `PaymentPayload` in the request's `_meta["x402/payment"]`.
+3. The server verifies the payment, runs the tool, settles the payment, and returns the tool's result with the x402 `SettleResponse` in `_meta["x402/payment-response"]`.
+
+Tollway adds one key to a paid result: `_meta["tollway/receipt"]`, the signed Tollway receipt, the same object an HTTP route sends in the `TOLLWAY-RECEIPT` header. Its `resource` is the tool's resource id, `mcp://tool/<toolName>` by default, and it binds to the tool's offer by `model`, `network`, `resource`, `amount`, `asset` and `payee`, exactly as an HTTP receipt does. A version 2 receipt also names the method, `tools/call`, so a tool's receipt never unlocks an HTTP route.
+
+## Settle after success
+
+An HTTP route settles before its handler runs. A paid tool call settles after it:
+
+1. The payment is checked against the schema and the tool's terms, then verified by the facilitator. Nothing runs before that.
+2. The service policy runs, and the settlement lock for the payment is taken.
+3. The tool runs.
+4. If the tool succeeded, the payment settles and the receipt is signed and cached. If the tool threw or returned `isError: true`, nothing settles, nothing is cached, and the agent can retry with the same payment.
+
+If settlement fails after the tool ran, the agent gets only the payment error, never the tool's content, as the transport requires: the tool's output was not paid for.
+
+## Wrapping a tool
+
+```ts
+import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
+import { paidTool } from "@vegaforge/tollway-mcp";
+import { z } from "zod";
+
+const server = new McpServer({ name: "quotes", version: "1.0.0" });
+
+server.registerTool(
+  "get-quote",
+  { description: "Latest quote", inputSchema: { symbol: z.string() } },
+  paidTool(
+    {
+      toolName: "get-quote",
+      amount: "10000", // 0.001 USDC in base units
+      asset: USDC,
+      payTo: PAYEE,
+      network: "testnet",
+    },
+    { signer, facilitator, cache },
+  )(async ({ symbol }: { symbol: string }) => ({
+    content: [{ type: "text" as const, text: await quote(symbol) }],
+  })),
+);
+```
+
+The configuration takes the same fields as `createPaywall` with a fixed `amount` (`asset`, `payTo`, `network`, `models`, `facilitatorUrl`, `maxTimeoutSeconds`, `extra`), plus `toolName` and an optional stable `resource`. A dynamic price is not available, because it is computed from the HTTP request. The dependencies are the gate's: the receipt `signer`, the `facilitator`, and optionally the settlement `cache`, `servicePolicy`, `onCacheError` and `receiptVersion`.
+
+Keep `resource` stable. A cached receipt is replayed only for the resource and method it was issued for.
+
+## Replays and concurrent calls
+
+The idempotency key comes from the signed payment, exactly as on the HTTP gate, and the HTTP gate and paid tools share one implementation of it: `createPaidCall` in `@vegaforge/tollway-server`.
+
+- The same payment sent again after it settled, for example because the agent lost the answer, gets the cached receipt and `SettleResponse`. Nothing settles again. The tool runs again for the retry, the same way a replayed payment is served its HTTP route again.
+- Two calls with the same payment at once settle once: the second waits for the first.
+- Give the paid tools and the HTTP routes one settlement cache, and a payment settles at most once across both.
+- A settlement cache that fails after the payment settled does not cost the agent its receipt. The error goes to `onCacheError`.
+
+## Why not `@x402/mcp`
+
+`@x402/mcp` (2.31.0, compatible with the `@x402/core` version Tollway uses) wraps a tool with `createPaymentWrapper(resourceServer, { accepts, hooks })`. It verifies and settles through an `x402ResourceServer` and has no settlement cache, so composing it with Tollway would give a payment two places that decide whether it already settled. Tollway instead drives its own settlement path, the one the HTTP gate uses, and follows the same wire format: the `x402/payment` and `x402/payment-response` keys, the default `mcp://tool/<toolName>` resource id, and the payment-required result.
+
+## Try it
+
+[`examples/paid-mcp-tool`](https://github.com/vegaforge/tollway/tree/dev/examples/paid-mcp-tool) runs a paid tool end to end in mock mode: an unpaid call, a paid call, and a replay of the same payment.

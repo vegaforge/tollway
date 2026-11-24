@@ -8,6 +8,7 @@
     "route-tables",
     "payment-options",
     "discovery",
+    "mcp",
     "---Concepts---",
     "model-router",
     "channels",

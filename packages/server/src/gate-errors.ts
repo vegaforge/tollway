@@ -31,7 +31,12 @@ export type GateErrorCode =
   /** The gate is missing a handler or is not ready to take payments. */
   | "handler-not-configured"
   /** The router chose a settlement model this gate does not implement. */
-  | "model-not-supported";
+  | "model-not-supported"
+  /**
+   * A paid call's work (an MCP tool, say) failed after the payment was
+   * verified, so the payment was not settled and may be sent again (#206).
+   */
+  | "work-failed";
 
 /** What a client may do after a rejection, and what the response carries. */
 export type GateErrorSpec = {
@@ -75,6 +80,7 @@ export const GATE_ERRORS: Readonly<Record<GateErrorCode, GateErrorSpec>> = {
   "price-unavailable": { status: 500, retrySamePayment: false, headers: [] },
   "handler-not-configured": { status: 500, retrySamePayment: false, headers: [] },
   "model-not-supported": { status: 501, retrySamePayment: false, headers: [] },
+  "work-failed": { status: 424, retrySamePayment: true, headers: [] },
 };
 
 /** Every code, in the order the docs list them. */

@@ -32,6 +32,7 @@ Every rejection from a Tollway gate carries a stable `code`. Branch on the code,
 | `price-unavailable` | 500 | no | |
 | `handler-not-configured` | 500 | no | |
 | `model-not-supported` | 501 | no | |
+| `work-failed` | 424 | yes | |
 
 The same table is exported as `GATE_ERRORS`, so code can read the status and retry guidance instead of copying them.
 
