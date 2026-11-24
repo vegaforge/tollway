@@ -33,6 +33,7 @@ export type TollwayErrorCode =
   | "commitment-exceeds-deposit"
   | "settlement-mismatch"
   | "counterparty-quarantined"
+  | "channel-open-failed"
   | "invalid-metrics-query"
   | "invalid-metric"
   | "metrics-query-too-large"
@@ -67,5 +68,50 @@ export class NotImplementedError extends TollwayError {
     super("not-implemented", `${feature} is not implemented yet. See ${reference}.`);
     this.name = "NotImplementedError";
     this.reference = reference;
+  }
+}
+
+/**
+ * How far a failed channel open got (#183). `not-submitted`: nothing reached
+ * the chain. `failed`: a transaction was submitted and definitely failed.
+ * `ambiguous`: a transaction may have landed, so a funded channel may exist
+ * that nobody tracks.
+ */
+export type ChannelOpenSubmission = "not-submitted" | "failed" | "ambiguous";
+
+/**
+ * Thrown by a channel settler when opening a payment channel failed before
+ * any voucher was signed or sent (#183, #184). It is the only error the
+ * client treats as safe to fall back from: no payment has been offered to
+ * the service, so paying the same request by x402 cannot pay it twice.
+ */
+export class ChannelOpenFailedError extends TollwayError {
+  readonly counterparty: string;
+  readonly asset: string;
+  readonly submission: ChannelOpenSubmission;
+  /** The channel contract id, when the open got far enough to have one. */
+  readonly channelId?: string;
+  /** The open transaction hash, when one was submitted. */
+  readonly txHash?: string;
+
+  constructor(details: {
+    counterparty: string;
+    asset: string;
+    submission: ChannelOpenSubmission;
+    channelId?: string;
+    txHash?: string;
+    cause?: unknown;
+  }) {
+    super(
+      "channel-open-failed",
+      `could not open a channel to ${details.counterparty} for ${details.asset} (${details.submission})`,
+      details.cause === undefined ? undefined : { cause: details.cause },
+    );
+    this.name = "ChannelOpenFailedError";
+    this.counterparty = details.counterparty;
+    this.asset = details.asset;
+    this.submission = details.submission;
+    if (details.channelId !== undefined) this.channelId = details.channelId;
+    if (details.txHash !== undefined) this.txHash = details.txHash;
   }
 }

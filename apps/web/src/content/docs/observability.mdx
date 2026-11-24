@@ -102,6 +102,43 @@ There is no SQL store in `@vegaforge/tollway-observability` yet; it is tracked i
 
 Every event carries a stable `id` assigned at emit time. Each request includes `Tollway-Event-Id`, and a subscription with a `secret` also gets a `Tollway-Signature` header that covers the exact body. Export `verifyWebhookSignature` from the package to check it on the receiving side, rejecting forged bodies and replayed timestamps.
 
+### Channel webhooks
+
+`@vegaforge/tollway-channels` produces `channel.opened` and `channel.closed` through `toObservabilitySink(hub)` (see [Channels](/docs/channels#lifecycle-events)). Amounts are integer strings in the asset's smallest unit.
+
+```json
+{
+  "id": "0f8b6a1e-4c2d-4f57-9a0b-2f7f3c1d9e21",
+  "type": "channel.opened",
+  "at": "2026-11-24T10:00:00.000Z",
+  "data": {
+    "channelId": "CCHAN1",
+    "counterparty": "GSERVICE",
+    "asset": "CUSDC",
+    "network": "testnet",
+    "deposit": "10000000",
+    "openTxHash": "3b1f"
+  }
+}
+```
+
+```json
+{
+  "id": "6d2e9c4a-1b7f-4e3a-8c5d-9a1b2c3d4e5f",
+  "type": "channel.closed",
+  "at": "2026-11-24T11:00:00.000Z",
+  "data": {
+    "channelId": "CCHAN1",
+    "counterparty": "GSERVICE",
+    "asset": "CUSDC",
+    "network": "testnet",
+    "settlementTxHash": "9c2a",
+    "settledAmount": "2500000",
+    "returnedRemainder": "7500000"
+  }
+}
+```
+
 ### Durable delivery
 
 Pass an `outbox` to `createObservabilityHub` to persist each delivery instead of POSTing inside `emit`. `createSqliteWebhookOutbox({ filename })` survives a restart; `createMemoryWebhookOutbox()` keeps rows in process for tests. Call `hub.startDispatcher()` to deliver with jittered exponential backoff under a lease, and `hub.stop()` to wait for in-flight attempts on shutdown. With an outbox, `emit` never rejects: a row that cannot be written is listed in the report's `failures`.
