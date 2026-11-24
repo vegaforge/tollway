@@ -12,6 +12,8 @@
     "model-router",
     "channels",
     "policy",
+    "mcp-tools",
+    "ai-sdk",
     "receipts",
     "reconciliation",
     "observability",

@@ -14,6 +14,10 @@ export const serviceErrorCodes = [
   "tenant-mismatch",
   /** The path, query or body failed its schema, or the body is not JSON. */
   "invalid-request",
+  /** The policy body failed validation against the core policy schema. */
+  "invalid-policy",
+  /** An optimistic concurrency check (`If-Match`) failed against the current version. */
+  "precondition-failed",
   /** No route matches the method and path. */
   "not-found",
   /** The request body is larger than `maxBodyBytes`. */

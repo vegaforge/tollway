@@ -94,6 +94,9 @@ describe("memory policy and audit stores", () => {
     ]);
     expect((await store.current(TENANT_A, "agent-1"))?.version).toBe(2);
     expect(await store.current(TENANT_B, "agent-1")).toBeUndefined();
+    expect(await store.getVersion(TENANT_A, "agent-1", 1)).toEqual(first);
+    expect(await store.getVersion(TENANT_A, "agent-1", 3)).toBeUndefined();
+    expect(await store.getVersion(TENANT_B, "agent-1", 1)).toBeUndefined();
 
     const audit = createMemoryAuditStore({ clock: () => Date.parse("2026-11-23T00:00:00Z") });
     const entry = await audit.append(TENANT_A, {

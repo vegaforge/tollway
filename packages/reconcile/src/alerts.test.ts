@@ -36,8 +36,9 @@ describe("createDriftAlertBridge", () => {
     const summary = await bridge.process(
       [
         {
+          status: "drift" as const,
           ok: false,
-          channelId: "ch-1",
+          subject: { kind: "channel" as const, channelId: "ch-1" },
           drift: [{ kind: "under-settled", detail: "shortfall: 100" }],
         },
       ],
@@ -68,8 +69,9 @@ describe("createDriftAlertBridge", () => {
 
     const first: ReconciliationResult[] = [
       {
+        status: "drift" as const,
         ok: false,
-        channelId: "ch-1",
+        subject: { kind: "channel" as const, channelId: "ch-1" },
         drift: [{ kind: "under-settled", detail: "shortfall: 100" }],
       },
     ];
@@ -87,8 +89,9 @@ describe("createDriftAlertBridge", () => {
     const run3 = await bridge.process(
       [
         {
+          status: "drift" as const,
           ok: false,
-          channelId: "ch-1",
+          subject: { kind: "channel" as const, channelId: "ch-1" },
           drift: [{ kind: "under-settled", detail: "shortfall: 200" }],
         },
       ],
@@ -98,9 +101,12 @@ describe("createDriftAlertBridge", () => {
     expect(hub.events).toHaveLength(2);
 
     // Resolved -> clears active state.
-    const run4 = await bridge.process([{ ok: true, channelId: "ch-1" }], {
-      at: "2026-11-24T00:03:00.000Z",
-    });
+    const run4 = await bridge.process(
+      [{ status: "ok", ok: true, subject: { kind: "channel", channelId: "ch-1" } }],
+      {
+        at: "2026-11-24T00:03:00.000Z",
+      },
+    );
     expect(run4.emitted).toBe(0);
     expect(run4.resolved).toBe(1);
 
@@ -112,7 +118,12 @@ describe("createDriftAlertBridge", () => {
 
   it("preserves deduplication across restarts when backed by a store", async () => {
     const priorResults: ReconciliationResult[] = [
-      { ok: false, channelId: "ch-1", drift: [{ kind: "sequence-gap", detail: "gap at 1" }] },
+      {
+        status: "drift" as const,
+        ok: false,
+        subject: { kind: "channel" as const, channelId: "ch-1" },
+        drift: [{ kind: "sequence-gap", detail: "gap at 1" }],
+      },
     ];
     const store = createMemoryDriftAlertStore(priorResults);
     const hub = createFakeHub();
@@ -134,8 +145,9 @@ describe("createDriftAlertBridge", () => {
     const kinds = Object.keys(DEFAULT_DRIFT_SEVERITY) as DriftKind[];
     await bridge.process(
       kinds.map((kind, i) => ({
+        status: "drift" as const,
         ok: false as const,
-        channelId: `ch-${i}`,
+        subject: { kind: "channel" as const, channelId: `ch-${i}` },
         drift: [{ kind, detail: `detail-${kind}` }],
       })),
     );
@@ -159,8 +171,18 @@ describe("createDriftAlertBridge", () => {
     const bridge = createDriftAlertBridge({ emitter: hub });
 
     const summary = await bridge.process([
-      { ok: false, channelId: "ch-report", drift: [{ kind: "over-settled", detail: "excess 1" }] },
-      { ok: false, channelId: "ch-throw", drift: [{ kind: "over-settled", detail: "excess 2" }] },
+      {
+        status: "drift" as const,
+        ok: false,
+        subject: { kind: "channel" as const, channelId: "ch-report" },
+        drift: [{ kind: "over-settled", detail: "excess 1" }],
+      },
+      {
+        status: "drift" as const,
+        ok: false,
+        subject: { kind: "channel" as const, channelId: "ch-throw" },
+        drift: [{ kind: "over-settled", detail: "excess 2" }],
+      },
     ]);
 
     expect(summary.emitted).toBe(2);
@@ -182,8 +204,9 @@ describe("createDriftAlertBridge", () => {
     });
     const bridge = createDriftAlertBridge({ emitter: hub });
     const result: ReconciliationResult = {
+      status: "drift" as const,
       ok: false,
-      channelId: "ch-retry",
+      subject: { kind: "channel" as const, channelId: "ch-retry" },
       drift: [{ kind: "under-settled", detail: "shortfall: 5" }],
     };
 
@@ -199,5 +222,47 @@ describe("createDriftAlertBridge", () => {
     const third = await bridge.process([result]);
     expect(third.emitted).toBe(0);
     expect(third.deduplicated).toBe(1);
+  });
+});
+
+describe("createDriftAlertBridge with checks that could not run", () => {
+  const drifted: ReconciliationResult = {
+    status: "drift",
+    ok: false,
+    subject: { kind: "transaction", txHash: "tx-1", network: "testnet" },
+    drift: [{ kind: "amount-mismatch", detail: "expected amount 10, got 9" }],
+  };
+
+  it.each([
+    ["retryable", { status: "retryable", reason: "RPC timed out" }],
+    ["unverifiable", { status: "unverifiable", reason: "older than retention" }],
+  ] as const)("a %s result neither resolves nor raises an alert", async (_, outcome) => {
+    const hub = createFakeHub();
+    const bridge = createDriftAlertBridge({ emitter: hub });
+    await bridge.process([drifted]);
+
+    const run = await bridge.process([{ ...outcome, ok: false, subject: drifted.subject }]);
+    expect(run).toMatchObject({ emitted: 0, resolved: 0, deduplicated: 0 });
+
+    // The drift is still active, so the same drift deduplicates.
+    const again = await bridge.process([drifted]);
+    expect(again.deduplicated).toBe(1);
+    expect(hub.events).toHaveLength(1);
+  });
+
+  it("names a transaction subject by its hash", async () => {
+    const hub = createFakeHub();
+    await createDriftAlertBridge({ emitter: hub }).process([drifted]);
+    expect(hub.events[0]?.data.subject).toBe("tx-1");
+  });
+
+  it("keeps seeded drift when a later seed result is retryable", async () => {
+    const store = createMemoryDriftAlertStore([
+      drifted,
+      { status: "retryable", ok: false, subject: drifted.subject, reason: "timeout" },
+    ]);
+    expect(await store.getActive("tx-1")).toEqual({
+      "amount-mismatch": "expected amount 10, got 9",
+    });
   });
 });
