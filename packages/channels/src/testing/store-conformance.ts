@@ -153,8 +153,8 @@ async function caseFilters(makeStore: CommitmentStoreFactory): Promise<void> {
   await putAll(store, [
     makeChannel("CF-A", { status: "open", counterparty: "GA", asset: "USDC", network: "testnet" }),
     makeChannel("CF-B", { status: "closed", counterparty: "GA", asset: "XLM", network: "testnet" }),
-    makeChannel("CF-C", { status: "open", counterparty: "GB", asset: "USDC", network: "pubnet" }),
-    makeChannel("CF-D", { status: "open", counterparty: "GA", asset: "USDC", network: "pubnet" }),
+    makeChannel("CF-C", { status: "open", counterparty: "GB", asset: "USDC", network: "mainnet" }),
+    makeChannel("CF-D", { status: "open", counterparty: "GA", asset: "USDC", network: "mainnet" }),
   ]);
   const idsFor = async (filter: ChannelFilter): Promise<string[]> =>
     (await store.listChannels(filter)).channels.map((c) => c.id);
@@ -163,9 +163,9 @@ async function caseFilters(makeStore: CommitmentStoreFactory): Promise<void> {
   assert.deepEqual(await idsFor({ status: "open" }), ["CF-A", "CF-C", "CF-D"]);
   assert.deepEqual(await idsFor({ counterparty: "GA" }), ["CF-A", "CF-B", "CF-D"]);
   assert.deepEqual(await idsFor({ asset: "USDC" }), ["CF-A", "CF-C", "CF-D"]);
-  assert.deepEqual(await idsFor({ network: "pubnet" }), ["CF-C", "CF-D"]);
+  assert.deepEqual(await idsFor({ network: "mainnet" }), ["CF-C", "CF-D"]);
   assert.deepEqual(
-    await idsFor({ status: "open", counterparty: "GA", asset: "USDC", network: "pubnet" }),
+    await idsFor({ status: "open", counterparty: "GA", asset: "USDC", network: "mainnet" }),
     ["CF-D"],
   );
   assert.deepEqual(await idsFor({ counterparty: "GNOBODY" }), []);

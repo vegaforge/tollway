@@ -38,6 +38,19 @@ export {
 } from "./errors.js";
 export { type CreateChannelManagerOptions, createChannelManager } from "./manager.js";
 export {
+  createPostgresCommitmentStore,
+  type PostgresClient,
+  type PostgresCommitmentStoreOptions,
+  type PostgresConnection,
+  type PostgresQueryable,
+  type PostgresQueryResult,
+} from "./stores/postgres.js";
+export {
+  createRedisCommitmentStore,
+  type RedisCommitmentStoreOptions,
+  type RedisLikeClient,
+} from "./stores/redis.js";
+export {
   createStellarMppChannelAdapter,
   type StellarMppChannelAdapterOptions,
 } from "./stellar-adapter.js";
