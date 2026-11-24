@@ -14,6 +14,7 @@ import {
   type PolicyTraceEntry,
   type PolicyWindow,
 } from "./policy-trace.js";
+import { createRateLimiter, type RateLimiter } from "./rate-limit.js";
 import { RollingSum } from "./rolling-sum.js";
 import type { SettlementModel } from "./types.js";
 
@@ -43,6 +44,22 @@ export interface PolicyEngine {
   evaluate(intent: PaymentIntent): Promise<PolicyTrace>;
   /** The decision alone, derived from `evaluate` with `decisionFromTrace`. */
   check(intent: PaymentIntent): Promise<PolicyDecision>;
+  /**
+   * Evaluates the intent for a payment the caller is about to make and,
+   * when the trace allows it, counts it as one attempt toward a rate limit
+   * with `count: "attempts"`. Evaluating and counting are one step, so
+   * concurrent attempts cannot all pass the last free slot. The client
+   * calls this once per payment it sends, including each retry with a
+   * fresh authorization. Optional, so engines written before issue #197
+   * still satisfy the interface; the client falls back to `evaluate`.
+   */
+  admit?(intent: PaymentIntent): Promise<PolicyTrace>;
+  /**
+   * Counts one attempt without evaluating. The client calls it on a shadow
+   * engine when the active policy sent a payment, so the shadow's
+   * attempt-counted limits see the same traffic. Never blocks anything.
+   */
+  recordAttempt?(intent: PaymentIntent): Promise<void>;
   /** Records a settled payment so budgets and anomaly windows advance. */
   record(intent: PaymentIntent): Promise<void>;
 }
@@ -68,25 +85,6 @@ function parseAmount(s: string): bigint {
   return BigInt(s);
 }
 
-/**
- * A request count from the policy. It is a count, not an amount, but the
- * trace carries it as an integer string like every other limit, so a value
- * that is not a whole non-negative number is refused rather than rounded.
- *
- * `policySchema` already refuses such a value when the engine is created, so
- * this check, `parseRational` and `adaptiveConfig` cannot fail through the
- * engine. They stay as defence in depth for the rules that read the values.
- */
-function parseCount(value: number): bigint {
-  if (!Number.isSafeInteger(value) || value < 0) {
-    throw new TollwayError(
-      "invalid-policy",
-      `rateLimit.requestsPerMinute must be a non-negative integer, got ${value}`,
-    );
-  }
-  return BigInt(value);
-}
-
 /** Spend and request history the stateful rules read. */
 type EngineState = {
   day: string;
@@ -107,7 +105,8 @@ type EngineState = {
   resourceSpend: Map<string, bigint>;
   resourceDailySpend: Map<string, bigint>;
   resourceWindowSpend: Map<string, RollingSum>;
-  requestTimestamps: number[];
+  /** Issue #197: the rate limit's own log, independent of the anomaly window. */
+  rateLimiter: RateLimiter | undefined;
   anomalySamples: { amount: bigint; asset: string; ts: number }[];
   adaptive: Map<string, AdaptiveState>;
 };
@@ -181,6 +180,11 @@ function matchResourceEntries(
 
 const FIXED_SCALE = 1_000_000n;
 
+/**
+ * `policySchema` already refuses a bad rational when the engine is created,
+ * so this check and the ones in `adaptiveConfig` cannot fail through the
+ * engine. They stay as defence in depth for the rules that read the values.
+ */
 function parseRational(
   value: { numerator: string; denominator: string },
   label: string,
@@ -605,12 +609,11 @@ const perResourceDaily: RuleEvaluator = (input) =>
 const perResourceWindow: RuleEvaluator = (input) =>
   perResourceCeiling("per-resource-window", "per-resource rolling cap", input);
 
-const rateLimit: RuleEvaluator = ({ policy, state }) => {
-  const base = { id: "rate-limit", rule: "rate-limit" } as const;
-  const rpm = policy.rateLimit?.requestsPerMinute;
-  if (rpm == null) {
+const rateLimit: RuleEvaluator = ({ intent, now, state }) => {
+  if (state.rateLimiter === undefined) {
     return {
-      ...base,
+      id: "rate-limit",
+      rule: "rate-limit",
       configured: false,
       outcome: "not-applicable",
       limit: null,
@@ -620,22 +623,7 @@ const rateLimit: RuleEvaluator = ({ policy, state }) => {
       detail: "policy sets no rate limit",
     };
   }
-  const limit = parseCount(rpm);
-  const current = BigInt(state.requestTimestamps.length);
-  const projected = current + 1n;
-  const fails = projected > limit;
-  return {
-    ...base,
-    configured: true,
-    outcome: fails ? "fail" : "pass",
-    limit: limit.toString(),
-    current: current.toString(),
-    projected: projected.toString(),
-    window: MINUTE_WINDOW,
-    detail: fails
-      ? `rate limit exceeded: ${current} requests in the last minute`
-      : `rate limit: ${projected} of ${limit} requests in the last minute`,
-  };
+  return state.rateLimiter.evaluate(intent.payee, now);
 };
 
 const anomaly: RuleEvaluator = ({ policy, intent, amount, now, state }) => {
@@ -789,7 +777,7 @@ export function createPolicyEngine(
     resourceSpend: new Map(),
     resourceDailySpend: new Map(),
     resourceWindowSpend: new Map(),
-    requestTimestamps: [],
+    rateLimiter: createRateLimiter(policy.rateLimit),
     anomalySamples: [],
     adaptive: new Map(),
   };
@@ -805,14 +793,12 @@ export function createPolicyEngine(
   }
 
   function pruneWindow(now: number): void {
-    const cutoff = now - WINDOW_MS;
+    // Only the anomaly samples age out here. The rate limit keeps its own
+    // log with its own windows (issue #197), so the two no longer share one.
     while (
-      state.requestTimestamps.length > 0 &&
-      (state.requestTimestamps[0] ?? Infinity) < cutoff
+      state.anomalySamples.length > 0 &&
+      (state.anomalySamples[0]?.ts ?? Infinity) < now - WINDOW_MS
     ) {
-      state.requestTimestamps.shift();
-    }
-    while (state.anomalySamples.length > 0 && (state.anomalySamples[0]?.ts ?? Infinity) < cutoff) {
       state.anomalySamples.shift();
     }
   }
@@ -899,7 +885,7 @@ export function createPolicyEngine(
       detector.bucketSpend += amount;
       state.adaptive.set(key, detector);
     }
-    state.requestTimestamps.push(now);
+    if (state.rateLimiter?.count === "settlements") state.rateLimiter.record(intent.payee, now);
     state.anomalySamples.push({ amount, asset: intent.asset, ts: now });
   }
 
@@ -921,7 +907,7 @@ export function createPolicyEngine(
     }
   }
 
-  async function evaluate(intent: PaymentIntent): Promise<PolicyTrace> {
+  function evaluateNow(intent: PaymentIntent): PolicyTrace {
     resetDailyIfNeeded();
     const amount = parseAmount(intent.amount);
     const now = clock();
@@ -953,22 +939,45 @@ export function createPolicyEngine(
     };
   }
 
+  async function decide(trace: PolicyTrace, intent: PaymentIntent): Promise<PolicyDecision> {
+    const decision = decisionFromTrace(trace);
+    const adaptiveEntry = trace.entries.find((entry) => entry.id === "anomaly-adaptive");
+    if (!decision.allowed && adaptiveEntry?.outcome === "fail") {
+      await opts?.onAnomalyDetected?.({
+        type: "anomaly.detected",
+        intent,
+        detail: adaptiveEntry.detail,
+      });
+    }
+    return decision;
+  }
+
+  function countAttempt(intent: PaymentIntent): void {
+    if (state.rateLimiter?.count === "attempts") state.rateLimiter.record(intent.payee, clock());
+  }
+
   return {
     mode,
-    evaluate,
+
+    async evaluate(intent: PaymentIntent): Promise<PolicyTrace> {
+      return evaluateNow(intent);
+    },
 
     async check(intent: PaymentIntent): Promise<PolicyDecision> {
-      const trace = await evaluate(intent);
-      const decision = decisionFromTrace(trace);
-      const adaptiveEntry = trace.entries.find((entry) => entry.id === "anomaly-adaptive");
-      if (!decision.allowed && adaptiveEntry?.outcome === "fail") {
-        await opts?.onAnomalyDetected?.({
-          type: "anomaly.detected",
-          intent,
-          detail: adaptiveEntry.detail,
-        });
-      }
-      return decision;
+      return decide(evaluateNow(intent), intent);
+    },
+
+    async admit(intent: PaymentIntent): Promise<PolicyTrace> {
+      // Evaluating and counting happen in one synchronous step, with no
+      // await between them, so two concurrent attempts cannot both see
+      // the last free slot of an attempts-counted rate limit.
+      const trace = evaluateNow(intent);
+      if (trace.allowed) countAttempt(intent);
+      return trace;
+    },
+
+    async recordAttempt(intent: PaymentIntent): Promise<void> {
+      countAttempt(intent);
     },
 
     async record(intent: PaymentIntent): Promise<void> {
