@@ -34,6 +34,7 @@ import { StellarNetwork } from '@vegaforge/tollway-core';
 import { Store } from '@stellar/mpp/channel/server';
 import { Store as Store_2 } from '@stellar/mpp/charge/server';
 import { TollwayError } from '@vegaforge/tollway-core';
+import * as _vegaforge_tollway_core from '@vegaforge/tollway-core';
 import { X402Payment } from '@vegaforge/tollway-core';
 import { z } from 'zod';
 
@@ -84,21 +85,14 @@ export type ChannelRecord = z.infer<typeof channelRecordSchema>;
 // @public
 export const channelRecordSchema: z.ZodObject<{
     channelId: z.ZodString;
-    network: z.ZodEnum<{
-        testnet: "testnet";
-        mainnet: "mainnet";
-    }>;
+    network: z.ZodEnum<_vegaforge_tollway_core.EnumShape<readonly ["testnet", "mainnet"]>>;
     payer: z.ZodString;
     payTo: z.ZodString;
     asset: z.ZodString;
     commitmentKey: z.ZodString;
     refundWaitingPeriod: z.ZodNumber;
     registeredAt: z.ZodNumber;
-    status: z.ZodEnum<{
-        open: "open";
-        settling: "settling";
-        closed: "closed";
-    }>;
+    status: z.ZodEnum<_vegaforge_tollway_core.EnumShape<readonly ["open", "settling", "closed"]>>;
     version: z.ZodNumber;
     latest: z.ZodOptional<z.ZodObject<{
         sequence: z.ZodNumber;
@@ -107,10 +101,7 @@ export const channelRecordSchema: z.ZodObject<{
         acceptedAt: z.ZodNumber;
     }, z.core.$strict>>;
     pending: z.ZodOptional<z.ZodObject<{
-        action: z.ZodEnum<{
-            voucher: "voucher";
-            close: "close";
-        }>;
+        action: z.ZodEnum<_vegaforge_tollway_core.EnumShape<readonly ["voucher", "close"]>>;
         sequence: z.ZodNumber;
         cumulativeAmount: z.ZodString;
         signature: z.ZodString;
@@ -118,10 +109,7 @@ export const channelRecordSchema: z.ZodObject<{
     }, z.core.$strict>>;
     settlement: z.ZodOptional<z.ZodObject<{
         startedAt: z.ZodNumber;
-        trigger: z.ZodEnum<{
-            service: "service";
-            agent: "agent";
-        }>;
+        trigger: z.ZodEnum<_vegaforge_tollway_core.EnumShape<readonly ["service", "agent"]>>;
         balanceBefore: z.ZodOptional<z.ZodString>;
         retryable: z.ZodBoolean;
         lastError: z.ZodOptional<z.ZodString>;
@@ -1136,12 +1124,12 @@ export type X402Terms = {
 
 // Warnings were encountered during analysis:
 //
-// dist/index.d.ts:318:9 - (ae-forgotten-export) The symbol "StellarSigner$2" needs to be exported by the entry point index.d.ts
-// dist/index.d.ts:440:9 - (ae-forgotten-export) The symbol "WatchtowerEvent" needs to be exported by the entry point index.d.ts
-// dist/index.d.ts:444:5 - (ae-forgotten-export) The symbol "ChannelState" needs to be exported by the entry point index.d.ts
-// dist/index.d.ts:482:5 - (ae-forgotten-export) The symbol "WatchtowerCursorStore" needs to be exported by the entry point index.d.ts
-// dist/index.d.ts:619:9 - (ae-forgotten-export) The symbol "StellarSigner$1" needs to be exported by the entry point index.d.ts
-// dist/index.d.ts:782:9 - (ae-forgotten-export) The symbol "StellarSigner" needs to be exported by the entry point index.d.ts
+// dist/index.d.ts:306:9 - (ae-forgotten-export) The symbol "StellarSigner$2" needs to be exported by the entry point index.d.ts
+// dist/index.d.ts:428:9 - (ae-forgotten-export) The symbol "WatchtowerEvent" needs to be exported by the entry point index.d.ts
+// dist/index.d.ts:432:5 - (ae-forgotten-export) The symbol "ChannelState" needs to be exported by the entry point index.d.ts
+// dist/index.d.ts:470:5 - (ae-forgotten-export) The symbol "WatchtowerCursorStore" needs to be exported by the entry point index.d.ts
+// dist/index.d.ts:607:9 - (ae-forgotten-export) The symbol "StellarSigner$1" needs to be exported by the entry point index.d.ts
+// dist/index.d.ts:770:9 - (ae-forgotten-export) The symbol "StellarSigner" needs to be exported by the entry point index.d.ts
 
 // (No @packageDocumentation comment for this package)
 

@@ -1,4 +1,4 @@
-import { stellarNetworks, TollwayError } from "@vegaforge/tollway-core";
+import { enumSchema, stellarNetworks, TollwayError } from "@vegaforge/tollway-core";
 import { z } from "zod";
 
 /**
@@ -59,7 +59,7 @@ export type ChannelSettlementRecord = z.infer<typeof channelSettlementRecordSche
 /** A channel's stored state. Values read back from a store are parsed with it. */
 export const channelRecordSchema = z.strictObject({
   channelId: z.string().min(1),
-  network: z.enum(stellarNetworks),
+  network: enumSchema(stellarNetworks),
   /** The funder (`from` on chain). Receipts name it as the payer. */
   payer: z.string().min(1),
   /** The channel's recipient (`to` on chain); equals the offer's `payTo`. */
@@ -70,7 +70,7 @@ export const channelRecordSchema = z.strictObject({
   commitmentKey: z.string().min(1),
   refundWaitingPeriod: z.number().int().nonnegative(),
   registeredAt: epochMs,
-  status: z.enum(channelStatuses),
+  status: enumSchema(channelStatuses),
   /**
    * Bumped by one on every write. {@link ChannelStore.compareAndSet} writes
    * only when the stored version is the one the writer read.
@@ -83,14 +83,14 @@ export const channelRecordSchema = z.strictObject({
    * for {@link MppChannelHandler.reconcile} to resolve.
    */
   pending: z
-    .strictObject({ ...acceptedVoucherFields, action: z.enum(["voucher", "close"]) })
+    .strictObject({ ...acceptedVoucherFields, action: enumSchema(["voucher", "close"]) })
     .optional(),
   /** Present once a close has been started. */
   settlement: z
     .strictObject({
       startedAt: epochMs,
       /** How the close was started: by the settlement module, or by the agent's close credential. */
-      trigger: z.enum(["service", "agent"]),
+      trigger: enumSchema(["service", "agent"]),
       /** On-chain balance read just before the close was sent. */
       balanceBefore: integerString.optional(),
       /** True when the chain shows the close did not land, so it may be sent again. */

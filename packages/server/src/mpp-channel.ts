@@ -2,6 +2,7 @@ import { StellarMppError } from "@stellar/mpp";
 import { Mppx, type Store, stellar } from "@stellar/mpp/channel/server";
 import {
   bytesToBase64Url,
+  enumSchema,
   type MppChannelPayment,
   type PaymentOffer,
   type SettlementRef,
@@ -45,7 +46,7 @@ import {
 
 /** The wire shape of an MPP channel credential payload, as `@stellar/mpp` 0.7 defines it. */
 const channelPayloadSchema = z.strictObject({
-  action: z.enum(["voucher", "close"]),
+  action: enumSchema(["voucher", "close"]),
   amount: z.string().regex(/^[1-9][0-9]*$/, "amount must be a positive integer string"),
   signature: z.string().regex(/^[0-9a-fA-F]{128}$/, "signature must be 128 hex characters"),
 });
