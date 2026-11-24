@@ -1,4 +1,4 @@
-import { TollwayError } from "@vegaforge/tollway-core";
+import { type QuarantineEntry, TollwayError } from "@vegaforge/tollway-core";
 
 /** Thrown when a channel id is not tracked by the manager. */
 export class ChannelNotFoundError extends TollwayError {
@@ -155,5 +155,28 @@ export class SettlementNotFoundError extends TollwayError {
     this.name = "SettlementNotFoundError";
     this.channelId = channelId;
     this.startLedger = startLedger;
+  }
+}
+
+/** Thrown when open or commit is attempted for a quarantined counterparty. */
+export class CounterpartyQuarantinedError extends TollwayError {
+  readonly counterparty: string;
+  readonly reason: string;
+  readonly entry?: QuarantineEntry;
+
+  constructor(
+    counterparty: string,
+    reason: string,
+    options?: { entry?: QuarantineEntry; cause?: unknown },
+  ) {
+    super(
+      "counterparty-quarantined",
+      `counterparty "${counterparty}" is quarantined: ${reason}`,
+      options?.cause !== undefined ? { cause: options.cause } : undefined,
+    );
+    this.name = "CounterpartyQuarantinedError";
+    this.counterparty = counterparty;
+    this.reason = reason;
+    this.entry = options?.entry;
   }
 }

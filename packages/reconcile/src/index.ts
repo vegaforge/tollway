@@ -9,6 +9,39 @@
 
 import { type SignedReceipt, signedReceiptSchema } from "@vegaforge/tollway-core";
 
+export {
+  type AlertDeliveryReport,
+  type AlertEmitter,
+  type AlertEventInput,
+  createDriftAlertBridge,
+  createMemoryDriftAlertStore,
+  type DriftAlertBridge,
+  type DriftAlertBridgeOptions,
+  type DriftAlertPayload,
+  type DriftAlertRunSummary,
+  type DriftAlertStore,
+} from "./alerts.js";
+export {
+  type BuildReconciliationReportOptions,
+  buildReconciliationReport,
+  type CsvReportOptions,
+  DEFAULT_DRIFT_SEVERITY,
+  type DriftSeverity,
+  type ExportReportFormat,
+  exportReconciliationReport,
+  RECONCILIATION_CSV_COLUMNS,
+  RECONCILIATION_REPORT_VERSION,
+  type ReconciliationAmounts,
+  type ReconciliationReport,
+  type ReconciliationReportEntry,
+  type ReconciliationReportInput,
+  type ReconciliationReportTotals,
+  type ReportRange,
+  reconciliationReportToCsv,
+  reconciliationReportToJson,
+  resolveDriftSeverity,
+} from "./report.js";
+
 /** One stored cumulative commitment, as the channel manager recorded it. */
 export type CommitmentRecord = {
   channelId: string;
@@ -260,3 +293,16 @@ export function createReconciler(options: ReconcilerOptions = {}): Reconciler {
     },
   };
 }
+
+export {
+  createQuarantineEnforcer,
+  DEFAULT_DRIFT_ACTIONS,
+  type DriftAction,
+  type DriftQuarantineEvent,
+  type DriftWarnEvent,
+  type ProcessedDriftAction,
+  type ProcessReconciliationInput,
+  type ProcessReconciliationOutput,
+  type QuarantineEnforcerOptions,
+  type ReconciliationQuarantineEnforcer,
+} from "./quarantine.js";

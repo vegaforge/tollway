@@ -29,6 +29,7 @@ export {
   ChannelNotOpenError,
   CloseNotSubmittedError,
   CommitmentExceedsDepositError,
+  CounterpartyQuarantinedError,
   InvalidAmountError,
   MissingEventHistoryError,
   SettlementMismatchError,

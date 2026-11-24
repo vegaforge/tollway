@@ -49,6 +49,15 @@ export {
   policyTraceSchema,
   policyWindowSchema,
 } from "./policy-trace.js";
+export {
+  type CounterpartyQuarantine,
+  type CreateMemoryQuarantineOptions,
+  createMemoryQuarantine,
+  type QuarantineDrift,
+  type QuarantineEntry,
+  type QuarantineInput,
+  type ReleaseQuarantineInput,
+} from "./quarantine.js";
 export { canonicalBytes, canonicalJson, type JsonValue } from "./receipt/canonical.js";
 export {
   derToP1363,
@@ -109,6 +118,7 @@ export {
 export { RollingSum, type RollingSumOptions } from "./rolling-sum.js";
 export {
   createDefaultRouter,
+  type DefaultRouterOptions,
   type ModelRouter,
   type RouteDecision,
   type RouteInput,

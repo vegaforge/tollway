@@ -7,7 +7,7 @@
  * `closing` (#176). `recover` is tracked under #38 and remains a typed stub.
  */
 
-import { NotImplementedError } from "@vegaforge/tollway-core";
+import { type CounterpartyQuarantine, NotImplementedError } from "@vegaforge/tollway-core";
 import type {
   CloseAdapterResult,
   MppChannelAdapter,
@@ -20,6 +20,7 @@ import {
   ChannelNotOpenError,
   CloseNotSubmittedError,
   CommitmentExceedsDepositError,
+  CounterpartyQuarantinedError,
   InvalidAmountError,
   SettlementMismatchError,
   SettlementNotFoundError,
@@ -57,6 +58,12 @@ export type CreateChannelManagerOptions = {
   store?: CommitmentStore;
   closePolicy?: ClosePolicy;
   /**
+   * Optional quarantine store. When provided, `open` and `commit` refuse
+   * quarantined counterparties (and fail closed if lookup throws). `close`
+   * remains allowed so funds can be settled or recovered.
+   */
+  quarantine?: CounterpartyQuarantine;
+  /**
    * Clock function returning the current time as an ISO-8601 string. Defaults
    * to `() => new Date().toISOString()`. Override in tests to make
    * idle-timeout assertions deterministic.
@@ -69,6 +76,7 @@ export function createChannelManager(options: CreateChannelManagerOptions): Chan
     adapter,
     store = createMemoryCommitmentStore(),
     closePolicy,
+    quarantine,
     now = () => new Date().toISOString(),
   } = options;
 
@@ -179,10 +187,29 @@ export function createChannelManager(options: CreateChannelManagerOptions): Chan
     return { kind: "closed", channelId, ...settledFields(found) };
   }
 
+  async function assertNotQuarantined(counterparty: string): Promise<void> {
+    if (!quarantine) return;
+    let entry: Awaited<ReturnType<CounterpartyQuarantine["lookup"]>>;
+    try {
+      entry = await quarantine.lookup(counterparty);
+    } catch (cause) {
+      throw new CounterpartyQuarantinedError(
+        counterparty,
+        "quarantine lookup failed; failing closed",
+        { cause },
+      );
+    }
+    if (entry) {
+      throw new CounterpartyQuarantinedError(counterparty, entry.reason, { entry });
+    }
+  }
+
   const manager: ChannelManager = {
     async open(input: OpenChannelInput): Promise<Channel> {
       const deposit = parseAmount(input.deposit, "deposit");
       if (deposit === 0n) throw new InvalidAmountError(input.deposit, "deposit");
+
+      await assertNotQuarantined(input.counterparty);
 
       const opened: OpenAdapterResult = await adapter.openChannel({
         counterparty: input.counterparty,
@@ -217,6 +244,8 @@ export function createChannelManager(options: CreateChannelManagerOptions): Chan
       if (current.status !== "open") {
         throw new ChannelNotOpenError(channelId, current.status);
       }
+
+      await assertNotQuarantined(current.counterparty);
 
       const committed = parseAmount(current.committed, "committed");
       const deposit = parseAmount(current.deposit, "deposit");
