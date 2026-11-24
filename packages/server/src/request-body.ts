@@ -13,6 +13,7 @@ export type RequestBodySource = {
 
 /** Thrown by a {@link RequestBodySource} once a body passes its limit. */
 export class BodyTooLargeError extends TollwayError {
+  /** The limit the body passed, in bytes. */
   readonly maxBytes: number;
 
   constructor(maxBytes: number) {

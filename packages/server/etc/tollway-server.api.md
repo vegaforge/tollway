@@ -31,6 +31,21 @@ import { TollwayError } from '@vegaforge/tollway-core';
 import { X402Payment } from '@vegaforge/tollway-core';
 import { z } from 'zod';
 
+// @public
+export type BodyBinding = {
+    maxBytes: number;
+    contentTypes?: readonly string[];
+};
+
+// @public
+export class BodyTooLargeError extends TollwayError {
+    constructor(maxBytes: number);
+    readonly maxBytes: number;
+}
+
+// @public
+export function bytesBody(bytes: Uint8Array): RequestBodySource;
+
 // @public (undocumented)
 export type ChannelDispute = {
     channelId: string;
@@ -90,6 +105,9 @@ export type ChannelWatchtower = {
     start(): Promise<void>;
     stop(): Promise<void>;
 };
+
+// @public
+export function concatChunks(chunks: readonly Uint8Array[], total: number): Uint8Array;
 
 // @public (undocumented)
 export function createChannelWatchtower(options: CreateChannelWatchtowerOptions): ChannelWatchtower;
@@ -476,6 +494,7 @@ export type PaywallConfig = {
     maxTimeoutSeconds?: number;
     extra?: Record<string, unknown>;
     discovery?: DiscoveryDeclaration;
+    bindBody?: BodyBinding;
 };
 
 // @public
@@ -520,6 +539,9 @@ export type PaywallValidation = {
 };
 
 // @public
+export function readBodyStream(stream: ReadableStream<Uint8Array> | null, maxBytes: number): Promise<Uint8Array>;
+
+// @public
 export function readHeader(headers: Record<string, string | string[] | undefined>, name: string): string | undefined;
 
 // @public
@@ -546,6 +568,11 @@ export type RedisSettlementCacheOptions = {
 
 // @public
 export function renderKeySetResponse(document: KeySetDocument, options?: KeySetResponseOptions): KeySetResponse;
+
+// @public
+export type RequestBodySource = {
+    read(maxBytes: number): Promise<Uint8Array>;
+};
 
 // @public
 export interface RouteTable {
@@ -740,6 +767,7 @@ export type TollwayRequest = {
     method: string;
     url: string;
     headers: Record<string, string | string[] | undefined>;
+    body?: RequestBodySource;
 };
 
 // @public

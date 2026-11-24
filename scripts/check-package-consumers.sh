@@ -28,12 +28,14 @@ PUBLISHABLE=(
   packages/adapter-hono
   packages/adapter-next
   packages/channels
+  packages/cli
   packages/client
   packages/core
   packages/observability
   packages/reconcile
   packages/server
   packages/service
+  packages/signer-vault
   packages/theme
 )
 
@@ -46,6 +48,7 @@ ENTRY_POINTS=(
   @vegaforge/tollway-adapter-next
   @vegaforge/tollway-adapter-next/proxy
   @vegaforge/tollway-channels
+  @vegaforge/tollway-cli
   @vegaforge/tollway-client
   @vegaforge/tollway-client/sqlite
   @vegaforge/tollway-core
@@ -55,6 +58,7 @@ ENTRY_POINTS=(
   @vegaforge/tollway-reconcile
   @vegaforge/tollway-server
   @vegaforge/tollway-service
+  @vegaforge/tollway-signer-vault
   @vegaforge/tollway-theme
   @vegaforge/tollway-theme/preset
 )

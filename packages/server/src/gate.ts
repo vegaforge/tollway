@@ -1414,11 +1414,6 @@ async function paymentRequired(
   return { kind: "payment-required", status: 402, headers, challenge };
 }
 
-/**
- * Builds the gate from a paywall config. It settles x402 per-request and
- * mpp-charge; a routing decision for another model is rejected rather than
- * mishandled. See docs/design.md, "Build plan", Phase 1.
- */
 function checkBodyBinding(binding: BodyBinding): void {
   if (!(Number.isSafeInteger(binding.maxBytes) && binding.maxBytes > 0)) {
     throw new TypeError(
@@ -1498,6 +1493,11 @@ function bodyTooLarge(maxBytes: number): GateOutcome {
   };
 }
 
+/**
+ * Builds the gate from a paywall config. It settles x402 per-request and
+ * mpp-charge; a routing decision for another model is rejected rather than
+ * mishandled. See docs/design.md, "Build plan", Phase 1.
+ */
 export function createPaywall(config: PaywallConfig, deps: PaywallDeps): Gate {
   return createPaywallWithInFlight(config, deps, new Map());
 }

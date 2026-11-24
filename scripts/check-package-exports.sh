@@ -18,12 +18,14 @@ PUBLISHABLE=(
   packages/adapter-hono
   packages/adapter-next
   packages/channels
+  packages/cli
   packages/client
   packages/core
   packages/observability
   packages/reconcile
   packages/server
   packages/service
+  packages/signer-vault
   packages/theme
 )
 
