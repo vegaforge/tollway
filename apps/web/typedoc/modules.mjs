@@ -75,6 +75,12 @@ export const modules = [
     description: "Metrics, summaries and time series for gate outcomes.",
   },
   {
+    module: "signer-vault/src",
+    slug: "signer-vault",
+    importPath: "@vegaforge/tollway-signer-vault",
+    description: "A receipt signer backed by a HashiCorp Vault Transit Ed25519 key.",
+  },
+  {
     module: "theme/src",
     slug: "theme",
     importPath: "@vegaforge/tollway-theme",

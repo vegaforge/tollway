@@ -11,6 +11,7 @@
     "channels",
     "policy",
     "receipts",
+    "signer-vault",
     "reconciliation",
     "observability",
     "service",

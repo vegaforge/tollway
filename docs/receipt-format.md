@@ -212,6 +212,8 @@ const receipt = await signReceipt(
 
 Any object that satisfies the `ReceiptSigner` interface is a valid signer. A KMS-backed signer that delegates `sign` to AWS KMS, GCP KMS, or an HSM is a drop-in replacement; the rest of the system does not change. The only requirements are that `keyId` is stable for the lifetime of the key and `algorithm` matches what a downstream verifier knows.
 
+`@vegaforge/tollway-signer-vault` is one such signer: it keeps the Ed25519 key in HashiCorp Vault Transit and pins the key version, so a rotation in Vault never changes the key behind a `keyId`. See the "Vault Transit signer" docs page.
+
 ## Verifying
 
 ```ts
