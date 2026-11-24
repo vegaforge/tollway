@@ -144,7 +144,7 @@ Duplicate protection. Facilitators are known to be vulnerable to duplicate `/set
 
 Fee sponsorship. We assume sponsorship via the OpenZeppelin relayer path so agents never need to hold XLM, and we surface the sponsoring account's balance as an operational metric. Tollway configures and observes sponsorship; it does not implement it.
 
-Failure semantics. Every model has explicit failure handling. x402 retries with a fresh auth entry on expiry or nonce reuse. Channel open failure falls back to per-request. Budget exhaustion halts with a typed error rather than a silent skip. The client emits events (`payment`, `skip`, `error`, `budget:warning`, `channel:opened`, `channel:closed`) so none of this is invisible.
+Failure semantics. Every model has explicit failure handling. The per-failure behaviour of the gate, its status, whether the payer may have been charged, and the operator action are listed in [failure-modes.md](failure-modes.md). x402 retries with a fresh auth entry on expiry or nonce reuse. Channel open failure falls back to per-request. Budget exhaustion halts with a typed error rather than a silent skip. The client emits events (`payment`, `skip`, `error`, `budget:warning`, `channel:opened`, `channel:closed`) so none of this is invisible.
 
 ## Stack
 
