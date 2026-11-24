@@ -104,3 +104,36 @@ describe("Fastify: body binding (#164)", () => {
     expect((await post(PROMPT_A)).statusCode).toBe(500);
   });
 });
+
+describe("Fastify over a real socket: body limit (#164)", () => {
+  it("answers 413 while the client is still uploading, and closes the connection", async () => {
+    const { gate, calls } = await boundGate();
+    const app = Fastify();
+    app.addHook("preParsing", fastifyRawBody({ maxBytes: 64 }));
+    app.post("/infer", { preHandler: fastifyPaywall(gate) }, async (request) => request.body);
+    const address = await app.listen({ port: 0, host: "127.0.0.1" });
+    try {
+      let sent = false;
+      // More than the limit at once, then an upload that never finishes.
+      const body = new ReadableStream<Uint8Array>({
+        pull(controller) {
+          if (sent) return new Promise<void>(() => {});
+          sent = true;
+          controller.enqueue(new TextEncoder().encode(JSON.stringify({ prompt: "x".repeat(500) })));
+          return undefined;
+        },
+      });
+      const response = await fetch(`${address}/infer`, {
+        method: "POST",
+        body,
+        headers: { "content-type": "application/json", [PAYMENT_SIGNATURE_HEADER]: "any" },
+        duplex: "half",
+      } as RequestInit);
+      expect(response.status).toBe(413);
+      expect(response.headers.get("connection")).toBe("close");
+      expect(calls()).toBe(0);
+    } finally {
+      await app.close();
+    }
+  });
+});

@@ -54,21 +54,61 @@ export function fastifyRawBody(options: { maxBytes?: number } = {}): preParsingH
   if (!(Number.isSafeInteger(maxBytes) && maxBytes > 0)) {
     throw new TypeError(`maxBytes must be a positive integer, got ${maxBytes}`);
   }
-  return async function preParsing(request, _reply, payload) {
-    const chunks: Uint8Array[] = [];
-    let total = 0;
-    for await (const chunk of payload as AsyncIterable<Buffer>) {
-      total += chunk.byteLength;
-      if (total > maxBytes) {
-        throw Object.assign(new BodyTooLargeError(maxBytes), { statusCode: 413 });
+  return async function preParsing(request, reply, payload) {
+    let bytes: Uint8Array;
+    try {
+      bytes = await readCapped(payload, maxBytes);
+    } catch (error) {
+      if (error instanceof BodyTooLargeError) {
+        // The rest of the upload stays unread, so the connection cannot be
+        // reused: close it once the 413 is sent.
+        reply.header("Connection", "close");
+        throw Object.assign(error, { statusCode: 413 });
       }
-      chunks.push(chunk);
+      throw error;
     }
-    const bytes = concatChunks(chunks, total);
     request.tollwayRawBody = bytes;
     const replay = Readable.from([Buffer.from(bytes)]);
-    return Object.assign(replay, { receivedEncodedLength: total });
+    return Object.assign(replay, { receivedEncodedLength: bytes.byteLength });
   };
+}
+
+/**
+ * Reads a payload stream up to `maxBytes`. On overflow it stops listening and
+ * pauses the stream rather than destroying it, so the socket is still there
+ * to carry the 413.
+ */
+function readCapped(payload: NodeJS.ReadableStream, maxBytes: number): Promise<Uint8Array> {
+  return new Promise((resolve, reject) => {
+    const chunks: Uint8Array[] = [];
+    let total = 0;
+    const detach = () => {
+      payload.removeListener("data", onData);
+      payload.removeListener("end", onEnd);
+      payload.removeListener("error", onError);
+    };
+    const onData = (chunk: Buffer) => {
+      total += chunk.byteLength;
+      if (total > maxBytes) {
+        detach();
+        payload.pause();
+        reject(new BodyTooLargeError(maxBytes));
+        return;
+      }
+      chunks.push(chunk);
+    };
+    const onEnd = () => {
+      detach();
+      resolve(concatChunks(chunks, total));
+    };
+    const onError = (error: Error) => {
+      detach();
+      reject(error);
+    };
+    payload.on("data", onData);
+    payload.on("end", onEnd);
+    payload.on("error", onError);
+  });
 }
 
 /** True when the request carries a body at all, by its headers. */

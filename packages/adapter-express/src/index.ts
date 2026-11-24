@@ -45,6 +45,9 @@ export function expressPaywall(gate: Gate): RequestHandler {
           return;
         }
         if (outcome.headers) res.set(outcome.headers);
+        // A 413 leaves the rest of the upload unread, so the connection
+        // cannot be reused: close it once the answer is sent.
+        if (outcome.status === 413) res.set("Connection", "close");
         res.status(outcome.status).json({ error: outcome.reason });
       })
       .catch(next);
@@ -61,6 +64,46 @@ export function expressRouteTable(table: RouteTable): RequestHandler {
     }
     expressPaywall(match.gate)(req, res, next);
   };
+}
+
+/**
+ * Reads a Node request up to `maxBytes`. On overflow it stops listening and
+ * pauses the stream, but does not destroy it: destroying the request would
+ * destroy the socket before the 413 is written. The 413 is then sent with
+ * `Connection: close`, which closes the socket and drops the rest of the
+ * upload.
+ */
+function readNodeBody(request: Request, maxBytes: number): Promise<Uint8Array> {
+  return new Promise((resolve, reject) => {
+    const chunks: Uint8Array[] = [];
+    let total = 0;
+    const detach = () => {
+      request.off("data", onData);
+      request.off("end", onEnd);
+      request.off("error", onError);
+    };
+    const onData = (chunk: Buffer) => {
+      total += chunk.byteLength;
+      if (total > maxBytes) {
+        detach();
+        request.pause();
+        reject(new BodyTooLargeError(maxBytes));
+        return;
+      }
+      chunks.push(chunk);
+    };
+    const onEnd = () => {
+      detach();
+      resolve(concatChunks(chunks, total));
+    };
+    const onError = (error: Error) => {
+      detach();
+      reject(error);
+    };
+    request.on("data", onData);
+    request.on("end", onEnd);
+    request.on("error", onError);
+  });
 }
 
 /** The raw bytes a body parser kept, when one ran before the paywall. */
@@ -92,14 +135,7 @@ function expressBody(req: Request): RequestBodySource {
           "the request body was parsed before the paywall without keeping its raw bytes; use express.raw() or store them with express.json({ verify }) as req.rawBody",
         );
       }
-      const chunks: Uint8Array[] = [];
-      let total = 0;
-      for await (const chunk of request as AsyncIterable<Buffer>) {
-        total += chunk.byteLength;
-        if (total > maxBytes) throw new BodyTooLargeError(maxBytes);
-        chunks.push(chunk);
-      }
-      const bytes = Buffer.from(concatChunks(chunks, total));
+      const bytes = Buffer.from(await readNodeBody(request, maxBytes));
       request.rawBody = bytes;
       if (request.body === undefined) request.body = bytes;
       // body-parser skips a request it sees as already parsed.

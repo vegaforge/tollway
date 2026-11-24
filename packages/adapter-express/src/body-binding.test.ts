@@ -99,12 +99,43 @@ describe.each([
   });
 });
 
+/**
+ * An upload that sends more than the limit at once and then never finishes:
+ * the client is still sending when the server answers. The server must
+ * answer 413 at once, without waiting for (or destroying) the rest.
+ */
+function oversizedUploadThatNeverEnds(): ReadableStream<Uint8Array> {
+  let sent = false;
+  return new ReadableStream({
+    pull(controller) {
+      if (sent) return new Promise<void>(() => {});
+      sent = true;
+      controller.enqueue(new Uint8Array(2000));
+      return undefined;
+    },
+  });
+}
+
 describe("Express: body limit (#164)", () => {
   it("answers 413 over the limit without calling the facilitator", async () => {
     const { post, calls, close } = await start("none");
     try {
       const response = await post(chunked("x".repeat(2000)), { [PAYMENT_SIGNATURE_HEADER]: "any" });
       expect(response.status).toBe(413);
+      expect(calls()).toBe(0);
+    } finally {
+      await close();
+    }
+  });
+
+  it("answers 413 while the client is still uploading", async () => {
+    const { post, calls, close } = await start("none");
+    try {
+      const response = await post(oversizedUploadThatNeverEnds(), {
+        [PAYMENT_SIGNATURE_HEADER]: "any",
+      });
+      expect(response.status).toBe(413);
+      expect(response.headers.get("connection")).toBe("close");
       expect(calls()).toBe(0);
     } finally {
       await close();
