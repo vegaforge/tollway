@@ -41,6 +41,7 @@ import {
   scriptedRedis,
   watchUnhandledRejections,
 } from "./testing/faults.js";
+import { AMOUNT, ASSET, envelope, PAY_TO } from "./testing/stellar-envelopes.js";
 
 /**
  * Failure injection for the gate. Each scenario scripts one upstream fault,
@@ -51,10 +52,12 @@ import {
  * docs/failure-modes.md.
  */
 
+// A real Soroban asset, payee and signed envelope, so the HTTP facilitator
+// scenarios pass the gate's local pre-validation (#159) and reach the fault.
 const config = {
-  amount: "10000",
-  asset: "USDC:GA5ZSEJYB37JRC5AVCIA5MOP4RHTM335X2KGX3IHOJAPP5RE34K4KZVN",
-  payTo: "GSERVICEXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX",
+  amount: AMOUNT,
+  asset: ASSET,
+  payTo: PAY_TO,
   network: "testnet",
 } satisfies PaywallConfig;
 
@@ -64,7 +67,7 @@ const baseRequest: TollwayRequest = {
   headers: {},
 };
 
-const transaction = "mock-signed-auth-entry-failure";
+const transaction = envelope();
 
 const headers: Record<string, string> = {
   [PAYMENT_SIGNATURE_HEADER]: encodePaymentSignatureHeader({
@@ -245,7 +248,8 @@ describe("facilitator faults", () => {
     expect(outcome).toMatchObject({
       kind: "rejected",
       status: 503,
-      reason: expect.stringContaining("facilitator-timeout"),
+      code: "facilitator-unavailable",
+      headers: { "retry-after": "1" },
     });
     expect(recording.settleCalls.size).toBe(0);
     await harness.check(recording.settleCalls);
@@ -278,7 +282,13 @@ describe("facilitator faults", () => {
     );
     const harness = invariantHarness(process);
 
-    await expect(process.gate(paidRequest)).rejects.toMatchObject({ code: "payment-failed" });
+    // An unusable answer is a facilitator that is not available (#161):
+    // a 503 the agent may retry, and nothing settles.
+    expect(harness.record(await process.gate(paidRequest))).toMatchObject({
+      kind: "rejected",
+      status: 503,
+      code: "facilitator-unavailable",
+    });
     expect(calls).toEqual(["/verify"]);
     await harness.check(new Map());
   });
@@ -344,6 +354,46 @@ describe("facilitator faults", () => {
     await harness.check(recording.settleCalls, []);
   });
 
+  it("answers a classified /settle failure after sending with a held 503, across processes (#161)", async () => {
+    vi.useFakeTimers();
+    const redis = new RedisMock();
+    const keyPrefix = "failure:settle-sent-coded:";
+    const failure = new TollwayError(
+      "facilitator-unavailable",
+      "facilitator /settle request failed",
+      {
+        cause: new Error("socket hang up"),
+      },
+    );
+    const recording = createRecordingFacilitator(
+      scriptedFacilitator(createMockFacilitator(), { settle: [rejectWith(failure)] }),
+    );
+    const a = gateProcess(recording.client, redisCache(redis, keyPrefix));
+    const b = gateProcess(recording.client, redisCache(redis, keyPrefix));
+    const harness = invariantHarness(a, b);
+
+    const held = {
+      kind: "rejected",
+      status: 503,
+      code: "settlement-unknown",
+      headers: { "retry-after": String(HOLD_MS / 1000) },
+    };
+    expect(harness.record(await a.gate(paidRequest))).toMatchObject(held);
+    // A retry in the same process shares the held attempt; one in another
+    // process finds the lock still held. Neither settles again.
+    expect(harness.record(await a.gate(paidRequest))).toMatchObject(held);
+    await vi.advanceTimersByTimeAsync(LOCK_TTL_MS * 2);
+    expect(await b.gate(paidRequest)).toMatchObject({
+      status: 409,
+      code: "settlement-in-progress",
+    });
+    expect(recording.settleCalls.get(nonceOf(recording))).toBe(1);
+
+    await vi.advanceTimersByTimeAsync(HOLD_MS);
+    expect(await locksLeft(redis, keyPrefix)).toEqual([]);
+    await harness.check(recording.settleCalls, []);
+  });
+
   it("releases the payment at once when /settle was refused before sending", async () => {
     const redis = new RedisMock();
     const keyPrefix = "failure:settle-refused:";
@@ -395,10 +445,16 @@ describe("facilitator faults", () => {
     const harness = invariantHarness(a, b);
 
     const first = a.gate(paidRequest);
-    const expectation = expect(first).rejects.toMatchObject({ code: "payment-failed" });
     await untilReal(() => settleCalls.length === 1);
     await vi.advanceTimersByTimeAsync(1_000);
-    await expectation;
+    // The transport gave up after sending, so the payment may land: a held
+    // 503 whose Retry-After is the hold, never a thrown error (#161).
+    expect(harness.record(await first)).toMatchObject({
+      kind: "rejected",
+      status: 503,
+      code: "settlement-unknown",
+      headers: { "retry-after": String(HOLD_MS / 1000) },
+    });
     expect(settleCalls).toEqual(["/settle"]);
 
     await vi.advanceTimersByTimeAsync(LOCK_TTL_MS * 2);
@@ -455,7 +511,9 @@ describe("facilitator faults", () => {
     expect(await process.gate(paidRequest)).toEqual({
       kind: "rejected",
       status: 502,
-      reason: "insufficient funds on chain",
+      code: "settlement-failed",
+      reason: "the facilitator refused to settle the payment",
+      upstreamReason: "insufficient funds on chain",
     });
     expect(await redis.keys(`${keyPrefix}*`)).toEqual([]);
     await harness.check(recording.settleCalls, []);

@@ -1,6 +1,7 @@
 import { fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { describe, expect, it } from "vitest";
 
+import { DRIFT_KINDS } from "@/data/channel-detail";
 import { AnomaliesView } from "./anomalies-view";
 
 /** Waits for the feed to finish loading, then returns the rendered event ids. */
@@ -50,7 +51,9 @@ describe("AnomaliesView", () => {
     });
     const drifts = await loadedIds();
 
-    expect(drifts).toHaveLength(9);
+    // The mock feed holds one drift per kind; the first page shows up to ten.
+    expect(drifts).toHaveLength(Math.min(DRIFT_KINDS.length, 10));
+    expect(drifts.every((id) => id.includes("drift"))).toBe(true);
     expect(screen.queryByTestId("anomaly-anom-policy-stop-0")).not.toBeInTheDocument();
     expect(screen.getByText("Page 1")).toBeInTheDocument();
   });

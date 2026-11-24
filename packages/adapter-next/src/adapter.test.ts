@@ -128,9 +128,13 @@ describe("withPaywall", () => {
     );
 
     expect(response.status).toBe(501);
-    const body = (await response.json()) as { error?: string; quote?: number };
+    const body = (await response.json()) as {
+      error?: { code: string; message: string };
+      quote?: number;
+    };
     expect(body.quote).toBeUndefined();
-    expect(body.error).toMatch(/mpp-channel/);
+    expect(body.error?.code).toBe("model-not-supported");
+    expect(body.error?.message).toMatch(/mpp-channel/);
   });
 });
 
@@ -251,7 +255,13 @@ describe("withPaywall with mpp-charge", () => {
       new Request(url, { headers: { authorization: "Payment refused" } }),
     );
     expect(response.status).toBe(402);
-    expect(await response.json()).toEqual({ error: "mpp challenge was not issued by this server" });
+    expect(await response.json()).toEqual({
+      error: {
+        code: "payment-invalid",
+        message: "the payment was refused",
+        upstreamReason: "mpp challenge was not issued by this server",
+      },
+    });
   });
 });
 
@@ -314,6 +324,8 @@ describe("withPaywall with a service policy", () => {
     );
     expect(response.status).toBe(429);
     expect(response.headers.get("retry-after")).toBe("60");
-    expect(await response.json()).toEqual({ error: "service-policy:spend-exceeded" });
+    expect(await response.json()).toEqual({
+      error: { code: "service-policy:spend-exceeded", message: "service-policy:spend-exceeded" },
+    });
   });
 });

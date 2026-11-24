@@ -1,4 +1,13 @@
-import { Keypair } from "@stellar/stellar-sdk";
+import {
+  Account,
+  Address,
+  Keypair,
+  Networks,
+  nativeToScVal,
+  Operation,
+  TransactionBuilder,
+  xdr,
+} from "@stellar/stellar-sdk";
 import type { PaymentPayload, PaymentRequirements } from "@x402/core/types";
 import { USDC_TESTNET_ADDRESS } from "@x402/stellar";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
@@ -53,13 +62,52 @@ describe("runDemo in live mode", () => {
   // What the stub answers on /supported: OpenZeppelin Channels' shape by default.
   let supportedKinds: unknown[];
 
-  // Signs nothing: returns a V2 payload with a fixed transaction, so no
-  // Stellar RPC is needed.
-  const payer = async (requirements: PaymentRequirements): Promise<PaymentPayload> => ({
-    x402Version: 2,
-    accepted: requirements,
-    payload: { transaction: "AAAAAgAAAAB0ZXN0LXRyYW5zYWN0aW9u" },
-  });
+  // Builds the transfer envelope a Stellar client would, for exactly the
+  // requirements it was given, without simulating it, so no Stellar RPC is
+  // needed and the gate's local pre-validation (#159) lets it through.
+  const payer = async (requirements: PaymentRequirements): Promise<PaymentPayload> => {
+    const from = payerKeypair.publicKey();
+    const invocation = new xdr.InvokeContractArgs({
+      contractAddress: Address.fromString(requirements.asset).toScAddress(),
+      functionName: "transfer",
+      args: [
+        nativeToScVal(from, { type: "address" }),
+        nativeToScVal(requirements.payTo, { type: "address" }),
+        nativeToScVal(BigInt(requirements.amount), { type: "i128" }),
+      ],
+    });
+    const auth = new xdr.SorobanAuthorizationEntry({
+      credentials: xdr.SorobanCredentials.sorobanCredentialsAddress(
+        new xdr.SorobanAddressCredentials({
+          address: Address.fromString(from).toScAddress(),
+          nonce: xdr.Int64.fromString("1"),
+          signatureExpirationLedger: 1_000,
+          signature: xdr.ScVal.scvVoid(),
+        }),
+      ),
+      rootInvocation: new xdr.SorobanAuthorizedInvocation({
+        function: xdr.SorobanAuthorizedFunction.sorobanAuthorizedFunctionTypeContractFn(invocation),
+        subInvocations: [],
+      }),
+    });
+    const transaction = new TransactionBuilder(new Account(from, "1"), {
+      fee: "100",
+      networkPassphrase: Networks.TESTNET,
+    })
+      .addOperation(
+        Operation.invokeHostFunction({
+          func: xdr.HostFunction.hostFunctionTypeInvokeContract(invocation),
+          auth: [auth],
+        }),
+      )
+      .setTimeout(60)
+      .build();
+    return {
+      x402Version: 2,
+      accepted: requirements,
+      payload: { transaction: transaction.toXDR() },
+    };
+  };
 
   beforeEach(() => {
     facilitatorCalls = [];

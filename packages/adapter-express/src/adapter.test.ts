@@ -182,7 +182,7 @@ describe("expressPaywall with a shared settlement cache", () => {
       const replay = await fetch(`${base}/quotes/history`, { headers });
       expect(replay.status).toBe(409);
       expect(await replay.json()).toEqual({
-        error: "payment already settled for a different offer",
+        error: { code: "offer-mismatch", message: "payment already settled for a different offer" },
       });
       expect(served).toEqual(["latest"]);
     } finally {
@@ -295,7 +295,11 @@ describe("expressPaywall with mpp-charge", () => {
       const response = await fetch(app.url, { headers: { authorization: "Payment refused" } });
       expect(response.status).toBe(402);
       expect(await response.json()).toEqual({
-        error: "mpp challenge was not issued by this server",
+        error: {
+          code: "payment-invalid",
+          message: "the payment was refused",
+          upstreamReason: "mpp challenge was not issued by this server",
+        },
       });
     } finally {
       await app.close();
@@ -380,7 +384,9 @@ describe("expressPaywall with a service policy", () => {
       });
       expect(response.status).toBe(429);
       expect(response.headers.get("retry-after")).toBe("60");
-      expect(await response.json()).toEqual({ error: "service-policy:spend-exceeded" });
+      expect(await response.json()).toEqual({
+        error: { code: "service-policy:spend-exceeded", message: "service-policy:spend-exceeded" },
+      });
     } finally {
       await new Promise((resolve) => server.close(resolve));
     }

@@ -1,6 +1,11 @@
 import type { SignedReceipt } from "@vegaforge/tollway-core";
 import { describe, expect, it } from "vitest";
-import { type CommitmentRecord, createReconciler, type SettlementRecord } from "./index.js";
+import {
+  type CommitmentRecord,
+  createReconciler,
+  type ReconciliationSubject,
+  type SettlementRecord,
+} from "./index.js";
 
 // ── helpers ──────────────────────────────────────────────────────────────────
 
@@ -70,7 +75,7 @@ describe("reconcileChannel", () => {
       const commitments = [mkCommitment(0, "100"), mkCommitment(1, "200"), mkCommitment(2, "300")];
       const result = await reconciler.reconcileChannel(commitments, mkSettlement("300", "700"));
       expect(result.ok).toBe(true);
-      if (result.ok) expect(result.channelId).toBe("ch-1");
+      expect(result.subject).toEqual({ kind: "channel", channelId: "ch-1" });
     });
 
     it("returns ok for a single commitment that matches settlement", async () => {
@@ -94,7 +99,7 @@ describe("reconcileChannel", () => {
         txHash: "0x",
       });
       expect(result.ok).toBe(false);
-      if (!result.ok) {
+      if (result.status === "drift") {
         expect(result.drift[0]?.kind).toBe("malformed-record");
         expect(result.drift[0]?.detail).toContain("settledAmount");
       }
@@ -108,7 +113,7 @@ describe("reconcileChannel", () => {
         txHash: "0x",
       });
       expect(result.ok).toBe(false);
-      if (!result.ok) expect(result.drift[0]?.kind).toBe("malformed-record");
+      if (result.status === "drift") expect(result.drift[0]?.kind).toBe("malformed-record");
     });
 
     it("flags a non-numeric returnedRemainder instead of throwing", async () => {
@@ -119,7 +124,7 @@ describe("reconcileChannel", () => {
         txHash: "0x",
       });
       expect(result.ok).toBe(false);
-      if (!result.ok) {
+      if (result.status === "drift") {
         expect(result.drift[0]?.kind).toBe("malformed-record");
         expect(result.drift[0]?.detail).toContain("returnedRemainder");
       }
@@ -131,7 +136,7 @@ describe("reconcileChannel", () => {
         mkSettlement("100"),
       );
       expect(result.ok).toBe(false);
-      if (!result.ok) {
+      if (result.status === "drift") {
         expect(result.drift.some((d) => d.kind === "malformed-record")).toBe(true);
       }
     });
@@ -141,7 +146,7 @@ describe("reconcileChannel", () => {
     it("flags when no commitments recorded but funds settled", async () => {
       const result = await reconciler.reconcileChannel([], mkSettlement("500"));
       expect(result.ok).toBe(false);
-      if (!result.ok) {
+      if (result.status === "drift") {
         expect(result.drift).toHaveLength(1);
         expect(result.drift[0]?.kind).toBe("missing-commitment");
       }
@@ -160,7 +165,7 @@ describe("reconcileChannel", () => {
         mkSettlement("200"),
       );
       expect(result.ok).toBe(false);
-      if (!result.ok) {
+      if (result.status === "drift") {
         const drift = result.drift.find((d) => d.kind === "under-settled");
         expect(drift).toBeDefined();
         expect(drift?.detail).toContain("shortfall: 50");
@@ -175,7 +180,7 @@ describe("reconcileChannel", () => {
         mkSettlement("150"),
       );
       expect(result.ok).toBe(false);
-      if (!result.ok) {
+      if (result.status === "drift") {
         const drift = result.drift.find((d) => d.kind === "over-settled");
         expect(drift).toBeDefined();
         expect(drift?.detail).toContain("excess: 50");
@@ -192,7 +197,7 @@ describe("reconcileChannel", () => {
       ];
       const result = await reconciler.reconcileChannel(commitments, mkSettlement("400"));
       expect(result.ok).toBe(false);
-      if (!result.ok) {
+      if (result.status === "drift") {
         const drift = result.drift.find((d) => d.kind === "sequence-gap");
         expect(drift).toBeDefined();
         expect(drift?.detail).toContain("expected sequence 2");
@@ -205,7 +210,7 @@ describe("reconcileChannel", () => {
         mkSettlement("100"),
       );
       expect(result.ok).toBe(false);
-      if (!result.ok) {
+      if (result.status === "drift") {
         const drift = result.drift.find((d) => d.kind === "sequence-gap");
         expect(drift?.detail).toContain("expected sequence 0");
       }
@@ -217,7 +222,7 @@ describe("reconcileChannel", () => {
         mkSettlement("300"),
       );
       expect(result.ok).toBe(false);
-      if (!result.ok) {
+      if (result.status === "drift") {
         const gaps = result.drift.filter((d) => d.kind === "sequence-gap");
         expect(gaps).toHaveLength(1);
         expect(gaps[0]?.detail).toContain("expected sequence 1");
@@ -235,7 +240,7 @@ describe("reconcileChannel", () => {
       };
       const result = await reconciler.reconcileChannel([mkCommitment(0, "300")], settlement);
       expect(result.ok).toBe(false);
-      if (!result.ok) {
+      if (result.status === "drift") {
         expect(result.drift.some((d) => d.kind === "unexpected-remainder")).toBe(true);
       }
     });
@@ -257,28 +262,28 @@ describe("reconcileChannel", () => {
       const withSuppression = createReconciler({
         suppress: (drift) => drift.kind === "under-settled",
       });
-      // sequence gap + under-settled — suppress only under-settled
+      // sequence gap and under-settled: suppress only under-settled
       const result = await withSuppression.reconcileChannel(
         [mkCommitment(0, "100"), mkCommitment(2, "300")],
         mkSettlement("200"),
       );
       expect(result.ok).toBe(false);
-      if (!result.ok) {
+      if (result.status === "drift") {
         expect(result.drift.some((d) => d.kind === "sequence-gap")).toBe(true);
         expect(result.drift.some((d) => d.kind === "under-settled")).toBe(false);
       }
     });
 
-    it("passes channelId to suppressor", async () => {
-      const seen: string[] = [];
+    it("passes the subject to suppressor", async () => {
+      const seen: ReconciliationSubject[] = [];
       const withSuppression = createReconciler({
-        suppress: (_drift, channelId) => {
-          seen.push(channelId);
+        suppress: (_drift, subject) => {
+          seen.push(subject);
           return false;
         },
       });
       await withSuppression.reconcileChannel([mkCommitment(0, "100")], mkSettlement("50"));
-      expect(seen).toContain("ch-1");
+      expect(seen).toContainEqual({ kind: "channel", channelId: "ch-1" });
     });
   });
 });
@@ -309,19 +314,19 @@ describe("reconcileCharge", () => {
     // x402 with channel-commitment is structurally invalid
     const bad = mkReceipt({ model: "x402", settlementKind: "channel-commitment" });
     const result = await reconciler.reconcileCharge(bad);
-    expect(result.ok).toBe(false);
-    if (!result.ok) {
+    expect(result.status).toBe("drift");
+    if (result.status === "drift") {
       expect(result.drift.every((d) => d.kind === "malformed-record")).toBe(true);
     }
   });
 
-  it("uses txHash as channelId for transaction-settled receipts", async () => {
+  it("names the transaction as the subject of a transaction-settled receipt", async () => {
     const txHash = "0xfeedcafe";
     const result = await reconciler.reconcileCharge(mkReceipt({ txHash }));
-    expect(result.channelId).toBe(txHash);
+    expect(result.subject).toEqual({ kind: "transaction", txHash, network: "testnet" });
   });
 
-  it("uses channelId for channel-commitment receipts", async () => {
+  it("names the channel as the subject of a channel-commitment receipt", async () => {
     const result = await reconciler.reconcileCharge(
       mkReceipt({
         model: "mpp-channel",
@@ -329,7 +334,7 @@ describe("reconcileCharge", () => {
         channelId: "ch-target",
       }),
     );
-    expect(result.channelId).toBe("ch-target");
+    expect(result.subject).toEqual({ kind: "channel", channelId: "ch-target" });
   });
 });
 
@@ -343,8 +348,7 @@ describe("reconcileChannel stream integrity", () => {
       [mkCommitment(0, "100"), mkCommitment(1, "40")],
       mkSettlement("40", "60"),
     );
-    expect(result.ok).toBe(false);
-    if (result.ok) return;
+    if (result.status !== "drift") throw new Error(`expected drift, got ${result.status}`);
     expect(result.drift.map((d) => d.kind)).toContain("non-monotonic-cumulative");
     // The highest promised amount is what should have settled.
     expect(result.drift.map((d) => d.kind)).toContain("under-settled");
@@ -356,8 +360,7 @@ describe("reconcileChannel stream integrity", () => {
       [mkCommitment(0, "100"), foreign],
       mkSettlement("40", "60"),
     );
-    expect(result.ok).toBe(false);
-    if (result.ok) return;
+    if (result.status !== "drift") throw new Error(`expected drift, got ${result.status}`);
     const kinds = result.drift.map((d) => d.kind);
     expect(kinds).toContain("foreign-commitment");
     expect(kinds).toContain("under-settled");
@@ -368,8 +371,7 @@ describe("reconcileChannel stream integrity", () => {
       [mkCommitment(0, "100"), mkCommitment(1, "200"), mkCommitment(1, "150")],
       mkSettlement("200"),
     );
-    expect(result.ok).toBe(false);
-    if (result.ok) return;
+    if (result.status !== "drift") throw new Error(`expected drift, got ${result.status}`);
     const kinds = result.drift.map((d) => d.kind);
     expect(kinds).toContain("duplicate-sequence");
     expect(kinds).not.toContain("sequence-gap");
@@ -380,8 +382,7 @@ describe("reconcileChannel stream integrity", () => {
       [mkCommitment(0, "100"), mkCommitment(1, "150"), mkCommitment(1, "200")],
       mkSettlement("150"),
     );
-    expect(result.ok).toBe(false);
-    if (result.ok) return;
+    if (result.status !== "drift") throw new Error(`expected drift, got ${result.status}`);
     expect(result.drift.map((d) => d.kind)).toContain("under-settled");
   });
 
@@ -390,6 +391,10 @@ describe("reconcileChannel stream integrity", () => {
       [mkCommitment(0, "100"), mkCommitment(1, "100"), mkCommitment(2, "250")],
       mkSettlement("250", "750"),
     );
-    expect(result).toEqual({ ok: true, channelId: "ch-1" });
+    expect(result).toEqual({
+      status: "ok",
+      ok: true,
+      subject: { kind: "channel", channelId: "ch-1" },
+    });
   });
 });
