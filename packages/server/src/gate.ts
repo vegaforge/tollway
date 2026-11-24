@@ -46,11 +46,7 @@ import {
   TOLLWAY_QUOTE_HEADER,
   TOLLWAY_RECEIPT_HEADER,
 } from "./headers.js";
-import {
-  type MppChannelHandler,
-  mppCredentialIntent,
-  parseMppChannelCredential,
-} from "./mpp-channel.js";
+import { type MppChannelHandler, parseMppChannelCredential } from "./mpp-channel.js";
 import type { MppChargeHandler } from "./mpp-charge.js";
 import {
   createOfferReceiptIssuer,
@@ -493,18 +489,13 @@ async function priceRequest(
  * PAYMENT-RESPONSE, and Tollway's signed receipt in TOLLWAY-RECEIPT. The
  * facilitator settled the payment, so `success` is always true here.
  */
-async function settlementHeaders(
+function settlementHeaders(
   signed: SignedReceipt,
-  context: Pick<SettlementContext, "offerReceipt">,
-): Promise<Record<string, string>> {
-  const { settlement, network, model } = signed.receipt;
+  extensions?: Record<string, unknown>,
+): Record<string, string> {
+  const { settlement, network } = signed.receipt;
   const headers: Record<string, string> = { [TOLLWAY_RECEIPT_HEADER]: encodeHeader(signed) };
   if (settlement.kind === "transaction") {
-    // The extension answers an x402 offer, so only an x402 settlement gets one.
-    const extensions =
-      context.offerReceipt && model === "x402"
-        ? { [OFFER_RECEIPT_EXTENSION_KEY]: await context.offerReceipt.receipt(signed) }
-        : undefined;
     headers[PAYMENT_RESPONSE_HEADER] = encodePaymentResponseHeader({
       success: true,
       transaction: settlement.txHash,
@@ -513,6 +504,24 @@ async function settlementHeaders(
     });
   }
   return headers;
+}
+
+/**
+ * The settled headers with the offer-receipt extension added (#172). The
+ * extension answers an x402 offer, so only an x402 settlement on a route
+ * that opted in gets one; every other settlement takes the synchronous path,
+ * so the extension costs nothing where it is off.
+ */
+async function settlementHeadersFor(
+  signed: SignedReceipt,
+  context: Pick<SettlementContext, "offerReceipt">,
+): Promise<Record<string, string>> {
+  if (!context.offerReceipt || signed.receipt.model !== "x402") {
+    return settlementHeaders(signed);
+  }
+  return settlementHeaders(signed, {
+    [OFFER_RECEIPT_EXTENSION_KEY]: await context.offerReceipt.receipt(signed),
+  });
 }
 
 /** The shared result of one settlement attempt, before it is checked against an offer. */
@@ -1024,7 +1033,10 @@ async function toOutcome(
   const outcome: GateOutcome = {
     kind: "settled",
     status: 200,
-    headers: await settlementHeaders(result.receipt, context),
+    headers:
+      context.offerReceipt && result.receipt.receipt.model === "x402"
+        ? await settlementHeadersFor(result.receipt, context)
+        : settlementHeaders(result.receipt),
     receipt: result.receipt,
     replayed: waited || result.replayed,
   };
@@ -1651,45 +1663,34 @@ export function createPaywallWithInFlight(
     }
 
     // An MPP credential answers an MPP challenge, so the agent has already
-    // chosen the model; the router is not asked again. The credential's
-    // challenge says which MPP method it is for.
+    // chosen the model; the router is not asked again. Only a route that
+    // accepts mpp-channel looks inside the credential to tell the methods
+    // apart; a charge-only route hands it straight to the charge handler,
+    // which decodes it once and rejects any other method.
     if (mppCredential) {
-      const intent = mppCredentialIntent(mppCredential);
-      if (intent === "stellar/channel") {
-        if (!acceptedModels.includes("mpp-channel")) {
-          return {
-            kind: "rejected",
-            status: 400,
-            reason: "this route does not accept mpp-channel payments",
-          };
-        }
-        if (!deps.mppChannelHandler) {
-          return {
-            kind: "rejected",
-            status: 500,
-            reason: "mpp-channel handler not configured",
-          };
-        }
+      if (acceptedModels.includes("mpp-channel")) {
         const parsed = parseMppChannelCredential(mppCredential);
-        if (!parsed.ok) {
-          return { kind: "rejected", status: 400, reason: parsed.reason };
+        const isChannel = parsed.ok || parsed.kind === "invalid-channel";
+        if (isChannel || !acceptedModels.includes("mpp-charge")) {
+          if (!parsed.ok) {
+            return { kind: "rejected", status: 400, reason: parsed.reason };
+          }
+          if (!deps.mppChannelHandler) {
+            return {
+              kind: "rejected",
+              status: 500,
+              reason: "mpp-channel handler not configured",
+            };
+          }
+          return settleWithHandler(
+            parsed.payment,
+            offer,
+            "mpp-channel",
+            method,
+            deps.mppChannelHandler,
+            context,
+          );
         }
-        return settleWithHandler(
-          parsed.payment,
-          offer,
-          "mpp-channel",
-          method,
-          deps.mppChannelHandler,
-          context,
-        );
-      }
-      if (!acceptedModels.includes("mpp-charge")) {
-        return {
-          kind: "rejected",
-          status: 400,
-          reason:
-            "Authorization: Payment credential is not for a payment method this route accepts",
-        };
       }
 
       if (!deps.mppChargeHandler) {

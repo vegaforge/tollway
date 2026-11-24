@@ -774,6 +774,7 @@ export function parseMppChannelCredential(credential: string): {
     payment: MppChannelPayment;
 } | {
     ok: false;
+    kind: "not-channel" | "invalid-channel";
     reason: string;
 };
 
@@ -1139,8 +1140,8 @@ export type X402Terms = {
 // dist/index.d.ts:440:9 - (ae-forgotten-export) The symbol "WatchtowerEvent" needs to be exported by the entry point index.d.ts
 // dist/index.d.ts:444:5 - (ae-forgotten-export) The symbol "ChannelState" needs to be exported by the entry point index.d.ts
 // dist/index.d.ts:482:5 - (ae-forgotten-export) The symbol "WatchtowerCursorStore" needs to be exported by the entry point index.d.ts
-// dist/index.d.ts:617:9 - (ae-forgotten-export) The symbol "StellarSigner$1" needs to be exported by the entry point index.d.ts
-// dist/index.d.ts:780:9 - (ae-forgotten-export) The symbol "StellarSigner" needs to be exported by the entry point index.d.ts
+// dist/index.d.ts:619:9 - (ae-forgotten-export) The symbol "StellarSigner$1" needs to be exported by the entry point index.d.ts
+// dist/index.d.ts:782:9 - (ae-forgotten-export) The symbol "StellarSigner" needs to be exported by the entry point index.d.ts
 
 // (No @packageDocumentation comment for this package)
 

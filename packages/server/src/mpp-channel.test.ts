@@ -481,13 +481,78 @@ describe("mpp-channel vouchers through the gate (#173)", () => {
     });
   });
 
-  it("rejects a channel credential on a route that only accepts mpp-charge", async () => {
+  it("leaves a charge-only route to the charge handler, which refuses a channel credential", async () => {
+    const h = harness();
+    const channelHandler = createMppChannelHandler(h.options);
+    const verify = vi.spyOn(channelHandler, "verify");
     const gate = createPaywall(
       { amount: "1000", asset: USDC, payTo: RECIPIENT, network: "testnet", models: ["mpp-charge"] },
-      { signer: await Ed25519Signer.generate("k"), facilitator: createMockFacilitator() },
+      {
+        signer: await Ed25519Signer.generate("k"),
+        facilitator: createMockFacilitator(),
+        mppChannelHandler: channelHandler,
+        mppChargeHandler: {
+          async verify() {
+            return {
+              valid: false,
+              reason: "mpp credential is for stellar/channel, not stellar/charge",
+            };
+          },
+          async settle() {
+            throw new Error("a refused credential must not settle");
+          },
+        },
+      },
     );
     const outcome = await pay(gate, voucher("1000", SIG(1)));
-    expect(outcome).toMatchObject({ kind: "rejected", status: 400 });
+    expect(outcome).toMatchObject({ kind: "rejected", status: 402 });
+    expect(verify).not.toHaveBeenCalled();
+  });
+
+  it("routes a charge credential to the charge handler on a route that accepts both", async () => {
+    const h = harness();
+    let charged = 0;
+    const gate = createPaywall(
+      {
+        amount: "1000",
+        asset: USDC,
+        payTo: RECIPIENT,
+        network: "testnet",
+        models: ["mpp-charge", "mpp-channel"],
+      },
+      {
+        signer: await Ed25519Signer.generate("k"),
+        facilitator: createMockFacilitator(),
+        mppChannelHandler: createMppChannelHandler(h.options),
+        mppChargeHandler: {
+          async verify() {
+            charged += 1;
+            return { valid: false, reason: "charge handler saw it" };
+          },
+          async settle() {
+            throw new Error("a refused credential must not settle");
+          },
+        },
+      },
+    );
+    const charge = Credential.serialize({
+      challenge: Challenge.from({
+        secretKey: SECRET,
+        realm: "tollway",
+        method: "stellar",
+        intent: "charge",
+        request: { amount: "1000", currency: USDC, recipient: RECIPIENT },
+      }),
+      payload: { type: "transaction", transaction: "AAAA" },
+    });
+    expect(await pay(gate, charge)).toMatchObject({
+      kind: "rejected",
+      reason: "charge handler saw it",
+    });
+    expect(charged).toBe(1);
+    const malformed = await pay(gate, voucher("1000", "not-hex"));
+    expect(malformed).toMatchObject({ kind: "rejected", status: 400 });
+    expect(charged).toBe(1);
   });
 
   it("rejects a malformed channel payload with 400", async () => {

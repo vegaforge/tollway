@@ -63,28 +63,40 @@ const sdkCumulativeSchema = z.object({ amount: z.string().regex(/^[0-9]+$/) });
  */
 export function parseMppChannelCredential(
   credential: string,
-): { ok: true; payment: MppChannelPayment } | { ok: false; reason: string } {
+):
+  | { ok: true; payment: MppChannelPayment }
+  | { ok: false; kind: "not-channel" | "invalid-channel"; reason: string } {
   let decoded: Credential.Credential;
   try {
     decoded = Credential.deserialize(credential);
   } catch (error) {
-    return { ok: false, reason: `malformed mpp credential: ${errorMessage(error)}` };
+    return {
+      ok: false,
+      kind: "not-channel",
+      reason: `malformed mpp credential: ${errorMessage(error)}`,
+    };
   }
   const { challenge } = decoded;
   if (challenge.method !== "stellar" || challenge.intent !== "channel") {
     return {
       ok: false,
+      kind: "not-channel",
       reason: `mpp credential is for ${challenge.method}/${challenge.intent}, not stellar/channel`,
     };
   }
   const channelId = challenge.request.channel;
   if (typeof channelId !== "string" || !CONTRACT_ADDRESS.test(channelId)) {
-    return { ok: false, reason: "mpp channel challenge does not name a channel contract" };
+    return {
+      ok: false,
+      kind: "invalid-channel",
+      reason: "mpp channel challenge does not name a channel contract",
+    };
   }
   const payload = channelPayloadSchema.safeParse(decoded.payload);
   if (!payload.success) {
     return {
       ok: false,
+      kind: "invalid-channel",
       reason: `invalid mpp channel payload: ${payload.error.issues.map((issue) => issue.message).join("; ")}`,
     };
   }
@@ -99,17 +111,6 @@ export function parseMppChannelCredential(
       credential,
     },
   };
-}
-
-/** The method and intent of an MPP credential, or undefined when it does not decode. */
-export function mppCredentialIntent(credential: string): string | undefined {
-  try {
-    const { challenge } = Credential.deserialize(credential);
-    return `${challenge.method}/${challenge.intent}`;
-  } catch {
-    // An undecodable credential has no intent; the caller rejects it.
-    return undefined;
-  }
 }
 
 export type MppChannelVerifyInput = { payment: MppChannelPayment; offer: PaymentOffer };
