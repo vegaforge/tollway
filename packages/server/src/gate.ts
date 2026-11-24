@@ -18,7 +18,7 @@ import {
 } from "@vegaforge/tollway-core";
 import { x402Version } from "@x402/core";
 import type { PaymentRequired, PaymentPayload as X402Payload } from "@x402/core/types";
-import type { SettlementCache, SettlementLock } from "./cache.js";
+import type { SettlementCache, SettlementEntry, SettlementLock } from "./cache.js";
 import {
   checkDiscoveryDeclaration,
   type DiscoveryDeclaration,
@@ -47,6 +47,7 @@ import {
   TOLLWAY_RECEIPT_HEADER,
 } from "./headers.js";
 import type { MppChargeHandler } from "./mpp-charge.js";
+import type { PaymentReceiptArchive } from "./payment-receipt-archive.js";
 import {
   createInMemoryServicePolicyStore,
   SERVICE_POLICY_DENIALS,
@@ -227,10 +228,27 @@ export type PaywallDeps = {
    */
   onServicePolicyError?: (error: Error, payer: string) => void;
   /**
-   * Called when the settlement cache fails after a payment has settled. The
-   * same error is also set as `cacheError` on the outcome.
+   * Called when the settlement cache, or the receipt archive, fails after a
+   * payment has settled. The same error is also set as `cacheError` on the
+   * outcome.
    */
   onCacheError?: (error: Error, key: string) => void;
+  /**
+   * Durable record of settled payments (#162). A retry whose entry has left
+   * the settlement cache is answered from here with its original receipt,
+   * before `/verify`, so a payer who already paid is never refused or charged
+   * again. Every fresh settlement is written to it. See
+   * `PaymentReceiptArchive` and docs/receipt-archive.md.
+   */
+  receiptArchive?: PaymentReceiptArchive;
+  /**
+   * Called when a receipt archive read fails. The request then goes on to
+   * `/verify` as if the archive had no entry, the behaviour before #162: the
+   * facilitator refuses a spent payment, so nothing is charged twice, but the
+   * payer may get a 402 instead of the replay. Write failures go to
+   * `onCacheError`.
+   */
+  onArchiveError?: (error: Error, key: string) => void;
   /**
    * Called when a dynamic price function throws. The request is rejected
    * with 500 and nothing is charged; the error goes here, not to the agent.
@@ -551,6 +569,8 @@ type SettlementContext = {
   receiptVersion: 1 | 2;
   cache?: SettlementCache;
   onCacheError?: (error: Error, key: string) => void;
+  archive?: PaymentReceiptArchive;
+  onArchiveError?: (error: Error, key: string) => void;
   /** Settlements in progress in this process, by cache key. */
   inFlight: Map<string, Promise<SettlementResult>>;
   lockTtlMs: number;
@@ -793,6 +813,52 @@ function asError(value: unknown, message: string): Error {
   return value instanceof Error ? value : new Error(message, { cause: value });
 }
 
+/**
+ * Looks a payment up in the receipt archive. A failed read is reported and
+ * treated as no entry: the payment then goes to `/verify`, which refuses a
+ * spent authorization, so the failure can cost the payer a replay but never
+ * a second charge.
+ */
+async function readArchive(
+  key: string,
+  context: SettlementContext,
+): Promise<SettlementEntry | undefined> {
+  if (!context.archive) return undefined;
+  try {
+    return await context.archive.findByPaymentKey(key);
+  } catch (error) {
+    context.onArchiveError?.(asError(error, "receipt archive read failed"), key);
+    return undefined;
+  }
+}
+
+/**
+ * Records a fresh settlement in the cache and the archive. Both writes are
+ * awaited; a failure must not cost the payer the receipt, so the first one
+ * is returned for `cacheError` and every one goes to `onCacheError`.
+ */
+async function recordSettlement(
+  key: string,
+  entry: SettlementEntry,
+  context: SettlementContext,
+): Promise<Error | undefined> {
+  let firstError: Error | undefined;
+  for (const [store, write] of [
+    ["settlement cache", context.cache && (() => context.cache?.set(key, entry))],
+    ["receipt archive", context.archive && (() => context.archive?.put(key, entry))],
+  ] as const) {
+    if (!write) continue;
+    try {
+      await write();
+    } catch (failure) {
+      const error = asError(failure, `${store} write failed`);
+      context.onCacheError?.(error, key);
+      firstError ??= error;
+    }
+  }
+  return firstError;
+}
+
 /** What the request-level code hands the settlement path besides the payment. */
 type SettlementSteps = {
   /** The headers of a fresh 402, for a refused payment to carry. */
@@ -824,7 +890,10 @@ async function settleWithHandler<TPayment>(
     if (pending) {
       return toOutcome(await awaitPending(pending), offer, model, method, true);
     }
-    const cached = await context.cache?.get(knownKey);
+    // The cache first, then the durable archive for a payment whose cache
+    // entry has expired (#162). Either hit goes through toOutcome's offer
+    // and method binding: a hit for another offer is a 409, never a replay.
+    const cached = (await context.cache?.get(knownKey)) ?? (await readArchive(knownKey, context));
     if (cached) {
       const replay: SettlementResult = {
         ok: true,
@@ -1337,20 +1406,12 @@ async function settleAndRecord<TPayment>(
 
   const receipt = await receiptFor(settlement.txHash, offer, model, method, verification, context);
 
-  if (!context.cache) {
-    return { ok: true, receipt, method, replayed: false };
-  }
-
   // The payment has settled, so a failed write must not cost the payer the
   // receipt. The error goes on the outcome and to onCacheError instead.
-  try {
-    await context.cache.set(key, { receipt, method });
-  } catch (writeFailure) {
-    const cacheError = asError(writeFailure, "settlement cache write failed");
-    context.onCacheError?.(cacheError, key);
-    return { ok: true, receipt, method, replayed: false, cacheError };
-  }
-  return { ok: true, receipt, method, replayed: false };
+  const cacheError = await recordSettlement(key, { receipt, method }, context);
+  return cacheError
+    ? { ok: true, receipt, method, replayed: false, cacheError }
+    : { ok: true, receipt, method, replayed: false };
 }
 
 /**
@@ -1410,24 +1471,37 @@ async function settleLateAnswer(
     if (isPreSendFailure(late.error)) hold.end();
     return;
   }
-  if (late.value.settled && context.cache) {
+  if (late.value.settled && (context.cache || context.archive)) {
+    let receipt: SignedReceipt;
     try {
-      const receipt = await receiptFor(
-        late.value.txHash,
-        offer,
-        model,
-        method,
-        verification,
-        context,
-      );
-      await context.cache.set(key, { receipt, method });
+      receipt = await receiptFor(late.value.txHash, offer, model, method, verification, context);
     } catch (error) {
-      // The payment landed but its receipt is not cached, so a retry after
-      // the hold would settle it again. Keep holding until the hold expires
-      // and tell the operator.
-      report(context.onCacheError, asError(error, "late settlement cache write failed"), key);
+      report(context.onCacheError, asError(error, "late settlement receipt failed"), key);
       return;
     }
+    // Both stores are written and every failure is reported. The hold only
+    // ends once a retry can find the receipt: the cache when there is one
+    // (it is what retries read first), otherwise the archive.
+    const findable = context.cache ? "settlement cache" : "receipt archive";
+    let recorded = true;
+    for (const [store, write] of [
+      ["settlement cache", context.cache && (() => context.cache?.set(key, { receipt, method }))],
+      [
+        "receipt archive",
+        context.archive && (() => context.archive?.put(key, { receipt, method })),
+      ],
+    ] as const) {
+      if (!write) continue;
+      try {
+        await write();
+      } catch (error) {
+        // The payment landed but a retry may not find its receipt, and after
+        // the hold it would settle again. Keep holding and tell the operator.
+        report(context.onCacheError, asError(error, `late ${store} write failed`), key);
+        if (store === findable) recorded = false;
+      }
+    }
+    if (!recorded) return;
   }
   hold.end();
 }
@@ -1567,6 +1641,8 @@ export function createPaywallWithInFlight(
     receiptVersion: deps.receiptVersion ?? 1,
     cache: deps.cache,
     onCacheError: deps.onCacheError,
+    ...(deps.receiptArchive ? { archive: deps.receiptArchive } : {}),
+    ...(deps.onArchiveError ? { onArchiveError: deps.onArchiveError } : {}),
     ...(deps.onServicePolicyError ? { onServicePolicyError: deps.onServicePolicyError } : {}),
     inFlight,
     lockTtlMs: deps.settlementLockTtlMs ?? DEFAULT_SETTLEMENT_LOCK_TTL_MS,

@@ -131,6 +131,14 @@ export {
   type MppChargeVerifyResult,
 } from "./mpp-charge.js";
 export {
+  createInMemoryPaymentReceiptArchive,
+  createRedisPaymentReceiptArchive,
+  type InMemoryPaymentReceiptArchiveOptions,
+  type PaymentReceiptArchive,
+  type RedisArchiveClient,
+  type RedisPaymentReceiptArchiveOptions,
+} from "./payment-receipt-archive.js";
+export {
   createRouteTable,
   type RouteTable,
   type RouteTableEntry,

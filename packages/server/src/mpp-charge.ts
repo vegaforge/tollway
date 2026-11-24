@@ -75,6 +75,12 @@ export interface MppChargeHandler {
    */
   challenge?(input: MppChargeChallengeInput): Promise<MppChargeChallenge>;
   /**
+   * The nonce `verify` would return for this credential, derived locally
+   * with no network call. The gate uses it to find a settled payment in its
+   * cache and receipt archive before verifying again (#162).
+   */
+  idempotencyKey?(input: { payment: MppChargeVerifyInput["payment"] }): Promise<string | undefined>;
+  /**
    * Offline checks only: decoding, challenge provenance and binding to the
    * offer. Nothing is submitted, so the gate can dedupe before `settle`.
    */
@@ -90,6 +96,9 @@ export interface MppChargeHandler {
  */
 export function createMockMppChargeHandler(): MppChargeHandler {
   return {
+    async idempotencyKey({ payment }) {
+      return payment.payload ? mockHex(payment.payload, 32) : undefined;
+    },
     async verify({ payment }) {
       if (!payment.payload) {
         return { valid: false, reason: "empty mpp charge payload" };
@@ -209,6 +218,12 @@ export function createMppChargeHandler(options: MppChargeOptions): MppChargeHand
   }
 
   return {
+    async idempotencyKey({ payment }) {
+      // The same digest verify returns, so a cached or archived receipt is
+      // found under the key the settlement was recorded with.
+      return payment.payload ? deriveMppChargeNonce(payment.payload) : undefined;
+    },
+
     async challenge({ offer, request }) {
       const mismatch = offerMismatch(offer);
       if (mismatch) {
