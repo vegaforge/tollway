@@ -18,6 +18,10 @@ export const serviceErrorCodes = [
   "payload-too-large",
   /** A backing store failed its readiness check. */
   "not-ready",
+  /** The resource is in a state the request cannot act on, such as closing a recovering channel. */
+  "conflict",
+  /** A channel close was attempted and did not complete; `details.status` is its current status. */
+  "close-failed",
   /** An unexpected failure. The cause is logged, never returned. */
   "internal-error",
 ] as const;

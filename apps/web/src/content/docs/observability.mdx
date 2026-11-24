@@ -209,6 +209,40 @@ when discovery is unsuitable. `FEE_SPONSOR_THRESHOLD_STROOPS` defaults to
 offline fake reader and prints `1000000000` stroops. The demo does not start a
 background timer; library services should call `start()` and stop on shutdown.
 
+## Receipt archive
+
+A receipt archive keeps every signed receipt a service issued and lets you search them. `createMemoryReceiptArchive()` keeps them in process; `createSqliteReceiptArchive({ filename })` keeps them in a file through the built-in `node:sqlite` (Node 22.13 or later). Both pass the same conformance suite.
+
+```ts
+import { Ed25519Verifier } from "@vegaforge/tollway-core";
+import { createSqliteReceiptArchive } from "@vegaforge/tollway-observability";
+
+const archive = createSqliteReceiptArchive({
+  filename: "./receipts.db",
+  verifier: new Ed25519Verifier({ "service-key-2026": publicKey }),
+});
+
+await archive.append(signedReceipt); // "appended", or "duplicate" for a repeat
+
+let cursor: string | undefined;
+do {
+  const page = await archive.search(
+    { payee: "G...SERVICE", from: "2026-11-01T00:00:00Z" },
+    cursor === undefined ? { limit: 100 } : { limit: 100, cursor },
+  );
+  for (const receipt of page.items) console.log(receipt.receipt.id);
+  cursor = page.nextCursor ?? undefined;
+} while (cursor !== undefined);
+```
+
+- **Idempotent by id.** Appending the same receipt again returns `duplicate`. A different body under an id that is already stored throws `receipt-conflict`, and the stored receipt is kept.
+- **Checked on the way in and out.** Every receipt is parsed with `signedReceiptSchema` on append and again on read. With a `verifier`, a receipt whose signature does not verify is never stored (`invalid-receipt`). A stored row that no longer parses throws `corrupt-receipt`.
+- **Stored as given.** The archive keeps the canonical JSON of the receipt, so a later receipt version is stored exactly.
+- **Filters.** `payer`, `payee`, `model`, `network`, `asset`, `resource` (exact) or `resourcePrefix` (compared character by character), `from` and `to` on `issuedAt` (inclusive), `txHash`, and `channelId` with an optional `sequence`. SQLite indexes every one of them.
+- **Pages.** Results are newest first by `(issuedAt, id)`, up to 500 a page (50 by default). Pass `nextCursor` back as `cursor`. Paging is stable: receipts appended while you page never make you skip or repeat one that was already there. A cursor the archive did not produce is rejected with `invalid-cursor`.
+
+The archive never adds amounts together; spend totals come from the metrics store.
+
 ## Reference
 
 [`docs/design.md`, "Observability"](https://github.com/vegaforge/tollway/blob/main/docs/design.md#observability) is the architectural reference. The code lives in `packages/observability/src/`.
