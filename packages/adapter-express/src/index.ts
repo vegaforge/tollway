@@ -7,7 +7,13 @@
  * "Repository layout".
  */
 
-import type { Gate, RouteTable } from "@vegaforge/tollway-server";
+import {
+  BodyTooLargeError,
+  concatChunks,
+  type Gate,
+  type RequestBodySource,
+  type RouteTable,
+} from "@vegaforge/tollway-server";
 import type { NextFunction, Request, RequestHandler, Response } from "express";
 
 /** Where the verified receipt is stashed on res.locals for downstream handlers. */
@@ -25,6 +31,7 @@ export function expressPaywall(gate: Gate): RequestHandler {
       method: req.method,
       url: req.originalUrl,
       headers: req.headers,
+      body: expressBody(req),
     })
       .then((outcome) => {
         if (outcome.kind === "settled") {
@@ -53,5 +60,51 @@ export function expressRouteTable(table: RouteTable): RequestHandler {
       return;
     }
     expressPaywall(match.gate)(req, res, next);
+  };
+}
+
+/** The raw bytes a body parser kept, when one ran before the paywall. */
+type WithRawBody = Request & { rawBody?: unknown; _body?: boolean };
+
+/**
+ * The request body for a route with `bindBody` (#164), read only when the
+ * gate asks.
+ *
+ * - If a parser ran first and kept the raw bytes (`express.raw()`, or
+ *   `express.json({ verify })` storing `req.rawBody`), those are used.
+ * - If no parser ran, the stream is read here, stopping at the limit. The
+ *   bytes are then left on `req.rawBody` and, when nothing set `req.body`,
+ *   on `req.body` as a Buffer, so the handler still gets the whole body.
+ * - If a parser consumed the stream without keeping the raw bytes, there is
+ *   nothing left to bind, and the request fails rather than binding nothing.
+ */
+function expressBody(req: Request): RequestBodySource {
+  const request = req as WithRawBody;
+  return {
+    async read(maxBytes) {
+      const kept = request.rawBody ?? (Buffer.isBuffer(request.body) ? request.body : undefined);
+      if (kept instanceof Uint8Array) {
+        if (kept.byteLength > maxBytes) throw new BodyTooLargeError(maxBytes);
+        return kept;
+      }
+      if (request._body === true || request.readableEnded) {
+        throw new Error(
+          "the request body was parsed before the paywall without keeping its raw bytes; use express.raw() or store them with express.json({ verify }) as req.rawBody",
+        );
+      }
+      const chunks: Uint8Array[] = [];
+      let total = 0;
+      for await (const chunk of request as AsyncIterable<Buffer>) {
+        total += chunk.byteLength;
+        if (total > maxBytes) throw new BodyTooLargeError(maxBytes);
+        chunks.push(chunk);
+      }
+      const bytes = Buffer.from(concatChunks(chunks, total));
+      request.rawBody = bytes;
+      if (request.body === undefined) request.body = bytes;
+      // body-parser skips a request it sees as already parsed.
+      request._body = true;
+      return bytes;
+    },
   };
 }

@@ -11,7 +11,7 @@
  */
 
 import type { SignedReceipt } from "@vegaforge/tollway-core";
-import type { Gate, RouteTable } from "@vegaforge/tollway-server";
+import { type Gate, type RouteTable, readBodyStream } from "@vegaforge/tollway-server";
 
 /** Extra argument a paid handler receives: the verified receipt. */
 export type PaidContext = { receipt: SignedReceipt };
@@ -46,6 +46,9 @@ export function withPaywall(
       method: request.method,
       url: requestUrl(request),
       headers: requestHeaders(request),
+      // Read from a clone, only for a route with bindBody, so the handler
+      // still reads the original body unchanged.
+      body: { read: (maxBytes) => readBodyStream(request.clone().body, maxBytes) },
     });
 
     if (outcome.kind === "settled") {

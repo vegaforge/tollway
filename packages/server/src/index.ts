@@ -74,6 +74,7 @@ export {
   type SettlementPinStore,
 } from "./failover-facilitator.js";
 export {
+  type BodyBinding,
   createPaywall,
   type DynamicPriceFunction,
   type Gate,
@@ -118,6 +119,13 @@ export {
   type MppChargeVerifyInput,
   type MppChargeVerifyResult,
 } from "./mpp-charge.js";
+export {
+  BodyTooLargeError,
+  bytesBody,
+  concatChunks,
+  type RequestBodySource,
+  readBodyStream,
+} from "./request-body.js";
 export {
   createRouteTable,
   type RouteTable,

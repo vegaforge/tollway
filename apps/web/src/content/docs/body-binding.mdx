@@ -1,0 +1,75 @@
+---
+title: Paying for a request body
+description: Bind the request body into the paid resource, so a payment for one prompt never unlocks another
+---
+
+For most routes the URL is what is paid for. For a route like `POST /infer`, the body is: a one-line prompt and a ten-page one hit the same URL. Without binding, a payment settled for a cheap body can be replayed with an expensive one for as long as the settlement cache keeps it, and the receipt says only `/infer`.
+
+Turn on `bindBody` for those routes:
+
+```ts
+const gate = createPaywall(
+  {
+    amount: "10000",
+    asset: USDC,
+    payTo: SERVICE_ACCOUNT,
+    network: "testnet",
+    resource: "/infer",
+    bindBody: { maxBytes: 64 * 1024, contentTypes: ["application/json"] },
+  },
+  { signer, facilitator, cache },
+);
+```
+
+The gate then reads the body and binds its SHA-256 into the resource identity:
+
+```text
+/infer#body-sha256=<base64url SHA-256 of the exact body bytes, no padding>
+```
+
+That identity goes in the 402 challenge, the settlement cache key and the receipt. A payment for body A replayed with body B gets 409 (`payment already settled for a different offer`) instead of a receipt, through every adapter. Routes without `bindBody` keep the identity they had.
+
+## The digest a client computes
+
+The digest is over the raw bytes as sent: never re-serialised JSON, because two encodings of one object are two different bodies. A client computes the same identity before it pays:
+
+```ts
+import { bindBodyToResource } from "@vegaforge/tollway-core";
+
+const body = new TextEncoder().encode(JSON.stringify({ prompt }));
+const resource = await bindBodyToResource("/infer", body); // matches the challenge
+```
+
+Send exactly those bytes. `bodyDigest(bytes)` returns the digest alone.
+
+## Limits and refusals
+
+| Request | Answer |
+| --- | --- |
+| Body larger than `maxBytes` | 413, before any payment is decoded or any facilitator is called. A `Content-Length` over the limit is refused without reading; a chunked body is refused as soon as the limit is passed, never buffered whole. |
+| `Content-Encoding` other than `identity` | 415. The digest is over the bytes on the wire, which a client cannot reproduce from a body it meant to compress, so compressed bodies are refused rather than half supported. |
+| A media type outside `contentTypes` | 415. Media types are compared without parameters. |
+| The adapter passed no body | 500: binding nothing would make the binding meaningless, so the gate fails closed. |
+
+Reading the body holds it in memory for the request. Keep `maxBytes` as small as the route allows: tens of kilobytes for prompts, not megabytes.
+
+## Each adapter
+
+The route handler always receives the full, unchanged body.
+
+- **Hono** and **Next** (`withPaywall`): nothing to configure. The adapter reads a clone of the request, so the handler reads the original.
+- **Express**: works with or without a body parser in front. With `express.raw()`, or `express.json({ verify })` storing the bytes on `req.rawBody`, the adapter digests those bytes. With no parser, the adapter reads the stream itself and leaves the bytes on `req.body` as a Buffer and on `req.rawBody`. A parser that consumed the stream without keeping the raw bytes leaves nothing to bind, and the request fails with 500.
+
+  ```ts
+  app.use(express.json({ verify: (req, _res, buf) => { req.rawBody = Buffer.from(buf); } }));
+  app.post("/infer", expressPaywall(gate), handler);
+  ```
+
+- **Fastify**: Fastify parses the body before `preHandler`, so register `fastifyRawBody` as a `preParsing` hook to keep the raw bytes. It answers 413 as soon as its own `maxBytes` is passed, and hands Fastify's parser an identical stream, so `request.body` is unchanged. Set its `maxBytes` to at least the largest `bindBody.maxBytes` it covers.
+
+  ```ts
+  app.addHook("preParsing", fastifyRawBody({ maxBytes: 64 * 1024 }));
+  app.post("/infer", { preHandler: fastifyPaywall(gate) }, handler);
+  ```
+
+- **Next proxy** (`paywallProxy`): a proxy cannot read the body without taking it from the route, so it passes none, and a `bindBody` route behind it fails closed with 500. Use `withPaywall` in the route handler for those routes.

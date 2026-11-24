@@ -6,6 +6,7 @@
     "deployment",
     "runtimes",
     "route-tables",
+    "body-binding",
     "discovery",
     "---Concepts---",
     "model-router",

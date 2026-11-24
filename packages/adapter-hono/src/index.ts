@@ -7,7 +7,12 @@
  * "Repository layout".
  */
 
-import type { Gate, GateOutcome, RouteTable } from "@vegaforge/tollway-server";
+import {
+  type Gate,
+  type GateOutcome,
+  type RouteTable,
+  readBodyStream,
+} from "@vegaforge/tollway-server";
 import type { Context, MiddlewareHandler } from "hono";
 
 /** Where the verified receipt is stashed on the Hono context for downstream handlers. */
@@ -36,6 +41,9 @@ export function honoPaywall(gate: Gate): MiddlewareHandler {
       method: c.req.method,
       url: requestUrl(c),
       headers: requestHeaders(c),
+      // Read from a clone, only for a route with bindBody, so the handler
+      // still reads the original body unchanged.
+      body: { read: (maxBytes) => readBodyStream(c.req.raw.clone().body, maxBytes) },
     });
 
     if (outcome.kind === "settled") {
