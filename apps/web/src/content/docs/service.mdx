@@ -105,6 +105,12 @@ The service hashes each presented key and compares the digest with every configu
 | `GET /v1/metrics/summary` | `read` | Settled spend per asset, with counts per outcome. |
 | `GET /v1/metrics/series` | `read` | Spend, counts and latency per time bucket. |
 | `GET /v1/metrics/export` | `read` | The matched metrics as a JSON or CSV download. |
+| `PUT /v1/agents/{agentId}/policy` | `admin` | Creates or updates an agent's policy with `If-Match` concurrency control. |
+| `GET /v1/agents/{agentId}/policy` | `read` | Reads the active policy with `ETag` and `If-None-Match` (`304`) support. |
+| `GET /v1/agents/{agentId}/policy/versions` | `read` | Lists every immutable policy version (including retired tombstones). |
+| `GET /v1/agents/{agentId}/policy/versions/{version}` | `read` | Reads a single immutable policy version. |
+| `DELETE /v1/agents/{agentId}/policy` | `admin` | Retires an agent's policy by appending a tombstone version. |
+| `GET /v1/audit` | `read` | Lists immutable policy audit records with cursor pagination. |
 
 `/readyz` reports a store as failing with `reason: "timeout"` or `reason: "error"`. The error itself goes to the service log, never the response, because it can name a host or carry a connection string.
 
@@ -236,6 +242,16 @@ A dashboard query cannot exhaust the process. Each of these is a `400` whose `de
 
 `metricsModule({ limits })` checks each limit when the module is created, so a bad value fails at startup.
 
+## Policy store
+
+The policy routes (`policyModule()`, mounted by `tollway-service`) store and serve per-agent `Policy` documents over HTTP without enforcing payments themselves. **Enforcement still happens in each agent process** via `createPolicyEngine(policy)` from `@vegaforge/tollway-core`; the service gives operators a single place to validate, version, distribute, and audit policy updates.
+
+- **Validation (`422 invalid-policy`)**: `PUT /v1/agents/{agentId}/policy` validates the body using `parsePolicy` from `@vegaforge/tollway-core`. Amounts must be integer strings in the asset's smallest unit, unknown keys are rejected, and any failure returns `422` with `details.issues` listing every failing path.
+- **Immutable versions & optimistic concurrency**: Each accepted `PUT` appends a monotonically increasing version (`1, 2, ...`) and returns an `ETag` header (`"<version>"`). Subsequent updates must send `If-Match` with the current version; a missing or stale `If-Match` returns `412 precondition-failed` so concurrent edits never overwrite each other.
+- **Retirement without deletion**: `DELETE /v1/agents/{agentId}/policy` appends a retired tombstone version (`retired: true`, `policy: null`) rather than deleting history. `GET /v1/agents/{agentId}/policy` then returns `404`, while `/versions` and `/versions/{version}` continue to serve every historical version.
+- **Audit trail**: Every create, update, and retirement atomically records an immutable audit entry containing the agent id, version, API key name (`actor`), timestamp, and a deterministic JSON-path structural diff from the previous version. `GET /v1/audit?agentId=...` lists records newest-first with cursor pagination, and no route edits or deletes audit history.
+- **Agent-side loading**: `@vegaforge/tollway-client` exports `fetchPolicy(serviceUrl, agentId, apiKey)`, which sends `If-None-Match`, reuses its cached `Policy` on `304 Not Modified`, validates `200` responses with `parsePolicy`, and returns a policy ready for `createPolicyEngine`.
+
 ## Errors
 
 Every error response has one shape:
@@ -244,7 +260,7 @@ Every error response has one shape:
 { "error": { "code": "invalid-request", "message": "the request did not match the schema", "details": [] } }
 ```
 
-`code` is stable and machine-readable: `unauthorized`, `forbidden`, `invalid-request`, `not-found`, `payload-too-large`, `not-ready`, `conflict`, `close-failed` and `internal-error`, plus the metrics limits above. `details` carries structured context, such as each failing field with its location and path. An unexpected failure returns `internal-error`; its cause is logged, never returned.
+`code` is stable and machine-readable: `unauthorized`, `forbidden`, `invalid-request`, `invalid-policy`, `precondition-failed`, `not-found`, `payload-too-large`, `not-ready`, `conflict`, `close-failed` and `internal-error`, plus the metrics limits above. `details` carries structured context, such as each failing field with its location and path. An unexpected failure returns `internal-error`; its cause is logged, never returned.
 
 ## Logs
 

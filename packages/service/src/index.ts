@@ -69,6 +69,12 @@ export {
   toSummaryResponse,
 } from "./metrics.js";
 export { buildOpenApiDocument, type OpenApiDocument } from "./openapi.js";
+export {
+  agentIdSchema,
+  type PolicyVersionView,
+  policyModule,
+  policyVersionViewSchema,
+} from "./policies.js";
 export { type ReadinessReport, readinessReportSchema } from "./readiness.js";
 export {
   defineRoute,
@@ -85,7 +91,15 @@ export {
   createMemoryPolicyStore,
   createMemoryReceiptStore,
   createMemoryStores,
+  diffPolicies,
+  InvalidAuditCursorError,
   type MetricsStore,
+  type PolicyAuditAction,
+  type PolicyAuditEntry,
+  type PolicyAuditPage,
+  type PolicyAuditQuery,
+  type PolicyDiffEntry,
+  type PolicyDiffOp,
   type PolicyStore,
   type PolicyVersion,
   type ReceiptPutResult,

@@ -9,6 +9,7 @@ import { CounterpartyQuarantine } from '@vegaforge/tollway-core';
 import { Keypair } from '@stellar/stellar-sdk';
 import { ModelRouter } from '@vegaforge/tollway-core';
 import { PaymentOffer } from '@vegaforge/tollway-core';
+import { Policy } from '@vegaforge/tollway-core';
 import { PolicyEngine } from '@vegaforge/tollway-core';
 import { PolicyTrace } from '@vegaforge/tollway-core';
 import { PolicyTraceComparison } from '@vegaforge/tollway-core';
@@ -29,6 +30,15 @@ export class AmbiguousSettlementError extends TollwayError {
     // (undocumented)
     readonly reason: string;
 }
+
+// @public
+export type CachedPolicyEntry = {
+    agentId: string;
+    version: number;
+    etag: string;
+    policy: Policy;
+    createdAt: string;
+};
 
 // @public
 export type ChannelFallbackOptions = {
@@ -155,6 +165,9 @@ export interface ClientSettler {
 export function createClient(options: TollwayClientOptions): TollwayClient;
 
 // @public
+export function createMemoryPolicyCache(): PolicyCache;
+
+// @public
 export function createMemoryReceiptStore(): ReceiptHistory;
 
 // @public
@@ -168,6 +181,20 @@ export const DEFAULT_RECEIPT_MAX_SKEW_MS: number;
 
 // @public
 export const DEFAULT_RECEIPT_PAGE_SIZE = 100;
+
+// @public
+export type FetchedPolicy = CachedPolicyEntry & {
+    fromCache: boolean;
+};
+
+// @public
+export function fetchPolicy(serviceUrl: string, agentId: string, apiKey: string, options?: FetchPolicyOptions): Promise<FetchedPolicy>;
+
+// @public
+export type FetchPolicyOptions = {
+    fetch?: typeof globalThis.fetch;
+    cache?: PolicyCache;
+};
 
 // @public
 export const MAX_RECEIPT_PAGE_SIZE = 1000;
@@ -268,6 +295,23 @@ export class PolicyBlockedError extends TollwayError {
     readonly detail: string;
     // (undocumented)
     readonly rule: string;
+}
+
+// @public
+export interface PolicyCache {
+    // (undocumented)
+    delete(key: string): void;
+    // (undocumented)
+    get(key: string): CachedPolicyEntry | undefined;
+    // (undocumented)
+    set(key: string, entry: CachedPolicyEntry): void;
+}
+
+// @public
+export class PolicyFetchError extends TollwayError {
+    constructor(status: number, message: string);
+    // (undocumented)
+    readonly status: number;
 }
 
 // @public

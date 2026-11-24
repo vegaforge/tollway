@@ -19,6 +19,9 @@ import { TimeseriesQuery } from '@vegaforge/tollway-observability';
 import { TimeseriesResult } from '@vegaforge/tollway-observability';
 import { z } from 'zod';
 
+// @public
+export const agentIdSchema: z.ZodString;
+
 // @public (undocumented)
 export type ApiKeyConfig = z.infer<typeof apiKeyConfigSchema>;
 
@@ -124,6 +127,9 @@ export const DEFAULT_METRICS_LIMITS: MetricsLimits;
 // @public
 export function defineRoute<P extends AnyObjectSchema | undefined = undefined, Q extends AnyObjectSchema | undefined = undefined, B extends z.ZodType | undefined = undefined>(definition: RouteDefinition<P, Q, B>): ServiceRoute;
 
+// @public
+export function diffPolicies(before: Policy | null, after: Policy | null): PolicyDiffEntry[];
+
 // @public (undocumented)
 export type ErrorBody = z.infer<typeof errorBodySchema>;
 
@@ -189,6 +195,11 @@ export const ingestBodySchema: z.ZodObject<{
         at: z.ZodISODateTime;
     }, z.core.$strict>>;
 }, z.core.$strict>;
+
+// @public
+export class InvalidAuditCursorError extends Error {
+    constructor(cursor: string);
+}
 
 // @public
 export type LogFields = Readonly<Record<string, string | number | boolean | null>>;
@@ -263,10 +274,55 @@ export const paymentMetricSchema: z.ZodObject<{
 }, z.core.$strict>;
 
 // @public
+export type PolicyAuditAction = "create" | "update" | "retire";
+
+// @public
+export type PolicyAuditEntry = {
+    sequence: number;
+    agentId: string;
+    version: number;
+    action: PolicyAuditAction;
+    actor: string;
+    createdAt: string;
+    diff: readonly PolicyDiffEntry[];
+};
+
+// @public
+export type PolicyAuditPage = {
+    entries: readonly PolicyAuditEntry[];
+    nextCursor?: string;
+};
+
+// @public
+export type PolicyAuditQuery = {
+    agentId?: string;
+    cursor?: string;
+    limit?: number;
+};
+
+// @public
+export type PolicyDiffEntry = {
+    path: string;
+    op: PolicyDiffOp;
+    before?: unknown;
+    after?: unknown;
+};
+
+// @public
+export type PolicyDiffOp = "add" | "remove" | "replace";
+
+// @public
+export function policyModule(): ServiceModule;
+
+// @public
 export interface PolicyStore extends ServiceStore {
-    append(agentId: string, policy: Policy, expectedVersion: number | null): Promise<PolicyVersion | "version-conflict">;
+    append(agentId: string, policy: Policy | null, expectedVersion: number | null, actor?: string): Promise<PolicyVersion | "version-conflict">;
     // (undocumented)
     current(agentId: string): Promise<PolicyVersion | undefined>;
+    // (undocumented)
+    getVersion(agentId: string, version: number): Promise<PolicyVersion | undefined>;
+    // (undocumented)
+    listAudit(query?: PolicyAuditQuery): Promise<PolicyAuditPage>;
     // (undocumented)
     versions(agentId: string): Promise<readonly PolicyVersion[]>;
 }
@@ -275,9 +331,96 @@ export interface PolicyStore extends ServiceStore {
 export type PolicyVersion = {
     agentId: string;
     version: number;
-    policy: Policy;
+    policy: Policy | null;
     createdAt: string;
 };
+
+// @public (undocumented)
+export type PolicyVersionView = z.infer<typeof policyVersionViewSchema>;
+
+// @public
+export const policyVersionViewSchema: z.ZodObject<{
+    agentId: z.ZodString;
+    version: z.ZodNumber;
+    retired: z.ZodBoolean;
+    policy: z.ZodNullable<z.ZodObject<{
+        $schema: z.ZodOptional<z.ZodString>;
+        policyVersion: z.ZodLiteral<1>;
+        mode: z.ZodOptional<z.ZodEnum<{
+            enforce: "enforce";
+            "dry-run": "dry-run";
+        }>>;
+        budgets: z.ZodOptional<z.ZodObject<{
+            daily: z.ZodOptional<z.ZodString>;
+            total: z.ZodOptional<z.ZodString>;
+        }, z.core.$strict>>;
+        perService: z.ZodOptional<z.ZodRecord<z.ZodString, z.ZodObject<{
+            cap: z.ZodOptional<z.ZodString>;
+            dailyCap: z.ZodOptional<z.ZodString>;
+            window: z.ZodOptional<z.ZodObject<{
+                windowSeconds: z.ZodNumber;
+                cap: z.ZodString;
+            }, z.core.$strict>>;
+        }, z.core.$strict>>>;
+        perResource: z.ZodOptional<z.ZodRecord<z.ZodString, z.ZodObject<{
+            match: z.ZodOptional<z.ZodEnum<{
+                exact: "exact";
+                prefix: "prefix";
+            }>>;
+            cap: z.ZodOptional<z.ZodString>;
+            dailyCap: z.ZodOptional<z.ZodString>;
+            window: z.ZodOptional<z.ZodObject<{
+                windowSeconds: z.ZodNumber;
+                cap: z.ZodString;
+            }, z.core.$strict>>;
+        }, z.core.$strict>>>;
+        perModel: z.ZodOptional<z.ZodRecord<z.ZodEnum<{
+            x402: "x402";
+            "mpp-charge": "mpp-charge";
+            "mpp-channel": "mpp-channel";
+        }> & z.core.$partial, z.ZodObject<{
+            enabled: z.ZodOptional<z.ZodBoolean>;
+            minChannelDeposit: z.ZodOptional<z.ZodString>;
+        }, z.core.$strict>>>;
+        rateLimit: z.ZodOptional<z.ZodObject<{
+            requestsPerMinute: z.ZodOptional<z.ZodNumber>;
+            windows: z.ZodOptional<z.ZodArray<z.ZodObject<{
+                windowSeconds: z.ZodNumber;
+                limit: z.ZodNumber;
+            }, z.core.$strict>>>;
+            count: z.ZodOptional<z.ZodEnum<{
+                settlements: "settlements";
+                attempts: "attempts";
+            }>>;
+            scope: z.ZodOptional<z.ZodEnum<{
+                global: "global";
+                "per-counterparty": "per-counterparty";
+            }>>;
+            perCounterpartyKeyLimit: z.ZodOptional<z.ZodNumber>;
+        }, z.core.$strict>>;
+        anomaly: z.ZodOptional<z.ZodObject<{
+            maxSpendPerMinute: z.ZodOptional<z.ZodString>;
+            adaptive: z.ZodOptional<z.ZodObject<{
+                kind: z.ZodLiteral<"ewma">;
+                smoothing: z.ZodObject<{
+                    numerator: z.ZodString;
+                    denominator: z.ZodString;
+                }, z.core.$strict>;
+                sensitivity: z.ZodObject<{
+                    numerator: z.ZodString;
+                    denominator: z.ZodString;
+                }, z.core.$strict>;
+                warmupPeriods: z.ZodNumber;
+                scope: z.ZodOptional<z.ZodEnum<{
+                    asset: "asset";
+                    "asset-payee": "asset-payee";
+                }>>;
+                maxBaselineGrowthPerMinute: z.ZodOptional<z.ZodString>;
+            }, z.core.$strict>>;
+        }, z.core.$strict>>;
+    }, z.core.$strict>>;
+    createdAt: z.ZodString;
+}, z.core.$strip>;
 
 // @public (undocumented)
 export type ReadinessReport = z.infer<typeof readinessReportSchema>;
@@ -480,7 +623,7 @@ export type ServiceEnv = {
 export type ServiceErrorCode = (typeof serviceErrorCodes)[number];
 
 // @public
-export const serviceErrorCodes: readonly ["unauthorized", "forbidden", "invalid-request", "not-found", "payload-too-large", "not-ready", "conflict", "close-failed", "internal-error"];
+export const serviceErrorCodes: readonly ["unauthorized", "forbidden", "invalid-request", "invalid-policy", "precondition-failed", "not-found", "payload-too-large", "not-ready", "conflict", "close-failed", "internal-error"];
 
 // @public (undocumented)
 export interface ServiceLogger {

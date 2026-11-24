@@ -6,6 +6,7 @@ import { ServiceConfigError } from "./config.js";
 import { createConsoleLogger, describeError } from "./logger.js";
 import { metricsModule } from "./metrics.js";
 import { loadServiceConfig } from "./node-config.js";
+import { policyModule } from "./policies.js";
 
 /**
  * The `tollway-service` command.
@@ -36,7 +37,7 @@ function startCommand(): void {
   const logger = createConsoleLogger();
   const config = loadServiceConfig(process.env);
   // The metrics routes (#226) are the service's first module.
-  const app = createService({ config, logger, modules: [metricsModule()] });
+  const app = createService({ config, logger, modules: [metricsModule(), policyModule()] });
   const server = serve({ fetch: app.fetch, port: config.port, hostname: config.host }, (info) => {
     logger.info("listening", { host: config.host, port: info.port });
   });
