@@ -119,6 +119,22 @@ export {
   type MppChargeVerifyResult,
 } from "./mpp-charge.js";
 export {
+  buildOfferReceiptChallengeExtension,
+  buildOfferReceiptSettlementExtension,
+  decodeOfferReceiptJws,
+  ed25519PublicKeyToDidKey,
+  OFFER_RECEIPT_EXTENSION_KEY,
+  type OfferExtensionPayload,
+  type OfferReceiptConfig,
+  type ReceiptExtensionPayload,
+  type ResolvedOfferReceiptConfig,
+  resolveOfferReceiptConfig,
+  resolveOfferReceiptKid,
+  signOfferJws,
+  signReceiptJws,
+  verifyOfferReceiptJws,
+} from "./offer-receipt.js";
+export {
   createRouteTable,
   type RouteTable,
   type RouteTableEntry,

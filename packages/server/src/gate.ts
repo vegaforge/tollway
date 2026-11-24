@@ -41,6 +41,14 @@ import {
 } from "./headers.js";
 import type { MppChargeHandler } from "./mpp-charge.js";
 import {
+  buildOfferReceiptChallengeExtension,
+  buildOfferReceiptSettlementExtension,
+  OFFER_RECEIPT_EXTENSION_KEY,
+  type OfferReceiptConfig,
+  type ResolvedOfferReceiptConfig,
+  resolveOfferReceiptConfig,
+} from "./offer-receipt.js";
+import {
   createInMemoryServicePolicyStore,
   SERVICE_POLICY_DENIALS,
   type ServicePolicy,
@@ -104,6 +112,13 @@ export type PaywallConfig = {
    * at `createPaywall`. See `DiscoveryDeclaration` and docs/discovery.
    */
   discovery?: DiscoveryDeclaration;
+  /**
+   * Opt-in attachment of the x402 offer-receipt extension (#172). When
+   * enabled, 402 challenges carry `extensions["offer-receipt"].info.offers`
+   * and settled `PAYMENT-RESPONSE` headers carry
+   * `extensions["offer-receipt"].info.receipt`.
+   */
+  offerReceipt?: boolean | OfferReceiptConfig;
 };
 
 /**
@@ -454,14 +469,27 @@ async function priceRequest(
  * PAYMENT-RESPONSE, and Tollway's signed receipt in TOLLWAY-RECEIPT. The
  * facilitator settled the payment, so `success` is always true here.
  */
-function settlementHeaders(signed: SignedReceipt): Record<string, string> {
+async function settlementHeaders(
+  signed: SignedReceipt,
+  context: Pick<SettlementContext, "signer" | "offerReceipt">,
+): Promise<Record<string, string>> {
   const { settlement, network } = signed.receipt;
   const headers: Record<string, string> = { [TOLLWAY_RECEIPT_HEADER]: encodeHeader(signed) };
   if (settlement.kind === "transaction") {
+    const extensions = context.offerReceipt
+      ? {
+          [OFFER_RECEIPT_EXTENSION_KEY]: await buildOfferReceiptSettlementExtension({
+            signedReceipt: signed,
+            signer: context.signer,
+            config: context.offerReceipt,
+          }),
+        }
+      : undefined;
     headers[PAYMENT_RESPONSE_HEADER] = encodePaymentResponseHeader({
       success: true,
       transaction: settlement.txHash,
       network: stellarCaip2(network),
+      ...(extensions ? { extensions } : {}),
     });
   }
   return headers;
@@ -494,6 +522,7 @@ export type InFlightSettlementResult = SettlementResult;
 type SettlementContext = {
   signer: ReceiptSigner;
   receiptVersion: 1 | 2;
+  offerReceipt?: ResolvedOfferReceiptConfig;
   cache?: SettlementCache;
   onCacheError?: (error: Error, key: string) => void;
   /** Settlements in progress in this process, by cache key. */
@@ -753,7 +782,7 @@ async function settleWithHandler<TPayment>(
     const knownKey = `${model}:${knownNonce}`;
     const pending = context.inFlight.get(knownKey);
     if (pending) {
-      return toOutcome(await awaitPending(pending), offer, model, method, true);
+      return toOutcome(await awaitPending(pending), offer, model, method, true, context);
     }
     const cached = await context.cache?.get(knownKey);
     if (cached) {
@@ -763,7 +792,7 @@ async function settleWithHandler<TPayment>(
         method: cached.method,
         replayed: true,
       };
-      return toOutcome(replay, offer, model, method, false);
+      return toOutcome(replay, offer, model, method, false, context);
     }
   }
   // The caller allows only a replay here (an expired quote): a payment that
@@ -815,7 +844,7 @@ async function settleWithHandler<TPayment>(
   // written with no await in between, so two requests cannot both miss it.
   const pending = context.inFlight.get(key);
   if (pending) {
-    return toOutcome(await awaitPending(pending), offer, model, method, true);
+    return toOutcome(await awaitPending(pending), offer, model, method, true, context);
   }
 
   // The in-flight slot is claimed before anything awaits, so a second copy
@@ -839,7 +868,7 @@ async function settleWithHandler<TPayment>(
   try {
     const result = await attempt;
     if (!result.ok && result.hold) hold = result.hold;
-    return await toOutcome(result, offer, model, method, false);
+    return await toOutcome(result, offer, model, method, false, context);
   } catch (error) {
     if (error instanceof AmbiguousSettlementFailure) hold = error.hold;
     throw unwrapFailure(error);
@@ -949,6 +978,7 @@ async function toOutcome(
   model: SettlementModel,
   method: string,
   waited: boolean,
+  context: Pick<SettlementContext, "signer" | "offerReceipt">,
 ): Promise<GateOutcome> {
   if (!result.ok) {
     return result.outcome;
@@ -973,7 +1003,7 @@ async function toOutcome(
   const outcome: GateOutcome = {
     kind: "settled",
     status: 200,
-    headers: settlementHeaders(result.receipt),
+    headers: await settlementHeaders(result.receipt, context),
     receipt: result.receipt,
     replayed: waited || result.replayed,
   };
@@ -1344,6 +1374,7 @@ async function paymentRequired(
   mppChargeHandler: MppChargeHandler | undefined,
   config: PaywallConfig,
   quote: string | undefined,
+  context: Pick<SettlementContext, "signer" | "offerReceipt" | "clock">,
 ): Promise<GateOutcome> {
   const challenge: PaymentRequired = {
     x402Version,
@@ -1358,9 +1389,20 @@ async function paymentRequired(
       }),
     ],
   };
-  // Only a route that opts in publishes anything (#154).
-  if (config.discovery) {
-    challenge.extensions = discoveryExtensions(config.discovery, request);
+  // Only a route that opts in publishes anything (#154, #172).
+  const extensions: Record<string, unknown> = {
+    ...(config.discovery ? discoveryExtensions(config.discovery, request) : {}),
+  };
+  if (context.offerReceipt) {
+    extensions[OFFER_RECEIPT_EXTENSION_KEY] = await buildOfferReceiptChallengeExtension({
+      offer,
+      signer: context.signer,
+      nowMs: context.clock(),
+      config: context.offerReceipt,
+    });
+  }
+  if (Object.keys(extensions).length > 0) {
+    challenge.extensions = extensions;
   }
   const headers: Record<string, string> = {
     [PAYMENT_REQUIRED_HEADER]: encodePaymentRequiredHeader(challenge),
@@ -1418,9 +1460,11 @@ export function createPaywallWithInFlight(
   if (deps.receiptVersion !== undefined && deps.receiptVersion !== 1 && deps.receiptVersion !== 2) {
     throw new TypeError(`receiptVersion must be 1 or 2, got ${String(deps.receiptVersion)}`);
   }
+  const offerReceipt = resolveOfferReceiptConfig(config.offerReceipt, config.maxTimeoutSeconds);
   const context: SettlementContext = {
     signer: deps.signer,
     receiptVersion: deps.receiptVersion ?? 1,
+    ...(offerReceipt ? { offerReceipt } : {}),
     cache: deps.cache,
     onCacheError: deps.onCacheError,
     ...(deps.onServicePolicyError ? { onServicePolicyError: deps.onServicePolicyError } : {}),
@@ -1513,7 +1557,15 @@ export function createPaywallWithInFlight(
     // A dynamic price is only paid against a quote this gate issued: a
     // missing, expired, tampered or mismatched one gets a fresh 402.
     if (typeof config.amount === "function" && candidateQuote !== quote) {
-      return paymentRequired(offer, request, acceptedModels, deps.mppChargeHandler, config, quote);
+      return paymentRequired(
+        offer,
+        request,
+        acceptedModels,
+        deps.mppChargeHandler,
+        config,
+        quote,
+        context,
+      );
     }
 
     // An MPP credential answers an MPP challenge, so the agent has already
@@ -1538,7 +1590,15 @@ export function createPaywallWithInFlight(
     }
 
     if (!x402Payment) {
-      return paymentRequired(offer, request, acceptedModels, deps.mppChargeHandler, config, quote);
+      return paymentRequired(
+        offer,
+        request,
+        acceptedModels,
+        deps.mppChargeHandler,
+        config,
+        quote,
+        context,
+      );
     }
 
     const decision = deps.router
@@ -1566,6 +1626,7 @@ export function createPaywallWithInFlight(
           deps.mppChargeHandler,
           config,
           fresh,
+          context,
         );
       };
       return settleWithHandler(
