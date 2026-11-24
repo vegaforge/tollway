@@ -101,10 +101,103 @@ The service hashes each presented key and compares the digest with every configu
 | `GET /readyz` | none | Readiness. Checks every backing store; 200 when all are ok, 503 naming each failing one. |
 | `GET /openapi.json` | none | The OpenAPI 3.1 document for every mounted route. |
 | `GET /v1/whoami` | any scope | The calling key's name and scopes. |
+| `POST /v1/metrics` | `ingest` | Records a batch of payment metrics. See [Metrics](#metrics). |
+| `GET /v1/metrics/summary` | `read` | Settled spend per asset, with counts per outcome. |
+| `GET /v1/metrics/series` | `read` | Spend, counts and latency per time bucket. |
+| `GET /v1/metrics/export` | `read` | The matched metrics as a JSON or CSV download. |
 
 `/readyz` reports a store as failing with `reason: "timeout"` or `reason: "error"`. The error itself goes to the service log, never the response, because it can name a host or carry a connection string.
 
 The OpenAPI document is generated from the zod schemas each route validates its path, query and body with, so it cannot drift from what the service accepts.
+
+## Metrics
+
+The metrics routes are a module. The `tollway-service` binary mounts them; a program that builds the app itself passes the module in:
+
+```ts
+import { createService, metricsModule, parseServiceConfig } from "@vegaforge/tollway-service";
+
+const app = createService({
+  config: parseServiceConfig({ env: process.env }),
+  modules: [metricsModule({ limits: { maxRangeMs: 30 * 24 * 60 * 60 * 1000 } })],
+});
+```
+
+Every route reads and writes through the `MetricsStore`, so the counting rules are the observability hub's, and a persistent store changes where metrics live, never how they are counted.
+
+### Ingest
+
+```http
+POST /v1/metrics
+Authorization: Bearer <key with the ingest scope>
+Content-Type: application/json
+
+{
+  "metrics": [
+    {
+      "payer": "GAGENT...",
+      "payee": "GSERVICE...",
+      "model": "x402",
+      "amount": "10000",
+      "asset": "USDC:GA5Z...",
+      "latencyMs": 182,
+      "outcome": "settled",
+      "at": "2026-11-23T10:04:31.000Z"
+    }
+  ]
+}
+```
+
+Each metric is validated field by field: `amount` is an integer string in the asset's smallest unit, `at` is ISO 8601 with a zone, and `latencyMs` is a finite non-negative number. Unknown fields are refused. A batch holds 1 to 1000 metrics, and the answer is `202 {"accepted": n}` once the store has recorded them.
+
+### Summary
+
+```http
+GET /v1/metrics/summary?asset=USDC:GA5Z...&from=2026-11-01T00:00:00Z&to=2026-11-24T00:00:00Z
+```
+
+The filters are `payer`, `payee`, `model`, `asset`, `outcome`, `from` and `to`. An unknown query parameter is a `400`, so a typo cannot silently widen a query.
+
+```json
+{
+  "count": 5,
+  "byOutcome": { "settled": 3, "failed": 1, "skipped": 1 },
+  "byAsset": [{ "asset": "USDC:GA5Z...", "amount": "1250", "count": 2 }],
+  "byModel": [{ "model": "x402", "asset": "USDC:GA5Z...", "amount": "1000", "count": 1 }],
+  "byPayer": [{ "payer": "GAGENT...", "asset": "USDC:GA5Z...", "amount": "1000", "count": 1 }],
+  "byPayee": [{ "payee": "GSERVICE...", "asset": "USDC:GA5Z...", "amount": "1000", "count": 1 }]
+}
+```
+
+Only settled metrics add to an amount, and amounts in different assets are never added together, so there is no cross-asset total. `count` is every matched metric, so a failure rate is `byOutcome.failed / count`.
+
+### Time series
+
+```http
+GET /v1/metrics/series?from=2026-11-23T00:00:00Z&to=2026-11-24T00:00:00Z&bucket=1h&groupBy=model
+```
+
+`bucket` is `1m`, `5m`, `1h` or `1d`. `groupBy` is `model` (the default), `payer` or `payee`, and every row is also split by asset. The range is `[from, to)`: both ends are required, a metric exactly on a bucket boundary lands in the bucket that starts there, and every bucket in the range is returned, empty ones included. Each row carries the settled `amount`, the `settled`, `failed` and `skipped` counts, and nearest-rank `latencyMs` percentiles (`p50`, `p95`, `p99`, or `null` for an empty row). The filters are the summary's.
+
+### Export
+
+```http
+GET /v1/metrics/export?format=csv&from=2026-11-01T00:00:00Z
+```
+
+`format` is `json` or `csv`, and the filters are the summary's. The body is what `ObservabilityHub.export` writes, with `Content-Type` `application/json` or `text/csv` and a `Content-Disposition: attachment` file name. CSV cells that a spreadsheet could read as a formula are prefixed with a single quote.
+
+### Limits
+
+A dashboard query cannot exhaust the process. Each of these is a `400` whose `details.limit` names the limit and its value:
+
+| Code | When |
+| --- | --- |
+| `range-too-large` | `from` to `to` is wider than `maxRangeMs` (default 90 days). |
+| `series-too-large` | The series needs more buckets or rows than the store allows (the in-memory store allows 10 080 buckets, seven days of `1m`). |
+| `export-too-large` | The export would return more than `maxExportRows` metrics (default 10 000). |
+
+`metricsModule({ limits })` checks each limit when the module is created, so a bad value fails at startup.
 
 ## Errors
 
@@ -114,7 +207,7 @@ Every error response has one shape:
 { "error": { "code": "invalid-request", "message": "the request did not match the schema", "details": [] } }
 ```
 
-`code` is stable and machine-readable: `unauthorized`, `forbidden`, `invalid-request`, `not-found`, `payload-too-large`, `not-ready` and `internal-error`. `details` carries structured context, such as each failing field with its location and path. An unexpected failure returns `internal-error`; its cause is logged, never returned.
+`code` is stable and machine-readable: `unauthorized`, `forbidden`, `invalid-request`, `not-found`, `payload-too-large`, `not-ready` and `internal-error`, plus the metrics limits above. `details` carries structured context, such as each failing field with its location and path. An unexpected failure returns `internal-error`; its cause is logged, never returned.
 
 ## Logs
 

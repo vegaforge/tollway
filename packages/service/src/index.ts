@@ -45,6 +45,23 @@ export {
   type LogFields,
   type ServiceLogger,
 } from "./logger.js";
+export {
+  DEFAULT_METRICS_LIMITS,
+  exportQuerySchema,
+  ingestBodySchema,
+  MAX_METRIC_BATCH,
+  type MetricsLimits,
+  type MetricsModuleOptions,
+  metricsErrorCodes,
+  metricsModule,
+  paymentMetricSchema,
+  type SummaryResponse,
+  seriesQuerySchema,
+  seriesResponseSchema,
+  summaryQuerySchema,
+  summaryResponseSchema,
+  toSummaryResponse,
+} from "./metrics.js";
 export { buildOpenApiDocument, type OpenApiDocument } from "./openapi.js";
 export { type ReadinessReport, readinessReportSchema } from "./readiness.js";
 export {
