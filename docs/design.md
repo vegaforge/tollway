@@ -84,6 +84,8 @@ SHARED OPTIONAL SERVICE
   - Receipt archive
 ```
 
+The shared service is `packages/service` (`@vegaforge/tollway-service`), which an operator runs themselves. It holds no key that signs receipts or moves funds and calls nothing Tollway operates. See [the service docs](../apps/web/src/content/docs/service.mdx) for the trust boundary, configuration and API-key model.
+
 ### The model router
 
 The router is the conceptual core of the project. Per interaction or per counterparty, it decides which settlement model to use.
@@ -171,6 +173,7 @@ tollway/
     channels/             # MPP channel lifecycle manager
     reconcile/            # reconciliation engine (TS; Go variant later)
     observability/        # metrics, exports, webhooks
+    service/              # optional self-hosted shared service (Hono, API keys, OpenAPI)
     theme/                # shared design tokens
   apps/
     dashboard/            # Next.js observability UI
