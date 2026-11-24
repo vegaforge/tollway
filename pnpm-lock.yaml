@@ -608,6 +608,9 @@ importers:
       '@types/node':
         specifier: ^22.20.5
         version: 22.20.5
+      fast-check:
+        specifier: ^4.10.3
+        version: 4.10.3
       tsup:
         specifier: ^9.0.0
         version: 9.0.0(@microsoft/api-extractor@7.60.1(@types/node@22.20.5))(jiti@2.7.0)(postcss@8.5.33)(tsx@4.23.15)(typescript@5.9.3)(yaml@2.9.1)

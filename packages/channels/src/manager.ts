@@ -146,6 +146,35 @@ export function createChannelManager(options: CreateChannelManagerOptions): Chan
   const recovering = new Map<string, Promise<RecoveryResult>>();
 
   /**
+   * The last task queued for each channel that has work in flight (#175).
+   * Commits and closes on one channel take turns through this queue, so a
+   * commit reads the sequence the previous commit wrote and a close reads the
+   * final commitment stream. Channels do not wait for each other. An entry is
+   * dropped once its queue drains, so the map only holds busy channels.
+   */
+  const channelQueues = new Map<string, Promise<void>>();
+
+  function forgetIfIdle(channelId: string, tail: Promise<void>): void {
+    if (channelQueues.get(channelId) === tail) channelQueues.delete(channelId);
+  }
+
+  /**
+   * Runs `task` after every earlier task for `channelId` has settled. A task
+   * that fails rejects only its own caller; the next task still runs.
+   */
+  function serialiseChannel<T>(channelId: string, task: () => Promise<T>): Promise<T> {
+    const previous = channelQueues.get(channelId) ?? Promise.resolve();
+    const run = previous.then(task);
+    // The queue tail never rejects, so a failed task cannot stall the queue.
+    const tail: Promise<void> = run.then(
+      () => forgetIfIdle(channelId, tail),
+      () => forgetIfIdle(channelId, tail),
+    );
+    channelQueues.set(channelId, tail);
+    return run;
+  }
+
+  /**
    * Records the close attempt, then asks the adapter to close. The attempt
    * is written first so a process that dies mid-close leaves `closing` with
    * the ledger to search from. Only an adapter that says it submitted
@@ -493,52 +522,57 @@ export function createChannelManager(options: CreateChannelManagerOptions): Chan
       const delta = parseAmount(amount, "amount");
       if (delta === 0n) throw new InvalidAmountError(amount, "amount");
 
-      const current = await store.getChannel(channelId);
-      if (!current) throw new ChannelNotFoundError(channelId);
-      if (current.status !== "open") {
-        throw new ChannelNotOpenError(channelId, current.status);
-      }
+      // Queued behind earlier commits and closes on this channel, so the read
+      // below sees the state the last one left (#175).
+      return serialiseChannel(channelId, async () => {
+        const current = await store.getChannel(channelId);
+        if (!current) throw new ChannelNotFoundError(channelId);
+        if (current.status !== "open") {
+          throw new ChannelNotOpenError(channelId, current.status);
+        }
 
-      await assertNotQuarantined(current.counterparty);
+        await assertNotQuarantined(current.counterparty);
 
-      const committed = parseAmount(current.committed, "committed");
-      const deposit = parseAmount(current.deposit, "deposit");
-      const nextCumulative = committed + delta;
+        const committed = parseAmount(current.committed, "committed");
+        const deposit = parseAmount(current.deposit, "deposit");
+        const nextCumulative = committed + delta;
 
-      if (nextCumulative > deposit) {
-        throw new CommitmentExceedsDepositError(
+        if (nextCumulative > deposit) {
+          throw new CommitmentExceedsDepositError(
+            channelId,
+            nextCumulative.toString(),
+            current.deposit,
+          );
+        }
+
+        const nextSequence = current.sequence + 1;
+        const cumulativeAmount = nextCumulative.toString();
+
+        const signed: SignedCommitment = await adapter.signCommitment({
           channelId,
-          nextCumulative.toString(),
-          current.deposit,
-        );
-      }
+          cumulativeAmount,
+          network: current.network,
+        });
 
-      const nextSequence = current.sequence + 1;
-      const cumulativeAmount = nextCumulative.toString();
+        const commitment: Commitment = {
+          channelId,
+          sequence: nextSequence,
+          cumulativeAmount,
+          commitment: signed.commitment,
+        };
 
-      const signed: SignedCommitment = await adapter.signCommitment({
-        channelId,
-        cumulativeAmount,
-        network: current.network,
+        // The queue already ordered this commit after the previous one in this
+        // process. The compare-and-set still covers another process sharing the
+        // store: if it got there first, this throws CommitmentConflictError and
+        // the signed blob is dropped with it.
+        await store.appendCommitment(commitment, {
+          expectedSequence: current.sequence,
+          expectedStatus: "open",
+          lastCommitAt: now(),
+        });
+
+        return commitment;
       });
-
-      const commitment: Commitment = {
-        channelId,
-        sequence: nextSequence,
-        cumulativeAmount,
-        commitment: signed.commitment,
-      };
-
-      // A compare-and-set on the sequence and the status we read above. If
-      // another commit or a close got there first, this throws
-      // CommitmentConflictError, and the signed blob is dropped with it.
-      await store.appendCommitment(commitment, {
-        expectedSequence: current.sequence,
-        expectedStatus: "open",
-        lastCommitAt: now(),
-      });
-
-      return commitment;
     },
 
     async get(channelId: string): Promise<Channel | undefined> {
@@ -603,15 +637,20 @@ export function createChannelManager(options: CreateChannelManagerOptions): Chan
     },
 
     async close(channelId: string): Promise<CloseResult> {
-      const current = await store.getChannel(channelId);
-      if (!current) throw new ChannelNotFoundError(channelId);
-      if (current.status !== "open") {
-        throw new ChannelAlreadyClosedError(channelId, current.status);
-      }
-      // Read the chain height before anything is written: if this fails,
-      // nothing happened and the channel is still simply open.
-      const chain = await adapter.getChannelState({ channelId, network: current.network });
-      return submitClose(current, chain.currentLedger, "open");
+      // Queued behind any commit already in flight on this channel, so the
+      // close settles the last recorded commitment (#175). A second close waits
+      // here and then finds the channel no longer open.
+      return serialiseChannel(channelId, async () => {
+        const current = await store.getChannel(channelId);
+        if (!current) throw new ChannelNotFoundError(channelId);
+        if (current.status !== "open") {
+          throw new ChannelAlreadyClosedError(channelId, current.status);
+        }
+        // Read the chain height before anything is written: if this fails,
+        // nothing happened and the channel is still simply open.
+        const chain = await adapter.getChannelState({ channelId, network: current.network });
+        return submitClose(current, chain.currentLedger, "open");
+      });
     },
 
     resume(channelId: string): Promise<ResumeOutcome> {

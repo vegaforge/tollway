@@ -31,9 +31,9 @@ test("a channel-commitment receipt links to its channel", async ({ page }) => {
   await page.getByTestId("receipt-row-rcpt-channel-openai-01").click();
   await page.getByTestId("receipt-channel-link").click();
 
-  await expect(page).toHaveURL(/\/channels#channel-row-ch-openai-03$/);
-  await expect(page.getByRole("heading", { level: 1 })).toHaveText("Channels");
-  await expect(page.getByTestId("channel-row-ch-openai-03")).toBeVisible();
+  await expect(page).toHaveURL(/\/channels\/ch-openai-03$/);
+  await expect(page.getByRole("heading", { level: 1 })).toHaveText("Channel detail");
+  await expect(page.getByTestId("channel-detail")).toContainText("ch-openai-03");
 });
 
 test("the theme choice survives a reload", async ({ page }) => {
