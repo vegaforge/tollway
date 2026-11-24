@@ -18,6 +18,18 @@ const adminModule: ServiceModule = () => [
   }),
 ];
 
+// An operator-only route, mounted the way adminModule() mounts /v1/admin/tenants.
+const operatorModule: ServiceModule = () => [
+  defineRoute({
+    method: "get",
+    path: "/v1/operator-only",
+    summary: "Test route",
+    scope: "operator",
+    responses: { 200: { description: "ok" } },
+    handler: (c) => c.json({ ok: true }),
+  }),
+];
+
 async function call(headers: Record<string, string>) {
   const { app, logger } = await testService({ modules: [adminModule] });
   const response = await app.request("/v1/admin-only", {
@@ -84,6 +96,16 @@ describe("API-key authentication on /v1/*", () => {
     expect(JSON.parse(text)).toEqual({
       error: { code: "forbidden", message: "operator keys cannot access tenant routes" },
     });
+  });
+
+  it("refuses a revoked operator key on the operator route with 401", async () => {
+    const config = {
+      operatorKeys: [{ name: "ops", sha256: await hashApiKey(KEYS.operator), revoked: true }],
+    };
+    const { app } = await testService({ config, modules: [operatorModule] });
+    const response = await app.request("/v1/operator-only", { headers: bearer(KEYS.operator) });
+    expect(response.status).toBe(401);
+    expect((await response.json()).error.message).toContain("revoked");
   });
 
   it("lets a key with the scope through", async () => {
