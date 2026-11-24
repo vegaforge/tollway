@@ -11,7 +11,6 @@ import {
 import { useEffect, useMemo, useState } from "react";
 
 import { Panel } from "@/components/ui/panel";
-import { StreamStatusBadge } from "@/components/ui/stream-status-badge";
 import type { ReceiptRow } from "@/data/receipts";
 import { useReceipts } from "@/data/use-receipts";
 
@@ -67,15 +66,7 @@ export function ReceiptsView() {
   );
 
   return (
-    <Panel
-      title="Receipts"
-      description="Payer, payee, amount, model, and settlement reference"
-      action={
-        state.status === "ready" && state.stream ? (
-          <StreamStatusBadge status={state.stream} />
-        ) : undefined
-      }
-    >
+    <Panel title="Receipts" description="Payer, payee, amount, model, and settlement reference">
       {state.status === "loading" ? <ReceiptsTableSkeleton /> : null}
       {state.status === "error" ? <ReceiptsTableError error={state.error} /> : null}
       {state.status === "ready" ? (
@@ -250,6 +241,18 @@ function ReceiptDetail({
         <Detail label="Network" value={receipt.receipt.network} />
         <Detail label="Issued at" value={receipt.receipt.issuedAt} mono />
         <SettlementDetail settlement={receipt.receipt.settlement} />
+        <Detail label="Version" value={String(receipt.receipt.version)} />
+        {receipt.receipt.version === 2 ? (
+          <>
+            <Detail label="Method" value={receipt.receipt.method} mono />
+            <Detail label="Offer hash" value={receipt.receipt.offerHash} mono />
+            <Detail
+              label="Expires at"
+              value={receipt.receipt.expiresAt ?? "Never"}
+              mono={receipt.receipt.expiresAt !== undefined}
+            />
+          </>
+        ) : null}
       </dl>
 
       <footer className="mt-4 border-t border-border pt-3">

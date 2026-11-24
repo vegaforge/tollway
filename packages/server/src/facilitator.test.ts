@@ -181,12 +181,30 @@ describe("createHttpFacilitator", () => {
     expect(result).toEqual({ settled: false, reason: "settlement_failed" });
   });
 
-  it("maps /supported kinds to Tollway models", async () => {
+  it("parses /supported as the full capability set (Issue #155)", async () => {
     fetchMock.mockResolvedValueOnce(
-      jsonResponse({ kinds: [{ x402Version: 2, scheme: "exact", network: "stellar:testnet" }] }),
+      jsonResponse({
+        kinds: [
+          {
+            x402Version: 2,
+            scheme: "exact",
+            network: "stellar:testnet",
+            extra: { areFeesSponsored: true },
+          },
+        ],
+        extensions: ["offer-receipt"],
+        signers: { "stellar:testnet": ["ed25519"] },
+      }),
     );
     const result = await createHttpFacilitator(FACILITATOR_URL).supported();
-    expect(result).toEqual({ models: ["x402"], assets: [] });
+    expect(result.kinds).toHaveLength(1);
+    expect(result.kinds[0]).toMatchObject({
+      x402Version: 2,
+      scheme: "exact",
+      network: "stellar:testnet",
+    });
+    expect(result.extensions).toEqual(["offer-receipt"]);
+    expect(result.signers).toEqual({ "stellar:testnet": ["ed25519"] });
     const [url, init] = lastCall();
     expect(url).toBe(`${FACILITATOR_URL}/supported`);
     expect(init.method).toBe("GET");

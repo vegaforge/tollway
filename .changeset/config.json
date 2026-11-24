@@ -14,6 +14,7 @@
     "@vegaforge/tollway-example-content-paywall",
     "@vegaforge/tollway-example-data-feed",
     "@vegaforge/tollway-example-inference",
-    "@vegaforge/tollway-example-next-paid-api"
+    "@vegaforge/tollway-example-next-paid-api",
+    "@vegaforge/tollway-example-production-gate"
   ]
 }

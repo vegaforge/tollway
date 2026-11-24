@@ -2,7 +2,7 @@ import { settlementModels } from "@vegaforge/tollway-core";
 import { EmptyState } from "@/components/ui/empty-state";
 import { PageHeader } from "@/components/ui/page-header";
 import { Panel } from "@/components/ui/panel";
-import { OverviewLiveSection } from "./overview-live-section";
+import { StatCard } from "@/components/ui/stat-card";
 
 // Overview shows how the dashboard composes: stat cards over panels, one per
 // observability view. Values are placeholders until the data is wired, and each
@@ -14,14 +14,26 @@ const modelLabels: Record<string, string> = {
   "mpp-channel": "MPP channel",
 };
 
+const stats = [
+  { label: "Total spend", hint: "across all models" },
+  { label: "Payments settled", hint: "this period" },
+  { label: "Open channels", hint: "with remaining budget" },
+  { label: "Failure rate", hint: "verify and settle" },
+];
+
 export default function OverviewPage() {
   return (
     <>
       <PageHeader
         title="Overview"
-        lead="Spend, model mix, failures, and open channels at a glance."
+        lead="Spend, model mix, failures, and open channels at a glance. Wire the widgets to @vegaforge/tollway-observability to replace the placeholders."
       />
-      <OverviewLiveSection />
+
+      <section className="mb-6 grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-4">
+        {stats.map((s) => (
+          <StatCard key={s.label} label={s.label} value="—" hint={s.hint} />
+        ))}
+      </section>
 
       <div className="grid grid-cols-1 gap-6 lg:grid-cols-2">
         <Panel title="Model mix" description="Share of spend by settlement model">

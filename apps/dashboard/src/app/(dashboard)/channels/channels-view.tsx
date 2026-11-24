@@ -5,7 +5,6 @@ import { useMemo } from "react";
 
 import { Panel } from "@/components/ui/panel";
 import { StatCard } from "@/components/ui/stat-card";
-import { StreamStatusBadge } from "@/components/ui/stream-status-badge";
 import type { OpenChannelRow } from "@/data/open-channels";
 import { useOpenChannels } from "@/data/use-open-channels";
 
@@ -115,11 +114,6 @@ export function ChannelsView({
         title="Open channels"
         description="Sorted by drawdown. Nearing-close rows are highlighted."
         className="mt-6"
-        action={
-          state.status === "ready" && state.stream ? (
-            <StreamStatusBadge status={state.stream} />
-          ) : undefined
-        }
       >
         {state.status === "loading" ? <ChannelsTableSkeleton /> : null}
         {state.status === "error" ? <ChannelsTableError error={state.error} /> : null}
@@ -235,6 +229,7 @@ const STATUS_PILL_CLASSES: Record<ChannelStatus, string> = {
   closed: "bg-surface-2 text-muted",
   recovering: "bg-danger/15 text-foreground",
   recovered: "bg-success/15 text-foreground",
+  "settlement-mismatched": "bg-danger/15 text-foreground",
 };
 
 function StatusPill({ status }: { status: ChannelStatus }) {

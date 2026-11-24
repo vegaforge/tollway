@@ -3,7 +3,9 @@
   "pages": [
     "index",
     "getting-started",
+    "deployment",
     "route-tables",
+    "discovery",
     "---Concepts---",
     "model-router",
     "channels",

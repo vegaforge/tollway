@@ -1,18 +1,18 @@
 ---
 "@vegaforge/tollway-client": minor
-"@vegaforge/tollway-core": patch
+"@vegaforge/tollway-core": minor
 ---
 
-Add offer sanity checks to `@vegaforge/tollway-client`.
+Add offer sanity checks to the client (#209).
 
-`createClient` gains an `offerChecks` option with per-asset price ceilings
-(`maxAmount`, fail-closed), payee and asset allowlists, a network mismatch
-check (always on), and structural validation of the offer fields. Checks run
-before the policy engine and before the settler; a failure throws
-`OfferRejectedError` (code `"offer-rejected"`) and emits a `skip` event.
+`createClient` takes `offerChecks`: a price ceiling per asset (`maxAmount`,
+fail closed), payee and asset allowlists, a zero-amount opt-in, and
+`requireNetwork`. Structural checks on the offer always run. The checks run in
+`pay()` before the policy engine and the settler; a failure throws
+`OfferRejectedError` (code `offer-rejected`) and emits `skip`. `offerChecks`
+is validated when the client is created.
 
-`createX402Settler` gains a matching `offerChecks` option that registers an
-x402Client `PaymentPolicy` to filter disallowed options from multi-option
-challenges.
+`createX402Settler` takes the same `offerChecks` and registers the allowlists
+as an x402 `PaymentPolicy` over every option in the challenge.
 
-`@vegaforge/tollway-core` adds `"offer-rejected"` to `TollwayErrorCode`.
+`@vegaforge/tollway-core` adds `offer-rejected` to `TollwayErrorCode`.

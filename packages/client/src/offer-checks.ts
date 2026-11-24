@@ -1,112 +1,117 @@
 /**
- * Offer sanity checks.
+ * Offer sanity checks (#209).
  *
- * A 402 challenge is attacker-controlled input. These checks run before the
- * policy engine and before the settler so an offer that violates a configured
- * bound is rejected before any signature is produced or any budget is debited.
+ * A 402 challenge is attacker-controlled input. These checks run in
+ * `createClient().pay()` before the policy engine and before the settler, so
+ * an offer that breaks a configured bound is refused before any signature is
+ * produced or any budget is touched. They apply to every settlement model.
  *
- * Policy is spend over time; these are per-offer validity checks. They are
- * intentionally separate from createPolicyEngine.
+ * Policy is spend over time; these are per-offer validity checks, so they are
+ * deliberately separate from `createPolicyEngine`.
  *
- * ## Checks applied
+ * Always applied, with no configuration:
+ * - network: the offer's network must equal the client's network.
+ * - structural: `amount` is an integer string in base units and is not zero
+ *   (unless `allowZeroAmount` is set); `models` is non-empty; `payTo` and
+ *   `asset` are non-empty; and the offer's resource names the URL the agent
+ *   requested, under the same path-and-query rule the receipt binding uses
+ *   (#202).
  *
- * ### Always applied (no configuration required)
- * - **network** – The offer's network must equal the client's network.
- * - **structural** – `amount` matches `/^[0-9]+$/` and is not zero;
- *   `models` is non-empty; `payTo` and `asset` are non-empty strings;
- *   `offer.resource` equals `request.resource` (consistent with #202).
- *
- * ### Applied when `offerChecks` is configured
- * - **maxAmount** – Per-asset price ceiling as integer strings. An asset
- *   with no entry in `maxAmount` is **rejected** (fail-closed). Pass an
- *   empty map to allow any amount for any asset.
- * - **allowedPayees** – Exact-string allowlist. Any `payTo` not in the set
- *   is rejected.
- * - **allowedAssets** – Exact-string allowlist. Any `asset` not in the set
- *   is rejected.
- *
- * ## Fail-closed behaviour for maxAmount
- *
- * When `maxAmount` is configured, an offer whose asset has no entry in the
- * map is **always rejected**, even if no other check would have failed. This
- * is intentional: an operator who sets price limits has expressed intent
- * about which assets are acceptable. An unknown asset that slips through
- * silently would violate that intent. To allow an asset with no ceiling,
- * add it to the map with a value of `"0"` — that rejects every offer for
- * that asset, which is likely not what you want — or use `allowedAssets`
- * without `maxAmount` when you need a whitelist without per-asset ceilings.
- * The correct way to allow any amount for a known asset is to omit
- * `maxAmount` entirely, or set the entry to the maximum sensible bigint for
- * that asset.
+ * Applied when configured:
+ * - maxAmount: a ceiling per asset. When `maxAmount` is set, an asset with no
+ *   entry is refused (fail closed): an operator who sets price limits has said
+ *   which assets they expect, and an unknown asset must not slip through.
+ * - allowedPayees and allowedAssets: exact-string allowlists.
  */
 
 import type { PaymentOffer, StellarNetwork } from "@vegaforge/tollway-core";
 import { TollwayError } from "@vegaforge/tollway-core";
+import { resourceIdentity } from "./receipt-binding.js";
 
-// ---------------------------------------------------------------------------
-// Public types
-// ---------------------------------------------------------------------------
-
-/**
- * Per-call offer validation options. All fields are optional; omitting a
- * field disables that check.
- */
+/** Per-client offer checks. Every field is optional. */
 export type OfferChecks = {
   /**
-   * Maximum amount per asset, as integer strings. When present, an asset
-   * not in this map is rejected (fail-closed). See module doc for details.
+   * Largest amount accepted per asset, as integer strings in the asset's
+   * smallest unit. When present, an asset with no entry is refused.
    */
-  maxAmount?: Record<string, string>;
+  maxAmount?: Readonly<Record<string, string>>;
+  /** Exact-string allowlist of payee addresses. */
+  allowedPayees?: readonly string[];
+  /** Exact-string allowlist of asset identifiers. */
+  allowedAssets?: readonly string[];
   /**
-   * Exact-string allowlist of payee addresses. When present, a `payTo` not
-   * in this set is rejected. Do not use glob patterns; exact match only.
-   */
-  allowedPayees?: string[];
-  /**
-   * Exact-string allowlist of asset identifiers. When present, an `asset`
-   * not in this set is rejected.
-   */
-  allowedAssets?: string[];
-  /**
-   * Override the network that offers must declare. Defaults to the client's
-   * configured `network` when omitted — the network check always fires, but
-   * this field lets a caller override which network is required (useful when
-   * one client instance serves multiple network contexts).
+   * The network offers must name. Defaults to the client's `network`. It must
+   * equal that network when set: the client settles on one network, and its
+   * receipts are bound to it.
    */
   requireNetwork?: StellarNetwork;
+  /**
+   * Accept an offer whose amount is zero. Off by default, because a free
+   * offer that still asks for a signature is more likely a probe than a sale.
+   */
+  allowZeroAmount?: boolean;
 };
 
+/** The checks an offer can fail, as reported in `checkName`. */
+export type OfferCheckName =
+  | "structural"
+  | "network"
+  | "allowedAssets"
+  | "maxAmount"
+  | "allowedPayees";
+
 /**
- * Thrown when an offer fails one of the sanity checks. Extends `TollwayError`
- * with code `"offer-rejected"` so callers can branch on `error.code`.
- * `checkName` names the specific check that fired.
+ * Thrown when an offer fails a check. A `TollwayError` with code
+ * `offer-rejected`; `checkName` names the check that refused it.
  */
 export class OfferRejectedError extends TollwayError {
-  readonly checkName: string;
-  constructor(checkName: string, detail: string) {
+  readonly checkName: OfferCheckName;
+
+  constructor(checkName: OfferCheckName, detail: string) {
     super("offer-rejected", `offer rejected by check "${checkName}": ${detail}`);
     this.name = "OfferRejectedError";
     this.checkName = checkName;
   }
 }
 
-// ---------------------------------------------------------------------------
-// Implementation
-// ---------------------------------------------------------------------------
-
 const INTEGER_AMOUNT = /^[0-9]+$/;
 
 /**
- * Run all configured and built-in offer checks. Throws `OfferRejectedError`
- * on the first failing check. Order: structural → network → allowedAssets →
- * maxAmount → allowedPayees. Structural and network run even when
- * `offerChecks` is not configured.
- *
- * @param offer          The offer from the 402 challenge.
- * @param requestResource The resource URL the client was called with.
- * @param clientNetwork  The network the client is configured for.
- * @param checks         Optional per-call checks. `requireNetwork` overrides
- *                       `clientNetwork` for the network check when present.
+ * Validates an `offerChecks` configuration once, when the client or settler
+ * is created, so a typo in a ceiling fails at startup rather than on the
+ * first payment. Throws `TypeError` naming the bad field.
+ */
+export function validateOfferChecks(checks: OfferChecks, clientNetwork: StellarNetwork): void {
+  if (checks.maxAmount !== undefined) {
+    for (const [asset, ceiling] of Object.entries(checks.maxAmount)) {
+      if (asset.length === 0) {
+        throw new TypeError("offerChecks.maxAmount has an empty asset key");
+      }
+      if (typeof ceiling !== "string" || !INTEGER_AMOUNT.test(ceiling)) {
+        throw new TypeError(
+          `offerChecks.maxAmount["${asset}"] must be an integer string in the asset's smallest unit, got ${JSON.stringify(ceiling)}`,
+        );
+      }
+    }
+  }
+  for (const field of ["allowedPayees", "allowedAssets"] as const) {
+    const list = checks[field];
+    if (list === undefined) continue;
+    if (!Array.isArray(list) || list.some((item) => typeof item !== "string" || item === "")) {
+      throw new TypeError(`offerChecks.${field} must be an array of non-empty strings`);
+    }
+  }
+  if (checks.requireNetwork !== undefined && checks.requireNetwork !== clientNetwork) {
+    throw new TypeError(
+      `offerChecks.requireNetwork is "${checks.requireNetwork}" but the client settles on "${clientNetwork}"; a client can only pay offers on its own network`,
+    );
+  }
+}
+
+/**
+ * Runs the built-in and configured checks. Throws `OfferRejectedError` on the
+ * first failure, in this order: structural, network, allowedAssets,
+ * maxAmount, allowedPayees.
  */
 export function runOfferChecks(
   offer: PaymentOffer,
@@ -114,10 +119,8 @@ export function runOfferChecks(
   clientNetwork: StellarNetwork,
   checks?: OfferChecks,
 ): void {
-  checkStructural(offer, requestResource);
-  // requireNetwork in offerChecks overrides the client-level network.
-  const requiredNetwork = checks?.requireNetwork ?? clientNetwork;
-  checkNetwork(offer, requiredNetwork);
+  checkStructural(offer, requestResource, checks?.allowZeroAmount === true);
+  checkNetwork(offer, checks?.requireNetwork ?? clientNetwork);
   if (checks) {
     checkAllowedAssets(offer, checks);
     checkMaxAmount(offer, checks);
@@ -125,45 +128,57 @@ export function runOfferChecks(
   }
 }
 
-function checkStructural(offer: PaymentOffer, requestResource: string): void {
-  if (!offer.payTo || offer.payTo.trim().length === 0) {
+/** True when the option passes the payee and asset allowlists. */
+export function passesAllowlists(
+  option: { payTo: string; asset: string },
+  checks: OfferChecks | undefined,
+): boolean {
+  if (checks?.allowedPayees && !checks.allowedPayees.includes(option.payTo)) return false;
+  if (checks?.allowedAssets && !checks.allowedAssets.includes(option.asset)) return false;
+  return true;
+}
+
+function checkStructural(offer: PaymentOffer, requestResource: string, allowZero: boolean): void {
+  if (typeof offer.payTo !== "string" || offer.payTo.trim() === "") {
     throw new OfferRejectedError("structural", "offer.payTo is empty");
   }
-  if (!offer.asset || offer.asset.trim().length === 0) {
+  if (typeof offer.asset !== "string" || offer.asset.trim() === "") {
     throw new OfferRejectedError("structural", "offer.asset is empty");
   }
   if (!Array.isArray(offer.models) || offer.models.length === 0) {
     throw new OfferRejectedError("structural", "offer.models is empty");
   }
-  if (!INTEGER_AMOUNT.test(offer.amount)) {
+  if (typeof offer.amount !== "string" || !INTEGER_AMOUNT.test(offer.amount)) {
     throw new OfferRejectedError(
       "structural",
-      `offer.amount "${offer.amount}" is not a non-negative integer string`,
+      `offer.amount ${JSON.stringify(offer.amount)} is not an integer string in base units`,
     );
   }
-  if (BigInt(offer.amount) === 0n) {
-    throw new OfferRejectedError("structural", "offer.amount is zero");
-  }
-  if (offer.resource !== requestResource) {
+  if (!allowZero && BigInt(offer.amount) === 0n) {
     throw new OfferRejectedError(
       "structural",
-      `offer.resource "${offer.resource}" does not match request resource "${requestResource}"`,
+      "offer.amount is zero; set offerChecks.allowZeroAmount to accept free offers",
+    );
+  }
+  if (resourceIdentity(offer.resource) !== resourceIdentity(requestResource)) {
+    throw new OfferRejectedError(
+      "structural",
+      `the offer is for "${resourceIdentity(offer.resource)}" but the agent requested "${resourceIdentity(requestResource)}"`,
     );
   }
 }
 
-function checkNetwork(offer: PaymentOffer, clientNetwork: StellarNetwork): void {
-  if (offer.network !== clientNetwork) {
+function checkNetwork(offer: PaymentOffer, required: StellarNetwork): void {
+  if (offer.network !== required) {
     throw new OfferRejectedError(
       "network",
-      `offer is for network "${offer.network}" but client is configured for "${clientNetwork}"`,
+      `offer is for network "${offer.network}" but the client requires "${required}"`,
     );
   }
 }
 
 function checkAllowedAssets(offer: PaymentOffer, checks: OfferChecks): void {
-  if (!checks.allowedAssets) return;
-  if (!checks.allowedAssets.includes(offer.asset)) {
+  if (checks.allowedAssets && !checks.allowedAssets.includes(offer.asset)) {
     throw new OfferRejectedError(
       "allowedAssets",
       `asset "${offer.asset}" is not in the allowed-assets list`,
@@ -173,35 +188,28 @@ function checkAllowedAssets(offer: PaymentOffer, checks: OfferChecks): void {
 
 function checkMaxAmount(offer: PaymentOffer, checks: OfferChecks): void {
   if (!checks.maxAmount) return;
-
-  // Fail-closed: an asset with no entry is rejected.
-  const ceiling = checks.maxAmount[offer.asset];
+  // Object.hasOwn, so an asset named like an Object.prototype member never
+  // finds an inherited value.
+  const ceiling = Object.hasOwn(checks.maxAmount, offer.asset)
+    ? checks.maxAmount[offer.asset]
+    : undefined;
   if (ceiling === undefined) {
     throw new OfferRejectedError(
       "maxAmount",
-      `asset "${offer.asset}" has no maxAmount entry (fail-closed: add an entry to allow it)`,
+      `asset "${offer.asset}" has no maxAmount entry, and maxAmount fails closed`,
     );
   }
-
-  if (!INTEGER_AMOUNT.test(ceiling)) {
-    // A misconfigured ceiling is a programming error; use a plain Error so
-    // the operator sees it clearly rather than a typed offer rejection.
-    throw new Error(
-      `offerChecks.maxAmount["${offer.asset}"] is not a valid integer string: "${ceiling}"`,
-    );
-  }
-
+  // validateOfferChecks has already proved the ceiling is an integer string.
   if (BigInt(offer.amount) > BigInt(ceiling)) {
     throw new OfferRejectedError(
       "maxAmount",
-      `offer amount ${offer.amount} exceeds maximum ${ceiling} for asset "${offer.asset}"`,
+      `offer amount ${offer.amount} exceeds the maximum ${ceiling} for asset "${offer.asset}"`,
     );
   }
 }
 
 function checkAllowedPayees(offer: PaymentOffer, checks: OfferChecks): void {
-  if (!checks.allowedPayees) return;
-  if (!checks.allowedPayees.includes(offer.payTo)) {
+  if (checks.allowedPayees && !checks.allowedPayees.includes(offer.payTo)) {
     throw new OfferRejectedError(
       "allowedPayees",
       `payee "${offer.payTo}" is not in the allowed-payees list`,

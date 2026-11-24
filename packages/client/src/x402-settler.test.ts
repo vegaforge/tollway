@@ -13,6 +13,7 @@ import type { PaymentRequired, PaymentRequirements } from "@x402/core/types";
 import { createEd25519Signer } from "@x402/stellar";
 import { beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import { createClient } from "./index.js";
+import { SettlementOutcomeError } from "./retry.js";
 import {
   createX402Settler,
   PAYMENT_REQUIRED_HEADER,
@@ -218,7 +219,9 @@ describe("createX402Settler", () => {
     const { fetch } = scriptedFetch();
     const created = settler(fetch);
     expect(JSON.stringify(created)).not.toContain(AGENT.secret());
-    expect(Object.keys(created)).toEqual(["settle"]);
+    expect(Object.keys(created).sort()).toEqual(["payer", "settle"]);
+    // The payer is the public address, which the client checks receipts against.
+    expect(created.payer).toBe(AGENT.publicKey());
   });
 
   it("passes a custom RPC URL to the scheme", () => {
@@ -301,18 +304,6 @@ describe("createX402Settler", () => {
       expect(calls).toHaveLength(1);
     });
 
-    it("rejects a second 402", async () => {
-      const { fetch } = scriptedFetch(challenge(), challenge());
-      const error = await rejection(fetch);
-      expect(error.message).toBe(`${RESOURCE} answered the signed payment with another 402`);
-    });
-
-    it("rejects another failure status after paying", async () => {
-      const { fetch } = scriptedFetch(challenge(), new Response(null, { status: 500 }));
-      const error = await rejection(fetch);
-      expect(error.message).toBe(`${RESOURCE} answered the signed payment with 500`);
-    });
-
     it("rejects a paid response with no receipt header", async () => {
       const { fetch } = scriptedFetch(challenge(), paid({}));
       const error = await rejection(fetch);
@@ -340,5 +331,137 @@ describe("createX402Settler", () => {
       ).rejects.toThrow('the x402 settler cannot settle model "mpp-charge"');
       expect(calls).toHaveLength(0);
     });
+  });
+});
+
+describe("createX402Settler outcome classification (issue #203)", () => {
+  async function outcome(
+    fetch: typeof globalThis.fetch,
+    extra: { pinned?: { amount: string; asset: string; payTo: string } } = {},
+  ): Promise<SettlementOutcomeError> {
+    const error = await settler(fetch)
+      .settle({ resource: RESOURCE, offer, model: "x402", ...extra })
+      .then(
+        () => undefined,
+        (thrown: unknown) => thrown,
+      );
+    expect(error).toBeInstanceOf(SettlementOutcomeError);
+    return error as SettlementOutcomeError;
+  }
+
+  it("classifies a second 402 as retryable and names the terms it signed", async () => {
+    const { fetch } = scriptedFetch(challenge(), challenge());
+    const error = await outcome(fetch);
+    expect(error.kind).toBe("retryable-with-fresh-auth");
+    expect(error.code).toBe("payment-failed");
+    expect(error.signedTerms).toEqual({ amount: "10000", asset: USDC, payTo: PAYEE });
+  });
+
+  it("resends the identical payment header for a 409 with Retry-After", async () => {
+    const { fetch, calls } = scriptedFetch(
+      challenge(),
+      new Response(null, { status: 409, headers: { "retry-after": "2" } }),
+      paid(),
+    );
+    const error = await outcome(fetch);
+    expect(error.kind).toBe("settlement-in-progress");
+    expect(error.retryAfterMs).toBe(2000);
+    expect(await error.resend?.()).toEqual(receipt);
+    // One signature, sent twice, byte for byte.
+    expect(scheme.createPaymentPayload).toHaveBeenCalledTimes(1);
+    const sent = calls
+      .slice(1)
+      .map((call) => new Headers(call.init?.headers).get(PAYMENT_SIGNATURE_HEADER));
+    expect(sent).toHaveLength(2);
+    expect(sent[0]).toBe(sent[1]);
+  });
+
+  it.each([
+    ["no Retry-After", {}],
+    ["a date Retry-After", { "retry-after": "Wed, 21 Oct 2026 07:28:00 GMT" }],
+    ["a negative Retry-After", { "retry-after": "-1" }],
+  ])("treats a 409 with %s as ambiguous: the payment may have settled", async (_name, headers) => {
+    const { fetch } = scriptedFetch(challenge(), new Response(null, { status: 409, headers }));
+    const error = await outcome(fetch);
+    expect(error.kind).toBe("ambiguous");
+    expect(error.code).toBe("outcome-unknown");
+    expect(error.resend).toBeUndefined();
+  });
+
+  it.each([500, 502, 504])("treats a %i after the signed request as ambiguous", async (status) => {
+    const { fetch } = scriptedFetch(challenge(), new Response(null, { status }));
+    expect((await outcome(fetch)).kind).toBe("ambiguous");
+  });
+
+  it("treats a dropped connection after the signed request as ambiguous", async () => {
+    let call = 0;
+    const fetch = (async () => {
+      call += 1;
+      if (call === 1) return challenge();
+      throw new TypeError("fetch failed");
+    }) as unknown as typeof globalThis.fetch;
+    const error = await outcome(fetch);
+    expect(error.kind).toBe("ambiguous");
+    expect(error.cause).toBeInstanceOf(TypeError);
+  });
+
+  it("treats any other 4xx as fatal", async () => {
+    const { fetch } = scriptedFetch(challenge(), new Response(null, { status: 403 }));
+    expect((await outcome(fetch)).kind).toBe("fatal");
+  });
+
+  it.each([
+    ["amount", { amount: "20000" }],
+    ["asset", { asset: "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA" }],
+    ["payee", { payTo: Keypair.random().publicKey() }],
+  ])("refuses to sign again when the retry's challenge changed the %s", async (_field, change) => {
+    const { fetch } = scriptedFetch(challenge());
+    const pinned = { amount: "10000", asset: USDC, payTo: PAYEE, ...change };
+    const error = await outcome(fetch, { pinned });
+    expect(error.kind).toBe("fatal");
+    expect(error.message).toContain("changed between attempts");
+    expect(scheme.createPaymentPayload).not.toHaveBeenCalled();
+  });
+});
+
+describe("createX402Settler offerChecks (#209)", () => {
+  const OTHER = Keypair.random().publicKey();
+
+  function checkedSettler(fetch: typeof globalThis.fetch, allowedPayees: string[]) {
+    return createX402Settler({
+      signer: createEd25519Signer(AGENT.secret(), "stellar:testnet"),
+      network: "testnet",
+      fetch,
+      offerChecks: { allowedPayees },
+    });
+  }
+
+  it("signs only the allowed option when a disallowed payee comes first", async () => {
+    const disallowed: PaymentRequirements = { ...stellarExact, payTo: OTHER };
+    const { fetch, calls } = scriptedFetch(
+      challenge(paymentRequired([disallowed, stellarExact])),
+      paid(),
+    );
+
+    await checkedSettler(fetch, [PAYEE]).settle({ resource: RESOURCE, offer, model: "x402" });
+
+    expect(scheme.createPaymentPayload).toHaveBeenCalledTimes(1);
+    expect(scheme.createPaymentPayload).toHaveBeenCalledWith(2, stellarExact);
+    const sent = (calls[1]?.init?.headers as Record<string, string>)[PAYMENT_SIGNATURE_HEADER];
+    expect(decodePaymentSignatureHeader(sent ?? "").accepted.payTo).toBe(PAYEE);
+  });
+
+  it("signs nothing when every option is outside the allowlist", async () => {
+    const { fetch, calls } = scriptedFetch(challenge(paymentRequired([stellarExact])));
+
+    await expect(
+      checkedSettler(fetch, [OTHER]).settle({ resource: RESOURCE, offer, model: "x402" }),
+    ).rejects.toThrow(/within the offer-check allowlists/);
+    expect(scheme.createPaymentPayload).not.toHaveBeenCalled();
+    expect(calls).toHaveLength(1);
+  });
+
+  it("refuses a malformed configuration when the settler is created", () => {
+    expect(() => checkedSettler(scriptedFetch().fetch, [""])).toThrow(TypeError);
   });
 });

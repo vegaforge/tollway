@@ -11,6 +11,22 @@ A receipt body carries the counterparties (`payer`, `payee`), the amount and ass
 
 The settlement reference is a discriminated union. x402 and MPP charge use a Stellar transaction hash; MPP channel uses a `channelId` plus a `sequence` within the cumulative commitment stream. The schema rejects a mismatched pair (a channel receipt with a `txHash`, an x402 receipt with a `channelId`) before any signature check runs.
 
+## Receipt v2
+
+A version 2 receipt also says exactly what was bought. It adds `offerHash`, the SHA-256 of the canonical offer the payer accepted (its models list and facilitator included), `method`, the HTTP method of the paid request, and an optional `expiresAt`, after which `verifyReceipt` reports `"receipt expired"`. A v1 receipt only names the URL and the price, so two different offers for the same URL and price produce receipts that look the same; a v2 receipt tells them apart, and the gate never serves a cached v2 receipt to a different offer.
+
+The gate issues v1 until you switch. A process from before v2 reads a cached v2 receipt as a miss and would settle the payment again, so switch in this order:
+
+1. Deploy this version everywhere, with `receiptVersion` unset.
+2. Wait until no older process serves traffic or shares the settlement cache.
+3. Set `receiptVersion: 2`:
+
+```ts
+const gate = createPaywall(config, { signer, facilitator, cache, receiptVersion: 2 });
+```
+
+v1 receipts already in the cache keep being served to retries after the switch.
+
 ## Why signing sits behind an interface
 
 `ReceiptSigner` is the seam between Tollway and the key. The default `Ed25519Signer` uses WebCrypto so it runs unchanged in Node and in edge runtimes, but the same interface accepts a KMS-backed or HSM-backed signer with no other change. Any object that satisfies the interface is a valid signer.
@@ -18,6 +34,39 @@ The settlement reference is a discriminated union. x402 and MPP charge use a Ste
 ## Key rotation
 
 Every signature carries `keyId`, and `Ed25519Verifier` accepts a `keyId -> publicKey` map. Rotation is therefore additive: when a new key is introduced, both keys live in the verifier until every receipt signed by the old key has aged out of the window you care about (the settlement cache, the dispute window, the audit retention period). New receipts use the new `keyId`; old receipts still verify against the old key. An unknown `keyId` or a different algorithm returns false rather than throwing, so a verifier that lacks the key fails closed.
+
+## Signature algorithms
+
+Receipts can be signed with Ed25519 (`Ed25519Signer`, the default) or with ECDSA P-256 (`EcdsaP256Signer`, algorithm `ES256`) for key services that only offer NIST curves. Each trusted key is bound to one algorithm, so an Ed25519 key never checks an ES256 signature, or the reverse. An ES256 signature is `r || s` (IEEE P1363) with `s` in the low half; a KMS that returns DER can use `derToP1363` and `normaliseLowS` to produce it.
+
+## Publishing keys
+
+A verifier that does not share your code needs your public keys. Publish them as a JWK Set at `/.well-known/tollway-receipt-keys.jwks`, with a status on each key, and serve it through any adapter with `renderKeySetResponse`:
+
+```ts
+import { renderKeySetResponse } from "@vegaforge/tollway-server";
+
+app.get("/.well-known/tollway-receipt-keys.jwks", (c) => {
+  const response = renderKeySetResponse(
+    { keys: [{ ...signer.publicJwk(), status: { state: "active" } }] },
+    { maxAgeSeconds: 300 },
+  );
+  return c.body(response.body, response.status, response.headers);
+});
+```
+
+A verifier points `createKeySetVerifier({ url })` at it. The verifier caches the document, refetches when it expires or when a receipt names an unknown key (at most once a minute), backs off while the URL is down, and fails closed once its copy has expired and cannot be refreshed. `verifyReceipt` reports why a receipt failed, for example `"key tollway-2026-q1 is revoked"`.
+
+To rotate a key:
+
+1. Publish the new key as `active` next to the current one, and wait at least one `max-age`.
+2. Switch the signer to the new key.
+3. Mark the old key `{ state: "retired", retiredAt: <now> }`. It keeps verifying receipts issued before `retiredAt`.
+4. Remove the retired key once its receipts have aged out of your audit window.
+
+If a key is compromised, mark it `{ state: "revoked" }`. Every receipt it ever signed then fails, because a stolen key can backdate `issuedAt`. Then rotate as above. Verifiers see a revocation within one cache lifetime, five minutes with the defaults, so say so in the incident notice.
+
+Load a persisted key with `Ed25519Signer.fromPrivateKey` (seed or PKCS#8), `Ed25519Signer.fromJwk`, `EcdsaP256Signer.fromPkcs8` or `EcdsaP256Signer.fromJwk`, so every instance of a service signs with the same published key.
 
 ## In the code
 
