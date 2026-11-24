@@ -159,7 +159,7 @@ describe("createFailoverFacilitator", () => {
       expect(second).not.toHaveBeenCalled();
     });
 
-    it("throws payment-failed when every eligible facilitator fails transport", async () => {
+    it("throws facilitator-unavailable when every eligible facilitator fails transport", async () => {
       const client = createFailoverFacilitator({
         facilitators: [
           { id: "a", client: stubClient({ supported: () => Promise.reject(connectionRefused()) }) },
@@ -167,7 +167,7 @@ describe("createFailoverFacilitator", () => {
         ],
       });
       await expect(client.supported()).rejects.toMatchObject({
-        code: "payment-failed",
+        code: "facilitator-unavailable",
       });
     });
   });
@@ -215,7 +215,7 @@ describe("createFailoverFacilitator", () => {
       });
     });
 
-    it("throws payment-failed when no member is eligible for the offer", async () => {
+    it("throws facilitator-unavailable when no member is eligible for the offer", async () => {
       const evmOnly = stubClient({
         async supported() {
           return {
@@ -232,7 +232,7 @@ describe("createFailoverFacilitator", () => {
       });
       await expect(
         client.settle({ payment: payment(), offer: offer(), payer: "GPAYER", nonce: "n1" }),
-      ).rejects.toMatchObject({ code: "payment-failed" });
+      ).rejects.toMatchObject({ code: "facilitator-unavailable" });
     });
   });
 

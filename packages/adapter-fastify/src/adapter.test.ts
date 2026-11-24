@@ -146,9 +146,10 @@ describe("fastifyPaywall", () => {
       });
 
       expect(response.statusCode).toBe(501);
-      const body = response.json<{ error?: string; quote?: number }>();
+      const body = response.json<{ error?: { code: string; message: string }; quote?: number }>();
       expect(body.quote).toBeUndefined();
-      expect(body.error).toMatch(/mpp-channel/);
+      expect(body.error?.code).toBe("model-not-supported");
+      expect(body.error?.message).toMatch(/mpp-channel/);
     } finally {
       await app.close();
     }
@@ -280,7 +281,13 @@ describe("fastifyPaywall with mpp-charge", () => {
         headers: { authorization: "Payment refused" },
       });
       expect(response.statusCode).toBe(402);
-      expect(response.json()).toEqual({ error: "mpp challenge was not issued by this server" });
+      expect(response.json()).toEqual({
+        error: {
+          code: "payment-invalid",
+          message: "the payment was refused",
+          upstreamReason: "mpp challenge was not issued by this server",
+        },
+      });
     } finally {
       await app.close();
     }
@@ -358,7 +365,9 @@ describe("fastifyPaywall with a service policy", () => {
       });
       expect(response.statusCode).toBe(429);
       expect(response.headers["retry-after"]).toBe("60");
-      expect(response.json()).toEqual({ error: "service-policy:spend-exceeded" });
+      expect(response.json()).toEqual({
+        error: { code: "service-policy:spend-exceeded", message: "service-policy:spend-exceeded" },
+      });
     } finally {
       await app.close();
     }

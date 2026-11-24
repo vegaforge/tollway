@@ -11,7 +11,7 @@
  */
 
 import type { SignedReceipt } from "@vegaforge/tollway-core";
-import type { Gate, RouteTable } from "@vegaforge/tollway-server";
+import { type Gate, type RouteTable, renderGateRejection } from "@vegaforge/tollway-server";
 
 /** Extra argument a paid handler receives: the verified receipt. */
 export type PaidContext = { receipt: SignedReceipt };
@@ -24,7 +24,7 @@ export type PaidHandler = (request: Request, context: PaidContext) => Response |
  * only on a settled payment, receives the verified receipt via the second
  * argument, and has the PAYMENT-RESPONSE and TOLLWAY-RECEIPT headers added to its response.
  * Otherwise the wrapper answers the request itself (402 with the challenge,
- * or the rejection status with `{ error: reason }`).
+ * or the rejection status with `{ error: { code, message } }`).
  *
  * Usage:
  *
@@ -57,7 +57,10 @@ export function withPaywall(
       return jsonResponse(outcome.challenge, outcome.status, outcome.headers);
     }
 
-    return jsonResponse({ error: outcome.reason }, outcome.status, outcome.headers);
+    // The body and headers come from the server's one renderer, so every
+    // adapter answers each error code the same way (#161).
+    const rejection = renderGateRejection(outcome);
+    return jsonResponse(rejection.body, rejection.status, rejection.headers);
   };
 }
 

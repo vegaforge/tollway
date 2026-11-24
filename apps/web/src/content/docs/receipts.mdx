@@ -27,6 +27,23 @@ const gate = createPaywall(config, { signer, facilitator, cache, receiptVersion:
 
 v1 receipts already in the cache keep being served to retries after the switch.
 
+## Replaying a settled payment after the cache expires
+
+The settlement cache keeps a receipt for 30 seconds by default. To give a payer its original receipt when it retries later, configure a receipt archive:
+
+```ts
+import { createRedisPaymentReceiptArchive } from "@vegaforge/tollway-server";
+
+createPaywall(config, {
+  signer,
+  facilitator,
+  cache,
+  receiptArchive: createRedisPaymentReceiptArchive({ client: redis, retentionMs: 7 * 86_400_000 }),
+});
+```
+
+The gate looks the payment up by a key derived from the signed payment, before `/verify`, and answers with the original receipt and `replayed: true`. The same offer and method binding applies as for a cached receipt, so a payment settled for one route is a `409 offer-mismatch` on any other. Whoever holds the exact payment bytes can fetch that one resource again until the entry expires, so keep `PAYMENT-SIGNATURE` values out of logs. Redis entries have no TTL unless you set `retentionMs`; `createInMemoryPaymentReceiptArchive` suits a single process.
+
 ## Why signing sits behind an interface
 
 `ReceiptSigner` is the seam between Tollway and the key. The default `Ed25519Signer` uses WebCrypto so it runs unchanged in Node and in edge runtimes, but the same interface accepts a KMS-backed or HSM-backed signer with no other change. Any object that satisfies the interface is a valid signer.

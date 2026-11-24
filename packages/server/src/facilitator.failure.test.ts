@@ -89,7 +89,7 @@ describe("facilitator transport faults", () => {
         createHttpFacilitator(FACILITATOR_URL, { timeoutMs: 5_000 }).verify({ payment, offer }),
         5_000,
       ),
-    ).rejects.toMatchObject({ code: "payment-failed" });
+    ).rejects.toMatchObject({ code: "facilitator-unavailable" });
   });
 
   it("gives up on a hung /settle at the transport deadline", async () => {
@@ -105,7 +105,7 @@ describe("facilitator transport faults", () => {
         }),
         5_000,
       ),
-    ).rejects.toMatchObject({ code: "payment-failed" });
+    ).rejects.toMatchObject({ code: "facilitator-unavailable" });
   });
 
   it("rejects a /verify response that is not JSON", async () => {
@@ -113,7 +113,7 @@ describe("facilitator transport faults", () => {
 
     await expect(
       createHttpFacilitator(FACILITATOR_URL).verify({ payment, offer }),
-    ).rejects.toMatchObject({ code: "payment-failed" });
+    ).rejects.toMatchObject({ code: "facilitator-unavailable" });
   });
 
   it("rejects a /verify body that does not match the protocol", async () => {
@@ -126,7 +126,7 @@ describe("facilitator transport faults", () => {
 
     await expect(
       createHttpFacilitator(FACILITATOR_URL).verify({ payment, offer }),
-    ).rejects.toMatchObject({ code: "payment-failed" });
+    ).rejects.toMatchObject({ code: "facilitator-unavailable" });
   });
 
   it("wraps a connection failure on /settle", async () => {
@@ -139,14 +139,14 @@ describe("facilitator transport faults", () => {
         payer: "GPAYER",
         nonce: "n",
       }),
-    ).rejects.toMatchObject({ code: "payment-failed" });
+    ).rejects.toMatchObject({ code: "facilitator-unavailable" });
   });
 
   it("wraps a failed /supported", async () => {
     fetchMock.mockResolvedValueOnce(new Response("upstream boom", { status: 500 }));
 
     await expect(createHttpFacilitator(FACILITATOR_URL).supported()).rejects.toMatchObject({
-      code: "payment-failed",
+      code: "facilitator-unavailable",
     });
   });
 });

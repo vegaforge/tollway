@@ -30,7 +30,7 @@ import {
   createMockMppChargeHandler,
   createPaywall,
   decodeHeader,
-  type PaywallConfig,
+  type SinglePaymentOptionConfig,
   TOLLWAY_RECEIPT_HEADER,
 } from "@vegaforge/tollway-server";
 import express from "express";
@@ -40,7 +40,7 @@ import type { ScenarioResult } from "./types.js";
 const DEMO_AMOUNT = "10000";
 
 /** The mock service account, matching the x402 scenario's mock mode. */
-const MOCK_PAYWALL: Pick<PaywallConfig, "asset" | "payTo" | "network"> = {
+const MOCK_PAYWALL: Pick<SinglePaymentOptionConfig, "asset" | "payTo" | "network"> = {
   asset: "USDC:GA5ZSEJYB37JRC5AVCIA5MOP4RHTM335X2KGX3IHOJAPP5RE34K4KZVN",
   payTo: "GSERVICEXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX",
   network: "testnet",

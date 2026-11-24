@@ -5,6 +5,7 @@
  */
 
 import { runMppChargeScenario } from "./mpp-charge.js";
+import { runPaymentOptionsScenario } from "./payment-options.js";
 import type { ScenarioResult } from "./types.js";
 import { runX402Scenario } from "./x402.js";
 
@@ -20,6 +21,7 @@ export type ScenarioRunner = () => Promise<ScenarioResult>;
 const MOCK_RUNNERS: readonly ScenarioRunner[] = [
   () => runX402Scenario({ env: { MOCK_MODE: "true" } }),
   () => runMppChargeScenario(),
+  () => runPaymentOptionsScenario(),
 ];
 
 /**

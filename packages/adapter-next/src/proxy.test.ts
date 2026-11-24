@@ -107,7 +107,12 @@ describe("paywallProxy", () => {
   });
 
   it("answers a gate rejection without continuing to the route", async () => {
-    const gate: Gate = async () => ({ kind: "rejected", status: 409, reason: "invalid payment" });
+    const gate: Gate = async () => ({
+      kind: "rejected",
+      status: 409,
+      code: "offer-mismatch",
+      reason: "invalid payment",
+    });
     const proxy = paywallProxy({ routes: [{ path: "/api/paid", gate }] });
     const response = await proxy(
       new NextRequest("https://example.test/api/paid", {
@@ -125,7 +130,7 @@ describe("paywallProxy", () => {
       (name: string): Gate =>
       async () => {
         seen.push(name);
-        return { kind: "rejected", status: 409, reason: name };
+        return { kind: "rejected", status: 409, code: "offer-mismatch", reason: name };
       };
     const proxy = paywallProxy({
       routes: [
