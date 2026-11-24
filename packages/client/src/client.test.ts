@@ -1,5 +1,7 @@
 import {
   buildReceipt,
+  createDefaultRouter,
+  createMemoryQuarantine,
   createPolicyEngine,
   Ed25519Signer,
   Ed25519Verifier,
@@ -630,5 +632,70 @@ describe("createClient shadow policy", () => {
     expect(evaluate).not.toHaveBeenCalled();
     // Spend is still recorded, so the shadow is accurate once someone listens.
     expect(record).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe("counterparty:quarantined events", () => {
+  it("emits counterparty:quarantined and excludes mpp-channel when quarantine is configured", async () => {
+    const quarantine = createMemoryQuarantine();
+    await quarantine.quarantine({
+      counterparty: OFFER.payTo,
+      reason: "under-settled by 500",
+      drift: { kind: "under-settled", detail: "shortfall 500", channelId: "ch-1" },
+    });
+
+    const events: ClientEvent[] = [];
+    const client = createClient({
+      network: "testnet",
+      settler: mockSettler(),
+      router: createDefaultRouter(),
+      quarantine,
+    });
+    client.on((event) => events.push(event));
+
+    const result = await client.pay({
+      resource: OFFER.resource,
+      offer: { ...OFFER, models: ["mpp-channel", "x402"] },
+    });
+
+    expect(result.model).toBe("x402");
+    const qEvent = events.find((e) => e.type === "counterparty:quarantined");
+    expect(qEvent).toMatchObject({
+      type: "counterparty:quarantined",
+      counterparty: OFFER.payTo,
+      resource: OFFER.resource,
+      reason: "under-settled by 500",
+      entry: { counterparty: OFFER.payTo },
+    });
+  });
+
+  it("emits counterparty:quarantined when the router itself flags quarantine", async () => {
+    const quarantine = createMemoryQuarantine();
+    await quarantine.quarantine({
+      counterparty: OFFER.payTo,
+      reason: "under-settled",
+      drift: { kind: "under-settled", detail: "shortfall" },
+    });
+
+    const events: ClientEvent[] = [];
+    const client = createClient({
+      network: "testnet",
+      settler: mockSettler(),
+      router: createDefaultRouter({ quarantine }),
+    });
+    client.on((event) => events.push(event));
+
+    const result = await client.pay({
+      resource: OFFER.resource,
+      offer: { ...OFFER, models: ["mpp-channel", "mpp-charge"] },
+    });
+
+    expect(result.model).toBe("mpp-charge");
+    const qEvent = events.find((e) => e.type === "counterparty:quarantined");
+    expect(qEvent).toMatchObject({
+      type: "counterparty:quarantined",
+      counterparty: OFFER.payTo,
+      resource: OFFER.resource,
+    });
   });
 });
