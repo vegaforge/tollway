@@ -299,18 +299,14 @@ export class PolicyBlockedError extends TollwayError {
 
 // @public
 export interface PolicyCache {
-    // (undocumented)
     delete(key: string): void;
-    // (undocumented)
     get(key: string): CachedPolicyEntry | undefined;
-    // (undocumented)
     set(key: string, entry: CachedPolicyEntry): void;
 }
 
 // @public
 export class PolicyFetchError extends TollwayError {
     constructor(status: number, message: string);
-    // (undocumented)
     readonly status: number;
 }
 

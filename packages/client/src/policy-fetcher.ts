@@ -1,4 +1,9 @@
-import { type Policy, parsePolicy, TollwayError } from "@vegaforge/tollway-core";
+import {
+  formatPolicyIssues,
+  type Policy,
+  parsePolicy,
+  TollwayError,
+} from "@vegaforge/tollway-core";
 import { z } from "zod";
 
 /**
@@ -7,7 +12,11 @@ import { z } from "zod";
  * policy on `304 Not Modified`.
  */
 
-/** One cached policy entry keyed by `(serviceUrl, agentId)`. */
+/**
+ * One cached policy entry. Entries are keyed by the policy URL and a SHA-256
+ * digest of the API key: each key belongs to one tenant, and version numbers
+ * (so ETags) repeat across tenants.
+ */
 export type CachedPolicyEntry = {
   agentId: string;
   version: number;
@@ -18,8 +27,11 @@ export type CachedPolicyEntry = {
 
 /** Cache store used by {@link fetchPolicy} for `If-None-Match` conditional reads. */
 export interface PolicyCache {
+  /** The entry stored under `key`, or `undefined`. */
   get(key: string): CachedPolicyEntry | undefined;
+  /** Stores `entry` under `key`, replacing any earlier entry. */
   set(key: string, entry: CachedPolicyEntry): void;
+  /** Removes the entry under `key`; used when the service reports no active policy. */
   delete(key: string): void;
 }
 
@@ -55,6 +67,7 @@ export type FetchedPolicy = CachedPolicyEntry & {
 
 /** Error thrown when {@link fetchPolicy} cannot load an active policy. */
 export class PolicyFetchError extends TollwayError {
+  /** HTTP status of the response that failed. */
   readonly status: number;
 
   constructor(status: number, message: string) {
@@ -64,13 +77,28 @@ export class PolicyFetchError extends TollwayError {
   }
 }
 
+// The service's `policyVersionResponseSchema`. `policy` is checked separately
+// with `parsePolicy` so its issues can be reported by path.
 const responseEnvelopeSchema = z.object({
   agentId: z.string().min(1),
   version: z.number().int().min(1),
-  retired: z.boolean().optional(),
   policy: z.unknown(),
   createdAt: z.string().min(1),
 });
+
+function invalidResponse(status: number, reason: string): PolicyFetchError {
+  return new PolicyFetchError(status, `service returned an invalid policy response: ${reason}`);
+}
+
+async function cacheKeyFor(url: string, apiKey: string): Promise<string> {
+  const digest = await globalThis.crypto.subtle.digest("SHA-256", new TextEncoder().encode(apiKey));
+  const hex = Array.from(new Uint8Array(digest), (byte) => byte.toString(16).padStart(2, "0"));
+  return `${url} ${hex.join("")}`;
+}
+
+function copyOf(entry: CachedPolicyEntry, fromCache: boolean): FetchedPolicy {
+  return { ...structuredClone(entry), fromCache };
+}
 
 function policyEndpointUrl(serviceUrl: string, agentId: string): string {
   let end = serviceUrl.length;
@@ -96,7 +124,7 @@ export async function fetchPolicy(
   const fetcher = options.fetch ?? globalThis.fetch;
   const cache = options.cache ?? defaultPolicyCache;
   const url = policyEndpointUrl(serviceUrl, agentId);
-  const cacheKey = `${url}::${agentId}`;
+  const cacheKey = await cacheKeyFor(url, apiKey);
   const cached = cache.get(cacheKey);
 
   const headers: Record<string, string> = {
@@ -112,7 +140,7 @@ export async function fetchPolicy(
     if (cached === undefined) {
       throw new PolicyFetchError(304, "service returned 304 Not Modified with no cached policy");
     }
-    return { ...cached, fromCache: true };
+    return copyOf(cached, true);
   }
 
   if (response.status === 404) {
@@ -124,20 +152,36 @@ export async function fetchPolicy(
     throw new PolicyFetchError(response.status, `policy fetch failed with HTTP ${response.status}`);
   }
 
-  const envelope = responseEnvelopeSchema.safeParse(await response.json());
-  if (!envelope.success || envelope.data.retired === true || envelope.data.policy === null) {
-    throw new PolicyFetchError(response.status, "service returned an invalid policy envelope");
+  let json: unknown;
+  try {
+    json = await response.json();
+  } catch {
+    throw invalidResponse(response.status, "the body is not JSON");
   }
-
+  const envelope = responseEnvelopeSchema.safeParse(json);
+  if (!envelope.success) {
+    throw invalidResponse(response.status, "the body does not match the policy response shape");
+  }
+  if (envelope.data.agentId !== agentId) {
+    throw invalidResponse(response.status, `it is for agent "${envelope.data.agentId}"`);
+  }
+  if (envelope.data.policy === null) {
+    throw invalidResponse(response.status, "the policy is retired");
+  }
   const parsed = parsePolicy(envelope.data.policy);
   if (!parsed.ok) {
-    throw new PolicyFetchError(
+    throw invalidResponse(
       response.status,
-      `service returned an invalid policy: ${parsed.issues.map((i) => `${i.path.join(".")}: ${i.message}`).join("; ")}`,
+      formatPolicyIssues(parsed.issues).replaceAll("\n", "; "),
     );
   }
+  // The ETag is what makes the next request conditional. Without one there
+  // is nothing safe to cache, and inventing one could match the wrong version.
+  const etag = response.headers.get("ETag");
+  if (etag === null || etag.length === 0) {
+    throw invalidResponse(response.status, "it has no ETag header");
+  }
 
-  const etag = response.headers.get("etag") ?? `"${envelope.data.version}"`;
   const entry: CachedPolicyEntry = {
     agentId: envelope.data.agentId,
     version: envelope.data.version,
@@ -146,6 +190,5 @@ export async function fetchPolicy(
     createdAt: envelope.data.createdAt,
   };
   cache.set(cacheKey, entry);
-
-  return { ...entry, fromCache: false };
+  return copyOf(entry, false);
 }
