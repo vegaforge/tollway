@@ -15,6 +15,19 @@ The raw `@stellar/mpp` SDK gives you the primitive. Tollway runs the lifecycle.
 
 **Close.** Decide timing from heuristics: budget nearly drawn down, idle timeout reached, end-of-session signal received. Submit the single settlement, which transfers the latest committed amount to the recipient and returns the remainder to the funder.
 
+A close can be interrupted: the process dies, or the network call times out after the transaction went out. So before submitting, the manager records the attempt on the channel (an id, the ledger it started at, and the time) and moves the channel to `closing`. If the close fails in a way that may have reached the chain, the channel stays `closing`. It goes back to `open` only when the adapter reports that nothing was submitted, with `CloseNotSubmittedError`. A settlement that differs from the last commitment moves the channel to `settlement-mismatched`, which is terminal: the channel never takes another commit.
+
+`resume(channelId)` finishes a `closing` channel from what the chain says. If no close is on chain, it closes again. If the contract is closed and empty, it finds the settlement transaction and marks the channel `closed` with its hash and remainder. If the contract is closed with funds still in it, a funder-started close or a dispute, it hands the channel to recovery as `recovering`. When the chain says closed but no settlement can be found, or the RPC no longer keeps events back to the attempt, `resume` throws and the channel stays `closing` for an operator. `resumeAll()` does this for every `closing` channel, typically at startup, and reports each result without stopping at the first error.
+
+```ts
+const manager = createChannelManager({ adapter, store });
+for (const outcome of (await manager.resumeAll()).outcomes) {
+  if (outcome.kind === "error") console.error(`resume ${outcome.channelId} failed`, outcome.error);
+}
+```
+
+Repeated and concurrent calls in one process submit at most one close. Two processes resuming over a shared store can both submit until the store supports compare-and-set ([#175](https://github.com/vegaforge/tollway/issues/175)), so resume from one process until then.
+
 **Recover.** If the counterparty stops responding mid-channel, follow the contract's dispute or timeout path to get the committed funds back. This event is surfaced loudly: silent recovery is the worst failure mode for channel mode.
 
 Recovery is a first-class feature here, not an afterthought. The edge cases live in that path, and so do the tests.
@@ -25,7 +38,7 @@ Per the design notes, channel mode is naturally idempotent: a repeated commitmen
 
 ## In the code
 
-The lifecycle manager lives in `packages/channels/src/`. Open, commit, and close are implemented against an injected `MppChannelAdapter`. Recover throws `NotImplementedError` today ([#38](https://github.com/vegaforge/tollway/issues/38)), and no adapter backed by `@stellar/mpp/channel` ships yet ([#101](https://github.com/vegaforge/tollway/issues/101)). The relevant `@stellar/mpp` surface is the `channel` module (`@stellar/mpp/channel`), which exposes `open`, `commitment`, `close`, and `claim`. Recovery is `claim` gated by `closeEffectiveAtLedger` plus a `fundWaitingPeriod`.
+The lifecycle manager lives in `packages/channels/src/`. Open, commit, close and resume are implemented against an injected `MppChannelAdapter`, and `createStellarMppChannelAdapter` backs it with `@stellar/mpp` 0.7.1. Recover throws `NotImplementedError` today ([#38](https://github.com/vegaforge/tollway/issues/38)). `@stellar/mpp/channel/server` exposes `close`, `getChannelState` and `watchChannel`; it has no `close_start` or `refund` helper, which recovery needs. The adapter finds a settlement in the channel contract's events: the transaction whose `close` event is effective at its own ledger, with its `withdraw` and `refund` amounts.
 
 ## Reference
 
