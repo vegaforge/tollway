@@ -66,6 +66,12 @@ import {
 } from "./retry.js";
 
 export {
+  createPaidFetch,
+  type PaidFetch,
+  type PaidFetchOptions,
+  type PaidResponse,
+} from "./paid-fetch.js";
+export {
   AmbiguousSettlementError,
   MAX_RETRY_AFTER_MS,
   type RetryOptions,
