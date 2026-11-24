@@ -27,6 +27,7 @@ import {
   SettlementMismatchError,
   SettlementNotFoundError,
 } from "./errors.js";
+import type { ChannelEventHandler, ChannelLifecycleEvent } from "./events.js";
 import { type CommitmentStore, createMemoryCommitmentStore } from "./store.js";
 import type {
   Channel,
@@ -74,6 +75,16 @@ export type CreateChannelManagerOptions = {
    * idle-timeout assertions deterministic.
    */
   now?: () => string;
+  /**
+   * Receives lifecycle events (#187): `channel:opened`, `channel:closing`,
+   * `channel:closed` and `channel:close-failed`. Each is emitted after the
+   * matching store write succeeds. The handler is not awaited, and a handler
+   * that throws or rejects never changes the result of `open` or `close`:
+   * the error goes to `onEventError`.
+   */
+  onEvent?: ChannelEventHandler;
+  /** Receives an error thrown or rejected by `onEvent`, with the event it was handling. */
+  onEventError?: (error: Error, event: ChannelLifecycleEvent) => void;
 };
 
 export function createChannelManager(options: CreateChannelManagerOptions): ChannelManager {
@@ -83,7 +94,46 @@ export function createChannelManager(options: CreateChannelManagerOptions): Chan
     closePolicy,
     quarantine,
     now = () => new Date().toISOString(),
+    onEvent,
+    onEventError,
   } = options;
+
+  function reportEventError(raw: unknown, event: ChannelLifecycleEvent): void {
+    const error = raw instanceof Error ? raw : new Error(String(raw));
+    try {
+      onEventError?.(error, event);
+    } catch {
+      // The error hook is the last stop. Nothing is left to report to, and a
+      // throwing hook must not change the result of open or close.
+    }
+  }
+
+  /**
+   * Hands an event to `onEvent` without waiting for it. A synchronous throw
+   * and a rejected promise both go to `onEventError`, so an observer can
+   * never change a payment outcome or leave an unhandled rejection.
+   */
+  function emit(event: ChannelLifecycleEvent): void {
+    if (!onEvent) return;
+    try {
+      const result = onEvent(event);
+      if (result && typeof result.then === "function") {
+        result.then(undefined, (raw: unknown) => reportEventError(raw, event));
+      }
+    } catch (raw) {
+      reportEventError(raw, event);
+    }
+  }
+
+  function eventBase(channel: Channel) {
+    return {
+      at: now(),
+      channelId: channel.id,
+      counterparty: channel.counterparty,
+      asset: channel.asset,
+      network: channel.network,
+    };
+  }
 
   /** Resumes in progress in this process, by channel id. */
   const resuming = new Map<string, Promise<ResumeOutcome>>();
@@ -124,6 +174,7 @@ export function createChannelManager(options: CreateChannelManagerOptions): Chan
     const stream = await store.listCommitments(channel.id);
     const latest = stream.at(-1);
     const cumulativeAmount = latest?.cumulativeAmount ?? "0";
+    emit({ type: "channel:closing", ...eventBase(channel), cumulativeAmount });
 
     let settlement: CloseAdapterResult;
     try {
@@ -138,9 +189,15 @@ export function createChannelManager(options: CreateChannelManagerOptions): Chan
       if (error instanceof CloseNotSubmittedError) {
         await store.updateChannel(channel.id, { status: "open", closeAttempt: undefined });
       }
+      emit({
+        type: "channel:close-failed",
+        ...eventBase(channel),
+        status: error instanceof CloseNotSubmittedError ? "open" : "closing",
+        error: error instanceof Error ? error : new Error(String(error)),
+      });
       throw error;
     }
-    await settle(channel.id, cumulativeAmount, settlement);
+    await settle(channel, cumulativeAmount, settlement);
     return { channelId: channel.id, ...settledFields(settlement) };
   }
 
@@ -150,13 +207,14 @@ export function createChannelManager(options: CreateChannelManagerOptions): Chan
    * disagree, and the channel must never take another commit.
    */
   async function settle(
-    channelId: string,
+    channel: Channel,
     cumulativeAmount: string,
     settlement: Pick<
       CloseAdapterResult,
       "settlementTxHash" | "settledAmount" | "returnedRemainder"
     >,
   ): Promise<void> {
+    const channelId = channel.id;
     if (settlement.settledAmount !== cumulativeAmount) {
       await store.updateChannel(channelId, {
         status: "settlement-mismatched",
@@ -166,9 +224,26 @@ export function createChannelManager(options: CreateChannelManagerOptions): Chan
           observedAmount: settlement.settledAmount,
         },
       });
-      throw new SettlementMismatchError(channelId, cumulativeAmount, settlement.settledAmount);
+      const mismatch = new SettlementMismatchError(
+        channelId,
+        cumulativeAmount,
+        settlement.settledAmount,
+      );
+      emit({
+        type: "channel:close-failed",
+        ...eventBase(channel),
+        status: "settlement-mismatched",
+        error: mismatch,
+      });
+      throw mismatch;
     }
     await store.updateChannel(channelId, { status: "closed", ...settledFields(settlement) });
+    emit({
+      type: "channel:closed",
+      ...eventBase(channel),
+      ...settledFields(settlement),
+      settledAmount: settlement.settledAmount,
+    });
   }
 
   async function resumeOnce(channelId: string): Promise<ResumeOutcome> {
@@ -206,7 +281,7 @@ export function createChannelManager(options: CreateChannelManagerOptions): Chan
     });
     if (!found) throw new SettlementNotFoundError(channelId, startLedger);
     const stream = await store.listCommitments(channelId);
-    await settle(channelId, stream.at(-1)?.cumulativeAmount ?? "0", found);
+    await settle(current, stream.at(-1)?.cumulativeAmount ?? "0", found);
     return { kind: "closed", channelId, ...settledFields(found) };
   }
 
@@ -255,6 +330,12 @@ export function createChannelManager(options: CreateChannelManagerOptions): Chan
       };
 
       await store.putChannel(channel);
+      emit({
+        type: "channel:opened",
+        ...eventBase(channel),
+        deposit: channel.deposit,
+        openTxHash: channel.openTxHash,
+      });
       return channel;
     },
 

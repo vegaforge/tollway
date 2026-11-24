@@ -36,6 +36,17 @@ export {
   SettlementMismatchError,
   SettlementNotFoundError,
 } from "./errors.js";
+export {
+  type ChannelClosedEvent,
+  type ChannelCloseFailedEvent,
+  type ChannelClosingEvent,
+  type ChannelEventHandler,
+  type ChannelEventSink,
+  type ChannelLifecycleEvent,
+  type ChannelOpenedEvent,
+  type ObservabilityBridge,
+  toObservabilitySink,
+} from "./events.js";
 export { type CreateChannelManagerOptions, createChannelManager } from "./manager.js";
 export {
   RATE_PRECISION,
