@@ -8,6 +8,7 @@ import { CounterpartyQuarantine } from '@vegaforge/tollway-core';
 import { QuarantineEntry } from '@vegaforge/tollway-core';
 import { StellarNetwork } from '@vegaforge/tollway-core';
 import { TollwayError } from '@vegaforge/tollway-core';
+import { TrafficSnapshot } from '@vegaforge/tollway-core';
 
 // @public (undocumented)
 export type Channel = {
@@ -51,6 +52,54 @@ export type ChannelChainState = {
     currentLedger: number;
 };
 
+// Warning: (ae-forgotten-export) The symbol "ChannelEventBase" needs to be exported by the entry point index.d.ts
+//
+// @public
+export type ChannelClosedEvent = ChannelEventBase & {
+    type: "channel:closed";
+    settlementTxHash: string;
+    settledAmount: string;
+    returnedRemainder: string;
+};
+
+// @public
+export type ChannelCloseFailedEvent = ChannelEventBase & {
+    type: "channel:close-failed";
+    status: "open" | "closing" | "settlement-mismatched";
+    error: Error;
+};
+
+// @public
+export type ChannelClosingEvent = ChannelEventBase & {
+    type: "channel:closing";
+    cumulativeAmount: string;
+};
+
+// @public
+export type ChannelEventHandler = (event: ChannelLifecycleEvent) => void | Promise<void>;
+
+// @public
+export type ChannelEventSink = {
+    emit(event: {
+        type: string;
+        at: string;
+        data: Record<string, unknown>;
+    }): Promise<unknown>;
+};
+
+// @public (undocumented)
+export type ChannelLifecycleEvent = ChannelOpenedEvent | ChannelClosingEvent | ChannelClosedEvent | ChannelCloseFailedEvent;
+
+// @public
+export type ChannelListFilter = {
+    status?: ChannelStatus;
+    counterparty?: string;
+    asset?: string;
+    network?: StellarNetwork;
+    cursor?: string;
+    limit?: number;
+};
+
 // @public (undocumented)
 export interface ChannelManager {
     // (undocumented)
@@ -59,6 +108,7 @@ export interface ChannelManager {
     commit(channelId: string, amount: string): Promise<Commitment>;
     get(channelId: string): Promise<Channel | undefined>;
     list(channelId: string): Promise<readonly Commitment[]>;
+    listChannels(filter?: ChannelListFilter): Promise<ChannelPage>;
     // (undocumented)
     open(input: OpenChannelInput): Promise<Channel>;
     // (undocumented)
@@ -84,6 +134,19 @@ export class ChannelNotOpenError extends TollwayError {
     // (undocumented)
     readonly status: string;
 }
+
+// @public
+export type ChannelOpenedEvent = ChannelEventBase & {
+    type: "channel:opened";
+    deposit: string;
+    openTxHash: string;
+};
+
+// @public
+export type ChannelPage = {
+    channels: readonly Channel[];
+    nextCursor?: string;
+};
 
 // @public
 export type ChannelStatus = "open" | "closing" | "closed" | "recovering" | "recovered"
@@ -140,6 +203,26 @@ export type Commitment = {
 };
 
 // @public
+export type CommitmentAppendExpectation = {
+    expectedSequence: number;
+    expectedStatus: ChannelStatus;
+    lastCommitAt: string;
+};
+
+// @public
+export class CommitmentConflictError extends TollwayError {
+    constructor(channelId: string, field: "sequence" | "status", expected: string, actual: string);
+    // (undocumented)
+    readonly actual: string;
+    // (undocumented)
+    readonly channelId: string;
+    // (undocumented)
+    readonly expected: string;
+    // (undocumented)
+    readonly field: "sequence" | "status";
+}
+
+// @public
 export class CommitmentExceedsDepositError extends TollwayError {
     constructor(channelId: string, attemptedCumulative: string, deposit: string);
     // (undocumented)
@@ -150,18 +233,17 @@ export class CommitmentExceedsDepositError extends TollwayError {
     readonly deposit: string;
 }
 
-// @public
+// @public (undocumented)
 export interface CommitmentStore {
-    // (undocumented)
-    appendCommitment(commitment: Commitment): Promise<void>;
+    appendCommitment(commitment: Commitment, expectation: CommitmentAppendExpectation): Promise<Channel>;
     // (undocumented)
     getChannel(channelId: string): Promise<Channel | undefined>;
+    listChannels(filter?: ChannelListFilter): Promise<ChannelPage>;
     listChannelsByStatus(status: Channel["status"]): Promise<readonly Channel[]>;
-    // (undocumented)
     listCommitments(channelId: string): Promise<readonly Commitment[]>;
     // (undocumented)
     putChannel(channel: Channel): Promise<void>;
-    // (undocumented)
+    transitionChannel(channelId: string, expectedStatus: ChannelStatus, patch: Partial<Channel>): Promise<Channel>;
     updateChannel(channelId: string, patch: Partial<Channel>): Promise<Channel | undefined>;
 }
 
@@ -189,10 +271,18 @@ export type CreateChannelManagerOptions = {
     closePolicy?: ClosePolicy;
     quarantine?: CounterpartyQuarantine;
     now?: () => string;
+    onEvent?: ChannelEventHandler;
+    onEventError?: (error: Error, event: ChannelLifecycleEvent) => void;
 };
 
 // @public (undocumented)
 export function createMemoryCommitmentStore(): CommitmentStore;
+
+// @public
+export function createPostgresCommitmentStore(options: PostgresCommitmentStoreOptions): CommitmentStore;
+
+// @public
+export function createRedisCommitmentStore(options: RedisCommitmentStoreOptions): CommitmentStore;
 
 // @public
 export function createStellarMppChannelAdapter(options: StellarMppChannelAdapterOptions): MppChannelAdapter;
@@ -236,6 +326,12 @@ export interface MppChannelAdapter {
     signCommitment(input: SignCommitmentInput): Promise<SignedCommitment>;
 }
 
+// @public (undocumented)
+export type ObservabilityBridge = {
+    onEvent: ChannelEventHandler;
+    flush(): Promise<void>;
+};
+
 // @public
 export type OpenAdapterInput = {
     counterparty: string;
@@ -258,12 +354,67 @@ export type OpenChannelInput = {
     network: StellarNetwork;
 };
 
+// @public
+export interface PostgresClient extends PostgresQueryable {
+    // (undocumented)
+    connect?(): Promise<PostgresConnection>;
+}
+
+// @public (undocumented)
+export type PostgresCommitmentStoreOptions = {
+    client: PostgresClient;
+    schema?: string;
+};
+
+// @public
+export interface PostgresConnection extends PostgresQueryable {
+    // (undocumented)
+    release(destroy?: boolean): void;
+}
+
+// @public
+export interface PostgresQueryable {
+    // (undocumented)
+    query(text: string, values?: readonly unknown[]): Promise<PostgresQueryResult>;
+}
+
+// @public (undocumented)
+export type PostgresQueryResult = {
+    readonly rows: readonly Row[];
+    readonly rowCount: number | null;
+};
+
+// @public
+export const RATE_PRECISION = 1000000;
+
 // @public (undocumented)
 export type RecoveryResult = {
     channelId: string;
     recoveredAmount: string;
     txHash: string;
 };
+
+// @public (undocumented)
+export type RedisCommitmentStoreOptions = {
+    client: RedisLikeClient;
+    keyPrefix?: string;
+};
+
+// @public
+export interface RedisLikeClient {
+    // (undocumented)
+    eval(script: string, numKeys: number, ...args: string[]): Promise<unknown>;
+    // (undocumented)
+    evalsha(sha: string, numKeys: number, ...args: string[]): Promise<unknown>;
+    // (undocumented)
+    hgetall(key: string): Promise<Record<string, string>>;
+    // (undocumented)
+    sadd(key: string, ...members: string[]): Promise<unknown>;
+    // (undocumented)
+    smembers(key: string): Promise<string[]>;
+    // (undocumented)
+    zrange(key: string, start: number, stop: number): Promise<string[]>;
+}
 
 // @public (undocumented)
 export type ResumeAllResult = {
@@ -328,6 +479,30 @@ export type SignedCommitment = {
 };
 
 // @public
+export function sizeDeposit(input: SizeDepositInput): SizeDepositDecision;
+
+// @public (undocumented)
+export type SizeDepositDecision = {
+    open: true;
+    deposit: string;
+    reason: string;
+} | {
+    open: false;
+    reason: string;
+};
+
+// @public (undocumented)
+export type SizeDepositInput = {
+    pricePerRequest: string;
+    traffic: TrafficSnapshot;
+    horizonSeconds: number;
+    safetyFactorBps: number;
+    maximum?: string;
+    minDeposit: string;
+    headroom: string | null;
+};
+
+// @public
 export type StellarMppChannelAdapterOptions = {
     channelContract: string;
     openTxHash: string;
@@ -340,6 +515,15 @@ export type StellarMppChannelAdapterOptions = {
     rpcUrl?: string;
     simulationTimeoutMs?: number;
 };
+
+// @public
+export function toObservabilitySink(sink: ChannelEventSink, options?: {
+    onDeliveryError?: (error: Error, event: ChannelLifecycleEvent) => void;
+}): ObservabilityBridge;
+
+// Warnings were encountered during analysis:
+//
+// dist/index.d.ts:781:5 - (ae-forgotten-export) The symbol "Row" needs to be exported by the entry point index.d.ts
 
 // (No @packageDocumentation comment for this package)
 

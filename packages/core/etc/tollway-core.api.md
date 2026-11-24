@@ -38,6 +38,47 @@ export function canonicalBytes(value: JsonValue): Uint8Array;
 // @public
 export function canonicalJson(value: JsonValue): string;
 
+// @public
+export type ChannelOpenDecision = {
+    allowed: boolean;
+    wouldBlock: boolean;
+    rule: ChannelOpenRule | null;
+    detail: string;
+};
+
+// @public
+export class ChannelOpenFailedError extends TollwayError {
+    constructor(details: {
+        counterparty: string;
+        asset: string;
+        submission: ChannelOpenSubmission;
+        channelId?: string;
+        txHash?: string;
+        cause?: unknown;
+    });
+    // (undocumented)
+    readonly asset: string;
+    readonly channelId?: string;
+    // (undocumented)
+    readonly counterparty: string;
+    // (undocumented)
+    readonly submission: ChannelOpenSubmission;
+    readonly txHash?: string;
+}
+
+// @public
+export type ChannelOpenIntent = {
+    payee: string;
+    asset: string;
+    deposit: string;
+};
+
+// @public
+export type ChannelOpenRule = "min-channel-deposit" | "budget-daily" | "budget-total" | "per-service" | "per-service-daily" | "per-service-window";
+
+// @public
+export type ChannelOpenSubmission = "not-submitted" | "failed" | "ambiguous";
+
 // @public (undocumented)
 export function checkSmartAccountPolicy(plan: SmartAccountPlan, reader: SmartAccountPolicyReader): Promise<readonly SmartAccountCheck[]>;
 
@@ -417,10 +458,20 @@ export interface PolicyEngine {
     admit?(intent: PaymentIntent): Promise<PolicyTrace>;
     check(intent: PaymentIntent): Promise<PolicyDecision>;
     evaluate(intent: PaymentIntent): Promise<PolicyTrace>;
+    evaluateChannelOpen?(open: ChannelOpenIntent): Promise<ChannelOpenDecision>;
+    headroom?(asset: string, payee: string): Promise<PolicyHeadroom>;
     readonly mode: PolicyMode;
     record(intent: PaymentIntent): Promise<void>;
     recordAttempt?(intent: PaymentIntent): Promise<void>;
 }
+
+// @public
+export type PolicyHeadroom = {
+    asset: string;
+    payee: string;
+    headroom: string | null;
+    limitedBy: Exclude<ChannelOpenRule, "min-channel-deposit"> | null;
+};
 
 // @public
 export type PolicyInput = Omit<Policy, "policyVersion"> & {
@@ -1137,6 +1188,32 @@ export type SmartAccountResidual = {
 };
 
 // @public
+export type SponsorBalanceReading = {
+    account: string;
+    network: StellarNetwork;
+    at: string;
+} & ({
+    stale: false;
+    balanceStroops: string;
+} | {
+    stale: true;
+    error: string;
+});
+
+// @public
+export type SponsorLowBalanceEvent = {
+    type: "sponsor.low_balance";
+    at: string;
+    data: {
+        account: string;
+        network: StellarNetwork;
+        balanceStroops: string;
+        thresholdStroops: string;
+        hysteresisStroops: string;
+    };
+};
+
+// @public
 export type StellarNetwork = (typeof stellarNetworks)[number];
 
 // @public
@@ -1152,7 +1229,7 @@ export class TollwayError extends Error {
 }
 
 // @public
-export type TollwayErrorCode = "not-implemented" | "no-viable-model" | "invalid-receipt" | "invalid-signing-key" | "invalid-amount" | "invalid-quote" | "invalid-discovery" | "invalid-policy" | "canonicalization-failed" | "invalid-signature-encoding" | "invalid-key-set" | "key-set-unavailable" | "budget-exceeded" | "payment-failed" | "outcome-unknown" | "facilitator-unsupported" | "facilitator-unavailable" | "facilitator-invalid-response" | "policy-blocked" | "receipt-verification-failed" | "receipt-offer-mismatch" | "offer-network-mismatch" | "channel-not-found" | "channel-not-open" | "channel-already-closed" | "commitment-exceeds-deposit" | "settlement-mismatch" | "counterparty-quarantined" | "invalid-metrics-query" | "invalid-metric" | "metrics-query-too-large" | "invalid-receipt-query" | "invalid-cursor" | "corrupt-receipt";
+export type TollwayErrorCode = "not-implemented" | "no-viable-model" | "invalid-receipt" | "invalid-signing-key" | "invalid-amount" | "invalid-quote" | "invalid-discovery" | "invalid-policy" | "canonicalization-failed" | "invalid-signature-encoding" | "invalid-key-set" | "key-set-unavailable" | "budget-exceeded" | "payment-failed" | "outcome-unknown" | "facilitator-unsupported" | "facilitator-unavailable" | "facilitator-invalid-response" | "policy-blocked" | "offer-rejected" | "receipt-verification-failed" | "receipt-offer-mismatch" | "offer-network-mismatch" | "channel-not-found" | "channel-not-open" | "channel-already-closed" | "commitment-conflict" | "invalid-store-config" | "corrupt-channel-record" | "commitment-exceeds-deposit" | "settlement-mismatch" | "counterparty-quarantined" | "channel-open-failed" | "invalid-metrics-query" | "invalid-metric" | "metrics-query-too-large" | "invalid-receipt-query" | "invalid-cursor" | "corrupt-receipt" | "receipt-conflict";
 
 // @public
 export type TrafficSnapshot = {

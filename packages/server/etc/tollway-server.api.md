@@ -22,6 +22,8 @@ import { PaymentRequirements } from '@x402/core/types';
 import { ReceiptSigner } from '@vegaforge/tollway-core';
 import { SettlementModel } from '@vegaforge/tollway-core';
 import { SignedReceipt } from '@vegaforge/tollway-core';
+import { SponsorBalanceReading } from '@vegaforge/tollway-core';
+import { SponsorLowBalanceEvent } from '@vegaforge/tollway-core';
 import { stellar } from '@stellar/mpp/charge/server';
 import { StellarNetwork } from '@vegaforge/tollway-core';
 import { Store } from '@stellar/mpp/charge/server';
@@ -115,6 +117,9 @@ export function createFacilitatorValidator(facilitator: FacilitatorClient, optio
 // @public
 export function createFailoverFacilitator(options: FailoverFacilitatorOptions): FacilitatorClient;
 
+// @public
+export function createHorizonSponsorBalanceReader(clientForNetwork?: (network: StellarNetwork) => SponsorHorizonClient): SponsorBalanceReader;
+
 // Warning: (ae-forgotten-export) The symbol "HttpFacilitatorOptions" needs to be exported by the entry point index.d.ts
 //
 // @public
@@ -146,6 +151,9 @@ export function createRedisSettlementCache(options: RedisSettlementCacheOptions)
 
 // @public
 export function createRouteTable(routes: Record<string, PaywallConfig>, deps: PaywallDeps): RouteTable;
+
+// @public
+export function createSponsorMonitor(options: SponsorMonitorOptions): SponsorMonitor;
 
 // @public
 export function createStellarChannelWatchRpc(simulationTimeoutMs?: number): ChannelWatchRpc;
@@ -678,6 +686,41 @@ export type SettleResult = {
 } | {
     settled: false;
     reason: string;
+};
+
+// @public
+export type SponsorBalanceReader = (account: string, network: StellarNetwork) => Promise<string>;
+
+// @public
+export type SponsorHorizonClient = {
+    loadAccount(account: string): Promise<unknown>;
+};
+
+// @public
+export type SponsorMonitor = {
+    poll(): Promise<readonly SponsorBalanceReading[]>;
+    start(): Promise<void>;
+    stop(): Promise<void>;
+};
+
+// @public
+export type SponsorMonitorOptions = {
+    network: StellarNetwork;
+    accounts?: readonly string[];
+    facilitator?: Pick<FacilitatorClient, "supported">;
+    thresholdStroops: string;
+    hysteresisStroops?: string;
+    intervalMs?: number;
+    readBalance?: SponsorBalanceReader;
+    sink: SponsorMonitorSink;
+    clock?: () => number;
+    onError?: (error: unknown) => void;
+};
+
+// @public
+export type SponsorMonitorSink = {
+    recordSponsorBalance(reading: SponsorBalanceReading): void | Promise<void>;
+    emit(event: SponsorLowBalanceEvent): unknown;
 };
 
 // @public

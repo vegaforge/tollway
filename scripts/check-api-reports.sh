@@ -37,6 +37,7 @@ PUBLISHABLE=(
   packages/observability
   packages/reconcile
   packages/server
+  packages/service
   packages/theme
 )
 
@@ -54,6 +55,8 @@ for pkg in "${PUBLISHABLE[@]}"; do
   if [ "$UPDATE" = "true" ]; then
     # Update mode: write the new report. Any extractor error (a forgotten
     # export, an unreadable entry point) still fails the run.
+    # A new package has no etc/ folder yet, and API Extractor will not create it.
+    mkdir -p "$pkg/etc"
     if ! pnpm exec api-extractor run --local --config "$pkg/api-extractor.json"; then
       echo "✗ $pkg: API Extractor failed while updating the report" >&2
       FAILED=1

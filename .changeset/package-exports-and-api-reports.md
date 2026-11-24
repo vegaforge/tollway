@@ -9,6 +9,7 @@
 "@vegaforge/tollway-observability": patch
 "@vegaforge/tollway-reconcile": patch
 "@vegaforge/tollway-server": patch
+"@vegaforge/tollway-service": patch
 "@vegaforge/tollway-theme": patch
 ---
 

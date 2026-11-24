@@ -33,6 +33,7 @@ PUBLISHABLE=(
   packages/observability
   packages/reconcile
   packages/server
+  packages/service
   packages/theme
 )
 
@@ -50,8 +51,10 @@ ENTRY_POINTS=(
   @vegaforge/tollway-core
   @vegaforge/tollway-core/policy-loader
   @vegaforge/tollway-observability
+  @vegaforge/tollway-observability/sqlite
   @vegaforge/tollway-reconcile
   @vegaforge/tollway-server
+  @vegaforge/tollway-service
   @vegaforge/tollway-theme
   @vegaforge/tollway-theme/preset
 )
@@ -73,10 +76,25 @@ JSON
 # The adapters' frameworks are peer dependencies (Next's is optional, so npm
 # does not install it on its own). Install the versions each adapter is
 # tested against, as a consumer would.
+# Prints the version spec a workspace manifest pins for a dependency, and
+# fails when there is none, so a typo never installs whatever is latest.
+pinned() {
+  local manifest=$1 field=$2 dependency=$3 spec
+  spec=$(node -p "require('$manifest').$field?.['$dependency'] ?? ''")
+  if [ -z "$spec" ]; then
+    echo "✗ $manifest does not pin $dependency in $field" >&2
+    exit 1
+  fi
+  echo "$spec"
+}
+
 PEERS=()
 for framework in express fastify hono next; do
-  PEERS+=("$framework@$(node -p "require('$ROOT/packages/adapter-$framework/package.json').devDependencies['$framework']")")
+  spec=$(pinned "$ROOT/packages/adapter-$framework/package.json" devDependencies "$framework")
+  PEERS+=("$framework@$spec")
 done
+TYPESCRIPT=$(pinned "$ROOT/package.json" devDependencies typescript)
+TYPES_NODE=$(pinned "$ROOT/packages/core/package.json" devDependencies @types/node)
 
 echo "→ Installing the tarballs into a fresh project..."
 # The packages depend on each other at the same version, so installing every
@@ -84,8 +102,8 @@ echo "→ Installing the tarballs into a fresh project..."
 npm install --ignore-scripts --no-audit --no-fund --loglevel=error \
   "$WORK"/tarballs/*.tgz \
   "${PEERS[@]}" \
-  "typescript@$(node -p "require('$ROOT/node_modules/typescript/package.json').version")" \
-  "@types/node@$(node -p "require('$ROOT/node_modules/@types/node/package.json').version")"
+  "typescript@$TYPESCRIPT" \
+  "@types/node@$TYPES_NODE"
 
 : > consumer.mts
 : > consumer.cts

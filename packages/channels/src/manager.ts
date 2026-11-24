@@ -2,9 +2,10 @@
  * The MPP channel lifecycle manager. See docs/design.md,
  * "The channel lifecycle manager".
  *
- * Scope of this release: `open`, `commit`, `shouldClose`, `close`, and
- * `resume` and `resumeAll` for closes a crash or an unknown outcome left in
- * `closing` (#176). `recover` is tracked under #38 and remains a typed stub.
+ * Scope of this release: `open`, `commit`, `listChannels`, `shouldClose`,
+ * `close`, and `resume` and `resumeAll` for closes a crash or an unknown
+ * outcome left in `closing` (#176). `recover` is tracked under #38 and remains
+ * a typed stub.
  */
 
 import { type CounterpartyQuarantine, NotImplementedError } from "@vegaforge/tollway-core";
@@ -19,16 +20,21 @@ import {
   ChannelNotFoundError,
   ChannelNotOpenError,
   CloseNotSubmittedError,
+  CommitmentConflictError,
   CommitmentExceedsDepositError,
   CounterpartyQuarantinedError,
   InvalidAmountError,
   SettlementMismatchError,
   SettlementNotFoundError,
 } from "./errors.js";
+import type { ChannelEventHandler, ChannelLifecycleEvent } from "./events.js";
 import { type CommitmentStore, createMemoryCommitmentStore } from "./store.js";
 import type {
   Channel,
+  ChannelListFilter,
   ChannelManager,
+  ChannelPage,
+  ChannelStatus,
   ClosePolicy,
   CloseResult,
   Commitment,
@@ -69,6 +75,16 @@ export type CreateChannelManagerOptions = {
    * idle-timeout assertions deterministic.
    */
   now?: () => string;
+  /**
+   * Receives lifecycle events (#187): `channel:opened`, `channel:closing`,
+   * `channel:closed` and `channel:close-failed`. Each is emitted after the
+   * matching store write succeeds. The handler is not awaited, and a handler
+   * that throws or rejects never changes the result of `open` or `close`:
+   * the error goes to `onEventError`.
+   */
+  onEvent?: ChannelEventHandler;
+  /** Receives an error thrown or rejected by `onEvent`, with the event it was handling. */
+  onEventError?: (error: Error, event: ChannelLifecycleEvent) => void;
 };
 
 export function createChannelManager(options: CreateChannelManagerOptions): ChannelManager {
@@ -78,7 +94,46 @@ export function createChannelManager(options: CreateChannelManagerOptions): Chan
     closePolicy,
     quarantine,
     now = () => new Date().toISOString(),
+    onEvent,
+    onEventError,
   } = options;
+
+  function reportEventError(raw: unknown, event: ChannelLifecycleEvent): void {
+    const error = raw instanceof Error ? raw : new Error(String(raw));
+    try {
+      onEventError?.(error, event);
+    } catch {
+      // The error hook is the last stop. Nothing is left to report to, and a
+      // throwing hook must not change the result of open or close.
+    }
+  }
+
+  /**
+   * Hands an event to `onEvent` without waiting for it. A synchronous throw
+   * and a rejected promise both go to `onEventError`, so an observer can
+   * never change a payment outcome or leave an unhandled rejection.
+   */
+  function emit(event: ChannelLifecycleEvent): void {
+    if (!onEvent) return;
+    try {
+      const result = onEvent(event);
+      if (result && typeof result.then === "function") {
+        result.then(undefined, (raw: unknown) => reportEventError(raw, event));
+      }
+    } catch (raw) {
+      reportEventError(raw, event);
+    }
+  }
+
+  function eventBase(channel: Channel) {
+    return {
+      at: now(),
+      channelId: channel.id,
+      counterparty: channel.counterparty,
+      asset: channel.asset,
+      network: channel.network,
+    };
+  }
 
   /** Resumes in progress in this process, by channel id. */
   const resuming = new Map<string, Promise<ResumeOutcome>>();
@@ -91,16 +146,35 @@ export function createChannelManager(options: CreateChannelManagerOptions): Chan
    * other failure may have reached the chain, so the channel stays
    * `closing` for `resume` instead of being closed a second time.
    */
-  async function submitClose(channel: Channel, startedAtLedger: number): Promise<CloseResult> {
-    const stream = await store.listCommitments(channel.id);
-    const latest = stream.at(-1);
-    const cumulativeAmount = latest?.cumulativeAmount ?? "0";
+  async function submitClose(
+    channel: Channel,
+    startedAtLedger: number,
+    expectedStatus: ChannelStatus,
+  ): Promise<CloseResult> {
     const closeAttempt = {
       attemptId: globalThis.crypto.randomUUID(),
       startedAtLedger,
       startedAt: now(),
     };
-    await store.updateChannel(channel.id, { status: "closing", closeAttempt });
+    // Move to `closing` first, as a compare-and-set on the status. Commits
+    // are conditioned on `open`, so once this lands no commitment can follow,
+    // and the stream read below is the final one. A concurrent close loses
+    // here and is refused instead of submitting a second close (#175).
+    try {
+      await store.transitionChannel(channel.id, expectedStatus, {
+        status: "closing",
+        closeAttempt,
+      });
+    } catch (error) {
+      if (error instanceof CommitmentConflictError && error.field === "status") {
+        throw new ChannelAlreadyClosedError(channel.id, error.actual);
+      }
+      throw error;
+    }
+    const stream = await store.listCommitments(channel.id);
+    const latest = stream.at(-1);
+    const cumulativeAmount = latest?.cumulativeAmount ?? "0";
+    emit({ type: "channel:closing", ...eventBase(channel), cumulativeAmount });
 
     let settlement: CloseAdapterResult;
     try {
@@ -115,9 +189,15 @@ export function createChannelManager(options: CreateChannelManagerOptions): Chan
       if (error instanceof CloseNotSubmittedError) {
         await store.updateChannel(channel.id, { status: "open", closeAttempt: undefined });
       }
+      emit({
+        type: "channel:close-failed",
+        ...eventBase(channel),
+        status: error instanceof CloseNotSubmittedError ? "open" : "closing",
+        error: error instanceof Error ? error : new Error(String(error)),
+      });
       throw error;
     }
-    await settle(channel.id, cumulativeAmount, settlement);
+    await settle(channel, cumulativeAmount, settlement);
     return { channelId: channel.id, ...settledFields(settlement) };
   }
 
@@ -127,13 +207,14 @@ export function createChannelManager(options: CreateChannelManagerOptions): Chan
    * disagree, and the channel must never take another commit.
    */
   async function settle(
-    channelId: string,
+    channel: Channel,
     cumulativeAmount: string,
     settlement: Pick<
       CloseAdapterResult,
       "settlementTxHash" | "settledAmount" | "returnedRemainder"
     >,
   ): Promise<void> {
+    const channelId = channel.id;
     if (settlement.settledAmount !== cumulativeAmount) {
       await store.updateChannel(channelId, {
         status: "settlement-mismatched",
@@ -143,9 +224,26 @@ export function createChannelManager(options: CreateChannelManagerOptions): Chan
           observedAmount: settlement.settledAmount,
         },
       });
-      throw new SettlementMismatchError(channelId, cumulativeAmount, settlement.settledAmount);
+      const mismatch = new SettlementMismatchError(
+        channelId,
+        cumulativeAmount,
+        settlement.settledAmount,
+      );
+      emit({
+        type: "channel:close-failed",
+        ...eventBase(channel),
+        status: "settlement-mismatched",
+        error: mismatch,
+      });
+      throw mismatch;
     }
     await store.updateChannel(channelId, { status: "closed", ...settledFields(settlement) });
+    emit({
+      type: "channel:closed",
+      ...eventBase(channel),
+      ...settledFields(settlement),
+      settledAmount: settlement.settledAmount,
+    });
   }
 
   async function resumeOnce(channelId: string): Promise<ResumeOutcome> {
@@ -159,7 +257,7 @@ export function createChannelManager(options: CreateChannelManagerOptions): Chan
     if (chain.closeEffectiveAtLedger === undefined) {
       // Nothing closed on chain: the earlier attempt never landed. Close
       // again with the same commitment stream.
-      const closed = await submitClose(current, chain.currentLedger);
+      const closed = await submitClose(current, chain.currentLedger, "closing");
       return { kind: "reclosed", ...closed };
     }
 
@@ -183,7 +281,7 @@ export function createChannelManager(options: CreateChannelManagerOptions): Chan
     });
     if (!found) throw new SettlementNotFoundError(channelId, startLedger);
     const stream = await store.listCommitments(channelId);
-    await settle(channelId, stream.at(-1)?.cumulativeAmount ?? "0", found);
+    await settle(current, stream.at(-1)?.cumulativeAmount ?? "0", found);
     return { kind: "closed", channelId, ...settledFields(found) };
   }
 
@@ -232,6 +330,12 @@ export function createChannelManager(options: CreateChannelManagerOptions): Chan
       };
 
       await store.putChannel(channel);
+      emit({
+        type: "channel:opened",
+        ...eventBase(channel),
+        deposit: channel.deposit,
+        openTxHash: channel.openTxHash,
+      });
       return channel;
     },
 
@@ -275,10 +379,12 @@ export function createChannelManager(options: CreateChannelManagerOptions): Chan
         commitment: signed.commitment,
       };
 
-      await store.appendCommitment(commitment);
-      await store.updateChannel(channelId, {
-        committed: cumulativeAmount,
-        sequence: nextSequence,
+      // A compare-and-set on the sequence and the status we read above. If
+      // another commit or a close got there first, this throws
+      // CommitmentConflictError, and the signed blob is dropped with it.
+      await store.appendCommitment(commitment, {
+        expectedSequence: current.sequence,
+        expectedStatus: "open",
         lastCommitAt: now(),
       });
 
@@ -293,6 +399,10 @@ export function createChannelManager(options: CreateChannelManagerOptions): Chan
       const channel = await store.getChannel(channelId);
       if (!channel) throw new ChannelNotFoundError(channelId);
       return store.listCommitments(channelId);
+    },
+
+    async listChannels(filter?: ChannelListFilter): Promise<ChannelPage> {
+      return store.listChannels(filter);
     },
 
     async shouldClose(channelId: string): Promise<boolean> {
@@ -351,7 +461,7 @@ export function createChannelManager(options: CreateChannelManagerOptions): Chan
       // Read the chain height before anything is written: if this fails,
       // nothing happened and the channel is still simply open.
       const chain = await adapter.getChannelState({ channelId, network: current.network });
-      return submitClose(current, chain.currentLedger);
+      return submitClose(current, chain.currentLedger, "open");
     },
 
     resume(channelId: string): Promise<ResumeOutcome> {

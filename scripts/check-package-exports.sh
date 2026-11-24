@@ -23,6 +23,7 @@ PUBLISHABLE=(
   packages/observability
   packages/reconcile
   packages/server
+  packages/service
   packages/theme
 )
 

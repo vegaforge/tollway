@@ -6,6 +6,7 @@
 
 import { ClientStellarSigner } from '@x402/stellar';
 import { CounterpartyQuarantine } from '@vegaforge/tollway-core';
+import { Keypair } from '@stellar/stellar-sdk';
 import { ModelRouter } from '@vegaforge/tollway-core';
 import { PaymentOffer } from '@vegaforge/tollway-core';
 import { PolicyEngine } from '@vegaforge/tollway-core';
@@ -28,6 +29,15 @@ export class AmbiguousSettlementError extends TollwayError {
     // (undocumented)
     readonly reason: string;
 }
+
+// @public
+export type ChannelFallbackOptions = {
+    x402: ClientSettler;
+    cooldownMs?: number;
+    maxCooldownMs?: number;
+    maxTracked?: number;
+    onOrphanedChannel?: (channel: OrphanedChannel) => void;
+};
 
 // @public
 export type ClientEvent = {
@@ -97,12 +107,31 @@ export type ClientEvent = {
 } | {
     type: "budget:warning";
     remaining: string;
-} | {
+}
+/**
+* A channel settler opened or closed a payment channel. The client never
+* opens channels itself: a settler reports these through
+* `ClientSettler.subscribe` (#187).
+*/
+| {
     type: "channel:opened";
     channelId: string;
 } | {
     type: "channel:closed";
     channelId: string;
+}
+/**
+* The payment was made on another model than the one chosen (#183): a
+* channel could not be opened, or the counterparty's channel path is
+* cooling down after a failed open. The `payment` event that follows
+* reports the model that actually paid.
+*/
+| {
+    type: "fallback";
+    resource: string;
+    from: SettlementModel;
+    to: SettlementModel;
+    reason: string;
 } | {
     type: "counterparty:quarantined";
     counterparty: string;
@@ -119,6 +148,7 @@ export interface ClientSettler {
     readonly payer?: string;
     // (undocumented)
     settle(input: SettleRequest): Promise<SignedReceipt>;
+    subscribe?(emit: (event: SettlerEvent) => void): void;
 }
 
 // @public
@@ -126,6 +156,9 @@ export function createClient(options: TollwayClientOptions): TollwayClient;
 
 // @public
 export function createMemoryReceiptStore(): ReceiptHistory;
+
+// @public
+export function createMppChargeSettler(options: MppChargeSettlerOptions): ClientSettler;
 
 // @public
 export function createX402Settler(options: X402SettlerOptions): ClientSettler;
@@ -148,9 +181,58 @@ export type ModelSpendTotal = SpendTotal & {
 };
 
 // @public
+export const MPP_NETWORK_ID: Record<StellarNetwork, "stellar:testnet" | "stellar:pubnet">;
+
+// @public
+export type MppChargeMode = "pull" | "push";
+
+// Warning: (ae-forgotten-export) The symbol "SignerOption" needs to be exported by the entry point index.d.ts
+//
+// @public (undocumented)
+export type MppChargeSettlerOptions = SignerOption & {
+    network: StellarNetwork;
+    rpcUrl?: string;
+    mode?: MppChargeMode;
+    fetch?: typeof globalThis.fetch;
+    receiptHeader?: string;
+    method?: string;
+};
+
+// @public
+export function offerAssetContract(asset: string, network: StellarNetwork): string;
+
+// @public
+export type OfferCheckName = "structural" | "network" | "allowedAssets" | "maxAmount" | "allowedPayees";
+
+// @public
+export type OfferChecks = {
+    maxAmount?: Readonly<Record<string, string>>;
+    allowedPayees?: readonly string[];
+    allowedAssets?: readonly string[];
+    requireNetwork?: StellarNetwork;
+    allowZeroAmount?: boolean;
+};
+
+// @public
 export class OfferNetworkMismatchError extends TollwayError {
     constructor(offerNetwork: string, clientNetwork: StellarNetwork);
 }
+
+// @public
+export class OfferRejectedError extends TollwayError {
+    constructor(checkName: OfferCheckName, detail: string);
+    // (undocumented)
+    readonly checkName: OfferCheckName;
+}
+
+// @public
+export type OrphanedChannel = {
+    counterparty: string;
+    asset: string;
+    channelId?: string;
+    txHash?: string;
+    error: Error;
+};
 
 // @public
 export type PayeeSpendTotal = SpendTotal & {
@@ -272,6 +354,11 @@ export type SettleRequest = {
 };
 
 // @public
+export type SettlerEvent = Extract<ClientEvent, {
+    type: "channel:opened" | "channel:closed";
+}>;
+
+// @public
 export type SignedTerms = {
     amount: string;
     asset: string;
@@ -306,7 +393,7 @@ export type SpendTotal = {
     count: number;
 };
 
-// @public (undocumented)
+// @public
 export const TOLLWAY_RECEIPT_HEADER = "TOLLWAY-RECEIPT";
 
 // @public (undocumented)
@@ -327,6 +414,7 @@ export type TollwayClientOptions = {
         warn(message: string): void;
     };
     router?: ModelRouter;
+    offerChecks?: OfferChecks;
     quarantine?: CounterpartyQuarantine;
     verifier?: ReceiptVerifier;
     receiptMaxSkewMs?: number;
@@ -335,6 +423,7 @@ export type TollwayClientOptions = {
     receiptStore?: ReceiptStore;
     onStoreError?: (error: Error, receipt: SignedReceipt) => void;
     retry?: RetryOptions;
+    fallback?: ChannelFallbackOptions;
 };
 
 // @public (undocumented)
@@ -344,6 +433,7 @@ export type X402SettlerOptions = {
     fetch?: typeof globalThis.fetch;
     rpcUrl?: string;
     method?: string;
+    offerChecks?: OfferChecks;
 };
 
 // (No @packageDocumentation comment for this package)

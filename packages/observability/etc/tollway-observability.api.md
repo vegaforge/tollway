@@ -4,8 +4,36 @@
 
 ```ts
 
+import { ReceiptVerifier } from '@vegaforge/tollway-core';
 import { SettlementModel } from '@vegaforge/tollway-core';
+import { SignedReceipt } from '@vegaforge/tollway-core';
+import { SponsorBalanceReading } from '@vegaforge/tollway-core';
+import { StellarNetwork } from '@vegaforge/tollway-core';
 import { TollwayError } from '@vegaforge/tollway-core';
+
+// @public
+export type AppendOutcome = "appended" | "duplicate";
+
+// @public (undocumented)
+export type ArchiveSearchOptions = {
+    limit?: number;
+    cursor?: string;
+};
+
+// @public (undocumented)
+export type ArchiveSearchResult = {
+    items: SignedReceipt[];
+    nextCursor: string | null;
+};
+
+// @public
+export function assertValidMetric(metric: PaymentMetric): void;
+
+// @public
+export function createMemoryMetricsStore(): MetricsStore;
+
+// @public
+export function createMemoryReceiptArchive(options?: ReceiptArchiveOptions): ReceiptArchive;
 
 // @public
 export function createMemoryWebhookOutbox(): WebhookOutbox;
@@ -14,16 +42,34 @@ export function createMemoryWebhookOutbox(): WebhookOutbox;
 export function createObservabilityHub(options?: ObservabilityHubOptions): ObservabilityHub;
 
 // @public
+export function createPostgresMetricsStore(options: PostgresMetricsStoreOptions): MetricsStore;
+
+// @public
+export function createPrometheusExporter(options: PrometheusExporterOptions): PrometheusExporter;
+
+// @public
+export function createSqliteReceiptArchive(options: SqliteReceiptArchiveOptions): SqliteReceiptArchive;
+
+// @public
 export function createSqliteWebhookOutbox(options: SqliteWebhookOutboxOptions): SqliteWebhookOutbox;
 
 // @public (undocumented)
 export function createWebhookDispatcher(options: WebhookDispatcherOptions): WebhookDispatcher;
+
+// @public (undocumented)
+export const DEFAULT_ARCHIVE_PAGE_SIZE = 50;
+
+// @public
+export const DEFAULT_LATENCY_BUCKETS_SECONDS: readonly number[];
 
 // @public
 export const DEFAULT_MAX_TIMESERIES_BUCKETS = 10080;
 
 // @public
 export const DEFAULT_MAX_TIMESERIES_ROWS = 200000;
+
+// @public (undocumented)
+export const DEFAULT_METRICS_PAGE_LIMIT = 1000;
 
 // @public
 export type DeliveryFailure = {
@@ -40,6 +86,12 @@ export type DeliveryFailure = {
 };
 
 // @public
+export type DeliveryOutcome = {
+    result: "delivered" | "failed";
+    targetKind: "handler" | "webhook";
+};
+
+// @public
 export type DeliveryReport = {
     event: TollwayEvent;
     handlersDispatched: number;
@@ -47,8 +99,21 @@ export type DeliveryReport = {
     failures: DeliveryFailure[];
 };
 
-// @public (undocumented)
+// @public
 export type ExportFormat = "json" | "csv";
+
+// @public
+export type HubObserver = {
+    onMetric?: (metric: PaymentMetric) => void;
+    onDelivery?: (outcome: DeliveryOutcome) => void;
+};
+
+// @public
+export class InvalidMetricError extends TollwayError {
+    constructor(field: keyof PaymentMetric, message: string);
+    // (undocumented)
+    readonly field: keyof PaymentMetric;
+}
 
 // @public
 export function isWebhookEvent(value: unknown): value is WebhookEvent;
@@ -61,10 +126,36 @@ export type LatencyPercentiles = {
 };
 
 // @public (undocumented)
+export const MAX_ARCHIVE_PAGE_SIZE = 500;
+
+// @public (undocumented)
+export const MAX_METRICS_PAGE_LIMIT = 10000;
+
+// @public (undocumented)
+export type MetricsBufferTuning = {
+    maxBatchSize: number;
+    flushIntervalMs: number;
+};
+
+// @public (undocumented)
+export type MetricsPage = {
+    metrics: PaymentMetric[];
+    nextCursor?: string;
+};
+
+// @public (undocumented)
+export type MetricsPageRequest = {
+    limit?: number;
+    cursor?: string;
+};
+
+// @public (undocumented)
 export type MetricsQuery = {
     payer?: string;
     payee?: string;
     model?: SettlementModel;
+    asset?: string;
+    outcome?: PaymentMetric["outcome"];
     from?: string;
     to?: string;
 };
@@ -81,6 +172,25 @@ export class MetricsQueryTooLargeError extends TollwayError {
 }
 
 // @public
+export interface MetricsStore {
+    append(metrics: readonly PaymentMetric[]): Promise<void>;
+    close(): Promise<void>;
+    query(query?: MetricsQuery, page?: MetricsPageRequest): Promise<MetricsPage>;
+    summarize(query?: MetricsQuery): Promise<SpendSummary>;
+}
+
+// @public
+export function migratePostgresMetricsStore(client: PostgresLikeClient, tablePrefix?: string): Promise<void>;
+
+// @public
+export type ModelAssetSpend = {
+    model: SettlementModel;
+    asset: string;
+    amount: string;
+    count: number;
+};
+
+// @public
 export function nearestRankPercentile(sorted: readonly number[], p: number): number;
 
 // @public
@@ -92,13 +202,21 @@ export type NewWebhookDelivery = {
 // @public (undocumented)
 export interface ObservabilityHub {
     addWebhook(subscription: WebhookSubscription): void;
+    close(): Promise<void>;
     emit(event: TollwayEventInput): Promise<DeliveryReport>;
     export(format: ExportFormat, query?: MetricsQuery): string;
+    exportAsync(format: ExportFormat, query?: MetricsQuery): Promise<string>;
+    flush(): Promise<void>;
+    getSponsorReadings(): SponsorBalanceReading[];
+    observe(observer: HubObserver): () => void;
     on(event: WebhookEvent, handler: WebhookHandler): void;
+    queryMetrics(query?: MetricsQuery, page?: MetricsPageRequest): Promise<MetricsPage>;
     record(metric: PaymentMetric): void;
+    recordSponsorBalance(reading: SponsorBalanceReading): void;
     startDispatcher(): void;
     stop(): Promise<void>;
     summarize(query?: MetricsQuery): SpendSummary;
+    summarizeAsync(query?: MetricsQuery): Promise<SpendSummary>;
     timeseries(query: TimeseriesQuery): TimeseriesResult;
 }
 
@@ -114,10 +232,29 @@ export type ObservabilityHubOptions = {
     maxTimeseriesRows?: number;
     outbox?: WebhookOutbox;
     dispatcher?: Partial<WebhookDispatcherTuning>;
+    store?: MetricsStore;
+    onStoreError?: (error: Error, metrics: readonly PaymentMetric[]) => void;
+    storeBuffer?: Partial<MetricsBufferTuning>;
 };
 
 // @public
 export function parseIsoTimestamp(value: string): number | null;
+
+// @public
+export type PayeeAssetSpend = {
+    payee: string;
+    asset: string;
+    amount: string;
+    count: number;
+};
+
+// @public
+export type PayerAssetSpend = {
+    payer: string;
+    asset: string;
+    amount: string;
+    count: number;
+};
 
 // @public
 export type PaymentMetric = {
@@ -130,6 +267,84 @@ export type PaymentMetric = {
     outcome: "settled" | "failed" | "skipped";
     at: string;
 };
+
+// @public
+export const POSTGRES_INSERT_CHUNK = 1000;
+
+// @public
+export type PostgresLikeClient = {
+    query(text: string, params?: unknown[]): Promise<{
+        rows: Record<string, unknown>[];
+    }>;
+};
+
+// @public (undocumented)
+export type PostgresMetricsStoreOptions = {
+    client: PostgresLikeClient;
+    tablePrefix?: string;
+};
+
+// @public (undocumented)
+export type PrometheusExporter = {
+    handle(request: PrometheusRequest): PrometheusResponse;
+    render(): string;
+    detach(): void;
+};
+
+// @public (undocumented)
+export type PrometheusExporterOptions = {
+    hub: ObservabilityHub;
+    labelAllowlist?: {
+        payee?: readonly string[];
+    };
+    bearerToken?: string;
+    latencyBucketsSeconds?: readonly number[];
+};
+
+// @public
+export type PrometheusRequest = {
+    headers: Headers | Record<string, string | string[] | undefined>;
+};
+
+// @public (undocumented)
+export type PrometheusResponse = {
+    status: number;
+    headers: Record<string, string>;
+    body: string;
+};
+
+// @public (undocumented)
+export interface ReceiptArchive {
+    append(receipt: unknown): Promise<AppendOutcome>;
+    // (undocumented)
+    get(id: string): Promise<SignedReceipt | undefined>;
+    // (undocumented)
+    search(filter?: ReceiptFilter, options?: ArchiveSearchOptions): Promise<ArchiveSearchResult>;
+}
+
+// @public (undocumented)
+export type ReceiptArchiveOptions = {
+    verifier?: ReceiptVerifier;
+};
+
+// @public
+export type ReceiptFilter = {
+    payer?: string;
+    payee?: string;
+    model?: SettlementModel;
+    network?: StellarNetwork;
+    asset?: string;
+    resource?: string;
+    resourcePrefix?: string;
+    from?: string;
+    to?: string;
+    txHash?: string;
+    channelId?: string;
+    sequence?: number;
+};
+
+// @public
+export function renderFeeSponsorMetrics(source: SponsorReadingSource): string;
 
 // @public
 export type RetryPolicy = {
@@ -157,13 +372,40 @@ export function signWebhookPayload(input: {
 }): Promise<string>;
 
 // @public
+export type SpendOutcomeCounts = {
+    settled: number;
+    failed: number;
+    skipped: number;
+};
+
+// @public
 export type SpendSummary = {
     totalAmount: string;
     count: number;
+    byOutcome: SpendOutcomeCounts;
     byAsset: Record<string, string>;
     byModel: Partial<Record<SettlementModel, string>>;
     byPayer: Record<string, string>;
     byPayee: Record<string, string>;
+    byModelAsset: ModelAssetSpend[];
+    byPayerAsset: PayerAssetSpend[];
+    byPayeeAsset: PayeeAssetSpend[];
+};
+
+// @public
+export type SponsorReadingSource = {
+    getSponsorReadings(): readonly SponsorBalanceReading[];
+};
+
+// @public (undocumented)
+export type SqliteReceiptArchive = ReceiptArchive & {
+    close(): void;
+};
+
+// @public
+export type SqliteReceiptArchiveOptions = ReceiptArchiveOptions & {
+    filename: string;
+    busyTimeoutMs?: number;
 };
 
 // @public (undocumented)
@@ -294,6 +536,7 @@ export type WebhookDispatcherOptions = WebhookDispatcherTuning & {
         error: Error;
         attempts: number;
     }) => void;
+    onDelivered?: (delivery: WebhookDelivery) => void;
     onError?: (error: Error) => void;
 };
 
@@ -317,7 +560,7 @@ export type WebhookDispatcherTuning = {
 export type WebhookEvent = (typeof webhookEvents)[number];
 
 // @public
-export const webhookEvents: readonly ["receipt.created", "channel.opened", "channel.closed", "budget.warning", "anomaly.detected"];
+export const webhookEvents: readonly ["receipt.created", "channel.opened", "channel.closed", "budget.warning", "anomaly.detected", "sponsor.low_balance"];
 
 // @public (undocumented)
 export type WebhookHandler = (event: TollwayEvent) => void | Promise<void>;
