@@ -70,3 +70,13 @@ createService({ config, modules: [receipts] });
 ```
 
 Every `/v1` route must declare a scope (`null` accepts any valid key); a route outside `/v1` is public and cannot.
+
+## Channels
+
+`createChannelsModule()` serves the channels this deployment's `ChannelManager` tracks: list, detail, commitment stream and an admin close. Pass the manager, and optionally an observability hub for `channel.closed`:
+
+```ts
+createService({ config, channelManager, observability: hub, modules: [createChannelsModule()] });
+```
+
+See the service docs page for the routes and how a close behaves.
