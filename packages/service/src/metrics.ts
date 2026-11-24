@@ -1,22 +1,24 @@
-import { settlementModels, TollwayError } from "@vegaforge/tollway-core";
+import { enumSchema, settlementModels, TollwayError } from "@vegaforge/tollway-core";
 import {
   type MetricsQuery,
   MetricsQueryTooLargeError,
+  type PaymentMetric,
   parseIsoTimestamp,
   type SpendSummary,
   timeseriesBuckets,
 } from "@vegaforge/tollway-observability";
 import { z } from "zod";
 import type { ServiceModule } from "./app.js";
+import { tenantOf } from "./auth.js";
 import { errorBody, errorBodySchema } from "./errors.js";
 import { defineRoute } from "./routes.js";
+import { matchesTenantClaim, tenantClaimFields } from "./tenancy.js";
 
 /**
- * The metrics API (#226): ingest `PaymentMetric` batches from many gates and
- * clients, and read the observability rollups back as a summary, a bucketed
- * time series, or a JSON or CSV export. Every route goes through the
- * service's `MetricsStore`, so the counting rules stay the observability
- * hub's and a persistent store (#217) only changes where metrics live.
+ * The metrics API (#226, #231): ingest `PaymentMetric` batches from many gates
+ * and clients into the calling key's `(orgId, projectId)` partition, and read
+ * the observability rollups back as a summary, a bucketed time series, or a
+ * JSON or CSV export.
  *
  * Mount it with `createService({ config, modules: [metricsModule()] })`.
  */
@@ -48,6 +50,7 @@ export const DEFAULT_METRICS_LIMITS: MetricsLimits = {
   maxExportRows: 10_000,
 };
 
+/** Options passed to {@link metricsModule}. */
 export type MetricsModuleOptions = {
   /** Overrides for the request limits. Each must be a positive integer. */
   limits?: Partial<MetricsLimits>;
@@ -57,51 +60,62 @@ export type MetricsModuleOptions = {
 
 const outcomes = ["settled", "failed", "skipped"] as const;
 
-export const paymentMetricSchema = z.strictObject({
+const metricCoreFields = {
   payer: z.string().min(1),
   payee: z.string().min(1),
-  model: z.enum(settlementModels),
+  model: enumSchema(settlementModels),
   // An integer string in the asset's smallest unit, the rule receipts and
   // offers follow. A decimal point here would be summed as a wrong amount.
   amount: z.string().regex(/^[0-9]+$/, "amount must be an integer string"),
   asset: z.string().min(1),
   latencyMs: z.number().finite().nonnegative(),
-  outcome: z.enum(outcomes),
+  outcome: enumSchema(outcomes),
   // With a zone: a timestamp without one names a different instant
   // depending on the process's time zone.
   at: z.iso.datetime({ offset: true }),
+};
+
+/** Schema for one payment metric item accepted on `POST /v1/metrics` and `POST /v1/ingest`. */
+export const paymentMetricSchema = z.strictObject({
+  ...metricCoreFields,
+  ...tenantClaimFields,
 });
 
+/** Request body schema for `POST /v1/metrics`. */
 export const ingestBodySchema = z.strictObject({
+  ...tenantClaimFields,
   metrics: z.array(paymentMetricSchema).min(1).max(MAX_METRIC_BATCH),
 });
 
 const filterFields = {
   payer: z.string().min(1).optional(),
   payee: z.string().min(1).optional(),
-  model: z.enum(settlementModels).optional(),
+  model: enumSchema(settlementModels).optional(),
   asset: z.string().min(1).optional(),
-  outcome: z.enum(outcomes).optional(),
+  outcome: enumSchema(outcomes).optional(),
 };
 
+/** Query schema for `GET /v1/metrics/summary`. */
 export const summaryQuerySchema = z.strictObject({
   ...filterFields,
   from: z.iso.datetime({ offset: true }).optional(),
   to: z.iso.datetime({ offset: true }).optional(),
 });
 
+/** Query schema for `GET /v1/metrics/series`. */
 export const seriesQuerySchema = z.strictObject({
   ...filterFields,
   // A series is always bounded: the range sets how many buckets it allocates.
   from: z.iso.datetime({ offset: true }),
   to: z.iso.datetime({ offset: true }),
-  bucket: z.enum(timeseriesBuckets),
-  groupBy: z.enum(["model", "payer", "payee"]).optional(),
+  bucket: enumSchema(timeseriesBuckets),
+  groupBy: enumSchema(["model", "payer", "payee"]).optional(),
 });
 
+/** Query schema for `GET /v1/metrics/export`. */
 export const exportQuerySchema = z.strictObject({
   ...filterFields,
-  format: z.enum(["json", "csv"]),
+  format: enumSchema(["json", "csv"]),
   from: z.iso.datetime({ offset: true }).optional(),
   to: z.iso.datetime({ offset: true }).optional(),
 });
@@ -121,19 +135,20 @@ export const summaryResponseSchema = z.object({
   count: z.number(),
   byOutcome: z.object({ settled: z.number(), failed: z.number(), skipped: z.number() }),
   byAsset: z.array(assetTotalSchema),
-  byModel: z.array(assetTotalSchema.extend({ model: z.enum(settlementModels) })),
+  byModel: z.array(assetTotalSchema.extend({ model: enumSchema(settlementModels) })),
   byPayer: z.array(assetTotalSchema.extend({ payer: z.string() })),
   byPayee: z.array(assetTotalSchema.extend({ payee: z.string() })),
 });
 
+/** Serialized spend summary returned by `GET /v1/metrics/summary`. */
 export type SummaryResponse = z.infer<typeof summaryResponseSchema>;
 
 const latencySchema = z.object({ p50: z.number(), p95: z.number(), p99: z.number() });
 
 /** The observability time series, unchanged. */
 export const seriesResponseSchema = z.object({
-  bucket: z.enum(timeseriesBuckets),
-  groupBy: z.enum(["model", "payer", "payee"]),
+  bucket: enumSchema(timeseriesBuckets),
+  groupBy: enumSchema(["model", "payer", "payee"]),
   from: z.string(),
   to: z.string(),
   buckets: z.array(
@@ -142,7 +157,7 @@ export const seriesResponseSchema = z.object({
       end: z.string(),
       rows: z.array(
         z.object({
-          model: z.enum(settlementModels),
+          model: enumSchema(settlementModels),
           asset: z.string(),
           payer: z.string().optional(),
           payee: z.string().optional(),
@@ -247,22 +262,54 @@ export function metricsModule(options: MetricsModuleOptions = {}): ServiceModule
   const limits = resolveLimits(options.limits);
   const now = options.now ?? Date.now;
 
-  return ({ stores }) => [
+  return ({ stores, quotas }) => [
     defineRoute({
       method: "post",
       path: "/v1/metrics",
       summary: "Ingest payment metrics",
-      description: `Records a batch of up to ${MAX_METRIC_BATCH} PaymentMetric values.`,
+      description: `Records a batch of up to ${MAX_METRIC_BATCH} PaymentMetric values for the calling key's tenant.`,
       tags: ["metrics"],
       scope: "ingest",
       request: { body: ingestBodySchema },
       responses: {
         202: { description: "The batch was recorded.", schema: z.object({ accepted: z.number() }) },
         400: rejected,
+        403: rejected,
+        429: rejected,
       },
       handler: async (c, { body }) => {
-        await stores.metrics.record(body.metrics);
-        return c.json({ accepted: body.metrics.length }, 202);
+        const tenant = tenantOf(c);
+        if (
+          !matchesTenantClaim(tenant, body) ||
+          body.metrics.some((item) => !matchesTenantClaim(tenant, item))
+        ) {
+          return c.json(
+            errorBody(
+              "tenant-mismatch",
+              "batch items must belong to the authenticated API key's org and project",
+            ),
+            403,
+          );
+        }
+
+        const admission = await quotas.acquire(tenant, {
+          ingestItems: body.metrics.length,
+          newStoredRecords: body.metrics.length,
+        });
+        if (!admission.allowed) {
+          c.header("Retry-After", String(admission.retryAfterSeconds));
+          return c.json(admission.body, 429);
+        }
+
+        const cleaned: PaymentMetric[] = body.metrics.map(
+          ({ orgId: _o, projectId: _p, ...metric }) => metric,
+        );
+        try {
+          await stores.metrics.record(tenant, cleaned);
+        } finally {
+          admission.release();
+        }
+        return c.json({ accepted: cleaned.length }, 202);
       },
     }),
     defineRoute({
@@ -270,7 +317,7 @@ export function metricsModule(options: MetricsModuleOptions = {}): ServiceModule
       path: "/v1/metrics/summary",
       summary: "Spend summary",
       description:
-        "Settled spend per asset, broken down by model, payer and payee, with counts per outcome. There is no cross-asset total.",
+        "Settled spend per asset, broken down by model, payer and payee, with counts per outcome, scoped to the calling key's tenant.",
       tags: ["metrics"],
       scope: "read",
       request: { query: summaryQuerySchema },
@@ -279,9 +326,12 @@ export function metricsModule(options: MetricsModuleOptions = {}): ServiceModule
         400: rejected,
       },
       handler: async (c, { query }) => {
+        const tenant = tenantOf(c);
         const problem = rangeProblem(query, limits);
         if (problem) return c.json(problem, 400);
-        return c.json(toSummaryResponse(await stores.metrics.summarize(metricsQueryFrom(query))));
+        return c.json(
+          toSummaryResponse(await stores.metrics.summarize(tenant, metricsQueryFrom(query))),
+        );
       },
     }),
     defineRoute({
@@ -289,7 +339,7 @@ export function metricsModule(options: MetricsModuleOptions = {}): ServiceModule
       path: "/v1/metrics/series",
       summary: "Bucketed spend and counts",
       description:
-        "Settled spend, counts per outcome and latency percentiles per bucket, model and asset, optionally split by payer or payee. `to` is exclusive.",
+        "Settled spend, counts per outcome and latency percentiles per bucket, model and asset, optionally split by payer or payee, scoped to the calling key's tenant. `to` is exclusive.",
       tags: ["metrics"],
       scope: "read",
       request: { query: seriesQuerySchema },
@@ -298,10 +348,11 @@ export function metricsModule(options: MetricsModuleOptions = {}): ServiceModule
         400: rejected,
       },
       handler: async (c, { query }) => {
+        const tenant = tenantOf(c);
         const problem = rangeProblem(query, limits);
         if (problem) return c.json(problem, 400);
         try {
-          const series = await stores.metrics.timeseries({
+          const series = await stores.metrics.timeseries(tenant, {
             ...metricsQueryFrom(query),
             from: query.from,
             to: query.to,
@@ -330,7 +381,7 @@ export function metricsModule(options: MetricsModuleOptions = {}): ServiceModule
       path: "/v1/metrics/export",
       summary: "Export metrics",
       description:
-        "The matched metrics as JSON or CSV, exactly as the observability hub exports them, as a file download.",
+        "The matched metrics for the calling key's tenant as JSON or CSV, as a file download.",
       tags: ["metrics"],
       scope: "read",
       request: { query: exportQuerySchema },
@@ -339,10 +390,11 @@ export function metricsModule(options: MetricsModuleOptions = {}): ServiceModule
         400: rejected,
       },
       handler: async (c, { query }) => {
+        const tenant = tenantOf(c);
         const problem = rangeProblem(query, limits);
         if (problem) return c.json(problem, 400);
         const filter = metricsQueryFrom(query);
-        const { count } = await stores.metrics.summarize(filter);
+        const { count } = await stores.metrics.summarize(tenant, filter);
         if (count > limits.maxExportRows) {
           return c.json(
             errorBody(
@@ -353,7 +405,7 @@ export function metricsModule(options: MetricsModuleOptions = {}): ServiceModule
             400,
           );
         }
-        const body = await stores.metrics.export(query.format, filter);
+        const body = await stores.metrics.export(tenant, query.format, filter);
         const stamp = new Date(now()).toISOString().replaceAll(":", "-").replaceAll(".", "-");
         c.header(
           "Content-Disposition",

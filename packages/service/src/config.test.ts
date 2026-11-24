@@ -3,7 +3,8 @@ import { parseServiceConfig, ServiceConfigError } from "./config.js";
 import { loadServiceConfig } from "./node-config.js";
 
 const HASH = "a".repeat(64);
-const KEYS = JSON.stringify([{ name: "ops", sha256: HASH, scopes: ["read"] }]);
+const TENANT = { orgId: "acme", projectId: "payments" };
+const KEYS = JSON.stringify([{ name: "ops", ...TENANT, sha256: HASH, scopes: ["read"] }]);
 
 function issues(run: () => unknown): { field: string; message: string }[] {
   try {
@@ -23,7 +24,7 @@ describe("parseServiceConfig", () => {
     expect(config).toEqual({
       port: 8787,
       host: "127.0.0.1",
-      apiKeys: [{ name: "ops", sha256: HASH, scopes: ["read"] }],
+      apiKeys: [{ name: "ops", ...TENANT, sha256: HASH, scopes: ["read"] }],
       readinessTimeoutMs: 2000,
       maxBodyBytes: 1_048_576,
     });
@@ -35,12 +36,14 @@ describe("parseServiceConfig", () => {
       file: {
         port: 8080,
         host: "0.0.0.0",
-        apiKeys: [{ name: "ops", sha256: HASH, scopes: ["ingest", "admin"] }],
+        apiKeys: [{ name: "ops", ...TENANT, sha256: HASH, scopes: ["ingest", "admin"] }],
+        quotas: { default: { maxIngestItemsPerMinute: 120, maxStoredRecords: 5000 } },
       },
     });
     expect(config.port).toBe(9000);
     expect(config.host).toBe("0.0.0.0");
     expect(config.apiKeys[0]?.scopes).toEqual(["ingest", "admin"]);
+    expect(config.quotas?.default?.maxStoredRecords).toBe(5000);
   });
 
   it("names each required field that is missing", () => {
@@ -75,11 +78,31 @@ describe("parseServiceConfig", () => {
       "TOLLWAY_SERVICE_API_KEYS",
     ],
     [
+      "a key missing orgId",
+      {
+        TOLLWAY_SERVICE_PORT: "8787",
+        TOLLWAY_SERVICE_API_KEYS: JSON.stringify([
+          { name: "ops", projectId: "payments", sha256: HASH, scopes: ["read"] },
+        ]),
+      },
+      "TOLLWAY_SERVICE_API_KEYS [0].orgId",
+    ],
+    [
+      "a key missing projectId",
+      {
+        TOLLWAY_SERVICE_PORT: "8787",
+        TOLLWAY_SERVICE_API_KEYS: JSON.stringify([
+          { name: "ops", orgId: "acme", sha256: HASH, scopes: ["read"] },
+        ]),
+      },
+      "TOLLWAY_SERVICE_API_KEYS [0].projectId",
+    ],
+    [
       "a plaintext key instead of a hash",
       {
         TOLLWAY_SERVICE_PORT: "8787",
         TOLLWAY_SERVICE_API_KEYS: JSON.stringify([
-          { name: "ops", sha256: "my-secret-key", scopes: ["read"] },
+          { name: "ops", ...TENANT, sha256: "my-secret-key", scopes: ["read"] },
         ]),
       },
       "TOLLWAY_SERVICE_API_KEYS [0].sha256",
@@ -89,7 +112,7 @@ describe("parseServiceConfig", () => {
       {
         TOLLWAY_SERVICE_PORT: "8787",
         TOLLWAY_SERVICE_API_KEYS: JSON.stringify([
-          { name: "ops", sha256: HASH, scopes: ["write"] },
+          { name: "ops", ...TENANT, sha256: HASH, scopes: ["write"] },
         ]),
       },
       "TOLLWAY_SERVICE_API_KEYS [0].scopes[0]",
@@ -98,7 +121,9 @@ describe("parseServiceConfig", () => {
       "a key with no scope",
       {
         TOLLWAY_SERVICE_PORT: "8787",
-        TOLLWAY_SERVICE_API_KEYS: JSON.stringify([{ name: "ops", sha256: HASH, scopes: [] }]),
+        TOLLWAY_SERVICE_API_KEYS: JSON.stringify([
+          { name: "ops", ...TENANT, sha256: HASH, scopes: [] },
+        ]),
       },
       "TOLLWAY_SERVICE_API_KEYS [0].scopes",
     ],
@@ -107,11 +132,29 @@ describe("parseServiceConfig", () => {
       {
         TOLLWAY_SERVICE_PORT: "8787",
         TOLLWAY_SERVICE_API_KEYS: JSON.stringify([
-          { name: "ops", sha256: HASH, scopes: ["read"] },
-          { name: "ops", sha256: "b".repeat(64), scopes: ["read"] },
+          { name: "ops", ...TENANT, sha256: HASH, scopes: ["read"] },
+          { name: "ops", ...TENANT, sha256: "b".repeat(64), scopes: ["read"] },
         ]),
       },
       "TOLLWAY_SERVICE_API_KEYS [1].name",
+    ],
+    [
+      "an operator key reusing a tenant key hash",
+      {
+        TOLLWAY_SERVICE_PORT: "8787",
+        TOLLWAY_SERVICE_API_KEYS: KEYS,
+        TOLLWAY_SERVICE_OPERATOR_KEYS: JSON.stringify([{ name: "root-op", sha256: HASH }]),
+      },
+      "TOLLWAY_SERVICE_OPERATOR_KEYS [0].sha256",
+    ],
+    [
+      "a short cursorSecret",
+      {
+        TOLLWAY_SERVICE_PORT: "8787",
+        TOLLWAY_SERVICE_API_KEYS: KEYS,
+        TOLLWAY_SERVICE_CURSOR_SECRET: "too-short-secret",
+      },
+      "TOLLWAY_SERVICE_CURSOR_SECRET",
     ],
     [
       "a readiness timeout of zero",
@@ -126,14 +169,22 @@ describe("parseServiceConfig", () => {
     expect(issues(() => parseServiceConfig({ env })).map((issue) => issue.field)).toEqual([field]);
   });
 
-  it("never echoes the contents of a malformed key list", () => {
+  it("never echoes the contents of malformed key lists or a short cursor secret", () => {
     const secretish = "[{secret-material";
     const found = issues(() =>
       parseServiceConfig({
-        env: { TOLLWAY_SERVICE_PORT: "8787", TOLLWAY_SERVICE_API_KEYS: secretish },
+        env: {
+          TOLLWAY_SERVICE_PORT: "8787",
+          TOLLWAY_SERVICE_API_KEYS: secretish,
+          TOLLWAY_SERVICE_OPERATOR_KEYS: "[{operator-secret",
+          TOLLWAY_SERVICE_CURSOR_SECRET: "cursor-secret-value",
+        },
       }),
     );
-    expect(JSON.stringify(found)).not.toContain("secret-material");
+    const text = JSON.stringify(found);
+    expect(text).not.toContain("secret-material");
+    expect(text).not.toContain("operator-secret");
+    expect(text).not.toContain("cursor-secret-value");
   });
 
   it("refuses an unknown field in the config file", () => {
