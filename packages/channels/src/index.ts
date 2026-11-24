@@ -44,6 +44,15 @@ export {
   sizeDeposit,
 } from "./sizing.js";
 export {
+  createStellarMppChannelAdapter,
+  type StellarMppChannelAdapterOptions,
+} from "./stellar-adapter.js";
+export {
+  type CommitmentAppendExpectation,
+  type CommitmentStore,
+  createMemoryCommitmentStore,
+} from "./store.js";
+export {
   createPostgresCommitmentStore,
   type PostgresClient,
   type PostgresCommitmentStoreOptions,
@@ -56,15 +65,6 @@ export {
   type RedisCommitmentStoreOptions,
   type RedisLikeClient,
 } from "./stores/redis.js";
-export {
-  createStellarMppChannelAdapter,
-  type StellarMppChannelAdapterOptions,
-} from "./stellar-adapter.js";
-export {
-  type CommitmentAppendExpectation,
-  type CommitmentStore,
-  createMemoryCommitmentStore,
-} from "./store.js";
 export type {
   Channel,
   ChannelFilter,

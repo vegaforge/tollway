@@ -1614,7 +1614,10 @@ describe("ChannelManager concurrent writers (#175)", () => {
     });
     await manager.commit(channel.id, "40");
 
-    const results = await Promise.allSettled([manager.close(channel.id), manager.close(channel.id)]);
+    const results = await Promise.allSettled([
+      manager.close(channel.id),
+      manager.close(channel.id),
+    ]);
 
     expect(results.filter((r) => r.status === "fulfilled")).toHaveLength(1);
     const losing = results.flatMap((r) => (r.status === "rejected" ? [r.reason] : []));

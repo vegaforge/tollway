@@ -18,8 +18,8 @@
 
 import { type StellarNetwork, TollwayError } from "@vegaforge/tollway-core";
 import { ChannelNotFoundError, CommitmentConflictError } from "../errors.js";
-import { parseChannelListRequest } from "../store-query.js";
 import type { CommitmentAppendExpectation, CommitmentStore } from "../store.js";
+import { parseChannelListRequest } from "../store-query.js";
 import type {
   Channel,
   ChannelFilter,
@@ -319,10 +319,9 @@ export function createPostgresCommitmentStore(
     channelId: string,
     expectation: CommitmentAppendExpectation,
   ): Promise<Error> {
-    const result = await tx.query(
-      `SELECT status, sequence FROM ${names.channels} WHERE id = $1`,
-      [channelId],
-    );
+    const result = await tx.query(`SELECT status, sequence FROM ${names.channels} WHERE id = $1`, [
+      channelId,
+    ]);
     const row = result.rows[0];
     if (row === undefined) return new ChannelNotFoundError(channelId);
     const status = oneOf(textOf(row, "status"), CHANNEL_STATUSES, "status");

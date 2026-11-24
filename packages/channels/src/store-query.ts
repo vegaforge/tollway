@@ -5,12 +5,7 @@
  */
 
 import { TollwayError } from "@vegaforge/tollway-core";
-import type {
-  Channel,
-  ChannelFilter,
-  ChannelListPage,
-  ChannelListRequest,
-} from "./types.js";
+import type { Channel, ChannelFilter, ChannelListPage, ChannelListRequest } from "./types.js";
 
 export const DEFAULT_CHANNEL_PAGE_LIMIT = 50;
 export const MAX_CHANNEL_PAGE_LIMIT = 500;

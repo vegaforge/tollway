@@ -140,9 +140,9 @@ describe("sizeDeposit", () => {
     expect(() => sized({ traffic: { requestsPerMinute: -1, windowSeconds: 60 } })).toThrow(
       TollwayError,
     );
-    expect(() =>
-      sized({ traffic: { requestsPerMinute: Number.NaN, windowSeconds: 60 } }),
-    ).toThrow(TollwayError);
+    expect(() => sized({ traffic: { requestsPerMinute: Number.NaN, windowSeconds: 60 } })).toThrow(
+      TollwayError,
+    );
   });
 });
 

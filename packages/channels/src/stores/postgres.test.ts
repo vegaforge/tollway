@@ -131,31 +131,32 @@ describe("createPostgresCommitmentStore: appendCommitment", () => {
     });
     const store = createPostgresCommitmentStore({ client: pool });
 
-    await expect(store.appendCommitment(commitment(0, "40"), expectation(-1))).rejects.toMatchObject(
-      { field: "status", actual: "closing" },
-    );
+    await expect(
+      store.appendCommitment(commitment(0, "40"), expectation(-1)),
+    ).rejects.toMatchObject({ field: "status", actual: "closing" });
   });
 
   it("reports an unknown channel as not found", async () => {
     const { pool } = scriptedPool(() => EMPTY);
     const store = createPostgresCommitmentStore({ client: pool });
 
-    await expect(store.appendCommitment(commitment(0, "40"), expectation(-1))).rejects.toBeInstanceOf(
-      ChannelNotFoundError,
-    );
+    await expect(
+      store.appendCommitment(commitment(0, "40"), expectation(-1)),
+    ).rejects.toBeInstanceOf(ChannelNotFoundError);
   });
 
   it("turns a unique-key violation on the commitment row into a conflict", async () => {
     const { pool, calls } = scriptedPool((text) => {
       if (text.startsWith("UPDATE")) return rows(channelRow({ sequence: 0 }));
-      if (text.startsWith("INSERT INTO")) throw Object.assign(new Error("duplicate"), { code: "23505" });
+      if (text.startsWith("INSERT INTO"))
+        throw Object.assign(new Error("duplicate"), { code: "23505" });
       return EMPTY;
     });
     const store = createPostgresCommitmentStore({ client: pool });
 
-    await expect(store.appendCommitment(commitment(0, "40"), expectation(-1))).rejects.toBeInstanceOf(
-      CommitmentConflictError,
-    );
+    await expect(
+      store.appendCommitment(commitment(0, "40"), expectation(-1)),
+    ).rejects.toBeInstanceOf(CommitmentConflictError);
     expect(texts(calls)).toContain("ROLLBACK");
     expect(texts(calls)).not.toContain("COMMIT");
   });
@@ -167,9 +168,9 @@ describe("createPostgresCommitmentStore: appendCommitment", () => {
     });
     const store = createPostgresCommitmentStore({ client: pool });
 
-    await expect(store.appendCommitment(commitment(5, "40"), expectation(-1))).rejects.toMatchObject(
-      { field: "sequence", expected: "0", actual: "5" },
-    );
+    await expect(
+      store.appendCommitment(commitment(5, "40"), expectation(-1)),
+    ).rejects.toMatchObject({ field: "sequence", expected: "0", actual: "5" });
     expect(texts(calls)).toContain("ROLLBACK");
     expect(texts(calls)).not.toContain("INSERT INTO");
   });
@@ -215,9 +216,9 @@ describe("createPostgresCommitmentStore: other writes", () => {
     });
     const store = createPostgresCommitmentStore({ client: pool });
 
-    await expect(store.transitionChannel("CPG", "open", { status: "closing" })).resolves.toMatchObject(
-      { status: "closing" },
-    );
+    await expect(
+      store.transitionChannel("CPG", "open", { status: "closing" }),
+    ).resolves.toMatchObject({ status: "closing" });
   });
 
   it("names the stale status on a failed transition", async () => {
@@ -228,9 +229,9 @@ describe("createPostgresCommitmentStore: other writes", () => {
     });
     const store = createPostgresCommitmentStore({ client: pool });
 
-    await expect(store.transitionChannel("CPG", "open", { status: "closing" })).rejects.toMatchObject(
-      { field: "status", expected: "open", actual: "closed" },
-    );
+    await expect(
+      store.transitionChannel("CPG", "open", { status: "closing" }),
+    ).rejects.toMatchObject({ field: "status", expected: "open", actual: "closed" });
   });
 
   it("writes NULL for every optional column that putChannel does not set", async () => {
@@ -347,9 +348,9 @@ describe("createPostgresCommitmentStore: other writes", () => {
   it("refuses a schema name that is not a plain identifier", () => {
     const { pool } = scriptedPool(() => EMPTY);
 
-    expect(() => createPostgresCommitmentStore({ client: pool, schema: "x; DROP TABLE y" })).toThrow(
-      TollwayError,
-    );
+    expect(() =>
+      createPostgresCommitmentStore({ client: pool, schema: "x; DROP TABLE y" }),
+    ).toThrow(TollwayError);
   });
 });
 

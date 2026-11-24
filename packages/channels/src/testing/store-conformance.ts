@@ -173,7 +173,10 @@ async function caseFilters(makeStore: CommitmentStoreFactory): Promise<void> {
 
 async function casePaging(makeStore: CommitmentStoreFactory): Promise<void> {
   const store = await makeStore();
-  await putAll(store, ["P1", "P2", "P3", "P4", "P5"].map((id) => makeChannel(id)));
+  await putAll(
+    store,
+    ["P1", "P2", "P3", "P4", "P5"].map((id) => makeChannel(id)),
+  );
 
   const first = await store.listChannels({}, { limit: 2 });
   assert.deepEqual(
@@ -341,8 +344,7 @@ async function caseReferenceModel(makeStore: CommitmentStoreFactory): Promise<vo
     const current = model.get(id);
 
     if (random() < 0.6) {
-      const expectedSequence =
-        random() < 0.8 ? (current?.sequence ?? -1) : pick(4) - 1;
+      const expectedSequence = random() < 0.8 ? (current?.sequence ?? -1) : pick(4) - 1;
       const expectedStatus = random() < 0.85 ? "open" : (STATUSES[pick(STATUSES.length)] ?? "open");
       const sequence = random() < 0.9 ? expectedSequence + 1 : expectedSequence + pick(3);
       const commitment = commitmentFor(id, sequence, String(pick(1000)));

@@ -21,8 +21,8 @@
 import { createHash } from "node:crypto";
 import { type StellarNetwork, TollwayError } from "@vegaforge/tollway-core";
 import { ChannelNotFoundError, CommitmentConflictError } from "../errors.js";
-import { pageChannels } from "../store-query.js";
 import type { CommitmentAppendExpectation, CommitmentStore } from "../store.js";
+import { pageChannels } from "../store-query.js";
 import type {
   Channel,
   ChannelFilter,

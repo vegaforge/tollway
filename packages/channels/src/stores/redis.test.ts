@@ -233,9 +233,9 @@ describe("createRedisCommitmentStore: reply handling", () => {
     const { client, log } = fakeRedis(() => ["status", "closed"]);
     const store = createRedisCommitmentStore({ client });
 
-    await expect(store.transitionChannel("CR", "open", { status: "closing" })).rejects.toBeInstanceOf(
-      CommitmentConflictError,
-    );
+    await expect(
+      store.transitionChannel("CR", "open", { status: "closing" }),
+    ).rejects.toBeInstanceOf(CommitmentConflictError);
     expect(log.at(-1)?.args[0]).toBe("open");
   });
 

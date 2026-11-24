@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { TollwayError } from "./errors.js";
-import { type PaymentIntent, type PolicyEngine, createPolicyEngine } from "./policy.js";
+import { createPolicyEngine, type PaymentIntent, type PolicyEngine } from "./policy.js";
 import type { PolicyInput } from "./policy-schema.js";
 
 // #181: headroom and channel-open decisions. A deposit locks funds, so an open

@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { createMemoryCommitmentStore, type CommitmentStore } from "./store.js";
+import { type CommitmentStore, createMemoryCommitmentStore } from "./store.js";
 import { commitmentStoreConformanceCases } from "./testing/store-conformance.js";
 import type { Commitment } from "./types.js";
 

@@ -42,12 +42,7 @@ export class CommitmentConflictError extends TollwayError {
   readonly expected: string;
   readonly actual: string;
 
-  constructor(
-    channelId: string,
-    field: "sequence" | "status",
-    expected: string,
-    actual: string,
-  ) {
+  constructor(channelId: string, field: "sequence" | "status", expected: string, actual: string) {
     super(
       "commitment-conflict",
       `channel "${channelId}" ${field} is "${actual}", not the expected "${expected}"; another writer changed it first`,

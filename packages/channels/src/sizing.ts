@@ -14,7 +14,7 @@
  * once, here, to whole millionths of a request per minute.
  */
 
-import { type TrafficSnapshot, TollwayError } from "@vegaforge/tollway-core";
+import { TollwayError, type TrafficSnapshot } from "@vegaforge/tollway-core";
 
 /** Requests per minute are rounded to this many steps per request (one millionth). */
 export const RATE_PRECISION = 1_000_000;
