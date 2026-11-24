@@ -49,6 +49,41 @@ const { receipt, storeError } = await client.pay({
 receipt has been verified. When a store is configured, the store write is
 awaited before that happens.
 
+## The receipt must describe the payment
+
+A valid signature proves only that the service signed something. Before
+`pay()` stores the receipt, records it on the policy engine or emits a
+`payment` event, it checks that the receipt describes the payment the agent
+made:
+
+- `amount`, `asset`, `payee` (the offer's `payTo`), `resource`, `network` and
+  `model` must equal the paid offer exactly;
+- the settlement reference must fit the model: a transaction for `x402` and
+  `mpp-charge`, a channel commitment for `mpp-channel`;
+- when the settler reports the address it paid from (`ClientSettler.payer`,
+  which the x402 settler sets), `receipt.payer` must equal it;
+- `issuedAt` must be within `receiptMaxSkewMs` of the client clock, five
+  minutes by default, so a receipt replayed from an older payment is refused.
+
+A mismatch rejects with `ReceiptOfferMismatchError` (code
+`receipt-offer-mismatch`), whose `field` names the first field that differs.
+The `error` event fires instead of `payment`, and nothing is recorded or
+stored. The message names the field and the two values, never the receipt or
+its signature.
+
+Two checks run before anything is paid. An offer for another network than
+the client's is refused with `OfferNetworkMismatchError` (code
+`offer-network-mismatch`). And the offer's resource must be the one the agent
+requested: both are compared by path and query, so a request for
+`https://api.example/quotes/latest` matches an offer for `/quotes/latest`,
+which is what a gate behind the Express adapter states. The query string is
+part of the resource.
+
+These checks run with or without a `verifier`. Without one, the receipt is
+still unauthenticated: the checks catch a service that returns the wrong
+receipt by mistake, but anyone who can answer the request can forge one that
+passes them. Configure a verifier in production.
+
 ## Receipt store
 
 ```ts

@@ -17,9 +17,14 @@ import {
   type ClientEvent,
   type ClientSettler,
   createClient,
+  OfferNetworkMismatchError,
   PolicyBlockedError,
+  ReceiptOfferMismatchError,
   ReceiptVerificationError,
+  resourceIdentity,
+  type SettleRequest,
 } from "./index.js";
+import { assertReceiptMatchesOffer } from "./receipt-binding.js";
 import { createMemoryReceiptStore, type ReceiptStore } from "./receipt-store.js";
 
 const OFFER: PaymentOffer = {
@@ -34,6 +39,7 @@ const OFFER: PaymentOffer = {
 let signer: Ed25519Signer;
 let verifier: Ed25519Verifier;
 let baselineReceipt: SignedReceipt;
+let mppChargeReceipt: SignedReceipt;
 
 beforeAll(async () => {
   signer = await Ed25519Signer.generate("test-client-key");
@@ -47,6 +53,19 @@ beforeAll(async () => {
       resource: OFFER.resource,
       model: "x402",
       settlement: { kind: "transaction", txHash: "abc123" },
+      network: "testnet",
+    }),
+    signer,
+  );
+  mppChargeReceipt = await signReceipt(
+    buildReceipt({
+      payer: "GPAYERXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX",
+      payee: OFFER.payTo,
+      amount: OFFER.amount,
+      asset: OFFER.asset,
+      resource: OFFER.resource,
+      model: "mpp-charge",
+      settlement: { kind: "transaction", txHash: "def456" },
       network: "testnet",
     }),
     signer,
@@ -104,7 +123,7 @@ describe("createClient happy path", () => {
   });
 
   it("honours an explicit model override on the request", async () => {
-    const settler = mockSettler();
+    const settler = mockSettler(mppChargeReceipt);
     const client = createClient({ network: "testnet", settler });
 
     const result = await client.pay({
@@ -118,7 +137,7 @@ describe("createClient happy path", () => {
   });
 
   it("delegates the model decision to the router when one is configured", async () => {
-    const settler = mockSettler();
+    const settler = mockSettler(mppChargeReceipt);
     const router = {
       decide: vi.fn().mockResolvedValue({ model: "mpp-charge", reason: "traffic" }),
     };
@@ -226,9 +245,11 @@ describe("createClient receipt verification", () => {
   });
 
   it("skips verification when no verifier is configured (best-effort default)", async () => {
+    // A forged signature goes unnoticed without a verifier. The body still
+    // matches the offer, so the offer binding has nothing to reject.
     const tampered: SignedReceipt = {
       ...baselineReceipt,
-      receipt: { ...baselineReceipt.receipt, amount: "99999999999" },
+      signature: { ...baselineReceipt.signature, value: "AAAA" },
     };
     const client = createClient({ network: "testnet", settler: mockSettler(tampered) });
 
@@ -703,7 +724,7 @@ describe("counterparty:quarantined events", () => {
     const events: ClientEvent[] = [];
     const client = createClient({
       network: "testnet",
-      settler: mockSettler(),
+      settler: mockSettler(mppChargeReceipt),
       router: createDefaultRouter({ quarantine }),
     });
     client.on((event) => events.push(event));
@@ -723,22 +744,268 @@ describe("counterparty:quarantined events", () => {
   });
 });
 
+describe("createClient receipt bound to the paid offer (#202)", () => {
+  const PAYER = "GPAYERXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX";
+
+  type BodyOverrides = Partial<Parameters<typeof buildReceipt>[0]>;
+
+  /** A correctly signed receipt that differs from the offer only where told. */
+  async function signedReceipt(overrides: BodyOverrides = {}): Promise<SignedReceipt> {
+    return signReceipt(
+      buildReceipt({
+        payer: PAYER,
+        payee: OFFER.payTo,
+        amount: OFFER.amount,
+        asset: OFFER.asset,
+        resource: OFFER.resource,
+        model: "x402",
+        settlement: { kind: "transaction", txHash: "abc123" },
+        network: "testnet",
+        ...overrides,
+      } as Parameters<typeof buildReceipt>[0]),
+      signer,
+    );
+  }
+
+  async function rejection(promise: Promise<unknown>): Promise<ReceiptOfferMismatchError> {
+    const error = await promise.then(
+      () => undefined,
+      (caught: unknown) => caught,
+    );
+    expect(error).toBeInstanceOf(ReceiptOfferMismatchError);
+    return error as ReceiptOfferMismatchError;
+  }
+
+  it.each([
+    ["amount", { amount: "9999" }],
+    ["asset", { asset: "USDC:OTHERISSUER" }],
+    ["payee", { payee: "GOTHERPAYEEXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX" }],
+    ["resource", { resource: "/quotes/other" }],
+    ["network", { network: "mainnet" }],
+    ["model", { model: "mpp-charge", settlement: { kind: "transaction", txHash: "abc123" } }],
+  ] as const)("rejects a correctly signed receipt whose %s differs from the offer", async (field, overrides) => {
+    const receipt = await signedReceipt(overrides as BodyOverrides);
+    const client = createClient({ network: "testnet", settler: mockSettler(receipt), verifier });
+
+    const error = await rejection(client.pay({ resource: OFFER.resource, offer: OFFER }));
+    expect(error.code).toBe("receipt-offer-mismatch");
+    expect(error.field).toBe(field);
+    expect(error.message).toContain(field);
+  });
+
+  it("rejects a receipt signed for a cheaper payment than the offer", async () => {
+    // The attack this closes: the service charges the offer price but signs
+    // a receipt for less, so the agent's accounting under-counts the spend.
+    const cheaper = await signedReceipt({ amount: "1" });
+    const client = createClient({ network: "testnet", settler: mockSettler(cheaper), verifier });
+
+    const error = await rejection(client.pay({ resource: OFFER.resource, offer: OFFER }));
+    expect(error.field).toBe("amount");
+    expect(error.message).not.toContain(cheaper.signature.value);
+  });
+
+  it("does not record, store or report a payment for a mismatching receipt", async () => {
+    const policy = createPolicyEngine({ budgets: { daily: "1000000" } });
+    const record = vi.spyOn(policy, "record");
+    const store = createMemoryReceiptStore();
+    const put = vi.spyOn(store, "put");
+    const client = createClient({
+      network: "testnet",
+      settler: mockSettler(await signedReceipt({ amount: "1" })),
+      verifier,
+      policy,
+      receiptStore: store,
+    });
+    const events: ClientEvent[] = [];
+    client.on((event) => events.push(event));
+
+    await rejection(client.pay({ resource: OFFER.resource, offer: OFFER }));
+
+    expect(record).not.toHaveBeenCalled();
+    expect(put).not.toHaveBeenCalled();
+    expect(events.some((event) => event.type === "payment")).toBe(false);
+    const errorEvent = events.find((event) => event.type === "error");
+    expect(errorEvent).toBeDefined();
+    if (errorEvent?.type === "error") {
+      expect(errorEvent.error).toBeInstanceOf(ReceiptOfferMismatchError);
+    }
+  });
+
+  it("checks the binding even when no verifier is configured", async () => {
+    const client = createClient({
+      network: "testnet",
+      settler: mockSettler(await signedReceipt({ payee: "GELSEWHERE" })),
+    });
+    const error = await rejection(client.pay({ resource: OFFER.resource, offer: OFFER }));
+    expect(error.field).toBe("payee");
+  });
+
+  it("rejects an offer for another network before any payment", async () => {
+    const settler = mockSettler();
+    const client = createClient({ network: "testnet", settler });
+
+    const error = await client
+      .pay({ resource: OFFER.resource, offer: { ...OFFER, network: "mainnet" } })
+      .then(
+        () => undefined,
+        (caught: unknown) => caught,
+      );
+
+    expect(error).toBeInstanceOf(OfferNetworkMismatchError);
+    expect((error as TollwayError).code).toBe("offer-network-mismatch");
+    expect(settler.settle).not.toHaveBeenCalled();
+  });
+
+  it("requires the receipt payer to be the settler's own address when it reports one", async () => {
+    const settler: ClientSettler = {
+      payer: "GTHEAGENTXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX",
+      settle: vi.fn().mockResolvedValue(await signedReceipt()),
+    };
+    const client = createClient({ network: "testnet", settler, verifier });
+
+    const error = await rejection(client.pay({ resource: OFFER.resource, offer: OFFER }));
+    expect(error.field).toBe("payer");
+  });
+
+  it("accepts the receipt when the settler's payer matches", async () => {
+    const settler: ClientSettler = {
+      payer: PAYER,
+      settle: vi.fn().mockResolvedValue(await signedReceipt()),
+    };
+    const client = createClient({ network: "testnet", settler, verifier });
+
+    const result = await client.pay({ resource: OFFER.resource, offer: OFFER });
+    expect(result.receipt.receipt.payer).toBe(PAYER);
+  });
+
+  it("rejects a stale receipt replayed from an older payment", async () => {
+    const issuedAt = "2026-01-01T00:00:00.000Z";
+    const stale = await signedReceipt({ issuedAt });
+    const client = createClient({
+      network: "testnet",
+      settler: mockSettler(stale),
+      verifier,
+      // Six minutes later, one past the default five-minute window.
+      clock: () => Date.parse(issuedAt) + 6 * 60_000,
+    });
+
+    const error = await rejection(client.pay({ resource: OFFER.resource, offer: OFFER }));
+    expect(error.field).toBe("issuedAt");
+  });
+
+  it("accepts a receipt inside a configured skew window", async () => {
+    const issuedAt = "2026-01-01T00:00:00.000Z";
+    const client = createClient({
+      network: "testnet",
+      settler: mockSettler(await signedReceipt({ issuedAt })),
+      verifier,
+      clock: () => Date.parse(issuedAt) + 6 * 60_000,
+      receiptMaxSkewMs: 10 * 60_000,
+    });
+
+    await expect(client.pay({ resource: OFFER.resource, offer: OFFER })).resolves.toBeDefined();
+  });
+
+  it.each([
+    -1,
+    Number.NaN,
+    Number.POSITIVE_INFINITY,
+  ])("refuses receiptMaxSkewMs of %s at creation", (value) => {
+    expect(() =>
+      createClient({ network: "testnet", settler: mockSettler(), receiptMaxSkewMs: value }),
+    ).toThrow(TypeError);
+  });
+
+  it("matches a full request URL to the offer's path resource", async () => {
+    // The Express adapter binds the gate to req.originalUrl, a path, while
+    // the agent requests a full URL. Both have the same path-and-query.
+    const client = createClient({ network: "testnet", settler: mockSettler(), verifier });
+    const result = await client.pay({
+      resource: "http://127.0.0.1:4021/quotes/latest",
+      offer: OFFER,
+    });
+    expect(result.receipt.receipt.resource).toBe(OFFER.resource);
+  });
+
+  it("refuses an offer for a different resource than the one requested, before paying", async () => {
+    const settler = mockSettler();
+    const client = createClient({ network: "testnet", settler, verifier });
+
+    const error = await rejection(
+      client.pay({ resource: "http://127.0.0.1:4021/reports/full", offer: OFFER }),
+    );
+    expect(error.field).toBe("resource");
+    expect(settler.settle).not.toHaveBeenCalled();
+  });
+
+  it("treats the query string as part of the resource", () => {
+    expect(resourceIdentity("https://api.example/quotes?pair=usd")).toBe("/quotes?pair=usd");
+    expect(resourceIdentity("/quotes?pair=usd")).toBe("/quotes?pair=usd");
+    expect(resourceIdentity("https://api.example/quotes")).not.toBe(
+      resourceIdentity("https://api.example/quotes?pair=usd"),
+    );
+  });
+});
+
+describe("assertReceiptMatchesOffer", () => {
+  it("rejects a settlement kind that does not fit the model, independently of the schema", async () => {
+    const receipt: SignedReceipt = {
+      ...baselineReceipt,
+      receipt: {
+        ...baselineReceipt.receipt,
+        // Constructed directly, not through the schema, which would refuse it.
+        settlement: { kind: "channel-commitment", channelId: "c1", sequence: 1 },
+      } as SignedReceipt["receipt"],
+    };
+    expect(() =>
+      assertReceiptMatchesOffer({
+        receipt,
+        offer: OFFER,
+        model: "x402",
+        network: "testnet",
+        now: Date.parse(receipt.receipt.issuedAt),
+        maxSkewMs: 0,
+      }),
+    ).toThrow(/settlement\.kind/);
+  });
+});
+
 /**
  * A settler that keeps every settlement open until `release` is called, so a
  * test decides how many calls are in flight at once.
  */
-function heldSettler(outcome: SignedReceipt | Error = baselineReceipt) {
+function heldSettler(outcome?: SignedReceipt | Error) {
   let open: () => void = () => {};
   const held = new Promise<void>((resolve) => {
     open = resolve;
   });
-  const settle = vi.fn(async (): Promise<SignedReceipt> => {
+  const settle = vi.fn(async (input: SettleRequest): Promise<SignedReceipt> => {
     await held;
     if (outcome instanceof Error) throw outcome;
-    return outcome;
+    // By default each settlement returns a receipt for the offer it was
+    // asked to pay, as a real service does, so the client's receipt binding
+    // (#202) accepts it.
+    return outcome ?? (await receiptForSettlement(input));
   });
   const settler: ClientSettler = { settle };
   return { settler, settle, release: () => open() };
+}
+
+/** A receipt signed by the test service for exactly this settlement. */
+function receiptForSettlement(input: SettleRequest): Promise<SignedReceipt> {
+  return signReceipt(
+    buildReceipt({
+      payer: "GPAYERXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX",
+      payee: input.offer.payTo,
+      amount: input.offer.amount,
+      asset: input.offer.asset,
+      resource: input.offer.resource,
+      model: input.model,
+      settlement: { kind: "transaction", txHash: `held-${input.model}-${input.offer.amount}` },
+      network: input.offer.network,
+    }),
+    signer,
+  );
 }
 
 /** Lets every pay() call already started run up to its first pending await. */
@@ -893,7 +1160,7 @@ describe("createClient concurrent payments", () => {
   });
 
   it("emits exactly one payment event for N concurrent identical calls", async () => {
-    const held = heldSettler();
+    const held = heldSettler(baselineReceipt);
     const events: ClientEvent[] = [];
     const client = createClient({ network: "testnet", settler: held.settler });
     client.on((event) => events.push(event));
@@ -944,7 +1211,7 @@ describe("createClient concurrent payments", () => {
     });
     const second = client.pay({
       resource: "/quotes/latest?retry=1",
-      offer: { ...OFFER, amount: "20000" },
+      offer: { ...OFFER, resource: "/quotes/latest?retry=1", amount: "20000" },
       idempotencyKey: "order-42",
     });
     await inFlight();

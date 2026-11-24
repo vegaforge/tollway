@@ -23,6 +23,8 @@ export type TollwayErrorCode =
   | "facilitator-invalid-response"
   | "policy-blocked"
   | "receipt-verification-failed"
+  | "receipt-offer-mismatch"
+  | "offer-network-mismatch"
   | "channel-not-found"
   | "channel-not-open"
   | "channel-already-closed"
