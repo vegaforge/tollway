@@ -13,7 +13,7 @@ import {
   verifyAndStoreReceipts,
 } from "./receipts.js";
 import { defineRoute } from "./routes.js";
-import { matchesTenantClaim, scopedRecordKey, tenantClaimFields } from "./tenancy.js";
+import { matchesTenantClaim, tenantClaimFields, tenantPartitionKey } from "./tenancy.js";
 
 /**
  * Multi-item batch ingest route (#229, #231): receives buffered receipts,
@@ -25,7 +25,8 @@ import { matchesTenantClaim, scopedRecordKey, tenantClaimFields } from "./tenanc
 
 /** Maximum lifecycle events accepted in one `POST /v1/ingest` batch. */
 export const MAX_EVENT_BATCH = 500;
-const MAX_IDEMPOTENCY_ENTRIES = 10_000;
+const MAX_IDEMPOTENCY_KEYS_PER_TENANT = 1_000;
+const MAX_IDEMPOTENCY_TENANTS = 1_000;
 
 /** Options passed to {@link ingestModule}. */
 export type IngestModuleOptions = {
@@ -83,14 +84,30 @@ export function ingestModule(options: IngestModuleOptions = {}): ServiceModule {
   const { verifier } = options;
 
   return ({ stores, quotas, observabilityFor, logger }) => {
-    const seenBatches = new Map<string, CachedBatch>();
+    const seenBatches = new Map<string, Map<string, CachedBatch>>();
 
-    const rememberBatch = (scopedKey: string, entry: CachedBatch): void => {
-      if (seenBatches.size >= MAX_IDEMPOTENCY_ENTRIES) {
-        const oldest = seenBatches.keys().next().value;
-        if (oldest !== undefined) seenBatches.delete(oldest);
+    const lookupBatch = (partitionKey: string, idempotencyKey: string): CachedBatch | undefined =>
+      seenBatches.get(partitionKey)?.get(idempotencyKey);
+
+    const rememberBatch = (
+      partitionKey: string,
+      idempotencyKey: string,
+      entry: CachedBatch,
+    ): void => {
+      let bucket = seenBatches.get(partitionKey);
+      if (bucket === undefined) {
+        if (seenBatches.size >= MAX_IDEMPOTENCY_TENANTS) {
+          const oldestTenant = seenBatches.keys().next().value;
+          if (oldestTenant !== undefined) seenBatches.delete(oldestTenant);
+        }
+        bucket = new Map();
+        seenBatches.set(partitionKey, bucket);
       }
-      seenBatches.set(scopedKey, entry);
+      if (!bucket.has(idempotencyKey) && bucket.size >= MAX_IDEMPOTENCY_KEYS_PER_TENANT) {
+        const oldestKey = bucket.keys().next().value;
+        if (oldestKey !== undefined) bucket.delete(oldestKey);
+      }
+      bucket.set(idempotencyKey, entry);
     };
 
     return [
@@ -149,12 +166,10 @@ export function ingestModule(options: IngestModuleOptions = {}): ServiceModule {
           const cleanMetrics: PaymentMetric[] = metrics.map(
             ({ orgId: _o, projectId: _p, ...metric }) => metric,
           );
-          const dedupeKey =
-            body.idempotencyKey === undefined
-              ? undefined
-              : scopedRecordKey(tenant, body.idempotencyKey);
+          const partitionKey = tenantPartitionKey(tenant);
+          const idempotencyKey = body.idempotencyKey;
           const batchFingerprint =
-            dedupeKey === undefined
+            idempotencyKey === undefined
               ? undefined
               : canonicalJson({
                   receipts: receipts.map((item) => item.signed),
@@ -168,7 +183,12 @@ export function ingestModule(options: IngestModuleOptions = {}): ServiceModule {
           const admission = await quotas.acquire(tenant, {
             ingestItems: totalItems,
             newStoredRecords: async () => {
-              if (dedupeKey !== undefined && seenBatches.has(dedupeKey)) return 0;
+              if (
+                idempotencyKey !== undefined &&
+                lookupBatch(partitionKey, idempotencyKey) !== undefined
+              ) {
+                return 0;
+              }
               const newReceipts = await countNewReceiptsInBatch(stores.receipts, tenant, receipts);
               return newReceipts + cleanMetrics.length;
             },
@@ -179,14 +199,14 @@ export function ingestModule(options: IngestModuleOptions = {}): ServiceModule {
           }
 
           try {
-            if (dedupeKey !== undefined && batchFingerprint !== undefined) {
-              const cached = seenBatches.get(dedupeKey);
+            if (idempotencyKey !== undefined && batchFingerprint !== undefined) {
+              const cached = lookupBatch(partitionKey, idempotencyKey);
               if (cached !== undefined) {
                 if (cached.fingerprint !== batchFingerprint) {
                   return c.json(
                     errorBody(
                       "conflict",
-                      `idempotencyKey "${body.idempotencyKey}" was already used with a different batch payload`,
+                      `idempotencyKey "${idempotencyKey}" was already used with a different batch payload`,
                     ),
                     409,
                   );
@@ -238,8 +258,11 @@ export function ingestModule(options: IngestModuleOptions = {}): ServiceModule {
               metrics: { accepted: cleanMetrics.length },
               events: { emitted: sink === undefined ? 0 : events.length },
             };
-            if (dedupeKey !== undefined && batchFingerprint !== undefined) {
-              rememberBatch(dedupeKey, { fingerprint: batchFingerprint, response: result });
+            if (idempotencyKey !== undefined && batchFingerprint !== undefined) {
+              rememberBatch(partitionKey, idempotencyKey, {
+                fingerprint: batchFingerprint,
+                response: result,
+              });
             }
             return c.json(result, 202);
           } finally {

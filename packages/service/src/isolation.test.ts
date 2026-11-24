@@ -536,6 +536,75 @@ describe("table-driven cross-tenant route isolation", () => {
     expect(await response.json()).toMatchObject({ error: { code: "invalid-request" } });
   });
 
+  it("rejects cursors replayed across two projects in the same org (org-alpha/proj-one vs org-alpha/proj-two)", async () => {
+    const harness = await buildHarness();
+    // Seed 2 items of each paginated kind in TENANT_B (org-bravo/proj-one) and TENANT_A (org-alpha/proj-one),
+    // then replay TENANT_A's cursors under KEY_A2 (org-alpha/proj-two, identical orgId).
+    const r1 = await signReceipt(buildReceipt(receiptInput({ id: "a-cur-1" })), harness.signer);
+    const r2 = await signReceipt(buildReceipt(receiptInput({ id: "a-cur-2" })), harness.signer);
+    await harness.app.request("/v1/receipts", {
+      method: "POST",
+      headers: { ...bearer(KEY_A), "Content-Type": "application/json" },
+      body: JSON.stringify({ receipts: [r1, r2] }),
+    });
+    const ch1 = await harness.channelManagers(TENANT_A).open({
+      counterparty: "GALPHA_1",
+      asset: ASSET,
+      deposit: "1000",
+      network: "testnet",
+    });
+    await harness.channelManagers(TENANT_A).open({
+      counterparty: "GALPHA_2",
+      asset: ASSET,
+      deposit: "1000",
+      network: "testnet",
+    });
+    await harness.channelManagers(TENANT_A).commit(ch1.id, "100");
+    await harness.channelManagers(TENANT_A).commit(ch1.id, "100");
+    // Open colliding CH001 in TENANT_A2 as well so channel lookup alone would succeed.
+    await harness.channelManagers(TENANT_A2).open({
+      counterparty: "GALPHA2_1",
+      asset: ASSET,
+      deposit: "1000",
+      network: "testnet",
+    });
+    for (const agentId of ["ag-1", "ag-2"]) {
+      await harness.app.request(`/v1/agents/${agentId}/policy`, {
+        method: "PUT",
+        headers: { ...bearer(KEY_A), "Content-Type": "application/json" },
+        body: JSON.stringify({ policy: { policyVersion: 1, budgets: { daily: "100" } } }),
+      });
+    }
+
+    const rCur = (
+      await (await harness.app.request("/v1/receipts?limit=1", { headers: bearer(KEY_A) })).json()
+    ).nextCursor as string;
+    const cCur = (
+      await (await harness.app.request("/v1/channels?limit=1", { headers: bearer(KEY_A) })).json()
+    ).nextCursor as string;
+    const mCur = (
+      await (
+        await harness.app.request(`/v1/channels/${ch1.id}/commitments?limit=1`, {
+          headers: bearer(KEY_A),
+        })
+      ).json()
+    ).nextCursor as string;
+    const aCur = (
+      await (await harness.app.request("/v1/audit?limit=1", { headers: bearer(KEY_A) })).json()
+    ).nextCursor as string;
+
+    for (const path of [
+      `/v1/receipts?limit=1&cursor=${rCur}`,
+      `/v1/channels?limit=1&cursor=${cCur}`,
+      `/v1/channels/${ch1.id}/commitments?limit=1&cursor=${mCur}`,
+      `/v1/audit?limit=1&cursor=${aCur}`,
+    ]) {
+      const replay = await harness.app.request(path, { headers: bearer(KEY_A2) });
+      expect(replay.status).toBe(400);
+      expect(await replay.json()).toMatchObject({ error: { code: "invalid-request" } });
+    }
+  });
+
   it("rejects a cursor replayed by the same tenant with modified query filters", async () => {
     const harness = await buildHarness();
     const seeded = await seedTenantB(harness);
@@ -923,6 +992,34 @@ describe("batch ingest (#229) tenant claims and scoped deduplication", () => {
       })
     ).json();
     expect(firstB).toMatchObject({ deduplicated: false, metrics: { accepted: 1 } });
+
+    // Flooding tenant A's per-tenant idempotency ring past 1,000 keys never evicts tenant B's entry.
+    for (let i = 0; i < 1_020; i += 1) {
+      const flood = await app.request("/v1/ingest", {
+        method: "POST",
+        headers: { ...bearer(KEY_A), "Content-Type": "application/json" },
+        body: JSON.stringify({
+          idempotencyKey: `flood-${i}`,
+          events: [
+            {
+              type: "receipt.created",
+              at: "2026-11-24T11:05:00.000Z",
+              data: { seq: i },
+            },
+          ],
+        }),
+      });
+      expect(flood.status).toBe(202);
+    }
+
+    const replayB = await (
+      await app.request("/v1/ingest", {
+        method: "POST",
+        headers: { ...bearer(KEY_B), "Content-Type": "application/json" },
+        body: JSON.stringify(batch),
+      })
+    ).json();
+    expect(replayB).toMatchObject({ deduplicated: true, metrics: { accepted: 1 } });
 
     const summaryA = await (
       await app.request("/v1/metrics/summary", { headers: bearer(KEY_A) })

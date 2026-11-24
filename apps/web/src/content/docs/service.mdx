@@ -184,6 +184,8 @@ Optional per-tenant quotas bound shared-instance usage and return `429` with a `
 
 The OpenAPI document is generated from the zod schemas each route validates its path, query and body with, so it cannot drift from what the service accepts.
 
+The `tollway-service` CLI mounts `metricsModule()`, `policiesModule()`, `receiptsModule()`, `ingestModule()` and `adminModule()` by default. Programmatic callers pass a `ReceiptVerifier` (`receiptsModule({ verifier })`, `ingestModule({ verifier })`) to accept signed receipt writes and `createChannelsModule()` with `channelManagers` to serve the channel endpoints.
+
 ## Channels
 
 The channels API lists the MPP channels tracked for each `(orgId, projectId)` tenant, shows one channel with its commitment stream, and triggers a close. Mount it with `createTenantChannelManagers` over a shared `ChannelStore`:

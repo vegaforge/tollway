@@ -4,10 +4,12 @@ import { adminModule } from "./admin.js";
 import { createService } from "./app.js";
 import { hashApiKey } from "./auth.js";
 import { ServiceConfigError } from "./config.js";
+import { ingestModule } from "./ingest.js";
 import { createConsoleLogger, describeError } from "./logger.js";
 import { metricsModule } from "./metrics.js";
 import { loadServiceConfig } from "./node-config.js";
 import { policiesModule } from "./policies.js";
+import { receiptsModule } from "./receipts.js";
 
 /**
  * The `tollway-service` command.
@@ -40,7 +42,7 @@ function startCommand(): void {
   const app = createService({
     config,
     logger,
-    modules: [metricsModule(), policiesModule(), adminModule()],
+    modules: [metricsModule(), policiesModule(), receiptsModule(), ingestModule(), adminModule()],
   });
   const server = serve({ fetch: app.fetch, port: config.port, hostname: config.host }, (info) => {
     logger.info("listening", { host: config.host, port: info.port });
