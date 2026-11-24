@@ -191,7 +191,9 @@ export function createSponsorMonitor(options: SponsorMonitorOptions): SponsorMon
         },
       );
     }, intervalMs);
-    timer.unref();
+    // Node returns a Timeout that would otherwise keep the process alive.
+    // Workers, Deno and browsers return a number, which has nothing to unref.
+    if (typeof timer === "object" && typeof timer.unref === "function") timer.unref();
   }
 
   return {

@@ -16,7 +16,8 @@ the error, and never expose an old balance as current.
 
 The new `sponsor.low_balance` webhook event fires once per low-balance episode;
 configurable hysteresis prevents repeated alerts near the threshold. Polling is
-serial, uses an unref'd timer, and supports start/stop. Sponsor balance and stale
+serial, uses an unref'd timer on Node (other runtimes return a plain number,
+which needs no unref), and supports start/stop. Sponsor balance and stale
 gauges can be rendered with `renderFeeSponsorMetrics`, ready for #218's separate
 payment exporter. Tollway never funds, tops up, transfers, or signs for sponsors.
 

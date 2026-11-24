@@ -210,6 +210,26 @@ describe("sponsor balance monitor", () => {
     timer.mockRestore();
   });
 
+  it("schedules polls where setTimeout returns a number, as on Workers, Deno and browsers", async () => {
+    // Those runtimes have no Timeout object, so there is nothing to unref.
+    const pending: Array<() => void> = [];
+    vi.stubGlobal("setTimeout", (callback: () => void) => {
+      pending.push(callback);
+      return pending.length;
+    });
+    vi.stubGlobal("clearTimeout", () => {});
+    try {
+      const { monitor, readBalance } = setup(["200", "200"]);
+      await monitor.start();
+      expect(pending).toHaveLength(1);
+      pending[0]?.();
+      await vi.waitFor(() => expect(readBalance).toHaveBeenCalledTimes(2));
+      await monitor.stop();
+    } finally {
+      vi.unstubAllGlobals();
+    }
+  });
+
   it.each([
     { thresholdStroops: "-1" },
     { hysteresisStroops: "1.5" },
