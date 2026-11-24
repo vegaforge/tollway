@@ -1,7 +1,8 @@
-import { Keypair } from "@stellar/stellar-sdk";
+import { Keypair, rpc } from "@stellar/stellar-sdk";
 import { TollwayError } from "@vegaforge/tollway-core";
 import { Credential } from "mppx";
 import { beforeEach, describe, expect, it, vi } from "vitest";
+import { CloseNotSubmittedError } from "./errors.js";
 import {
   createStellarMppChannelAdapter,
   type StellarMppChannelAdapterOptions,
@@ -259,26 +260,37 @@ describe("closeChannel", () => {
     expect(parameters.network).toBe("stellar:testnet");
   });
 
-  it("refuses to close a channel with no commitments", async () => {
+  // A failure before @stellar/mpp is called submitted nothing, and says so,
+  // so the manager can return the channel to open (#176).
+  it.each([
+    [
+      "a channel with no commitments",
+      { cumulativeAmount: "0", commitment: "" },
+      /refund path \(see #38\)/,
+      "payment-failed",
+    ],
+    ["a malformed commitment", { commitment: "zz" }, /128-character hex/, "payment-failed"],
+    [
+      "a cumulative amount above the deposit",
+      { cumulativeAmount: "1000001" },
+      /exceeds the deposit/,
+      "commitment-exceeds-deposit",
+    ],
+  ])("refuses %s as not submitted", async (_name, change, message, code) => {
     const adapter = createStellarMppChannelAdapter(options());
-    await expect(
-      adapter.closeChannel({ ...input, cumulativeAmount: "0", commitment: "" }),
-    ).rejects.toThrow(/refund path \(see #38\)/);
+    const error = await adapter.closeChannel({ ...input, ...change }).catch((e: unknown) => e);
+    expect(error).toBeInstanceOf(CloseNotSubmittedError);
+    expect(error).toMatchObject({ code });
+    expect(String(error)).toMatch(message);
     expect(stub.close).not.toHaveBeenCalled();
   });
 
-  it("rejects a malformed commitment", async () => {
+  it("lets an SDK failure surface unwrapped, as possibly submitted", async () => {
+    stub.close.mockRejectedValue(new Error("poll timed out"));
     const adapter = createStellarMppChannelAdapter(options());
-    await expect(adapter.closeChannel({ ...input, commitment: "zz" })).rejects.toThrow(
-      /128-character hex/,
-    );
-  });
-
-  it("rejects a cumulative amount above the deposit", async () => {
-    const adapter = createStellarMppChannelAdapter(options());
-    await expect(
-      adapter.closeChannel({ ...input, cumulativeAmount: "1000001" }),
-    ).rejects.toMatchObject({ code: "commitment-exceeds-deposit" });
+    const error = await adapter.closeChannel(input).catch((e: unknown) => e);
+    expect(error).toBeInstanceOf(Error);
+    expect(error).not.toBeInstanceOf(CloseNotSubmittedError);
   });
 
   it("lets an SDK failure surface without adding secrets to it", async () => {
@@ -289,5 +301,49 @@ describe("closeChannel", () => {
     await closing.catch((error: unknown) => {
       expect(String(error)).not.toContain(FEE_PAYER.secret());
     });
+  });
+});
+
+describe("findChannelSettlement", () => {
+  it("scans the bound contract's events on the configured RPC, refusing other channels", async () => {
+    const health = vi.spyOn(rpc.Server.prototype, "getHealth").mockResolvedValue({
+      status: "healthy",
+      latestLedger: 900,
+      oldestLedger: 100,
+      ledgerRetentionWindow: 800,
+    });
+    const getEvents = vi.spyOn(rpc.Server.prototype, "getEvents").mockResolvedValue({
+      events: [],
+      cursor: "",
+      latestLedger: 900,
+      oldestLedger: 100,
+      latestLedgerCloseTime: "",
+      oldestLedgerCloseTime: "",
+    });
+    try {
+      const adapter = createStellarMppChannelAdapter(options({ rpcUrl: "https://rpc.example" }));
+      await expect(
+        adapter.findChannelSettlement({
+          channelId: CONTRACT,
+          network: "testnet",
+          startLedger: 200,
+        }),
+      ).resolves.toBeNull();
+      expect(getEvents).toHaveBeenCalledWith({
+        filters: [{ type: "contract", contractIds: [CONTRACT] }],
+        startLedger: 200,
+        limit: 200,
+      });
+      await expect(
+        adapter.findChannelSettlement({
+          channelId: OTHER_CONTRACT,
+          network: "testnet",
+          startLedger: 200,
+        }),
+      ).rejects.toMatchObject({ code: "channel-not-found" });
+    } finally {
+      health.mockRestore();
+      getEvents.mockRestore();
+    }
   });
 });

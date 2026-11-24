@@ -84,6 +84,111 @@ still unauthenticated: the checks catch a service that returns the wrong
 receipt by mistake, but anyone who can answer the request can forge one that
 passes them. Configure a verifier in production.
 
+## Hardening an agent
+
+A 402 challenge is attacker-controlled input. Before the policy engine and
+before any signature, `pay()` checks the offer itself (#209). A failed check
+throws `OfferRejectedError`, a `TollwayError` with code `offer-rejected` whose
+`checkName` names the check, and emits a `skip` event. The settler is never
+called.
+
+These checks always run:
+
+- **network**: the offer must name the client's `network`. A mismatch is
+  refused by the receipt binding above with `OfferNetworkMismatchError`.
+- **resource**: the offer must be for the URL the agent requested, under the
+  same path-and-query rule.
+- **structural**: `amount` is an integer string in base units and is not zero,
+  `models` is not empty, and `payTo` and `asset` are not empty.
+
+Configure the rest with `offerChecks`:
+
+```ts
+const client = createClient({
+  network: "mainnet",
+  settler,
+  offerChecks: {
+    // A ceiling per asset, in base units. USDC on Stellar has 7 decimals,
+    // so this is 5 USDC. An asset with no entry is refused: once you set
+    // ceilings, every accepted asset needs one.
+    maxAmount: { [USDC_CONTRACT]: "50000000" },
+    // Exact-string allowlists. No patterns.
+    allowedPayees: ["GSERVICE..."],
+    allowedAssets: [USDC_CONTRACT],
+  },
+});
+```
+
+| Option | Effect |
+| --- | --- |
+| `maxAmount` | Refuses an offer above the ceiling for its asset, and any asset with no entry (fail closed). Compared as `bigint`. |
+| `allowedPayees` | Refuses a `payTo` outside the list. |
+| `allowedAssets` | Refuses an `asset` outside the list. |
+| `allowZeroAmount` | Accepts offers for zero. Off by default: a free offer that still asks for a signature is more likely a probe than a sale. |
+| `requireNetwork` | The network offers must name. Defaults to `network` and must equal it. |
+
+`createClient` validates `offerChecks` when it is created, so a ceiling that
+is not an integer string fails at startup, not on the first payment.
+
+Pass the same `offerChecks` to `createX402Settler` too. It registers the
+allowlists as an x402 `PaymentPolicy` over every option in the challenge, so a
+402 that lists a disallowed option first cannot steer the settler to it.
+
+Recommended defaults for an agent with real funds: a `maxAmount` entry for
+each asset it should spend, an `allowedPayees` list of the services it calls,
+and the same checks on the settler.
+
+## Retries
+
+A payment can fail in ways that are safe to try again and ways that are not.
+The settler classifies each failure, and `pay()` acts on the class:
+
+| What happened | What `pay()` does |
+| --- | --- |
+| The service challenged the signed payment again (an expired authorization or a used nonce). Nothing settled. | Checks the policy again, then signs a fresh authorization for the same terms. A challenge asking for a different amount, asset or payee stops the retry. |
+| The service is already settling this payment (409 with `Retry-After`). | Waits `Retry-After`, up to 30 seconds, and resends the identical payment. It never signs a new one, so the service answers with the original receipt. |
+| The payment may have landed (a 5xx after the signed request, a dropped connection, or a 409 without `Retry-After`). | Never retries. Rejects with `AmbiguousSettlementError` (code `outcome-unknown`). |
+| Anything else. | Rejects at once. |
+
+Two consequences are deliberate. A 429 from the service's own rate limit is
+"anything else": `pay()` rejects at once and leaves waiting to the caller. A
+5xx the service returns before settling, such as a failure to price the
+request, still reads as ambiguous, because the client cannot tell it from a
+failure after settling. Both err toward never paying twice.
+
+Signing again after an ambiguous outcome is how a payer gets charged twice:
+the first transaction may already be on chain, and only the answer was lost.
+Reconcile against the chain or the receipt store before paying again.
+
+```ts
+import { AmbiguousSettlementError, createClient } from "@vegaforge/tollway-client";
+
+const client = createClient({
+  network: "testnet",
+  settler,
+  policy,
+  retry: { maxAttempts: 3 }, // default 2, clamped to 1..5; 1 turns retries off
+});
+
+client.on((event) => {
+  if (event.type === "retry") console.info(`retry ${event.attempt}: ${event.reason}`);
+});
+
+try {
+  await client.pay({ resource: "/quotes/latest", offer });
+} catch (error) {
+  if (error instanceof AmbiguousSettlementError) {
+    // Do not pay again. Find out whether the first payment landed.
+  }
+}
+```
+
+Retries are on by default (`maxAttempts: 2`). `maxAttempts` counts every
+settler call, resends included. Each fresh authorization is a new payment
+attempt for the policy: it is checked again, and it counts toward a rate
+limit with `count: "attempts"`. The policy records spend once, after the
+payment settles, however many attempts it took.
+
 ## Receipt store
 
 ```ts
