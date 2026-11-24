@@ -4,6 +4,8 @@
 
 ```ts
 
+import { CounterpartyQuarantine } from '@vegaforge/tollway-core';
+import { QuarantineEntry } from '@vegaforge/tollway-core';
 import { StellarNetwork } from '@vegaforge/tollway-core';
 import { TollwayError } from '@vegaforge/tollway-core';
 
@@ -22,6 +24,15 @@ export type Channel = {
     lastCommitAt?: string;
     settlementTxHash?: string;
     returnedRemainder?: string;
+    closeAttempt?: {
+        attemptId: string;
+        startedAtLedger: number;
+        startedAt: string;
+    };
+    settlementMismatch?: {
+        expectedAmount: string;
+        observedAmount: string;
+    };
 };
 
 // @public
@@ -32,6 +43,13 @@ export class ChannelAlreadyClosedError extends TollwayError {
     // (undocumented)
     readonly status: string;
 }
+
+// @public
+export type ChannelChainState = {
+    balance: string;
+    closeEffectiveAtLedger?: number;
+    currentLedger: number;
+};
 
 // @public (undocumented)
 export interface ChannelManager {
@@ -45,6 +63,8 @@ export interface ChannelManager {
     open(input: OpenChannelInput): Promise<Channel>;
     // (undocumented)
     recover(channelId: string): Promise<RecoveryResult>;
+    resume(channelId: string): Promise<ResumeOutcome>;
+    resumeAll(): Promise<ResumeAllResult>;
     // (undocumented)
     shouldClose(channelId: string): Promise<boolean>;
 }
@@ -66,7 +86,14 @@ export class ChannelNotOpenError extends TollwayError {
 }
 
 // @public
-export type ChannelStatus = "open" | "closing" | "closed" | "recovering" | "recovered";
+export type ChannelStatus = "open" | "closing" | "closed" | "recovering" | "recovered"
+/**
+* Issue #176: a terminal flag for a settlement that does not match the
+* last commitment. A channel in this state never accepts further
+* commits and is never reopened for the agent; the discrepancy is for
+* the reconcile path to classify.
+*/
+| "settlement-mismatched";
 
 // @public (undocumented)
 export type CloseAdapterInput = {
@@ -83,6 +110,13 @@ export type CloseAdapterResult = {
     settledAmount: string;
     returnedRemainder: string;
 };
+
+// @public
+export class CloseNotSubmittedError extends TollwayError {
+    constructor(channelId: string, cause: unknown);
+    // (undocumented)
+    readonly channelId: string;
+}
 
 // @public
 export type ClosePolicy = {
@@ -122,12 +156,27 @@ export interface CommitmentStore {
     appendCommitment(commitment: Commitment): Promise<void>;
     // (undocumented)
     getChannel(channelId: string): Promise<Channel | undefined>;
+    listChannelsByStatus(status: Channel["status"]): Promise<readonly Channel[]>;
     // (undocumented)
     listCommitments(channelId: string): Promise<readonly Commitment[]>;
     // (undocumented)
     putChannel(channel: Channel): Promise<void>;
     // (undocumented)
     updateChannel(channelId: string, patch: Partial<Channel>): Promise<Channel | undefined>;
+}
+
+// @public
+export class CounterpartyQuarantinedError extends TollwayError {
+    constructor(counterparty: string, reason: string, options?: {
+        entry?: QuarantineEntry;
+        cause?: unknown;
+    });
+    // (undocumented)
+    readonly counterparty: string;
+    // (undocumented)
+    readonly entry?: QuarantineEntry;
+    // (undocumented)
+    readonly reason: string;
 }
 
 // @public (undocumented)
@@ -138,6 +187,7 @@ export type CreateChannelManagerOptions = {
     adapter: MppChannelAdapter;
     store?: CommitmentStore;
     closePolicy?: ClosePolicy;
+    quarantine?: CounterpartyQuarantine;
     now?: () => string;
 };
 
@@ -145,10 +195,15 @@ export type CreateChannelManagerOptions = {
 export function createMemoryCommitmentStore(): CommitmentStore;
 
 // @public
-export function createMockMppChannelAdapter(): MockMppChannelAdapter;
+export function createStellarMppChannelAdapter(options: StellarMppChannelAdapterOptions): MppChannelAdapter;
 
 // @public
-export function createStellarMppChannelAdapter(options: StellarMppChannelAdapterOptions): MppChannelAdapter;
+export type FoundChannelSettlement = {
+    settlementTxHash: string;
+    settledAmount: string;
+    returnedRemainder: string;
+    settledAtLedger: number;
+};
 
 // @public
 export class InvalidAmountError extends TollwayError {
@@ -156,21 +211,26 @@ export class InvalidAmountError extends TollwayError {
 }
 
 // @public
-export type MockMppChannelAdapter = {
-    adapter: MppChannelAdapter;
-    calls: MockMppChannelAdapterCalls;
-};
-
-// @public
-export type MockMppChannelAdapterCalls = {
-    readonly openChannel: readonly OpenAdapterInput[];
-    readonly signCommitment: readonly SignCommitmentInput[];
-    readonly closeChannel: readonly CloseAdapterInput[];
-};
+export class MissingEventHistoryError extends TollwayError {
+    constructor(channelId: string, startLedger: number, detail?: string);
+    // (undocumented)
+    readonly channelId: string;
+    // (undocumented)
+    readonly startLedger: number;
+}
 
 // @public
 export interface MppChannelAdapter {
     closeChannel(input: CloseAdapterInput): Promise<CloseAdapterResult>;
+    findChannelSettlement(input: {
+        channelId: string;
+        network: StellarNetwork;
+        startLedger: number;
+    }): Promise<FoundChannelSettlement | null>;
+    getChannelState(input: {
+        channelId: string;
+        network: StellarNetwork;
+    }): Promise<ChannelChainState>;
     // (undocumented)
     openChannel(input: OpenAdapterInput): Promise<OpenAdapterResult>;
     signCommitment(input: SignCommitmentInput): Promise<SignedCommitment>;
@@ -205,6 +265,36 @@ export type RecoveryResult = {
     txHash: string;
 };
 
+// @public (undocumented)
+export type ResumeAllResult = {
+    outcomes: ReadonlyArray<ResumeOutcome | {
+        kind: "error";
+        channelId: string;
+        error: Error;
+    }>;
+};
+
+// @public
+export type ResumeOutcome = {
+    kind: "closed";
+    channelId: string;
+    settlementTxHash: string;
+    returnedRemainder: string;
+} | {
+    kind: "recovering";
+    channelId: string;
+    closeEffectiveAtLedger: number;
+} | {
+    kind: "reclosed";
+    channelId: string;
+    settlementTxHash: string;
+    returnedRemainder: string;
+} | {
+    kind: "no-change";
+    channelId: string;
+    status: ChannelStatus;
+};
+
 // @public
 export class SettlementMismatchError extends TollwayError {
     constructor(channelId: string, expectedSettled: string, actualSettled: string);
@@ -214,6 +304,15 @@ export class SettlementMismatchError extends TollwayError {
     readonly channelId: string;
     // (undocumented)
     readonly expectedSettled: string;
+}
+
+// @public
+export class SettlementNotFoundError extends TollwayError {
+    constructor(channelId: string, startLedger: number);
+    // (undocumented)
+    readonly channelId: string;
+    // (undocumented)
+    readonly startLedger: number;
 }
 
 // @public (undocumented)

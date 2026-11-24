@@ -38,31 +38,30 @@ const refKindForModel = {
   "mpp-channel": "channel-commitment",
 } as const;
 
+/** The fields every receipt body carries, independent of its version. */
+const commonBodyFields = {
+  id: z.string().min(1),
+  payer: z.string().min(1),
+  payee: z.string().min(1),
+  amount: z.string().regex(/^[0-9]+$/, "amount must be an integer string"),
+  asset: z.string().min(1),
+  resource: z.string().min(1),
+  model: z.enum(settlementModels),
+  settlement: settlementRefSchema,
+  network: z.enum(stellarNetworks),
+  issuedAt: z.iso.datetime(),
+} as const;
+
 /**
- * The receipt body every settlement path produces. It also checks that the
- * settlement reference kind fits the model (a transaction for x402 and MPP
- * charge, a channel commitment for MPP channels).
+ * The v1 receipt body. Unchanged byte-for-byte from the pre-#166 schema:
+ * every v1 receipt signed before this change verifies identically.
  */
-export const receiptBodySchema = z
+export const receiptBodyV1Schema = z
   .strictObject({
     version: z.literal(1),
-    /** Unique per receipt. The signature covers it, so replays are detectable. */
-    id: z.string().min(1),
-    payer: z.string().min(1),
-    payee: z.string().min(1),
-    /** Integer string in the asset's smallest unit. Strings keep 64-bit amounts exact. */
-    amount: z.string().regex(/^[0-9]+$/, "amount must be an integer string"),
-    asset: z.string().min(1),
-    /** URL or stable identifier of what was paid for. */
-    resource: z.string().min(1),
-    model: z.enum(settlementModels),
-    settlement: settlementRefSchema,
-    network: z.enum(stellarNetworks),
-    issuedAt: z.iso.datetime(),
+    ...commonBodyFields,
   })
   .superRefine((body, ctx) => {
-    // A receipt claiming x402 settlement with a channel reference (or the
-    // reverse) is malformed no matter who signed it.
     if (body.settlement.kind !== refKindForModel[body.model]) {
       ctx.addIssue({
         code: "custom",
@@ -72,6 +71,70 @@ export const receiptBodySchema = z
     }
   });
 
+/**
+ * The v2 receipt body (Issue #166). Adds three fields on top of v1:
+ *
+ * - `offerHash`: base64url SHA-256 of the canonical bytes of the offer the
+ *   payer accepted. Two offers that differ in `models`, `facilitatorUrl`
+ *   or `mppSessionSupported` produce different hashes, so a receipt is
+ *   bound to the exact offer the payer accepted, not only to the URL
+ *   and price.
+ * - `method`: the HTTP method of the paid request (uppercase, e.g.
+ *   `GET`), or any non-empty identifier a non-HTTP gate uses. A receipt
+ *   for `GET /x` no longer unlocks `POST /x`.
+ * - `expiresAt`: optional ISO 8601 timestamp, strictly after `issuedAt`.
+ *   A receipt without `expiresAt` never expires. The field is about how
+ *   long a receipt is honoured as proof of access; it does not evict
+ *   the settlement cache.
+ */
+export const receiptBodyV2Schema = z
+  .strictObject({
+    version: z.literal(2),
+    ...commonBodyFields,
+    offerHash: z.string().min(1),
+    method: z.string().min(1),
+    expiresAt: z.iso.datetime().optional(),
+  })
+  .superRefine((body, ctx) => {
+    if (body.settlement.kind !== refKindForModel[body.model]) {
+      ctx.addIssue({
+        code: "custom",
+        path: ["settlement", "kind"],
+        message: `model "${body.model}" settles via "${refKindForModel[body.model]}", got "${body.settlement.kind}"`,
+      });
+    }
+    if (body.expiresAt !== undefined) {
+      const issued = Date.parse(body.issuedAt);
+      const expires = Date.parse(body.expiresAt);
+      if (Number.isFinite(issued) && Number.isFinite(expires) && expires <= issued) {
+        ctx.addIssue({
+          code: "custom",
+          path: ["expiresAt"],
+          message: "expiresAt must be strictly after issuedAt",
+        });
+      }
+    }
+  });
+
+/**
+ * The receipt body every settlement path produces, discriminated on
+ * `version`. The schema also checks that the settlement reference kind
+ * fits the model (a transaction for x402 and MPP charge, a channel
+ * commitment for MPP channels).
+ *
+ * A verifier that does not recognise the version returns invalid rather
+ * than guessing the layout. Discriminating on `version` picks v1 or v2 up
+ * front, so a bad v2 body reports the v2 issues only.
+ */
+export const receiptBodySchema = z.discriminatedUnion("version", [
+  receiptBodyV1Schema,
+  receiptBodyV2Schema,
+]);
+
+/** A v1 receipt body; see {@link receiptBodyV1Schema}. */
+export type ReceiptBodyV1 = z.infer<typeof receiptBodyV1Schema>;
+/** A v2 receipt body; see {@link receiptBodyV2Schema}. */
+export type ReceiptBodyV2 = z.infer<typeof receiptBodyV2Schema>;
 /** The signed part of a receipt: who paid whom, how much, for what, and how it settled. */
 export type ReceiptBody = z.infer<typeof receiptBodySchema>;
 

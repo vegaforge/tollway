@@ -21,10 +21,13 @@ export function base64UrlToBytes(text: string): Uint8Array;
 export function buildReceipt(input: BuildReceiptInput): ReceiptBody;
 
 // @public
-export type BuildReceiptInput = Omit<ReceiptBody, "version" | "id" | "issuedAt"> & {
+export type BuildReceiptInput = (Omit<ReceiptBodyV1, "version" | "id" | "issuedAt"> & {
     id?: string;
     issuedAt?: string;
-};
+}) | (Omit<ReceiptBodyV2, "version" | "id" | "issuedAt"> & {
+    id?: string;
+    issuedAt?: string;
+});
 
 // @public (undocumented)
 export function bytesToBase64Url(bytes: Uint8Array): string;
@@ -42,10 +45,32 @@ export function checkSmartAccountPolicy(plan: SmartAccountPlan, reader: SmartAcc
 export function comparePolicyTraces(active: PolicyTrace, candidate: PolicyTrace): PolicyTraceComparison;
 
 // @public
-export function createDefaultRouter(): ModelRouter;
+export interface CounterpartyQuarantine {
+    history(counterparty?: string): Promise<readonly QuarantineEntry[]>;
+    lookup(counterparty: string): Promise<QuarantineEntry | undefined>;
+    // (undocumented)
+    quarantine(input: QuarantineInput): Promise<QuarantineEntry>;
+    // (undocumented)
+    release(input: ReleaseQuarantineInput): Promise<QuarantineEntry | undefined>;
+}
 
 // @public
-export function createPolicyEngine(policy: Policy, opts?: {
+export function createDefaultRouter(options?: DefaultRouterOptions): ModelRouter;
+
+// @public
+export function createKeySetVerifier(options: KeySetVerifierOptions): KeySetVerifier;
+
+// @public
+export function createMemoryQuarantine(options?: CreateMemoryQuarantineOptions): CounterpartyQuarantine;
+
+// @public (undocumented)
+export type CreateMemoryQuarantineOptions = {
+    autoReleaseAfterMs?: number;
+    now?: () => string;
+};
+
+// @public
+export function createPolicyEngine(input: PolicyInput, opts?: {
     clock?: () => number;
     onAnomalyDetected?: (event: AdaptiveAnomalyEvent) => void | Promise<void>;
 }): PolicyEngine;
@@ -54,13 +79,75 @@ export function createPolicyEngine(policy: Policy, opts?: {
 export function decisionFromTrace(trace: PolicyTrace): PolicyDecision;
 
 // @public (undocumented)
+export type DefaultRouterOptions = {
+    quarantine?: CounterpartyQuarantine;
+};
+
+// @public
+export function derToP1363(der: Uint8Array): Uint8Array;
+
+// @public
+export const ECDSA_P256_ALG = "ES256";
+
+// @public (undocumented)
+export class EcdsaP256Signer implements ReceiptSigner {
+    // (undocumented)
+    readonly algorithm = "ES256";
+    static fromJwk(jwk: Record<string, unknown>, keyId?: string): Promise<EcdsaP256Signer>;
+    static fromPkcs8(encodedKey: Uint8Array | string, keyId?: string): Promise<EcdsaP256Signer>;
+    static generate(keyId?: string): Promise<EcdsaP256Signer>;
+    // (undocumented)
+    readonly keyId: string;
+    publicJwk(): P256PublicJwk;
+    // (undocumented)
+    readonly publicJwkBytes: {
+        x: string;
+        y: string;
+    };
+    sign(message: Uint8Array): Promise<Uint8Array>;
+}
+
+// @public
+export class EcdsaP256Verifier implements ReceiptVerifier {
+    constructor(entries: Record<string, {
+        x: string;
+        y: string;
+    }>);
+    // (undocumented)
+    static forSigner(signer: EcdsaP256Signer): EcdsaP256Verifier;
+    // (undocumented)
+    verify(input: SignatureInput): Promise<boolean>;
+}
+
+// @public
+export const ed25519KeyEntrySchema: z.ZodObject<{
+    kty: z.ZodLiteral<"OKP">;
+    crv: z.ZodLiteral<"Ed25519">;
+    x: z.ZodString;
+    kid: z.ZodString;
+    alg: z.ZodLiteral<"EdDSA">;
+    use: z.ZodOptional<z.ZodLiteral<"sig">>;
+    status: z.ZodDefault<z.ZodDiscriminatedUnion<[z.ZodObject<{
+        state: z.ZodLiteral<"active">;
+    }, z.core.$strict>, z.ZodObject<{
+        state: z.ZodLiteral<"retired">;
+        retiredAt: z.ZodISODateTime;
+    }, z.core.$strict>, z.ZodObject<{
+        state: z.ZodLiteral<"revoked">;
+        revokedAt: z.ZodOptional<z.ZodISODateTime>;
+    }, z.core.$strict>], "state">>;
+}, z.core.$strict>;
+
+// @public (undocumented)
 export class Ed25519Signer implements ReceiptSigner {
     // (undocumented)
     readonly algorithm = "Ed25519";
+    static fromJwk(jwk: Record<string, unknown>, keyId?: string): Promise<Ed25519Signer>;
     static fromPrivateKey(encodedKey: string, keyId?: string): Promise<Ed25519Signer>;
     static generate(keyId?: string): Promise<Ed25519Signer>;
     // (undocumented)
     readonly keyId: string;
+    publicJwk(): PublicJwk;
     // (undocumented)
     readonly publicKey: Uint8Array;
     // (undocumented)
@@ -73,13 +160,14 @@ export class Ed25519Verifier implements ReceiptVerifier {
     // (undocumented)
     static forSigner(signer: Ed25519Signer): Ed25519Verifier;
     // (undocumented)
-    verify(input: {
-        message: Uint8Array;
-        signature: Uint8Array;
-        keyId: string;
-        algorithm: string;
-    }): Promise<boolean>;
+    verify(input: SignatureInput): Promise<boolean>;
 }
+
+// @public
+export function formatPolicyIssues(issues: readonly PolicyIssue[]): string;
+
+// @public
+export function hashOffer(offer: PaymentOffer): Promise<string>;
 
 // @public (undocumented)
 export type InstalledSpendingLimit = {
@@ -92,6 +180,116 @@ export type InstalledSpendingLimit = {
 // @public
 export type JsonValue = string | number | boolean | null | JsonValue[] | {
     [key: string]: JsonValue;
+};
+
+// @public
+export type KeySetDocument = z.infer<typeof keySetDocumentSchema>;
+
+// @public
+export const keySetDocumentSchema: z.ZodObject<{
+    keys: z.ZodArray<z.ZodDiscriminatedUnion<[z.ZodObject<{
+        kty: z.ZodLiteral<"OKP">;
+        crv: z.ZodLiteral<"Ed25519">;
+        x: z.ZodString;
+        kid: z.ZodString;
+        alg: z.ZodLiteral<"EdDSA">;
+        use: z.ZodOptional<z.ZodLiteral<"sig">>;
+        status: z.ZodDefault<z.ZodDiscriminatedUnion<[z.ZodObject<{
+            state: z.ZodLiteral<"active">;
+        }, z.core.$strict>, z.ZodObject<{
+            state: z.ZodLiteral<"retired">;
+            retiredAt: z.ZodISODateTime;
+        }, z.core.$strict>, z.ZodObject<{
+            state: z.ZodLiteral<"revoked">;
+            revokedAt: z.ZodOptional<z.ZodISODateTime>;
+        }, z.core.$strict>], "state">>;
+    }, z.core.$strict>, z.ZodObject<{
+        kty: z.ZodLiteral<"EC">;
+        crv: z.ZodLiteral<"P-256">;
+        x: z.ZodString;
+        y: z.ZodString;
+        kid: z.ZodString;
+        alg: z.ZodLiteral<"ES256">;
+        use: z.ZodOptional<z.ZodLiteral<"sig">>;
+        status: z.ZodDefault<z.ZodDiscriminatedUnion<[z.ZodObject<{
+            state: z.ZodLiteral<"active">;
+        }, z.core.$strict>, z.ZodObject<{
+            state: z.ZodLiteral<"retired">;
+            retiredAt: z.ZodISODateTime;
+        }, z.core.$strict>, z.ZodObject<{
+            state: z.ZodLiteral<"revoked">;
+            revokedAt: z.ZodOptional<z.ZodISODateTime>;
+        }, z.core.$strict>], "state">>;
+    }, z.core.$strict>], "kty">>;
+    issuedAt: z.ZodOptional<z.ZodISODateTime>;
+    expiresAt: z.ZodOptional<z.ZodISODateTime>;
+}, z.core.$strict>;
+
+// @public
+export type KeySetEntry = z.infer<typeof keySetEntrySchema>;
+
+// @public
+export const keySetEntrySchema: z.ZodDiscriminatedUnion<[z.ZodObject<{
+    kty: z.ZodLiteral<"OKP">;
+    crv: z.ZodLiteral<"Ed25519">;
+    x: z.ZodString;
+    kid: z.ZodString;
+    alg: z.ZodLiteral<"EdDSA">;
+    use: z.ZodOptional<z.ZodLiteral<"sig">>;
+    status: z.ZodDefault<z.ZodDiscriminatedUnion<[z.ZodObject<{
+        state: z.ZodLiteral<"active">;
+    }, z.core.$strict>, z.ZodObject<{
+        state: z.ZodLiteral<"retired">;
+        retiredAt: z.ZodISODateTime;
+    }, z.core.$strict>, z.ZodObject<{
+        state: z.ZodLiteral<"revoked">;
+        revokedAt: z.ZodOptional<z.ZodISODateTime>;
+    }, z.core.$strict>], "state">>;
+}, z.core.$strict>, z.ZodObject<{
+    kty: z.ZodLiteral<"EC">;
+    crv: z.ZodLiteral<"P-256">;
+    x: z.ZodString;
+    y: z.ZodString;
+    kid: z.ZodString;
+    alg: z.ZodLiteral<"ES256">;
+    use: z.ZodOptional<z.ZodLiteral<"sig">>;
+    status: z.ZodDefault<z.ZodDiscriminatedUnion<[z.ZodObject<{
+        state: z.ZodLiteral<"active">;
+    }, z.core.$strict>, z.ZodObject<{
+        state: z.ZodLiteral<"retired">;
+        retiredAt: z.ZodISODateTime;
+    }, z.core.$strict>, z.ZodObject<{
+        state: z.ZodLiteral<"revoked">;
+        revokedAt: z.ZodOptional<z.ZodISODateTime>;
+    }, z.core.$strict>], "state">>;
+}, z.core.$strict>], "kty">;
+
+// @public
+export type KeySetFetcher = (url: string) => Promise<{
+    status: number;
+    headers: Headers;
+    text(): Promise<string>;
+}>;
+
+// @public
+export interface KeySetVerifier extends ReceiptVerifier {
+    // (undocumented)
+    check(input: SignatureInput): Promise<SignatureCheck>;
+    refresh(): Promise<void>;
+}
+
+// @public
+export type KeySetVerifierOptions = {
+    url?: string;
+    document?: KeySetDocument;
+    fetch?: KeySetFetcher;
+    clock?: () => number;
+    minCacheMs?: number;
+    maxCacheMs?: number;
+    defaultCacheMs?: number;
+    staleIfErrorMs?: number;
+    failureBackoffMs?: number;
+    unknownKidRefetchCooldownMs?: number;
 };
 
 // @public
@@ -116,11 +314,54 @@ export type MppChargePayment = {
 };
 
 // @public
+export function normaliseLowS(signature: Uint8Array): Uint8Array;
+
+// @public
 export class NotImplementedError extends TollwayError {
     constructor(feature: string, reference: string);
     // (undocumented)
     readonly reference: string;
 }
+
+// @public
+export function p1363ToBase64Url(signature: Uint8Array): string;
+
+// @public
+export const p256KeyEntrySchema: z.ZodObject<{
+    kty: z.ZodLiteral<"EC">;
+    crv: z.ZodLiteral<"P-256">;
+    x: z.ZodString;
+    y: z.ZodString;
+    kid: z.ZodString;
+    alg: z.ZodLiteral<"ES256">;
+    use: z.ZodOptional<z.ZodLiteral<"sig">>;
+    status: z.ZodDefault<z.ZodDiscriminatedUnion<[z.ZodObject<{
+        state: z.ZodLiteral<"active">;
+    }, z.core.$strict>, z.ZodObject<{
+        state: z.ZodLiteral<"retired">;
+        retiredAt: z.ZodISODateTime;
+    }, z.core.$strict>, z.ZodObject<{
+        state: z.ZodLiteral<"revoked">;
+        revokedAt: z.ZodOptional<z.ZodISODateTime>;
+    }, z.core.$strict>], "state">>;
+}, z.core.$strict>;
+
+// @public
+export type P256PublicJwk = {
+    kty: "EC";
+    crv: "P-256";
+    x: string;
+    y: string;
+    kid: string;
+    alg: "ES256";
+    use: "sig";
+};
+
+// @public
+export function parseKeySetDocument(input: unknown): KeySetDocument;
+
+// @public
+export function parsePolicy(input: unknown): PolicyParseResult;
 
 // @public
 export type PaymentIntent = {
@@ -148,46 +389,19 @@ export type PaymentOffer = {
 export type PaymentPayload = X402Payment | MppChargePayment | MppChannelPayment;
 
 // @public
-export function planSmartAccountPolicy(policy: Policy, options: SmartAccountPlannerOptions): SmartAccountPlan;
+export function planSmartAccountPolicy(input: PolicyInput, options: SmartAccountPlannerOptions): SmartAccountPlan;
 
 // @public
-export type Policy = {
-    mode?: PolicyMode;
-    budgets?: {
-        daily?: string;
-        total?: string;
-    };
-    perService?: Record<string, {
-        cap?: string;
-    }>;
-    perModel?: Partial<Record<SettlementModel, {
-        enabled?: boolean;
-        minChannelDeposit?: string;
-    }>>;
-    rateLimit?: {
-        requestsPerMinute?: number;
-    };
-    anomaly?: {
-        maxSpendPerMinute?: string;
-        adaptive?: {
-            kind: "ewma";
-            smoothing: {
-                numerator: string;
-                denominator: string;
-            };
-            sensitivity: {
-                numerator: string;
-                denominator: string;
-            };
-            warmupPeriods: number;
-            scope?: "asset" | "asset-payee";
-            maxBaselineGrowthPerMinute?: string;
-        };
-    };
-};
+export type Policy = z.infer<typeof policySchema>;
+
+// @public
+export const POLICY_SCHEMA_ID = "https://raw.githubusercontent.com/vegaforge/tollway/dev/packages/core/schema/policy.schema.json";
 
 // @public
 export const POLICY_TRACE_VERSION = 1;
+
+// @public
+export const POLICY_VERSION = 1;
 
 // @public
 export type PolicyDecision = {
@@ -200,11 +414,27 @@ export type PolicyDecision = {
 
 // @public
 export interface PolicyEngine {
+    admit?(intent: PaymentIntent): Promise<PolicyTrace>;
     check(intent: PaymentIntent): Promise<PolicyDecision>;
     evaluate(intent: PaymentIntent): Promise<PolicyTrace>;
     readonly mode: PolicyMode;
     record(intent: PaymentIntent): Promise<void>;
+    recordAttempt?(intent: PaymentIntent): Promise<void>;
 }
+
+// @public
+export type PolicyInput = Omit<Policy, "policyVersion"> & {
+    policyVersion?: number;
+};
+
+// @public
+export type PolicyIssue = {
+    path: string[];
+    message: string;
+};
+
+// @public
+export function policyJsonSchema(): Record<string, unknown>;
 
 // @public
 export type PolicyMode = (typeof policyModes)[number];
@@ -219,16 +449,104 @@ export type PolicyOutcome = (typeof policyOutcomes)[number];
 export const policyOutcomes: readonly ["pass", "fail", "not-applicable"];
 
 // @public
+export type PolicyParseResult = {
+    ok: true;
+    policy: Policy;
+    migratedFrom?: number;
+} | {
+    ok: false;
+    issues: PolicyIssue[];
+};
+
+// @public
 export type PolicyRuleId = (typeof policyRuleIds)[number];
 
 // @public
-export const policyRuleIds: readonly ["per-model-disabled", "min-channel-deposit", "budget-daily", "budget-total", "per-service", "rate-limit", "anomaly", "anomaly-adaptive"];
+export const policyRuleIds: readonly ["per-model-disabled", "min-channel-deposit", "budget-daily", "budget-total", "per-service", "per-service-daily", "per-service-window", "per-resource", "per-resource-daily", "per-resource-window", "rate-limit", "anomaly", "anomaly-adaptive"];
 
 // @public
 export type PolicyRuleName = (typeof policyRuleNames)[number];
 
 // @public
-export const policyRuleNames: readonly ["per-model-disabled", "min-channel-deposit", "budget", "per-service", "rate-limit", "anomaly", "anomaly-adaptive"];
+export const policyRuleNames: readonly ["per-model-disabled", "min-channel-deposit", "budget", "per-service", "per-service-daily", "per-service-window", "per-resource", "per-resource-daily", "per-resource-window", "rate-limit", "anomaly", "anomaly-adaptive"];
+
+// @public
+export const policySchema: z.ZodObject<{
+    $schema: z.ZodOptional<z.ZodString>;
+    policyVersion: z.ZodLiteral<1>;
+    mode: z.ZodOptional<z.ZodEnum<{
+        enforce: "enforce";
+        "dry-run": "dry-run";
+    }>>;
+    budgets: z.ZodOptional<z.ZodObject<{
+        daily: z.ZodOptional<z.ZodString>;
+        total: z.ZodOptional<z.ZodString>;
+    }, z.core.$strict>>;
+    perService: z.ZodOptional<z.ZodRecord<z.ZodString, z.ZodObject<{
+        cap: z.ZodOptional<z.ZodString>;
+        dailyCap: z.ZodOptional<z.ZodString>;
+        window: z.ZodOptional<z.ZodObject<{
+            windowSeconds: z.ZodNumber;
+            cap: z.ZodString;
+        }, z.core.$strict>>;
+    }, z.core.$strict>>>;
+    perResource: z.ZodOptional<z.ZodRecord<z.ZodString, z.ZodObject<{
+        match: z.ZodOptional<z.ZodEnum<{
+            exact: "exact";
+            prefix: "prefix";
+        }>>;
+        cap: z.ZodOptional<z.ZodString>;
+        dailyCap: z.ZodOptional<z.ZodString>;
+        window: z.ZodOptional<z.ZodObject<{
+            windowSeconds: z.ZodNumber;
+            cap: z.ZodString;
+        }, z.core.$strict>>;
+    }, z.core.$strict>>>;
+    perModel: z.ZodOptional<z.ZodRecord<z.ZodEnum<{
+        x402: "x402";
+        "mpp-charge": "mpp-charge";
+        "mpp-channel": "mpp-channel";
+    }> & z.core.$partial, z.ZodObject<{
+        enabled: z.ZodOptional<z.ZodBoolean>;
+        minChannelDeposit: z.ZodOptional<z.ZodString>;
+    }, z.core.$strict>>>;
+    rateLimit: z.ZodOptional<z.ZodObject<{
+        requestsPerMinute: z.ZodOptional<z.ZodNumber>;
+        windows: z.ZodOptional<z.ZodArray<z.ZodObject<{
+            windowSeconds: z.ZodNumber;
+            limit: z.ZodNumber;
+        }, z.core.$strict>>>;
+        count: z.ZodOptional<z.ZodEnum<{
+            settlements: "settlements";
+            attempts: "attempts";
+        }>>;
+        scope: z.ZodOptional<z.ZodEnum<{
+            global: "global";
+            "per-counterparty": "per-counterparty";
+        }>>;
+        perCounterpartyKeyLimit: z.ZodOptional<z.ZodNumber>;
+    }, z.core.$strict>>;
+    anomaly: z.ZodOptional<z.ZodObject<{
+        maxSpendPerMinute: z.ZodOptional<z.ZodString>;
+        adaptive: z.ZodOptional<z.ZodObject<{
+            kind: z.ZodLiteral<"ewma">;
+            smoothing: z.ZodObject<{
+                numerator: z.ZodString;
+                denominator: z.ZodString;
+            }, z.core.$strict>;
+            sensitivity: z.ZodObject<{
+                numerator: z.ZodString;
+                denominator: z.ZodString;
+            }, z.core.$strict>;
+            warmupPeriods: z.ZodNumber;
+            scope: z.ZodOptional<z.ZodEnum<{
+                asset: "asset";
+                "asset-payee": "asset-payee";
+            }>>;
+            maxBaselineGrowthPerMinute: z.ZodOptional<z.ZodString>;
+        }, z.core.$strict>>;
+    }, z.core.$strict>>;
+}, z.core.$strict>;
 
 // @public
 export type PolicyTrace = z.infer<typeof policyTraceSchema>;
@@ -254,21 +572,31 @@ export type PolicyTraceEntry = z.infer<typeof policyTraceEntrySchema>;
 // @public
 export const policyTraceEntrySchema: z.ZodObject<{
     id: z.ZodEnum<{
+        anomaly: "anomaly";
         "per-model-disabled": "per-model-disabled";
         "min-channel-deposit": "min-channel-deposit";
         "budget-daily": "budget-daily";
         "budget-total": "budget-total";
         "per-service": "per-service";
+        "per-service-daily": "per-service-daily";
+        "per-service-window": "per-service-window";
+        "per-resource": "per-resource";
+        "per-resource-daily": "per-resource-daily";
+        "per-resource-window": "per-resource-window";
         "rate-limit": "rate-limit";
-        anomaly: "anomaly";
         "anomaly-adaptive": "anomaly-adaptive";
     }>;
     rule: z.ZodEnum<{
+        anomaly: "anomaly";
         "per-model-disabled": "per-model-disabled";
         "min-channel-deposit": "min-channel-deposit";
         "per-service": "per-service";
+        "per-service-daily": "per-service-daily";
+        "per-service-window": "per-service-window";
+        "per-resource": "per-resource";
+        "per-resource-daily": "per-resource-daily";
+        "per-resource-window": "per-resource-window";
         "rate-limit": "rate-limit";
-        anomaly: "anomaly";
         "anomaly-adaptive": "anomaly-adaptive";
         budget: "budget";
     }>;
@@ -315,32 +643,47 @@ export const policyTraceSchema: z.ZodObject<{
     allowed: z.ZodBoolean;
     wouldBlock: z.ZodBoolean;
     blockedBy: z.ZodNullable<z.ZodEnum<{
+        anomaly: "anomaly";
         "per-model-disabled": "per-model-disabled";
         "min-channel-deposit": "min-channel-deposit";
         "budget-daily": "budget-daily";
         "budget-total": "budget-total";
         "per-service": "per-service";
+        "per-service-daily": "per-service-daily";
+        "per-service-window": "per-service-window";
+        "per-resource": "per-resource";
+        "per-resource-daily": "per-resource-daily";
+        "per-resource-window": "per-resource-window";
         "rate-limit": "rate-limit";
-        anomaly: "anomaly";
         "anomaly-adaptive": "anomaly-adaptive";
     }>>;
     entries: z.ZodArray<z.ZodObject<{
         id: z.ZodEnum<{
+            anomaly: "anomaly";
             "per-model-disabled": "per-model-disabled";
             "min-channel-deposit": "min-channel-deposit";
             "budget-daily": "budget-daily";
             "budget-total": "budget-total";
             "per-service": "per-service";
+            "per-service-daily": "per-service-daily";
+            "per-service-window": "per-service-window";
+            "per-resource": "per-resource";
+            "per-resource-daily": "per-resource-daily";
+            "per-resource-window": "per-resource-window";
             "rate-limit": "rate-limit";
-            anomaly: "anomaly";
             "anomaly-adaptive": "anomaly-adaptive";
         }>;
         rule: z.ZodEnum<{
+            anomaly: "anomaly";
             "per-model-disabled": "per-model-disabled";
             "min-channel-deposit": "min-channel-deposit";
             "per-service": "per-service";
+            "per-service-daily": "per-service-daily";
+            "per-service-window": "per-service-window";
+            "per-resource": "per-resource";
+            "per-resource-daily": "per-resource-daily";
+            "per-resource-window": "per-resource-window";
             "rate-limit": "rate-limit";
-            anomaly: "anomaly";
             "anomaly-adaptive": "anomaly-adaptive";
             budget: "budget";
         }>;
@@ -367,6 +710,13 @@ export const policyTraceSchema: z.ZodObject<{
 }, z.core.$strict>;
 
 // @public
+export class PolicyValidationError extends TollwayError {
+    constructor(issues: readonly PolicyIssue[]);
+    // (undocumented)
+    readonly issues: readonly PolicyIssue[];
+}
+
+// @public
 export type PolicyWindow = z.infer<typeof policyWindowSchema>;
 
 // @public
@@ -381,11 +731,50 @@ export const policyWindowSchema: z.ZodDiscriminatedUnion<[z.ZodObject<{
 }, z.core.$strict>], "kind">;
 
 // @public
+export type PublicJwk = {
+    kty: "OKP";
+    crv: "Ed25519";
+    x: string;
+    kid: string;
+    alg: "EdDSA";
+    use: "sig";
+};
+
+// @public
+export type QuarantineDrift = {
+    kind: string;
+    detail: string;
+    channelId?: string;
+};
+
+// @public
+export type QuarantineEntry = {
+    counterparty: string;
+    reason: string;
+    drift: QuarantineDrift;
+    quarantinedAt: string;
+    releasedBy?: string;
+    releasedAt?: string;
+};
+
+// @public (undocumented)
+export type QuarantineInput = {
+    counterparty: string;
+    reason: string;
+    drift: QuarantineDrift;
+};
+
+// @public (undocumented)
+export const RECEIPT_ALGORITHMS: readonly ["Ed25519", "EdDSA", "ES256"];
+
+// @public
+export type ReceiptAlgorithm = (typeof RECEIPT_ALGORITHMS)[number];
+
+// @public
 export type ReceiptBody = z.infer<typeof receiptBodySchema>;
 
 // @public
-export const receiptBodySchema: z.ZodObject<{
-    version: z.ZodLiteral<1>;
+export const receiptBodySchema: z.ZodDiscriminatedUnion<[z.ZodObject<{
     id: z.ZodString;
     payer: z.ZodString;
     payee: z.ZodString;
@@ -410,6 +799,103 @@ export const receiptBodySchema: z.ZodObject<{
         mainnet: "mainnet";
     }>;
     issuedAt: z.ZodISODateTime;
+    version: z.ZodLiteral<1>;
+}, z.core.$strict>, z.ZodObject<{
+    offerHash: z.ZodString;
+    method: z.ZodString;
+    expiresAt: z.ZodOptional<z.ZodISODateTime>;
+    id: z.ZodString;
+    payer: z.ZodString;
+    payee: z.ZodString;
+    amount: z.ZodString;
+    asset: z.ZodString;
+    resource: z.ZodString;
+    model: z.ZodEnum<{
+        x402: "x402";
+        "mpp-charge": "mpp-charge";
+        "mpp-channel": "mpp-channel";
+    }>;
+    settlement: z.ZodDiscriminatedUnion<[z.ZodObject<{
+        kind: z.ZodLiteral<"transaction">;
+        txHash: z.ZodString;
+    }, z.core.$strict>, z.ZodObject<{
+        kind: z.ZodLiteral<"channel-commitment">;
+        channelId: z.ZodString;
+        sequence: z.ZodNumber;
+    }, z.core.$strict>], "kind">;
+    network: z.ZodEnum<{
+        testnet: "testnet";
+        mainnet: "mainnet";
+    }>;
+    issuedAt: z.ZodISODateTime;
+    version: z.ZodLiteral<2>;
+}, z.core.$strict>], "version">;
+
+// @public
+export type ReceiptBodyV1 = z.infer<typeof receiptBodyV1Schema>;
+
+// @public
+export const receiptBodyV1Schema: z.ZodObject<{
+    id: z.ZodString;
+    payer: z.ZodString;
+    payee: z.ZodString;
+    amount: z.ZodString;
+    asset: z.ZodString;
+    resource: z.ZodString;
+    model: z.ZodEnum<{
+        x402: "x402";
+        "mpp-charge": "mpp-charge";
+        "mpp-channel": "mpp-channel";
+    }>;
+    settlement: z.ZodDiscriminatedUnion<[z.ZodObject<{
+        kind: z.ZodLiteral<"transaction">;
+        txHash: z.ZodString;
+    }, z.core.$strict>, z.ZodObject<{
+        kind: z.ZodLiteral<"channel-commitment">;
+        channelId: z.ZodString;
+        sequence: z.ZodNumber;
+    }, z.core.$strict>], "kind">;
+    network: z.ZodEnum<{
+        testnet: "testnet";
+        mainnet: "mainnet";
+    }>;
+    issuedAt: z.ZodISODateTime;
+    version: z.ZodLiteral<1>;
+}, z.core.$strict>;
+
+// @public
+export type ReceiptBodyV2 = z.infer<typeof receiptBodyV2Schema>;
+
+// @public
+export const receiptBodyV2Schema: z.ZodObject<{
+    offerHash: z.ZodString;
+    method: z.ZodString;
+    expiresAt: z.ZodOptional<z.ZodISODateTime>;
+    id: z.ZodString;
+    payer: z.ZodString;
+    payee: z.ZodString;
+    amount: z.ZodString;
+    asset: z.ZodString;
+    resource: z.ZodString;
+    model: z.ZodEnum<{
+        x402: "x402";
+        "mpp-charge": "mpp-charge";
+        "mpp-channel": "mpp-channel";
+    }>;
+    settlement: z.ZodDiscriminatedUnion<[z.ZodObject<{
+        kind: z.ZodLiteral<"transaction">;
+        txHash: z.ZodString;
+    }, z.core.$strict>, z.ZodObject<{
+        kind: z.ZodLiteral<"channel-commitment">;
+        channelId: z.ZodString;
+        sequence: z.ZodNumber;
+    }, z.core.$strict>], "kind">;
+    network: z.ZodEnum<{
+        testnet: "testnet";
+        mainnet: "mainnet";
+    }>;
+    issuedAt: z.ZodISODateTime;
+    version: z.ZodLiteral<2>;
 }, z.core.$strict>;
 
 // @public
@@ -444,13 +930,36 @@ export type ReceiptVerification = {
 // @public
 export interface ReceiptVerifier {
     // (undocumented)
-    verify(input: {
-        message: Uint8Array;
-        signature: Uint8Array;
-        keyId: string;
-        algorithm: string;
-    }): Promise<boolean>;
+    check?(input: SignatureInput): Promise<SignatureCheck>;
+    // (undocumented)
+    verify(input: SignatureInput): Promise<boolean>;
 }
+
+// @public (undocumented)
+export type ReleaseQuarantineInput = {
+    counterparty: string;
+    releasedBy: string;
+};
+
+// @public
+export class RollingSum {
+    constructor(options: RollingSumOptions);
+    add(nowMs: number, amount: bigint): void;
+    // (undocumented)
+    readonly bucketMs: number;
+    isEmpty(): boolean;
+    prune(nowMs: number): boolean;
+    get size(): number;
+    sum(nowMs: number): bigint;
+    // (undocumented)
+    readonly windowMs: number;
+}
+
+// @public
+export type RollingSumOptions = {
+    windowMs: number;
+    bucketMs?: number;
+};
 
 // @public
 export type RouteDecision = {
@@ -466,10 +975,11 @@ export type RouteInput = {
     traffic?: TrafficSnapshot;
     override?: SettlementModel;
     allowedModels?: SettlementModel[];
+    quarantined?: boolean;
 };
 
 // @public
-export type RouteReason = "override" | "offer" | "traffic" | "default";
+export type RouteReason = "override" | "offer" | "traffic" | "default" | "quarantined";
 
 // @public
 export type SettlementModel = (typeof settlementModels)[number];
@@ -491,12 +1001,27 @@ export const settlementRefSchema: z.ZodDiscriminatedUnion<[z.ZodObject<{
 }, z.core.$strict>], "kind">;
 
 // @public
+export type SignatureCheck = {
+    valid: true;
+} | {
+    valid: false;
+    reason: string;
+};
+
+// @public
+export type SignatureInput = {
+    message: Uint8Array;
+    signature: Uint8Array;
+    keyId: string;
+    algorithm: string;
+};
+
+// @public
 export type SignedReceipt = z.infer<typeof signedReceiptSchema>;
 
 // @public
 export const signedReceiptSchema: z.ZodObject<{
-    receipt: z.ZodObject<{
-        version: z.ZodLiteral<1>;
+    receipt: z.ZodDiscriminatedUnion<[z.ZodObject<{
         id: z.ZodString;
         payer: z.ZodString;
         payee: z.ZodString;
@@ -521,7 +1046,37 @@ export const signedReceiptSchema: z.ZodObject<{
             mainnet: "mainnet";
         }>;
         issuedAt: z.ZodISODateTime;
-    }, z.core.$strict>;
+        version: z.ZodLiteral<1>;
+    }, z.core.$strict>, z.ZodObject<{
+        offerHash: z.ZodString;
+        method: z.ZodString;
+        expiresAt: z.ZodOptional<z.ZodISODateTime>;
+        id: z.ZodString;
+        payer: z.ZodString;
+        payee: z.ZodString;
+        amount: z.ZodString;
+        asset: z.ZodString;
+        resource: z.ZodString;
+        model: z.ZodEnum<{
+            x402: "x402";
+            "mpp-charge": "mpp-charge";
+            "mpp-channel": "mpp-channel";
+        }>;
+        settlement: z.ZodDiscriminatedUnion<[z.ZodObject<{
+            kind: z.ZodLiteral<"transaction">;
+            txHash: z.ZodString;
+        }, z.core.$strict>, z.ZodObject<{
+            kind: z.ZodLiteral<"channel-commitment">;
+            channelId: z.ZodString;
+            sequence: z.ZodNumber;
+        }, z.core.$strict>], "kind">;
+        network: z.ZodEnum<{
+            testnet: "testnet";
+            mainnet: "mainnet";
+        }>;
+        issuedAt: z.ZodISODateTime;
+        version: z.ZodLiteral<2>;
+    }, z.core.$strict>], "version">;
     signature: z.ZodObject<{
         keyId: z.ZodString;
         algorithm: z.ZodString;
@@ -589,13 +1144,15 @@ export const stellarNetworks: readonly ["testnet", "mainnet"];
 
 // @public
 export class TollwayError extends Error {
-    constructor(code: TollwayErrorCode, message: string);
+    constructor(code: TollwayErrorCode, message: string, options?: {
+        cause?: unknown;
+    });
     // (undocumented)
     readonly code: TollwayErrorCode;
 }
 
 // @public
-export type TollwayErrorCode = "not-implemented" | "no-viable-model" | "invalid-receipt" | "invalid-signing-key" | "invalid-amount" | "invalid-quote" | "invalid-policy" | "canonicalization-failed" | "budget-exceeded" | "payment-failed" | "policy-blocked" | "receipt-verification-failed" | "channel-not-found" | "channel-not-open" | "channel-already-closed" | "commitment-exceeds-deposit" | "settlement-mismatch" | "invalid-metrics-query" | "invalid-metric" | "metrics-query-too-large";
+export type TollwayErrorCode = "not-implemented" | "no-viable-model" | "invalid-receipt" | "invalid-signing-key" | "invalid-amount" | "invalid-quote" | "invalid-discovery" | "invalid-policy" | "canonicalization-failed" | "invalid-signature-encoding" | "invalid-key-set" | "key-set-unavailable" | "budget-exceeded" | "payment-failed" | "outcome-unknown" | "facilitator-unsupported" | "facilitator-unavailable" | "facilitator-invalid-response" | "policy-blocked" | "receipt-verification-failed" | "receipt-offer-mismatch" | "offer-network-mismatch" | "channel-not-found" | "channel-not-open" | "channel-already-closed" | "commitment-exceeds-deposit" | "settlement-mismatch" | "counterparty-quarantined" | "invalid-metrics-query" | "invalid-metric" | "metrics-query-too-large" | "invalid-receipt-query" | "invalid-cursor" | "corrupt-receipt";
 
 // @public
 export type TrafficSnapshot = {
@@ -607,7 +1164,12 @@ export type TrafficSnapshot = {
 export function utf8Bytes(text: string): Uint8Array;
 
 // @public
-export function verifyReceipt(candidate: unknown, verifier: ReceiptVerifier): Promise<ReceiptVerification>;
+export function verifyReceipt(candidate: unknown, verifier: ReceiptVerifier, options?: VerifyReceiptOptions): Promise<ReceiptVerification>;
+
+// @public
+export type VerifyReceiptOptions = {
+    now?: number;
+};
 
 // @public
 export type X402Payment = {

@@ -1,65 +1,34 @@
-/**
- * Tests for the all-models scenario.
- */
-
-import { createMockFacilitator } from "@vegaforge/tollway-server";
 import { describe, expect, it } from "vitest";
 import { runAllModels } from "./all-models.js";
-import type { ScenarioOptions } from "./types.js";
-
-function makeMockOptions(): ScenarioOptions {
-  return {
-    setup: {
-      mock: true,
-      facilitator: createMockFacilitator(),
-      paywall: {
-        asset: "USDC:GA5ZSEJYB37JRC5AVCIA5MOP4RHTM335X2KGX3IHOJAPP5RE34K4KZVN",
-        payTo: "GSERVICEXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX",
-        network: "testnet",
-      },
-      payer: async (requirements) => ({
-        x402Version: 2,
-        accepted: requirements,
-        payload: { transaction: "mock-signed-auth-entry" },
-      }),
-    },
-  };
-}
+import { runMppChargeScenario } from "./mpp-charge.js";
+import { runX402Scenario } from "./x402.js";
 
 describe("runAllModels", () => {
-  it("runs all three scenarios and returns allPassed: true in mock mode", async () => {
-    const { results, allPassed } = await runAllModels(makeMockOptions());
+  it("runs x402 then mpp-charge in mock mode, and every receipt verifies", async () => {
+    const { results, allPassed } = await runAllModels();
 
-    expect(results).toHaveLength(3);
+    expect(results.map((result) => result.scenario)).toEqual(["x402", "mpp-charge"]);
+    expect(results.map((result) => result.receipt.receipt.model)).toEqual(["x402", "mpp-charge"]);
+    expect(results.every((result) => result.receiptValid)).toBe(true);
     expect(allPassed).toBe(true);
   });
 
-  it("includes x402, mpp-charge, and mpp-channel results in order", async () => {
-    const { results } = await runAllModels(makeMockOptions());
+  it("reports failure when any scenario's receipt does not verify", async () => {
+    const { allPassed } = await runAllModels([
+      () => runX402Scenario({ env: { MOCK_MODE: "true" } }),
+      async () => ({ ...(await runMppChargeScenario()), receiptValid: false }),
+    ]);
 
-    expect(results[0]?.scenario).toBe("x402");
-    expect(results[1]?.scenario).toBe("mpp-charge");
-    expect(results[2]?.scenario).toBe("mpp-channel");
+    expect(allPassed).toBe(false);
   });
 
-  it("sets allPassed to false when any receipt is invalid (tampered receipt)", async () => {
-    // We test this by checking that runX402Scenario with a stranger verifier
-    // returns receiptValid: false. The all-models runner collects results, so
-    // a false receiptValid from any sub-scenario sets allPassed to false.
-    // The simplest way to assert this end-to-end without stubbing internals is
-    // to verify the allPassed logic in the type-level result accumulation.
-    // The mpp-charge test already asserts it throws in live mode (not mock),
-    // so here we just confirm the allPassed guard works.
-    const { results } = await runAllModels(makeMockOptions());
-
-    // All three should be valid; allPassed is derived.
-    const computedPassed = results.every((r) => {
-      if (r.scenario === "x402" || r.scenario === "mpp-charge") return r.receiptValid;
-      if (r.scenario === "mpp-channel") {
-        return r.commitments.every((c) => c.receiptValid) && r.reconciliationOk;
-      }
-      return false;
-    });
-    expect(computedPassed).toBe(true);
+  it("propagates a scenario that throws instead of reporting success", async () => {
+    await expect(
+      runAllModels([
+        async () => {
+          throw new Error("settlement failed");
+        },
+      ]),
+    ).rejects.toThrow("settlement failed");
   });
 });

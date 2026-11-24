@@ -176,42 +176,38 @@ pnpm build
 pnpm test
 ```
 
-## Demo scenarios
-
-The demo runs five named scenarios. With no argument it defaults to the x402 scenario.
+Run the x402 demo with no network, from challenge to a verified receipt:
 
 ```bash
-# Run offline in mock mode (no network, no keys needed):
-MOCK_MODE=true pnpm --filter @vegaforge/tollway-demo start               # x402 (default)
-MOCK_MODE=true pnpm --filter @vegaforge/tollway-demo start -- x402
-MOCK_MODE=true pnpm --filter @vegaforge/tollway-demo start -- mpp-charge
-MOCK_MODE=true pnpm --filter @vegaforge/tollway-demo start -- mpp-channel
-MOCK_MODE=true pnpm --filter @vegaforge/tollway-demo start -- high-frequency
-MOCK_MODE=true pnpm --filter @vegaforge/tollway-demo start -- all-models
+MOCK_MODE=true pnpm --filter @vegaforge/tollway-demo start
 ```
 
-| Scenario | What it shows |
-| --- | --- |
-| `x402` | One per-request payment producing a canonical receipt (the Phase 1 baseline). |
-| `mpp-charge` | Same route, model switched to MPP charge with `createMockMppChargeHandler`. Proves the Phase 1 exit: same route, config flag switches model. |
-| `mpp-channel` | Opens one channel, pays five requests as off-chain commitments, closes, reconciles. Each receipt has `model: "mpp-channel"` and a `channel-commitment` ref. |
-| `high-frequency` | Runs 500 sequential commitments through one channel (N configurable via `HF_N`), closes once, reconciles, and prints throughput and p50/p95 commit latency. |
-| `all-models` | Runs x402, mpp-charge, and mpp-channel in sequence and prints a summary table. CI runs this in mock mode on every commit. |
-
-The x402 scenario works in live mode with real testnet keys. MPP charge and channel scenarios require live facilitators that land in later issues (#100, #101, #173).
+Without `MOCK_MODE`, the demo pays 0.001 testnet USDC through the OpenZeppelin Channels testnet facilitator and prints the settlement transaction hash. It needs two testnet accounts with a USDC trustline (the payer also needs testnet USDC from the [Circle faucet](https://faucet.circle.com/)) and an API key from [channels.openzeppelin.com/testnet/gen](https://channels.openzeppelin.com/testnet/gen). Use testnet keys only: the payer's secret key sits in an environment variable.
 
 ```bash
-# Live x402 demo:
 OZ_API_KEY=... \
 STELLAR_RECIPIENT=G... \
 STELLAR_SECRET_KEY=S... \
 pnpm --filter @vegaforge/tollway-demo start
-
-# High-frequency with 1000 commitments:
-MOCK_MODE=true HF_N=1000 pnpm --filter @vegaforge/tollway-demo start -- high-frequency
 ```
 
 If a setting is missing or invalid, the demo lists every problem and exits with code 1. `FACILITATOR_URL` overrides the facilitator. `STELLAR_NETWORK=mainnet` switches to mainnet and then also needs `STELLAR_RPC_URL`.
+
+The demo also runs named scenarios. With no argument it runs the x402 demo above:
+
+```bash
+MOCK_MODE=true pnpm --filter @vegaforge/tollway-demo start -- x402         # the default
+MOCK_MODE=true pnpm --filter @vegaforge/tollway-demo start -- mpp-charge   # mock mode only
+MOCK_MODE=true pnpm --filter @vegaforge/tollway-demo start -- all-models   # mock mode only
+```
+
+| Scenario | What it shows |
+| --- | --- |
+| `x402` | One per-request x402 payment producing a canonical receipt. Runs in mock or live mode. |
+| `mpp-charge` | The same route with only the paywall's model switched to MPP charge: the same route serves both models with a config flag. |
+| `all-models` | Runs `x402` then `mpp-charge` and prints one table. It exits non-zero if any receipt fails verification. CI runs it in mock mode on every commit. |
+
+The MPP channel scenarios join once the gate accepts channel vouchers (#173).
 
 Gate a route on the service side:
 
@@ -250,6 +246,37 @@ const client = createClient({
 const { receipt } = await client.pay({ resource: "https://api.example.com/quotes/latest", offer });
 ```
 
+### Concurrent payments
+
+`pay()` is single-flight per purchase. Calls that are in flight at the same time for the same purchase share one settlement: one call signs and pays, and the others wait and resolve with the same receipt. An agent that fires the same request twice in parallel, as tool-calling models and retry loops do, pays once.
+
+Two calls are the same purchase when they have the same `resource`, the same settlement model after routing, and the same `amount`, `asset`, `payTo` and `network` in the offer. Pass `idempotencyKey` to decide for yourself:
+
+```ts
+// Shared, although the resource strings differ. The first call's offer is the one paid.
+await Promise.all([
+  client.pay({ resource: url, offer, idempotencyKey: "order-42" }),
+  client.pay({ resource: `${url}?retry=1`, offer, idempotencyKey: "order-42" }),
+]);
+
+// Never shared: two payments for the same offer.
+await Promise.all([
+  client.pay({ resource: url, offer, idempotencyKey: crypto.randomUUID() }),
+  client.pay({ resource: url, offer, idempotencyKey: crypto.randomUUID() }),
+]);
+```
+
+What each call sees:
+
+- The result carries `deduplicated`: `false` for the call that paid, `true` for a call that waited.
+- Only the call that paid checks the policy, records the spend and emits `payment`. A call that waited emits `payment:deduplicated` with the same receipt, so counting `payment` events counts payments.
+- If the shared settlement fails, every call rejects with the same error, no spend is recorded, and one `error` event is emitted.
+
+Known limits:
+
+- Only calls that overlap are shared. Receipts are not cached, so a call made after the settlement finished is a new purchase and pays again.
+- The in-flight table belongs to one `createClient()` instance in one process. Two workers of the same agent, or two clients in one process, do not see each other's payments and can both pay.
+
 For services with several priced endpoints, compile them in one route table and attach one adapter middleware:
 
 ```ts
@@ -267,7 +294,7 @@ Fastify, Hono, and Next adapters expose `fastifyRouteTable`, `honoRouteTable`, a
 
 Next.js App Router services can either wrap a handler with `withPaywall`, or protect a route group in Next 16 `proxy.ts`:
 
-```ts skip=uses a local paywall module that is project-specific, not a workspace package
+```ts
 // proxy.ts
 import { paywallProxy } from "@vegaforge/tollway-adapter-next/proxy";
 import { gate } from "./src/paywall.js";

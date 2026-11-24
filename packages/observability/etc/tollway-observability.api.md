@@ -8,7 +8,16 @@ import { SettlementModel } from '@vegaforge/tollway-core';
 import { TollwayError } from '@vegaforge/tollway-core';
 
 // @public
+export function createMemoryWebhookOutbox(): WebhookOutbox;
+
+// @public
 export function createObservabilityHub(options?: ObservabilityHubOptions): ObservabilityHub;
+
+// @public
+export function createSqliteWebhookOutbox(options: SqliteWebhookOutboxOptions): SqliteWebhookOutbox;
+
+// @public (undocumented)
+export function createWebhookDispatcher(options: WebhookDispatcherOptions): WebhookDispatcher;
 
 // @public
 export const DEFAULT_MAX_TIMESERIES_BUCKETS = 10080;
@@ -42,6 +51,9 @@ export type DeliveryReport = {
 export type ExportFormat = "json" | "csv";
 
 // @public
+export function isWebhookEvent(value: unknown): value is WebhookEvent;
+
+// @public
 export type LatencyPercentiles = {
     p50: number;
     p95: number;
@@ -71,13 +83,21 @@ export class MetricsQueryTooLargeError extends TollwayError {
 // @public
 export function nearestRankPercentile(sorted: readonly number[], p: number): number;
 
+// @public
+export type NewWebhookDelivery = {
+    subscriptionId: string;
+    event: TollwayEvent;
+};
+
 // @public (undocumented)
 export interface ObservabilityHub {
     addWebhook(subscription: WebhookSubscription): void;
-    emit(event: TollwayEvent): Promise<DeliveryReport>;
+    emit(event: TollwayEventInput): Promise<DeliveryReport>;
     export(format: ExportFormat, query?: MetricsQuery): string;
     on(event: WebhookEvent, handler: WebhookHandler): void;
     record(metric: PaymentMetric): void;
+    startDispatcher(): void;
+    stop(): Promise<void>;
     summarize(query?: MetricsQuery): SpendSummary;
     timeseries(query: TimeseriesQuery): TimeseriesResult;
 }
@@ -92,6 +112,8 @@ export type ObservabilityHubOptions = {
     sleep?: (ms: number) => Promise<void>;
     maxTimeseriesBuckets?: number;
     maxTimeseriesRows?: number;
+    outbox?: WebhookOutbox;
+    dispatcher?: Partial<WebhookDispatcherTuning>;
 };
 
 // @public
@@ -117,6 +139,24 @@ export type RetryPolicy = {
 };
 
 // @public
+export type SignatureFailureReason = "malformed-header" | "timestamp-out-of-tolerance" | "signature-mismatch";
+
+// @public (undocumented)
+export type SignatureVerification = {
+    valid: true;
+} | {
+    valid: false;
+    reason: SignatureFailureReason;
+};
+
+// @public
+export function signWebhookPayload(input: {
+    secret: string;
+    payload: string;
+    now?: number;
+}): Promise<string>;
+
+// @public
 export type SpendSummary = {
     totalAmount: string;
     count: number;
@@ -124,6 +164,17 @@ export type SpendSummary = {
     byModel: Partial<Record<SettlementModel, string>>;
     byPayer: Record<string, string>;
     byPayee: Record<string, string>;
+};
+
+// @public (undocumented)
+export type SqliteWebhookOutbox = WebhookOutbox & {
+    close(): void;
+};
+
+// @public (undocumented)
+export type SqliteWebhookOutboxOptions = {
+    filename: string;
+    busyTimeoutMs?: number;
 };
 
 // @public (undocumented)
@@ -174,9 +225,92 @@ export type TimeseriesRow = {
 
 // @public (undocumented)
 export type TollwayEvent = {
+    id: string;
     type: WebhookEvent;
     at: string;
     data: Record<string, unknown>;
+};
+
+// @public
+export type TollwayEventInput = Omit<TollwayEvent, "id"> & {
+    id?: string;
+};
+
+// @public
+export function verifyWebhookSignature(input: {
+    payload: string;
+    header: string;
+    secret: string;
+    toleranceSeconds?: number;
+    now?: number;
+}): Promise<SignatureVerification>;
+
+// @public (undocumented)
+export const WEBHOOK_DELIVERY_ID_HEADER = "Tollway-Delivery-Id";
+
+// @public
+export const WEBHOOK_EVENT_ID_HEADER = "Tollway-Event-Id";
+
+// @public
+export const WEBHOOK_SIGNATURE_HEADER = "Tollway-Signature";
+
+// @public
+export type WebhookDelivery = {
+    id: string;
+    eventId: string;
+    subscriptionId: string;
+    event: TollwayEvent;
+    status: WebhookDeliveryStatus;
+    attempts: number;
+    nextAttemptAt: number;
+    leaseExpiresAt: number | null;
+    leaseToken: string | null;
+    lastError: string | null;
+    createdAt: number;
+    completedAt: number | null;
+    replayedAs: string | null;
+};
+
+// @public
+export type WebhookDeliveryStatus = "pending" | "delivered" | "dead-letter";
+
+// @public (undocumented)
+export type WebhookDispatcher = {
+    start(): void;
+    stop(): Promise<void>;
+    drainOnce(): Promise<number>;
+};
+
+// @public (undocumented)
+export type WebhookDispatcherOptions = WebhookDispatcherTuning & {
+    outbox: WebhookOutbox;
+    resolveSubscription: (subscriptionId: string) => WebhookSubscription | undefined;
+    fetch: typeof globalThis.fetch;
+    requestTimeoutMs: number;
+    onDeliveryFailure?: (failure: {
+        url?: string;
+        subscriptionId: string;
+        delivery: WebhookDelivery;
+        error: Error;
+        attempts: number;
+    }) => void;
+    onError?: (error: Error) => void;
+};
+
+// @public
+export type WebhookDispatcherTuning = {
+    maxAttempts?: number;
+    initialDelayMs?: number;
+    backoffFactor?: number;
+    maxDelayMs?: number;
+    batchSize?: number;
+    leaseMs?: number;
+    intervalMs?: number;
+    stopTimeoutMs?: number;
+    deliveredRetentionMs?: number;
+    purgeIntervalMs?: number;
+    random?: () => number;
+    now?: () => number;
 };
 
 // @public (undocumented)
@@ -189,10 +323,42 @@ export const webhookEvents: readonly ["receipt.created", "channel.opened", "chan
 export type WebhookHandler = (event: TollwayEvent) => void | Promise<void>;
 
 // @public
+export type WebhookLease = {
+    deliveryId: string;
+    leaseToken: string;
+};
+
+// @public
+export class WebhookLeaseLostError extends Error {
+    constructor(deliveryId: string, result: WebhookLeaseLostError["result"]);
+    // (undocumented)
+    readonly deliveryId: string;
+    readonly result: "delivered" | "failed" | "dead-letter" | "released";
+}
+
+// @public
+export interface WebhookOutbox {
+    claim(batch: number, leaseMs: number, now?: number): Promise<WebhookDelivery[]>;
+    deadLetter(lease: WebhookLease, error: string, options?: {
+        countAttempt?: boolean;
+        now?: number;
+    }): Promise<boolean>;
+    enqueue(deliveries: readonly NewWebhookDelivery[]): Promise<void>;
+    listDeadLetters(): Promise<WebhookDelivery[]>;
+    markDelivered(lease: WebhookLease, now?: number): Promise<boolean>;
+    markFailed(lease: WebhookLease, nextAttemptAt: number, error: string): Promise<boolean>;
+    purgeDelivered(olderThan: number): Promise<number>;
+    release(lease: WebhookLease): Promise<boolean>;
+    replay(deliveryId: string): Promise<WebhookDelivery>;
+}
+
+// @public
 export type WebhookSubscription = {
+    id?: string;
     url: string;
     events?: WebhookEvent[];
     headers?: Record<string, string>;
+    secret?: string;
 };
 
 // (No @packageDocumentation comment for this package)

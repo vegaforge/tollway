@@ -1,9 +1,4 @@
-import type {
-  PaymentOffer,
-  SettlementModel,
-  StellarNetwork,
-  X402Payment,
-} from "@vegaforge/tollway-core";
+import type { PaymentOffer, StellarNetwork, X402Payment } from "@vegaforge/tollway-core";
 import { bytesToBase64Url, TollwayError, utf8Bytes } from "@vegaforge/tollway-core";
 import { type FacilitatorConfig, HTTPFacilitatorClient } from "@x402/core/http";
 import {
@@ -11,11 +6,12 @@ import {
   type PaymentRequirements,
   SettleError,
   type SettleResponse,
-  type SupportedResponse,
   VerifyError,
   type VerifyResponse,
 } from "@x402/core/types";
-import { STELLAR_PUBNET_CAIP2, STELLAR_TESTNET_CAIP2 } from "@x402/stellar";
+import { STELLAR_PUBNET_CAIP2, STELLAR_TESTNET_CAIP2, STELLAR_WILDCARD_CAIP2 } from "@x402/stellar";
+import type { FacilitatorCapabilities } from "./facilitator-capabilities.js";
+import { parseFacilitatorCapabilities } from "./facilitator-capabilities.js";
 import { mockAccount, mockHex } from "./hash.js";
 
 /**
@@ -50,16 +46,16 @@ export type SettleInput = {
 /** The outcome of settling: the transaction hash, or why settlement failed. */
 export type SettleResult = { settled: true; txHash: string } | { settled: false; reason: string };
 
-/** The models and assets a facilitator says it can settle. */
-export type SupportedResult = {
-  models: SettlementModel[];
-  assets: string[];
-};
-
 /**
  * The gate's view of an x402 facilitator: verify, then settle, plus a
  * capability check. {@link createHttpFacilitator} talks to a real one and
  * {@link createMockFacilitator} runs offline.
+ *
+ * `supported()` returns the full x402 `SupportedResponse` mapped to
+ * {@link FacilitatorCapabilities} and schema-checked at the boundary so
+ * callers can validate paywalls against it (Issue #155). Note that
+ * `/supported` does not advertise which assets a facilitator will accept:
+ * that is only confirmed by the first `/verify`.
  */
 export interface FacilitatorClient {
   /**
@@ -71,7 +67,7 @@ export interface FacilitatorClient {
   idempotencyKey?(input: { payment: X402Payment }): Promise<string | undefined>;
   verify(input: VerifyInput): Promise<VerifyResult>;
   settle(input: SettleInput): Promise<SettleResult>;
-  supported(): Promise<SupportedResult>;
+  supported(): Promise<FacilitatorCapabilities>;
 }
 
 /**
@@ -110,7 +106,22 @@ export function createMockFacilitator(): FacilitatorClient {
       return { settled: true, txHash: mockHex(`${nonce}:${offer.resource}`) };
     },
     async supported() {
-      return { models: ["x402"], assets: [] };
+      // What OpenZeppelin Channels advertises: v2 `exact` on every Stellar
+      // network, with sponsored fees. The mock demo runs the same capability
+      // check as the live one against it, and asset and payTo mistakes still
+      // show up because validatePaywall checks those locally.
+      return {
+        kinds: [
+          {
+            x402Version: 2,
+            scheme: STELLAR_EXACT_SCHEME,
+            network: STELLAR_WILDCARD_CAIP2,
+            extra: { areFeesSponsored: true },
+          },
+        ],
+        extensions: [],
+        signers: {},
+      };
     },
   };
 }
@@ -181,6 +192,15 @@ export function toPaymentRequirements(
 export type HttpFacilitatorOptions = X402Terms & {
   /** Per-call auth headers, for facilitators that gate /verify and /settle. */
   createAuthHeaders?: FacilitatorConfig["createAuthHeaders"];
+  /**
+   * Transport deadline for each request, in milliseconds. The abort signal it
+   * produces closes the connection, which the gate's own deadline cannot do.
+   * Defaults to the `@x402/core` client's 90 s. A `/settle` that hits it may
+   * already have reached the facilitator, so the gate holds that payment
+   * (see `PaywallDeps.ambiguousSettlementHoldMs`); keep the hold longer than
+   * this deadline plus the authorization lifetime.
+   */
+  timeoutMs?: number;
 };
 
 /**
@@ -199,6 +219,7 @@ export function createHttpFacilitator(
   const client = new HTTPFacilitatorClient({
     url: baseUrl,
     createAuthHeaders: options.createAuthHeaders,
+    timeoutMs: options.timeoutMs,
   });
   const terms: X402Terms = {
     maxTimeoutSeconds: options.maxTimeoutSeconds,
@@ -232,9 +253,12 @@ export function createHttpFacilitator(
             reason: reason(error.invalidReason, error.invalidMessage, "payment rejected"),
           };
         }
+        // Keep the underlying error as the cause: the failover client reads
+        // it to tell a connection that was never made from one that was.
         throw new TollwayError(
           "payment-failed",
           `facilitator /verify request failed: ${message(error)}`,
+          { cause: error },
         );
       }
 
@@ -270,9 +294,12 @@ export function createHttpFacilitator(
             reason: reason(error.errorReason, error.errorMessage, "settlement rejected"),
           };
         }
+        // Keep the underlying error as the cause: the failover client reads
+        // it to tell a connection that was never made from one that was.
         throw new TollwayError(
           "payment-failed",
           `facilitator /settle request failed: ${message(error)}`,
+          { cause: error },
         );
       }
 
@@ -286,22 +313,21 @@ export function createHttpFacilitator(
     },
 
     async supported() {
-      let response: SupportedResponse;
+      let response: unknown;
       try {
         response = await client.getSupported();
       } catch (error) {
+        // Keep the underlying error as the cause: the failover client reads
+        // it to tell a connection that was never made from one that was.
         throw new TollwayError(
           "payment-failed",
           `facilitator /supported request failed: ${message(error)}`,
+          { cause: error },
         );
       }
-      // x402 /supported advertises (scheme, network) kinds, not an asset list.
-      const models: SettlementModel[] = response.kinds.some(
-        (kind) => kind.scheme === STELLAR_EXACT_SCHEME,
-      )
-        ? ["x402"]
-        : [];
-      return { models, assets: [] };
+      // Parse at the boundary into Tollway's type. A malformed body throws
+      // `facilitator-invalid-response` naming the field.
+      return parseFacilitatorCapabilities(response);
     },
   };
 }

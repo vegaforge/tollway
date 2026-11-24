@@ -11,6 +11,8 @@ import { encodePaymentRequiredHeader } from '@x402/core/http';
 import { encodePaymentResponseHeader } from '@x402/core/http';
 import { encodePaymentSignatureHeader } from '@x402/core/http';
 import { FacilitatorConfig } from '@x402/core/http';
+import { KeySetDocument } from '@vegaforge/tollway-core';
+import { ListDiscoveryResourcesParams } from '@x402/extensions/bazaar';
 import { ModelRouter } from '@vegaforge/tollway-core';
 import { MppChargePayment } from '@vegaforge/tollway-core';
 import { Network } from '@x402/core/types';
@@ -23,7 +25,9 @@ import { SignedReceipt } from '@vegaforge/tollway-core';
 import { stellar } from '@stellar/mpp/charge/server';
 import { StellarNetwork } from '@vegaforge/tollway-core';
 import { Store } from '@stellar/mpp/charge/server';
+import { TollwayError } from '@vegaforge/tollway-core';
 import { X402Payment } from '@vegaforge/tollway-core';
+import { z } from 'zod';
 
 // @public (undocumented)
 export type ChannelDispute = {
@@ -105,13 +109,25 @@ export type CreateChannelWatchtowerOptions = {
     clearTimeout?(handle: ReturnType<typeof setTimeout>): void;
 };
 
+// @public
+export function createFacilitatorValidator(facilitator: FacilitatorClient, options?: FacilitatorValidatorOptions): FacilitatorValidator;
+
+// @public
+export function createFailoverFacilitator(options: FailoverFacilitatorOptions): FacilitatorClient;
+
 // Warning: (ae-forgotten-export) The symbol "HttpFacilitatorOptions" needs to be exported by the entry point index.d.ts
 //
 // @public
 export function createHttpFacilitator(baseUrl: string, options?: HttpFacilitatorOptions): FacilitatorClient;
 
 // @public
+export function createInMemoryServicePolicyStore(options?: InMemoryServicePolicyStoreOptions): ServicePolicyStore;
+
+// @public
 export function createInMemorySettlementCache(ttlMs?: number, options?: InMemorySettlementCacheOptions): SettlementCache;
+
+// @public
+export function createMemoryPinStore(clock?: () => number): SettlementPinStore;
 
 // @public
 export function createMockFacilitator(): FacilitatorClient;
@@ -149,6 +165,24 @@ export const DEFAULT_MAX_TIMEOUT_SECONDS = 60;
 // @public
 export function deriveMppChargeNonce(payload: string): Promise<string>;
 
+// @public
+export function describeMismatches(mismatches: readonly PaywallMismatch[]): string;
+
+// Warning: (ae-forgotten-export) The symbol "catalogueSchema" needs to be exported by the entry point index.d.ts
+//
+// @public
+export type DiscoveryCatalogue = z.infer<typeof catalogueSchema>;
+
+// Warning: (ae-forgotten-export) The symbol "DiscoveryShape" needs to be exported by the entry point index.d.ts
+//
+// @public
+export type DiscoveryDeclaration = ({
+    kind: "query";
+} & DiscoveryShape) | ({
+    kind: "body";
+    bodyType: "json" | "form-data" | "text";
+} & DiscoveryShape);
+
 // @public (undocumented)
 export type DynamicPriceFunction = (request: TollwayRequest) => string | Promise<string>;
 
@@ -162,6 +196,34 @@ export { encodePaymentResponseHeader }
 export { encodePaymentSignatureHeader }
 
 // @public
+export type FacilitatorCapabilities = {
+    kinds: FacilitatorKind[];
+    extensions: string[];
+    signers: Record<string, string[]>;
+};
+
+// @public
+export class FacilitatorCheckError extends TollwayError {
+    constructor(report: FacilitatorCheckReport, options?: {
+        cause?: unknown;
+    });
+    // (undocumented)
+    readonly report: FacilitatorCheckReport;
+}
+
+// @public
+export type FacilitatorCheckReport = {
+    status: "ok" | "mismatch";
+    routes: Record<string, PaywallValidation>;
+    mismatches: PaywallMismatch[];
+} | {
+    status: "unavailable";
+    reason: string;
+} | {
+    status: "skipped";
+};
+
+// @public
 export interface FacilitatorClient {
     idempotencyKey?(input: {
         payment: X402Payment;
@@ -169,10 +231,80 @@ export interface FacilitatorClient {
     // (undocumented)
     settle(input: SettleInput): Promise<SettleResult>;
     // (undocumented)
-    supported(): Promise<SupportedResult>;
+    supported(): Promise<FacilitatorCapabilities>;
     // (undocumented)
     verify(input: VerifyInput): Promise<VerifyResult>;
 }
+
+// @public
+export type FacilitatorKind = {
+    x402Version: number;
+    scheme: string;
+    network: string;
+    extra?: Record<string, unknown>;
+};
+
+// @public
+export type FacilitatorValidator = {
+    check(routes: Record<string, PaywallTarget>): Promise<FacilitatorCheckReport>;
+    getCapabilities(): Promise<FacilitatorCapabilities>;
+    refresh(): void;
+};
+
+// @public (undocumented)
+export type FacilitatorValidatorOptions = {
+    mode?: ValidationMode;
+    ttlMs?: number;
+    onWarn?: (report: FacilitatorCheckReport) => void;
+    clock?: () => number;
+};
+
+// @public
+export type FailoverEvent = {
+    type: "failover";
+    operation: "verify" | "settle" | "supported";
+    from: string;
+    to: string;
+    reason: string;
+} | {
+    type: "outcome-unknown";
+    facilitator: string;
+    operation: "settle";
+    reason: string;
+} | {
+    type: "health-changed";
+    facilitator: string;
+    healthy: boolean;
+}
+/** A member's `/supported` could not be read, so it was left out of this call. */
+| {
+    type: "capabilities-unavailable";
+    facilitator: string;
+    reason: string;
+};
+
+// @public (undocumented)
+export type FailoverFacilitatorOptions = {
+    facilitators: readonly FailoverMember[];
+    pins?: SettlementPinStore;
+    pinTtlMs?: number;
+    health?: {
+        failureThreshold?: number;
+        coolDownMs?: number;
+    };
+    clock?: () => number;
+    onEvent?: (event: FailoverEvent) => void;
+};
+
+// @public
+export type FailoverMember = {
+    id: string;
+    client: FacilitatorClient;
+    validator?: Pick<FacilitatorValidator, "getCapabilities">;
+};
+
+// @public
+export function findMatchingKind(capabilities: FacilitatorCapabilities, network: StellarNetwork): FacilitatorKind | undefined;
 
 // @public
 export type Gate = (request: TollwayRequest) => Promise<GateOutcome>;
@@ -195,6 +327,12 @@ export type GateOutcome = {
     kind: "rejected";
     status: number;
     reason: string;
+    headers?: Record<string, string>;
+};
+
+// @public (undocumented)
+export type InMemoryServicePolicyStoreOptions = {
+    maxPayers?: number;
 };
 
 // @public (undocumented)
@@ -202,6 +340,27 @@ export type InMemorySettlementCacheOptions = {
     maxEntries?: number;
     now?: () => number;
 };
+
+// @public (undocumented)
+export type KeySetResponse = {
+    status: 200;
+    headers: {
+        "content-type": "application/jwk-set+json";
+        "cache-control": string;
+    };
+    body: string;
+};
+
+// @public
+export type KeySetResponseOptions = {
+    maxAgeSeconds?: number;
+};
+
+// @public
+export function listDiscoveryResources(facilitatorUrl: string, options?: {
+    params?: ListDiscoveryResourcesParams;
+    createAuthHeaders?: HttpFacilitatorOptions["createAuthHeaders"];
+}): Promise<DiscoveryCatalogue>;
 
 // @public
 export type LockingSettlementCache = SettlementCache & Required<Pick<SettlementCache, "acquire" | "renew" | "release">>;
@@ -281,6 +440,9 @@ export type MppChargeVerifyResult = {
 };
 
 // @public
+export function parseFacilitatorCapabilities(raw: unknown): FacilitatorCapabilities;
+
+// @public
 export const PAYMENT_REQUIRED_HEADER = "PAYMENT-REQUIRED";
 
 // @public
@@ -305,6 +467,7 @@ export type PaywallConfig = {
     facilitatorUrl?: string;
     maxTimeoutSeconds?: number;
     extra?: Record<string, unknown>;
+    discovery?: DiscoveryDeclaration;
 };
 
 // @public
@@ -314,10 +477,38 @@ export type PaywallDeps = {
     mppChargeHandler?: MppChargeHandler;
     router?: ModelRouter;
     cache?: SettlementCache;
+    servicePolicy?: ServicePolicy;
+    servicePolicyStore?: ServicePolicyStore;
+    onServicePolicyError?: (error: Error, payer: string) => void;
     onCacheError?: (error: Error, key: string) => void;
     onPriceError?: (error: unknown, request: TollwayRequest) => void;
     settlementLockTtlMs?: number;
+    facilitatorTimeoutMs?: number;
+    ambiguousSettlementHoldMs?: number;
     clock?: () => number;
+    receiptVersion?: 1 | 2;
+};
+
+// @public
+export type PaywallMismatch = {
+    route: string;
+    field: "x402Version" | "scheme" | "network" | "extra.areFeesSponsored" | "asset" | "payTo";
+    expected: string;
+    advertised: string;
+};
+
+// @public
+export type PaywallTarget = Pick<PaywallConfig, "asset" | "payTo" | "network" | "models" | "extra">;
+
+// @public
+export type PaywallValidation = {
+    status: "valid";
+} | {
+    status: "mismatch";
+    mismatches: PaywallMismatch[];
+} | {
+    status: "not-applicable";
+    reason: string;
 };
 
 // @public
@@ -344,6 +535,9 @@ export type RedisSettlementCacheOptions = {
     ttlMs?: number;
     keyPrefix?: string;
 };
+
+// @public
+export function renderKeySetResponse(document: KeySetDocument, options?: KeySetResponseOptions): KeySetResponse;
 
 // @public
 export interface RouteTable {
@@ -381,6 +575,65 @@ export interface RouteTableMatch {
 }
 
 // @public
+export const SERVICE_POLICY_DENIALS: {
+    readonly notAllowed: "service-policy:not-allowed";
+    readonly rateLimited: "service-policy:rate-limited";
+    readonly spendExceeded: "service-policy:spend-exceeded";
+};
+
+// @public
+export type ServicePolicy = {
+    allowPayers?: readonly string[];
+    denyPayers?: readonly string[];
+    requestsPerWindow?: {
+        limit: number;
+        windowSeconds?: number;
+    };
+    spendPerWindow?: {
+        limit: string;
+        windowSeconds?: number;
+    };
+};
+
+// @public
+export type ServicePolicyDecision = {
+    allowed: true;
+    reservation?: ServicePolicyReservation;
+} | {
+    allowed: false;
+    code: ServicePolicyDenialCode;
+    retryAfterMs?: number;
+};
+
+// @public
+export type ServicePolicyDenialCode = (typeof SERVICE_POLICY_DENIALS)[keyof typeof SERVICE_POLICY_DENIALS];
+
+// @public
+export type ServicePolicyInput = {
+    policy: ServicePolicy;
+    payer: string;
+    offer: PaymentOffer;
+    model: SettlementModel;
+    now: number;
+};
+
+// @public
+export type ServicePolicyReservation = {
+    readonly payer: string;
+    readonly asset: string;
+    readonly amount: bigint;
+    readonly requestWindowStart?: number;
+    readonly spendWindowStart?: number;
+};
+
+// @public
+export interface ServicePolicyStore {
+    admit(input: ServicePolicyInput): Promise<ServicePolicyDecision>;
+    commit(reservation: ServicePolicyReservation): Promise<void>;
+    release(reservation: ServicePolicyReservation): Promise<void>;
+}
+
+// @public
 export type SettleInput = {
     payment: X402Payment;
     offer: PaymentOffer;
@@ -411,6 +664,14 @@ export type SettlementLock = {
 };
 
 // @public
+export interface SettlementPinStore {
+    // (undocumented)
+    get(key: string): Promise<string | undefined>;
+    release(key: string, facilitatorId: string): Promise<boolean>;
+    setIfAbsent(key: string, facilitatorId: string, ttlMs: number): Promise<string>;
+}
+
+// @public
 export type SettleResult = {
     settled: true;
     txHash: string;
@@ -424,12 +685,6 @@ export const STELLAR_EXACT_SCHEME = "exact";
 
 // @public
 export function stellarCaip2(network: StellarNetwork): Network;
-
-// @public
-export type SupportedResult = {
-    models: SettlementModel[];
-    assets: string[];
-};
 
 // @public
 export const TOLLWAY_QUOTE_HEADER = "TOLLWAY-QUOTE";
@@ -446,6 +701,15 @@ export type TollwayRequest = {
 
 // @public
 export function toPaymentRequirements(offer: PaymentOffer, terms?: X402Terms): PaymentRequirements;
+
+// @public
+export function validatePaywall(route: string, paywall: PaywallTarget, capabilities: FacilitatorCapabilities): PaywallValidation;
+
+// @public
+export function validateServicePolicy(policy: ServicePolicy): void;
+
+// @public
+export type ValidationMode = "fail" | "warn" | "off";
 
 // @public
 export type VerifyInput = {
@@ -482,10 +746,10 @@ export type X402Terms = {
 
 // Warnings were encountered during analysis:
 //
-// dist/index.d.ts:174:9 - (ae-forgotten-export) The symbol "WatchtowerEvent" needs to be exported by the entry point index.d.ts
-// dist/index.d.ts:178:5 - (ae-forgotten-export) The symbol "ChannelState" needs to be exported by the entry point index.d.ts
-// dist/index.d.ts:216:5 - (ae-forgotten-export) The symbol "WatchtowerCursorStore" needs to be exported by the entry point index.d.ts
-// dist/index.d.ts:457:9 - (ae-forgotten-export) The symbol "StellarSigner" needs to be exported by the entry point index.d.ts
+// dist/index.d.ts:176:9 - (ae-forgotten-export) The symbol "WatchtowerEvent" needs to be exported by the entry point index.d.ts
+// dist/index.d.ts:180:5 - (ae-forgotten-export) The symbol "ChannelState" needs to be exported by the entry point index.d.ts
+// dist/index.d.ts:218:5 - (ae-forgotten-export) The symbol "WatchtowerCursorStore" needs to be exported by the entry point index.d.ts
+// dist/index.d.ts:351:9 - (ae-forgotten-export) The symbol "StellarSigner" needs to be exported by the entry point index.d.ts
 
 // (No @packageDocumentation comment for this package)
 

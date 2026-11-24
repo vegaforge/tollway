@@ -7,7 +7,8 @@
 #   scripts/check-api-reports.sh           check mode (fails on diff)
 #   scripts/check-api-reports.sh --update  update mode (overwrites reports)
 #
-# See docs/contributing.md, "Public API reports".
+# A report change is a public API change. See CONTRIBUTING.md,
+# "Public API reports".
 
 set -euo pipefail
 
@@ -51,11 +52,15 @@ for pkg in "${PUBLISHABLE[@]}"; do
   echo "→ Running API Extractor for $pkg..."
 
   if [ "$UPDATE" = "true" ]; then
-    # Update mode: generate and accept the report.
-    pnpm exec api-extractor run --local --verbose --config "$pkg/api-extractor.json" || true
+    # Update mode: write the new report. Any extractor error (a forgotten
+    # export, an unreadable entry point) still fails the run.
+    if ! pnpm exec api-extractor run --local --config "$pkg/api-extractor.json"; then
+      echo "✗ $pkg: API Extractor failed while updating the report" >&2
+      FAILED=1
+    fi
   else
     # Check mode: fail if the report would change.
-    if ! pnpm exec api-extractor run --config "$pkg/api-extractor.json" 2>&1; then
+    if ! pnpm exec api-extractor run --config "$pkg/api-extractor.json"; then
       echo "✗ $pkg: API Extractor check failed (the API changed; run scripts/check-api-reports.sh --update)" >&2
       FAILED=1
     else

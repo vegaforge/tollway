@@ -4,7 +4,38 @@
 
 ```ts
 
+import { CounterpartyQuarantine } from '@vegaforge/tollway-core';
+import { QuarantineEntry } from '@vegaforge/tollway-core';
 import { SignedReceipt } from '@vegaforge/tollway-core';
+
+// @public (undocumented)
+export type AlertDeliveryReport = {
+    failures: ReadonlyArray<{
+        error: Error;
+    }>;
+};
+
+// @public
+export type AlertEmitter = {
+    emit(event: AlertEventInput): Promise<AlertDeliveryReport>;
+};
+
+// @public (undocumented)
+export type AlertEventInput = {
+    id?: string;
+    type: "anomaly.detected";
+    at: string;
+    data: DriftAlertPayload;
+};
+
+// @public
+export function buildReconciliationReport(results: readonly ReconciliationReportInput[], options?: BuildReconciliationReportOptions): ReconciliationReport;
+
+// @public (undocumented)
+export type BuildReconciliationReportOptions = {
+    generatedAt?: string;
+    range?: ReportRange;
+};
 
 // @public
 export type CommitmentRecord = {
@@ -13,14 +44,77 @@ export type CommitmentRecord = {
     cumulativeAmount: string;
 };
 
+// @public
+export function createDriftAlertBridge(options: DriftAlertBridgeOptions): DriftAlertBridge;
+
+// @public
+export function createMemoryDriftAlertStore(initialResults?: readonly ReconciliationResult[]): DriftAlertStore;
+
+// @public
+export function createQuarantineEnforcer(options: QuarantineEnforcerOptions): ReconciliationQuarantineEnforcer;
+
 // @public (undocumented)
 export function createReconciler(options?: ReconcilerOptions): Reconciler;
+
+// @public (undocumented)
+export type CsvReportOptions = {
+    severity?: Partial<Record<DriftKind, DriftSeverity>>;
+};
+
+// @public
+export const DEFAULT_DRIFT_ACTIONS: Record<DriftKind, DriftAction> & Record<string, DriftAction>;
+
+// @public
+export const DEFAULT_DRIFT_SEVERITY: Record<DriftKind, DriftSeverity>;
 
 // @public (undocumented)
 export type Drift = {
     kind: DriftKind;
     detail: string;
 };
+
+// @public
+export type DriftAction = "quarantine" | "warn" | "ignore";
+
+// @public (undocumented)
+export interface DriftAlertBridge {
+    process(results: readonly ReconciliationResult[], options?: {
+        at?: string;
+    }): Promise<DriftAlertRunSummary>;
+}
+
+// @public (undocumented)
+export type DriftAlertBridgeOptions = {
+    emitter: AlertEmitter;
+    store?: DriftAlertStore;
+    severity?: Partial<Record<DriftKind, DriftSeverity>>;
+};
+
+// @public (undocumented)
+export type DriftAlertPayload = {
+    source: "reconcile";
+    subject: string;
+    kind: DriftKind;
+    detail: string;
+    severity: DriftSeverity;
+};
+
+// @public (undocumented)
+export type DriftAlertRunSummary = {
+    emitted: number;
+    deduplicated: number;
+    resolved: number;
+    reports: AlertDeliveryReport[];
+    failures: Error[];
+};
+
+// @public
+export interface DriftAlertStore {
+    // (undocumented)
+    getActive(subject: string): Promise<Record<string, string> | undefined> | Record<string, string> | undefined;
+    // (undocumented)
+    setActive(subject: string, active: Record<string, string>): Promise<void> | void;
+}
 
 // @public (undocumented)
 export type DriftKind = "under-settled" | "over-settled" | "missing-commitment" | "unexpected-remainder" | "sequence-gap" | "malformed-record"
@@ -30,6 +124,59 @@ export type DriftKind = "under-settled" | "over-settled" | "missing-commitment" 
 | "foreign-commitment"
 /** Two or more commitments share one sequence. */
 | "duplicate-sequence";
+
+// @public (undocumented)
+export type DriftQuarantineEvent = {
+    counterparty: string;
+    channelId: string;
+    drift: Drift;
+    entry: QuarantineEntry;
+};
+
+// @public (undocumented)
+export type DriftSeverity = "low" | "medium" | "high" | "critical";
+
+// @public (undocumented)
+export type DriftWarnEvent = {
+    counterparty: string;
+    channelId: string;
+    drift: Drift;
+};
+
+// @public
+export function exportReconciliationReport(report: ReconciliationReport, format: ExportReportFormat, options?: CsvReportOptions): string;
+
+// @public (undocumented)
+export type ExportReportFormat = "json" | "csv";
+
+// @public (undocumented)
+export type ProcessedDriftAction = {
+    drift: Drift;
+    action: DriftAction;
+    quarantined: boolean;
+};
+
+// @public (undocumented)
+export type ProcessReconciliationInput = {
+    counterparty: string;
+    result: ReconciliationResult;
+    resultKey?: string;
+};
+
+// @public (undocumented)
+export type ProcessReconciliationOutput = {
+    duplicate: boolean;
+    actions: ProcessedDriftAction[];
+};
+
+// @public (undocumented)
+export type QuarantineEnforcerOptions = {
+    quarantine: CounterpartyQuarantine;
+    actions?: Partial<Record<DriftKind | (string & {}), DriftAction>>;
+    onWarn?: (event: DriftWarnEvent) => void;
+    onQuarantine?: (event: DriftQuarantineEvent) => void;
+    maxRememberedResults?: number;
+};
 
 // @public (undocumented)
 export interface Reconciler {
@@ -43,6 +190,67 @@ export type ReconcilerOptions = {
 };
 
 // @public (undocumented)
+export const RECONCILIATION_CSV_COLUMNS: readonly ["generatedAt", "subject", "kind", "severity", "detail"];
+
+// @public (undocumented)
+export const RECONCILIATION_REPORT_VERSION: 1;
+
+// @public
+export type ReconciliationAmounts = {
+    expected?: string;
+    settled?: string;
+    remainder?: string;
+};
+
+// @public (undocumented)
+export interface ReconciliationQuarantineEnforcer {
+    // (undocumented)
+    process(input: ProcessReconciliationInput): Promise<ProcessReconciliationOutput>;
+}
+
+// @public (undocumented)
+export type ReconciliationReport = {
+    version: typeof RECONCILIATION_REPORT_VERSION;
+    generatedAt: string;
+    range?: ReportRange;
+    totals: ReconciliationReportTotals;
+    entries: ReconciliationReportEntry[];
+};
+
+// @public (undocumented)
+export type ReconciliationReportEntry = {
+    subject: string;
+    ok: boolean;
+    drift: Drift[];
+    amounts?: ReconciliationAmounts;
+};
+
+// @public (undocumented)
+export type ReconciliationReportInput = ReconciliationResult & {
+    amounts?: ReconciliationAmounts;
+};
+
+// @public
+export function reconciliationReportToCsv(report: ReconciliationReport, options?: CsvReportOptions): string;
+
+// @public
+export function reconciliationReportToJson(report: ReconciliationReport): string;
+
+// @public (undocumented)
+export type ReconciliationReportTotals = {
+    total: number;
+    ok: number;
+    drifted: number;
+    driftItems: number;
+    byDriftKind: Record<DriftKind, number>;
+    amounts?: {
+        expected: string;
+        settled: string;
+        remainder: string;
+    };
+};
+
+// @public (undocumented)
 export type ReconciliationResult = {
     ok: true;
     channelId: string;
@@ -51,6 +259,15 @@ export type ReconciliationResult = {
     channelId: string;
     drift: Drift[];
 };
+
+// @public (undocumented)
+export type ReportRange = {
+    from: string;
+    to: string;
+};
+
+// @public (undocumented)
+export function resolveDriftSeverity(kind: DriftKind, overrides?: Partial<Record<DriftKind, DriftSeverity>>): DriftSeverity;
 
 // @public
 export type SettlementRecord = {

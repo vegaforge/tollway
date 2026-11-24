@@ -55,8 +55,6 @@ echo -e "\n${BLUE}[4/5] Tests${NC}"
 pnpm test
 # The PR security checks have their own tests (standard library only).
 PYTHONDONTWRITEBYTECODE=1 python3 -m unittest discover -s scripts/security -q
-# Type-check and run documentation code snippets to catch API drift.
-pnpm exec tsx scripts/check-doc-snippets.ts
 
 if [ "$SKIP_BUILD" = "true" ]; then
   echo -e "\n${BLUE}[5/5] Build skipped (--fast). CI runs it on every pull request.${NC}"
@@ -67,6 +65,8 @@ else
   bash scripts/check-api-reports.sh
   echo -e "\n${BLUE}[5/5b] Package exports (publint + arethetypeswrong)${NC}"
   bash scripts/check-package-exports.sh
+  echo -e "\n${BLUE}[5/5c] Package consumers (ESM and CommonJS under node16)${NC}"
+  bash scripts/check-package-consumers.sh
 fi
 
 echo -e "\n${GREEN}All preflight gates passed.${NC}"

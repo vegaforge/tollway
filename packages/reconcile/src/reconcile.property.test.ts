@@ -55,7 +55,9 @@ const honestStreamArb = fc
       maxLength: 25,
     }),
     returnedRemainder: amountStringArb,
-    txHash: fc.hexaString({ minLength: 8, maxLength: 64 }).map((h) => `0x${h}`),
+    txHash: fc
+      .string({ unit: fc.constantFrom(..."0123456789abcdef"), minLength: 8, maxLength: 64 })
+      .map((h) => `0x${h}`),
   })
   .map(({ channelId, deltas, returnedRemainder, txHash }) => {
     const commitments: CommitmentRecord[] = [];

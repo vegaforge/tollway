@@ -2,7 +2,7 @@
   "name": "@vegaforge/tollway-demo",
   "version": "0.0.0",
   "private": true,
-  "description": "End-to-end Tollway demo: x402, MPP charge, MPP channel, and high-frequency channel in mock mode",
+  "description": "End-to-end Tollway demo: x402 and MPP charge scenarios, from challenge to a verified receipt",
   "license": "Apache-2.0",
   "type": "module",
   "scripts": {
@@ -13,9 +13,7 @@
   "dependencies": {
     "@stellar/stellar-sdk": "^16.4.1",
     "@vegaforge/tollway-adapter-express": "workspace:*",
-    "@vegaforge/tollway-channels": "workspace:*",
     "@vegaforge/tollway-core": "workspace:*",
-    "@vegaforge/tollway-reconcile": "workspace:*",
     "@vegaforge/tollway-server": "workspace:*",
     "@x402/core": "^2.31.0",
     "@x402/stellar": "^2.31.0",

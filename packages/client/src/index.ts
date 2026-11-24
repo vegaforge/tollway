@@ -8,6 +8,9 @@
  * settlement on the policy engine so budgets advance, and hands back the
  * canonical receipt. See docs/design.md, "Architecture" (agent side).
  *
+ * Calls that overlap for the same purchase share one settlement, so an agent
+ * that fires the same request twice in parallel pays once.
+ *
  * The settler is the seam between this orchestrator and the protocol-
  * specific dance (Soroban auth entry signing for x402, MPP channel
  * commitments, etc.). Tests inject a mock settler; production wires a
@@ -17,6 +20,8 @@
  */
 
 import {
+  type CounterpartyQuarantine,
+  canonicalJson,
   comparePolicyTraces,
   createPolicyEngine,
   decisionFromTrace,
@@ -26,7 +31,9 @@ import {
   type PolicyEngine,
   type PolicyTrace,
   type PolicyTraceComparison,
+  type QuarantineEntry,
   type ReceiptVerifier,
+  type RouteDecision,
   type SettlementModel,
   type SignedReceipt,
   type StellarNetwork,
@@ -34,11 +41,53 @@ import {
   TollwayError,
   verifyReceipt,
 } from "@vegaforge/tollway-core";
+import {
+  assertOfferForRequest,
+  assertReceiptMatchesOffer,
+  DEFAULT_RECEIPT_MAX_SKEW_MS,
+  OfferNetworkMismatchError,
+} from "./receipt-binding.js";
+import type { ReceiptStore } from "./receipt-store.js";
+import {
+  AmbiguousSettlementError,
+  MAX_RETRY_AFTER_MS,
+  normaliseRetryOptions,
+  type RetryOptions,
+  SettlementOutcomeError,
+  type SignedTerms,
+} from "./retry.js";
+
+export {
+  AmbiguousSettlementError,
+  MAX_RETRY_AFTER_MS,
+  type RetryOptions,
+  SettlementOutcomeError,
+  type SettlementOutcomeKind,
+  type SignedTerms,
+} from "./retry.js";
 
 /** Events the client emits so callers and observability can follow along. */
 export type ClientEvent =
   | { type: "payment"; resource: string; model: SettlementModel; receipt: SignedReceipt }
+  /**
+   * A call that shared another call's settlement instead of paying. It
+   * carries the receipt of the one payment that was made, which the settling
+   * call reports as `payment`. Count `payment` events to count payments.
+   */
+  | {
+      type: "payment:deduplicated";
+      resource: string;
+      model: SettlementModel;
+      receipt: SignedReceipt;
+    }
   | { type: "skip"; resource: string; reason: string }
+  /**
+   * Issue #203: a retry attempt is about to run. `attempt` is 1-based
+   * and names the attempt being started (so `attempt: 2` is the first
+   * retry). `reason` carries the settler-reported cause of the previous
+   * failure.
+   */
+  | { type: "retry"; resource: string; attempt: number; reason: string }
   /**
    * The active policy's full trace for this payment, emitted before the
    * payment proceeds or is blocked. In dry-run, `trace.wouldBlock` marks a
@@ -62,7 +111,14 @@ export type ClientEvent =
   | { type: "error"; resource: string; error: Error }
   | { type: "budget:warning"; remaining: string }
   | { type: "channel:opened"; channelId: string }
-  | { type: "channel:closed"; channelId: string };
+  | { type: "channel:closed"; channelId: string }
+  | {
+      type: "counterparty:quarantined";
+      counterparty: string;
+      resource: string;
+      reason: string;
+      entry?: QuarantineEntry;
+    };
 
 export type ClientEventHandler = (event: ClientEvent) => void;
 
@@ -75,12 +131,23 @@ export type ClientEventHandler = (event: ClientEvent) => void;
  */
 export interface ClientSettler {
   settle(input: SettleRequest): Promise<SignedReceipt>;
+  /**
+   * The Stellar address this settler pays from, when it knows it. The
+   * client then requires `receipt.payer` to equal it.
+   */
+  readonly payer?: string;
 }
 
 export type SettleRequest = {
   resource: string;
   offer: PaymentOffer;
   model: SettlementModel;
+  /**
+   * Set on a retry with a fresh authorization: the terms the earlier
+   * attempt signed. A settler must refuse to sign a challenge that asks for
+   * anything else (issue #203).
+   */
+  pinned?: SignedTerms;
 };
 
 export type TollwayClientOptions = {
@@ -103,16 +170,59 @@ export type TollwayClientOptions = {
   /** Optional router. When omitted, defaults to x402 unless `model` is on the request. */
   router?: ModelRouter;
   /**
+   * Optional quarantine store. When provided, `pay()` checks the
+   * counterparty's standing before routing, emits `counterparty:quarantined`,
+   * and passes `quarantined: true` to the router (failing closed on lookup
+   * error).
+   */
+  quarantine?: CounterpartyQuarantine;
+  /**
    * Optional verifier. When provided, the returned receipt is checked
    * against the verifier's trusted public keys before `pay()` resolves;
    * a tampered or unknown-key receipt produces a `TollwayError` with
    * code `"receipt-verification-failed"`. Recommended in production: the
    * receipt is the service's signature, and skipping verification leaves
    * a tampered receipt undetected on the agent side.
+   *
+   * Whether or not a verifier is set, the receipt must also describe the
+   * paid offer (amount, asset, payee, resource, network, model, settlement
+   * kind, payer and `issuedAt`); a mismatch rejects with code
+   * `"receipt-offer-mismatch"`. Without a verifier that check runs on an
+   * unauthenticated receipt, so it catches mistakes, not forgeries.
    */
   verifier?: ReceiptVerifier;
+  /**
+   * How far a receipt's `issuedAt` may be from the client clock, in
+   * milliseconds, either way. Defaults to five minutes. A receipt replayed
+   * from an older payment falls outside it and is rejected.
+   */
+  receiptMaxSkewMs?: number;
+  /** The clock for the `issuedAt` check. Defaults to `Date.now`. */
+  clock?: () => number;
   /** Default facilitator URL when an offer does not name one. */
   facilitatorUrl?: string;
+  /**
+   * Optional receipt store. When provided, every verified receipt is written
+   * to it before `pay()` resolves, so the agent keeps the receipt for a
+   * payment that settled.
+   */
+  receiptStore?: ReceiptStore;
+  /**
+   * Called when the receipt store fails after a payment settled. The same
+   * error is set as `storeError` on the result and the receipt is still
+   * returned; the payment has happened, so a bookkeeping failure must not
+   * hide it. Mirrors the gate's `onCacheError`.
+   */
+  onStoreError?: (error: Error, receipt: SignedReceipt) => void;
+  /**
+   * Issue #203: how many times the client will call the settler per
+   * `pay()`. The default is 2 (one retry): the first attempt plus one
+   * fresh-authorization retry on an x402 expiry or nonce reuse. Only
+   * rejections classified `retryable-with-fresh-auth` or
+   * `settlement-in-progress` consume a retry; an `ambiguous` outcome
+   * never retries because the payment may have landed.
+   */
+  retry?: RetryOptions;
 };
 
 export type PayRequest = {
@@ -122,11 +232,29 @@ export type PayRequest = {
   offer: PaymentOffer;
   /** Force a settlement model, bypassing the router. */
   model?: SettlementModel;
+  /**
+   * Names the purchase. Concurrent calls with the same key share one
+   * settlement, whatever their resource and offer, and calls with different
+   * keys never share one. When omitted, the key is derived from the resource,
+   * the routed model, and the offer's amount, asset, payTo and network.
+   */
+  idempotencyKey?: string;
 };
 
 export type PayResult = {
   receipt: SignedReceipt;
   model: SettlementModel;
+  /**
+   * True when this call shared a concurrent call's settlement and did not
+   * pay. The receipt is the one that call was given.
+   */
+  deduplicated: boolean;
+  /**
+   * Set when the payment settled but the receipt store could not persist the
+   * receipt. The receipt itself is complete and valid; the store's history has
+   * a hole, so treat this as an operational alert.
+   */
+  storeError?: Error;
 };
 
 export interface TollwayClient {
@@ -142,6 +270,17 @@ export interface TollwayClient {
  */
 export function createClient(options: TollwayClientOptions): TollwayClient {
   const handlers: ClientEventHandler[] = [];
+  if (
+    options.receiptMaxSkewMs !== undefined &&
+    !(Number.isFinite(options.receiptMaxSkewMs) && options.receiptMaxSkewMs >= 0)
+  ) {
+    throw new TypeError(
+      `receiptMaxSkewMs must be a non-negative finite number, got ${options.receiptMaxSkewMs}`,
+    );
+  }
+  // Settlements in progress, by purchase key. In process only: two workers
+  // of the same agent do not see each other's entries.
+  const inFlight = new Map<string, Promise<Settled>>();
   // With a shadow policy and no active one, the candidate is compared with
   // "no policy", which an empty policy evaluates to exactly.
   const shadowBaseline =
@@ -196,6 +335,95 @@ export function createClient(options: TollwayClientOptions): TollwayClient {
     }
   }
 
+  /** Counts one sent payment on the shadow too, so its attempt limits see real traffic. */
+  async function shadowAttempt(
+    shadow: PolicyEngine,
+    intent: PaymentIntent,
+    resource: string,
+  ): Promise<void> {
+    try {
+      await shadow.recordAttempt?.(intent);
+    } catch (rawError) {
+      emit({ type: "policy:shadow-error", resource, error: normalizeError(rawError) });
+    }
+  }
+
+  /**
+   * Calls the settler, then retries the way issue #203 allows: a fresh
+   * authorization for a payment the service refused before settling, the
+   * identical payment for one it is still settling, and never anything for
+   * a payment that may have landed. `maxAttempts` bounds every settler call
+   * and resend together.
+   */
+  async function settleWithRetry(args: {
+    retry: { maxAttempts: number; sleep: (ms: number) => Promise<void> };
+    request: PayRequest;
+    model: SettlementModel;
+    freshAttempt: () => Promise<void>;
+  }): Promise<SignedReceipt> {
+    const { retry, request, model } = args;
+    let pinned: SignedTerms | undefined;
+    let next = () =>
+      options.settler.settle({ resource: request.resource, offer: request.offer, model });
+    for (let attempt = 1; ; attempt += 1) {
+      try {
+        return await next();
+      } catch (rawError) {
+        if (!(rawError instanceof SettlementOutcomeError)) throw rawError;
+        if (rawError.kind === "ambiguous") {
+          throw new AmbiguousSettlementError(rawError.reason, { cause: rawError });
+        }
+        if (rawError.kind === "fatal") throw rawError;
+
+        const resend = rawError.resend;
+        const waitMs = rawError.retryAfterMs;
+        if (rawError.kind === "settlement-in-progress") {
+          // The payment is in flight. If the client cannot wait for it
+          // within its bounds, the outcome is unknown to the caller.
+          if (
+            resend === undefined ||
+            waitMs === undefined ||
+            waitMs > MAX_RETRY_AFTER_MS ||
+            attempt >= retry.maxAttempts
+          ) {
+            throw new AmbiguousSettlementError(
+              `${rawError.reason}, and the client stopped waiting for it`,
+              { cause: rawError },
+            );
+          }
+          emit({
+            type: "retry",
+            resource: request.resource,
+            attempt: attempt + 1,
+            reason: rawError.reason,
+          });
+          await retry.sleep(waitMs);
+          next = resend;
+          continue;
+        }
+
+        // retryable-with-fresh-auth
+        if (attempt >= retry.maxAttempts) throw rawError;
+        pinned = rawError.signedTerms ?? pinned;
+        await args.freshAttempt();
+        emit({
+          type: "retry",
+          resource: request.resource,
+          attempt: attempt + 1,
+          reason: rawError.reason,
+        });
+        const terms = pinned;
+        next = () =>
+          options.settler.settle({
+            resource: request.resource,
+            offer: request.offer,
+            model,
+            ...(terms === undefined ? {} : { pinned: terms }),
+          });
+      }
+    }
+  }
+
   /** Records a settled payment on the shadow; a failure is reported, not thrown. */
   async function shadowRecord(
     shadow: PolicyEngine,
@@ -209,81 +437,237 @@ export function createClient(options: TollwayClientOptions): TollwayClient {
     }
   }
 
+  /**
+   * One payment from policy check to recorded spend. Only this path
+   * evaluates the policy, stores the receipt, records the spend and emits
+   * `payment`, so calls that share the settlement are not counted twice.
+   */
+  async function settleOnce(request: PayRequest, model: SettlementModel): Promise<Settled> {
+    try {
+      const intent: PaymentIntent = {
+        payee: request.offer.payTo,
+        resource: request.resource,
+        amount: request.offer.amount,
+        asset: request.offer.asset,
+        model,
+      };
+
+      // `admit` evaluates and, when the policy allows the payment, counts
+      // it as an attempt in the same step (issue #197). An engine written
+      // before `admit` existed is evaluated instead.
+      const admit = async (engine: PolicyEngine): Promise<PolicyTrace> =>
+        engine.admit ? engine.admit(intent) : engine.evaluate(intent);
+
+      let activeTrace: PolicyTrace | undefined;
+      if (options.policy) {
+        activeTrace = await admit(options.policy);
+        // No handler, no event object: the quiet path stays as cheap as a
+        // plain check().
+        if (handlers.length > 0) {
+          emit({ type: "policy:decision", resource: request.resource, trace: activeTrace });
+        }
+      }
+
+      if (options.shadow && shadowBaseline && handlers.length > 0) {
+        await shadowCompare(options.shadow, shadowBaseline, activeTrace, intent, request.resource);
+      }
+
+      const blockIfDenied = (trace: PolicyTrace | undefined): void => {
+        if (!trace) return;
+        // The same function check() uses, so the trace just emitted and the
+        // decision below cannot disagree.
+        const decision = decisionFromTrace(trace);
+        if (!decision.allowed) {
+          emit({
+            type: "skip",
+            resource: request.resource,
+            reason: `${decision.rule}: ${decision.detail}`,
+          });
+          throw new PolicyBlockedError(decision.rule, decision.detail);
+        }
+      };
+      blockIfDenied(activeTrace);
+      if (options.shadow) await shadowAttempt(options.shadow, intent, request.resource);
+
+      // The retry runs inside the shared settlement (issue #210), so calls
+      // waiting on this purchase share one retried payment, and the
+      // receipt it ends with is bound to the offer below like any other.
+      const settled = await settleWithRetry({
+        retry: normaliseRetryOptions(options.retry),
+        request,
+        model,
+        freshAttempt: async () => {
+          // A new authorization is a new payment attempt: the policy is
+          // checked again, and a budget that now bites stops the retry.
+          if (options.policy) blockIfDenied(await admit(options.policy));
+          if (options.shadow) await shadowAttempt(options.shadow, intent, request.resource);
+        },
+      });
+
+      // Only the parsed receipt leaves pay(), never the settler's object,
+      // so a field the signature does not cover cannot reach the caller.
+      const receipt = await checkedReceipt(settled, options.verifier);
+
+      // A valid signature proves only that the service signed something.
+      // The receipt must describe this payment before it is stored,
+      // recorded on the policy engine or reported as a payment.
+      assertReceiptMatchesOffer({
+        receipt,
+        offer: request.offer,
+        model,
+        network: options.network,
+        ...(options.settler.payer === undefined ? {} : { payer: options.settler.payer }),
+        now: (options.clock ?? Date.now)(),
+        maxSkewMs: options.receiptMaxSkewMs ?? DEFAULT_RECEIPT_MAX_SKEW_MS,
+      });
+
+      // The payment has settled, so a store failure must not cost the payer
+      // the receipt. The error goes on the result and to onStoreError.
+      let storeError: Error | undefined;
+      if (options.receiptStore) {
+        try {
+          await options.receiptStore.put(receipt);
+        } catch (rawStoreError) {
+          storeError = normalizeError(rawStoreError);
+          try {
+            options.onStoreError?.(storeError, receipt);
+          } catch {
+            // A throwing alert hook must not poison the pay() promise either.
+          }
+        }
+      }
+
+      if (options.policy) {
+        await options.policy.record(intent);
+      }
+      if (options.shadow) {
+        await shadowRecord(options.shadow, intent, request.resource);
+      }
+
+      emit({ type: "payment", resource: request.resource, model, receipt });
+      return storeError ? { receipt, model, storeError } : { receipt, model };
+    } catch (rawError) {
+      const error = normalizeError(rawError);
+      emit({ type: "error", resource: request.resource, error });
+      throw error;
+    }
+  }
+
   return {
     on(handler) {
       handlers.push(handler);
     },
     async pay(request): Promise<PayResult> {
+      let model: SettlementModel;
+      let emittedQuarantine = false;
       try {
-        const model = await decideModel(options.router, request);
-        const intent: PaymentIntent = {
-          payee: request.offer.payTo,
-          resource: request.resource,
-          amount: request.offer.amount,
-          asset: request.offer.asset,
-          model,
-        };
-
-        let activeTrace: PolicyTrace | undefined;
-        if (options.policy) {
-          activeTrace = await options.policy.evaluate(intent);
-          // No handler, no event object: the quiet path stays as cheap as a
-          // plain check().
-          if (handlers.length > 0) {
-            emit({ type: "policy:decision", resource: request.resource, trace: activeTrace });
+        // Refused before any policy check or signature: paying on the wrong
+        // network is never what the agent configured.
+        if (request.offer.network !== options.network) {
+          throw new OfferNetworkMismatchError(request.offer.network, options.network);
+        }
+        assertOfferForRequest(request.resource, request.offer);
+        let quarantined = false;
+        if (options.quarantine) {
+          let entry: QuarantineEntry | undefined;
+          let lookupFailed = false;
+          try {
+            entry = await options.quarantine.lookup(request.offer.payTo);
+          } catch {
+            lookupFailed = true;
           }
-        }
-
-        if (options.shadow && shadowBaseline && handlers.length > 0) {
-          await shadowCompare(
-            options.shadow,
-            shadowBaseline,
-            activeTrace,
-            intent,
-            request.resource,
-          );
-        }
-
-        if (activeTrace) {
-          // The same function check() uses, so the trace just emitted and the
-          // decision below cannot disagree.
-          const decision = decisionFromTrace(activeTrace);
-          if (!decision.allowed) {
+          if (entry || lookupFailed) {
+            quarantined = true;
+            emittedQuarantine = true;
             emit({
-              type: "skip",
+              type: "counterparty:quarantined",
+              counterparty: request.offer.payTo,
               resource: request.resource,
-              reason: `${decision.rule}: ${decision.detail}`,
+              reason: entry ? entry.reason : "quarantine lookup failed; failing closed",
+              ...(entry ? { entry } : {}),
             });
-            throw new PolicyBlockedError(decision.rule, decision.detail);
           }
         }
 
-        const settled = await options.settler.settle({
-          resource: request.resource,
-          offer: request.offer,
-          model,
-        });
-
-        // Only the parsed receipt leaves pay(), never the settler's object,
-        // so a field the signature does not cover cannot reach the caller.
-        const receipt = await checkedReceipt(settled, options.verifier);
-
-        if (options.policy) {
-          await options.policy.record(intent);
+        const decision = await decideModel(options.router, request, quarantined);
+        if (decision.reason === "quarantined" && !emittedQuarantine) {
+          emittedQuarantine = true;
+          emit({
+            type: "counterparty:quarantined",
+            counterparty: request.offer.payTo,
+            resource: request.resource,
+            reason: "router excluded mpp-channel for quarantined counterparty",
+          });
         }
-        if (options.shadow) {
-          await shadowRecord(options.shadow, intent, request.resource);
-        }
-
-        emit({ type: "payment", resource: request.resource, model, receipt });
-        return { receipt, model };
+        model = decision.model;
       } catch (rawError) {
         const error = normalizeError(rawError);
+        if (
+          error instanceof TollwayError &&
+          error.code === "counterparty-quarantined" &&
+          !emittedQuarantine
+        ) {
+          emit({
+            type: "counterparty:quarantined",
+            counterparty: request.offer.payTo,
+            resource: request.resource,
+            reason: error.message,
+          });
+        }
         emit({ type: "error", resource: request.resource, error });
         throw error;
       }
+
+      // A call that arrives while the same purchase is being settled waits
+      // for that settlement instead of paying again. The map is read and
+      // written with no await in between, so two calls cannot both miss it.
+      const key = purchaseKey(request, model);
+      const pending = inFlight.get(key);
+      if (pending) {
+        // A shared failure rejects here with the error the settling call
+        // already reported, so one failure is one `error` event.
+        const shared = await pending;
+        emit({
+          type: "payment:deduplicated",
+          resource: request.resource,
+          model: shared.model,
+          receipt: shared.receipt,
+        });
+        return { ...shared, deduplicated: true };
+      }
+
+      const attempt = settleOnce(request, model);
+      inFlight.set(key, attempt);
+      try {
+        return { ...(await attempt), deduplicated: false };
+      } finally {
+        // Completed receipts are not kept: a later call is a new purchase.
+        inFlight.delete(key);
+      }
     },
   };
+}
+
+/** What one settlement produced, before a call marks it as its own or shared. */
+type Settled = { receipt: SignedReceipt; model: SettlementModel; storeError?: Error };
+
+/**
+ * The key two calls must share to count as the same purchase. A caller's
+ * `idempotencyKey` and a derived key carry different prefixes, so a caller's
+ * string can never equal a derived key.
+ */
+function purchaseKey(request: PayRequest, model: SettlementModel): string {
+  if (request.idempotencyKey !== undefined) {
+    return `key:${request.idempotencyKey}`;
+  }
+  return `offer:${canonicalJson({
+    resource: request.resource,
+    model,
+    amount: request.offer.amount,
+    asset: request.offer.asset,
+    payTo: request.offer.payTo,
+    network: request.offer.network,
+  })}`;
 }
 
 /**
@@ -349,15 +733,27 @@ async function checkedReceipt(
 async function decideModel(
   router: ModelRouter | undefined,
   request: PayRequest,
-): Promise<SettlementModel> {
-  if (request.model) return request.model;
-  if (!router) return "x402";
-  const decision = await router.decide({
+  quarantined: boolean,
+): Promise<RouteDecision> {
+  if (request.model) {
+    // An explicit model skips the router, so the quarantine rule the router
+    // applies has to be applied here too: a quarantined counterparty never
+    // gets a new channel commitment.
+    if (request.model === "mpp-channel" && quarantined) {
+      throw new TollwayError(
+        "counterparty-quarantined",
+        `counterparty "${request.offer.payTo}" is quarantined; cannot pay it through mpp-channel`,
+      );
+    }
+    return { model: request.model, reason: "override" };
+  }
+  if (!router) return { model: "x402", reason: "default" };
+  return router.decide({
     counterparty: request.offer.payTo,
     resource: request.resource,
     offer: request.offer,
+    ...(quarantined ? { quarantined: true } : {}),
   });
-  return decision.model;
 }
 
 function normalizeError(value: unknown): Error {
@@ -365,6 +761,28 @@ function normalizeError(value: unknown): Error {
   return new Error(typeof value === "string" ? value : JSON.stringify(value));
 }
 
+export {
+  DEFAULT_RECEIPT_MAX_SKEW_MS,
+  OfferNetworkMismatchError,
+  ReceiptOfferMismatchError,
+  resourceIdentity,
+} from "./receipt-binding.js";
+export {
+  createMemoryReceiptStore,
+  DEFAULT_RECEIPT_PAGE_SIZE,
+  MAX_RECEIPT_PAGE_SIZE,
+  type ModelSpendTotal,
+  type PayeeSpendTotal,
+  type ReceiptFilter,
+  type ReceiptHistory,
+  type ReceiptQueryPage,
+  type ReceiptQueryResult,
+  type ReceiptStore,
+  type SpendLedger,
+  type SpendLedgerQuery,
+  type SpendLedgerTotals,
+  type SpendTotal,
+} from "./receipt-store.js";
 export {
   createX402Settler,
   PAYMENT_REQUIRED_HEADER,

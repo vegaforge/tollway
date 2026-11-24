@@ -4,8 +4,10 @@
  *
  * MPP charge uses the same route as x402 but changes the paywall model to
  * "mpp-charge". The agent sends an `Authorization: Payment <credential>`
- * header instead of `PAYMENT-SIGNATURE`. In mock mode the offline handler
- * settles deterministically; live mode requires #100 and is out of scope here.
+ * header instead of `PAYMENT-SIGNATURE`. The offline handler settles
+ * deterministically. Live MPP charge is out of scope for the demo: it needs a
+ * funded payer and a live route, which the x402 demo's configuration does not
+ * cover.
  *
  * This demonstrates the Phase 1 exit from docs/design.md: "the same route
  * serves both x402 and MPP charge with a config flag".
@@ -18,53 +20,53 @@ import { expressPaywall } from "@vegaforge/tollway-adapter-express";
 import {
   Ed25519Signer,
   Ed25519Verifier,
+  type ReceiptVerifier,
   type SignedReceipt,
   verifyReceipt,
 } from "@vegaforge/tollway-core";
 import {
   createInMemorySettlementCache,
+  createMockFacilitator,
   createMockMppChargeHandler,
   createPaywall,
   decodeHeader,
+  type PaywallConfig,
   TOLLWAY_RECEIPT_HEADER,
 } from "@vegaforge/tollway-server";
 import express from "express";
-import type { MppChargeScenarioResult, ScenarioOptions } from "./types.js";
+import type { ScenarioResult } from "./types.js";
 
 /** Price of the demo quote: 0.001 USDC in 7-decimal base units. */
 const DEMO_AMOUNT = "10000";
 
+/** The mock service account, matching the x402 scenario's mock mode. */
+const MOCK_PAYWALL: Pick<PaywallConfig, "asset" | "payTo" | "network"> = {
+  asset: "USDC:GA5ZSEJYB37JRC5AVCIA5MOP4RHTM335X2KGX3IHOJAPP5RE34K4KZVN",
+  payTo: "GSERVICEXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX",
+  network: "testnet",
+};
+
 /**
- * Runs the MPP charge per-request happy path end to end, verifies the receipt,
- * and returns the result.
- *
- * Live mode for MPP charge is out of scope until #100 lands. Calling this
- * function outside of mock mode will throw, as the mock handler is the only
- * one available.
+ * Runs the MPP charge per-request happy path end to end in mock mode,
+ * verifies the receipt, and returns the result. A live MPP charge run needs
+ * a funded payer and a live route, which the x402 demo's configuration does
+ * not cover, so this scenario is mock-only.
  */
-export async function runMppChargeScenario(
-  options: ScenarioOptions,
-): Promise<MppChargeScenarioResult> {
-  const { paywall, mock } = options.setup;
-
-  if (!mock) {
-    throw new Error(
-      "MPP charge live mode is not supported yet (tracked in #100). Run with MOCK_MODE=true.",
-    );
-  }
-
+export async function runMppChargeScenario(): Promise<
+  ScenarioResult & { verifier: ReceiptVerifier }
+> {
   const signer = await Ed25519Signer.generate("tollway-demo-mpp-charge");
   const handler = createMockMppChargeHandler();
 
   const gate = createPaywall(
     {
-      ...paywall,
+      ...MOCK_PAYWALL,
       amount: DEMO_AMOUNT,
       models: ["mpp-charge"],
     },
     {
       signer,
-      facilitator: options.setup.facilitator,
+      facilitator: createMockFacilitator(),
       mppChargeHandler: handler,
       cache: createInMemorySettlementCache(),
     },
@@ -104,20 +106,23 @@ export async function runMppChargeScenario(
       throw new Error(`expected model mpp-charge, got "${receipt.receipt.model}"`);
     }
 
-    const verification = await verifyReceipt(receipt, Ed25519Verifier.forSigner(signer));
+    const verifier = Ed25519Verifier.forSigner(signer);
+    const verification = await verifyReceipt(receipt, verifier);
 
     const settlement = receipt.receipt.settlement;
     const txHash = settlement.kind === "transaction" ? settlement.txHash : undefined;
 
     return {
       scenario: "mpp-charge",
-      mock,
-      resource,
+      mock: true,
+      // The route path, as the x402 scenario reports it from the offer.
+      resource: new URL(resource).pathname,
       amount: receipt.receipt.amount,
       asset: receipt.receipt.asset,
       settlement: txHash,
       receipt,
       receiptValid: verification.valid,
+      verifier,
     };
   } finally {
     await new Promise((resolve) => server.close(resolve));
