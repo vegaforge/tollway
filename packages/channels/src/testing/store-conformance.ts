@@ -15,10 +15,9 @@
  */
 
 import assert from "node:assert/strict";
-import { TollwayError } from "@vegaforge/tollway-core";
 import { ChannelNotFoundError, CommitmentConflictError } from "../errors.js";
 import type { CommitmentAppendExpectation, CommitmentStore } from "../store.js";
-import type { Channel, ChannelFilter, ChannelStatus, Commitment } from "../types.js";
+import type { Channel, ChannelListFilter, ChannelStatus, Commitment } from "../types.js";
 
 export type CommitmentStoreFactory = () => CommitmentStore | Promise<CommitmentStore>;
 
@@ -156,19 +155,35 @@ async function caseFilters(makeStore: CommitmentStoreFactory): Promise<void> {
     makeChannel("CF-C", { status: "open", counterparty: "GB", asset: "USDC", network: "mainnet" }),
     makeChannel("CF-D", { status: "open", counterparty: "GA", asset: "USDC", network: "mainnet" }),
   ]);
-  const idsFor = async (filter: ChannelFilter): Promise<string[]> =>
+  const idsFor = async (filter: ChannelListFilter): Promise<string[]> =>
     (await store.listChannels(filter)).channels.map((c) => c.id);
 
-  assert.deepEqual(await idsFor({}), ["CF-A", "CF-B", "CF-C", "CF-D"]);
-  assert.deepEqual(await idsFor({ status: "open" }), ["CF-A", "CF-C", "CF-D"]);
-  assert.deepEqual(await idsFor({ counterparty: "GA" }), ["CF-A", "CF-B", "CF-D"]);
-  assert.deepEqual(await idsFor({ asset: "USDC" }), ["CF-A", "CF-C", "CF-D"]);
-  assert.deepEqual(await idsFor({ network: "mainnet" }), ["CF-C", "CF-D"]);
+  // Equal openedAt, so the id breaks the tie, descending.
+  assert.deepEqual(await idsFor({}), ["CF-D", "CF-C", "CF-B", "CF-A"]);
+  assert.deepEqual(await idsFor({ status: "open" }), ["CF-D", "CF-C", "CF-A"]);
+  assert.deepEqual(await idsFor({ counterparty: "GA" }), ["CF-D", "CF-B", "CF-A"]);
+  assert.deepEqual(await idsFor({ asset: "USDC" }), ["CF-D", "CF-C", "CF-A"]);
+  assert.deepEqual(await idsFor({ network: "mainnet" }), ["CF-D", "CF-C"]);
   assert.deepEqual(
     await idsFor({ status: "open", counterparty: "GA", asset: "USDC", network: "mainnet" }),
     ["CF-D"],
   );
   assert.deepEqual(await idsFor({ counterparty: "GNOBODY" }), []);
+}
+
+async function caseOrder(makeStore: CommitmentStoreFactory): Promise<void> {
+  const store = await makeStore();
+  await putAll(store, [
+    makeChannel("CO-1", { openedAt: "2026-11-24T00:00:01.000Z" }),
+    makeChannel("CO-2", { openedAt: "2026-11-24T00:00:03.000Z" }),
+    makeChannel("CO-3", { openedAt: "2026-11-24T00:00:02.000Z" }),
+  ]);
+  const page = await store.listChannels();
+  assert.deepEqual(
+    page.channels.map((c) => c.id),
+    ["CO-2", "CO-3", "CO-1"],
+    "newest openedAt first",
+  );
 }
 
 async function casePaging(makeStore: CommitmentStoreFactory): Promise<void> {
@@ -178,39 +193,51 @@ async function casePaging(makeStore: CommitmentStoreFactory): Promise<void> {
     ["P1", "P2", "P3", "P4", "P5"].map((id) => makeChannel(id)),
   );
 
-  const first = await store.listChannels({}, { limit: 2 });
+  const first = await store.listChannels({ limit: 2 });
   assert.deepEqual(
     first.channels.map((c) => c.id),
-    ["P1", "P2"],
+    ["P5", "P4"],
   );
-  assert.equal(first.nextCursor, "P2");
+  assert.ok(first.nextCursor, "a full page that is not the last has a cursor");
 
-  const second = await store.listChannels({}, { limit: 2, cursor: first.nextCursor });
+  // A status change between pages does not move the cursor.
+  await store.updateChannel("P3", { status: "closing" });
+
+  const second = await store.listChannels({ limit: 2, cursor: first.nextCursor });
   assert.deepEqual(
     second.channels.map((c) => c.id),
-    ["P3", "P4"],
+    ["P3", "P2"],
   );
-  assert.equal(second.nextCursor, "P4");
 
-  const last = await store.listChannels({}, { limit: 2, cursor: second.nextCursor });
+  const last = await store.listChannels({ limit: 2, cursor: second.nextCursor });
   assert.deepEqual(
     last.channels.map((c) => c.id),
-    ["P5"],
+    ["P1"],
   );
   assert.equal(last.nextCursor, undefined, "the last page has no cursor");
 
-  const filtered = await store.listChannels({ status: "open" }, { limit: 2 });
-  assert.equal(filtered.channels.length, 2);
-  assert.equal(filtered.nextCursor, "P2");
+  const filtered = await store.listChannels({ status: "open", limit: 2 });
+  assert.deepEqual(
+    filtered.channels.map((c) => c.id),
+    ["P5", "P4"],
+  );
+  const filteredNext = await store.listChannels({
+    status: "open",
+    limit: 2,
+    cursor: filtered.nextCursor,
+  });
+  assert.deepEqual(
+    filteredNext.channels.map((c) => c.id),
+    ["P2", "P1"],
+  );
 }
 
 async function caseBadPageSize(makeStore: CommitmentStoreFactory): Promise<void> {
   const store = await makeStore();
-  for (const limit of [0, -1, 501, 1.5, Number.NaN]) {
-    await assert.rejects(store.listChannels({}, { limit }), (error: unknown) => {
-      return error instanceof TollwayError && error.code === "invalid-channel-query";
-    });
+  for (const limit of [0, -1, 201, 1.5, Number.NaN]) {
+    await assert.rejects(store.listChannels({ limit }), RangeError, `limit ${limit}`);
   }
+  await assert.rejects(store.listChannels({ cursor: "not-a-cursor" }), RangeError);
 }
 
 async function caseStaleSequence(makeStore: CommitmentStoreFactory): Promise<void> {
@@ -427,7 +454,11 @@ export const commitmentStoreConformanceCases: readonly ConformanceCase[] = [
     run: casePaging,
   },
   {
-    name: "rejects a page size outside 1 to 500",
+    name: "orders channels newest first by openedAt",
+    run: caseOrder,
+  },
+  {
+    name: "rejects a page size outside 1 to 200, or a cursor it did not issue",
     run: caseBadPageSize,
   },
   {

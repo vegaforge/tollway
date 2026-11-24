@@ -17,9 +17,8 @@ import { ChannelNotFoundError, CommitmentConflictError } from "./errors.js";
 import { pageChannels } from "./store-query.js";
 import type {
   Channel,
-  ChannelFilter,
-  ChannelListPage,
-  ChannelListRequest,
+  ChannelListFilter,
+  ChannelPage,
   ChannelStatus,
   Commitment,
 } from "./types.js";
@@ -83,14 +82,15 @@ export interface CommitmentStore {
    */
   listChannelsByStatus(status: Channel["status"]): Promise<readonly Channel[]>;
   /**
-   * The paged, filtered listing of tracked channels (#179), ordered by
-   * channel id. Filters are exact matches, and an absent filter matches every
-   * channel. `limit` defaults to 50 and must be an integer from 1 to 500,
-   * otherwise the call throws `invalid-channel-query`. Pass the previous
-   * page's `nextCursor` to continue. Every store returns the same pages for
-   * the same data.
+   * Every tracked channel, newest first (`openedAt`, then id, both
+   * descending), filtered and paginated (#179, #227). Filters are exact
+   * matches; an absent filter matches every channel. `limit` is 1 to 200 and
+   * defaults to 50. A cursor from one page resumes exactly after the last
+   * channel it returned, even when a channel's status changed in between. A
+   * bad `limit` or a cursor the store did not issue throws `RangeError`.
+   * Every store returns the same pages for the same data.
    */
-  listChannels(filter: ChannelFilter, request?: ChannelListRequest): Promise<ChannelListPage>;
+  listChannels(filter?: ChannelListFilter): Promise<ChannelPage>;
 }
 
 export function createMemoryCommitmentStore(): CommitmentStore {
@@ -171,8 +171,8 @@ export function createMemoryCommitmentStore(): CommitmentStore {
     async listChannelsByStatus(status) {
       return [...channels.values()].filter((channel) => channel.status === status);
     },
-    async listChannels(filter, request) {
-      return pageChannels(channels.values(), filter, request);
+    async listChannels(filter = {}) {
+      return pageChannels(channels.values(), filter);
     },
   };
 }

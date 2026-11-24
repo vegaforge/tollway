@@ -6,9 +6,9 @@
  * single settlement, and recover when a counterparty goes quiet. See
  * docs/design.md, "The channel lifecycle manager".
  *
- * This release ships `open`, `commit`, `shouldClose`, `close`, `resume` and
- * `resumeAll`, and `createStellarMppChannelAdapter`, the adapter backed by
- * @stellar/mpp.
+ * This release ships `open`, `commit`, `listChannels`, `shouldClose`, `close`,
+ * `resume` and `resumeAll`, and `createStellarMppChannelAdapter`, the adapter
+ * backed by @stellar/mpp.
  * `recover` is tracked under #38 and remains a typed stub.
  */
 
@@ -67,10 +67,9 @@ export {
 } from "./stores/redis.js";
 export type {
   Channel,
-  ChannelFilter,
-  ChannelListPage,
-  ChannelListRequest,
+  ChannelListFilter,
   ChannelManager,
+  ChannelPage,
   ChannelStatus,
   ClosePolicy,
   CloseResult,

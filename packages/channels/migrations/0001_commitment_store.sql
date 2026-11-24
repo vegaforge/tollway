@@ -7,8 +7,9 @@
 -- Amounts are NUMERIC(39, 0): exact integers up to 39 digits, which holds every
 -- value up to 2^127 - 1, the largest Soroban i128 amount. Timestamps are TEXT
 -- holding the ISO-8601 string the manager wrote, so they read back byte for byte.
--- The id column uses collation "C" so the database orders channels the same way
--- the store's JavaScript code does.
+-- The id and opened_at columns use collation "C" so the database orders channels
+-- the same way the store's JavaScript code does: by UTF-16 code unit, which for
+-- these ASCII values is byte order.
 
 CREATE TABLE channels (
   id                          TEXT PRIMARY KEY COLLATE "C",
@@ -22,7 +23,7 @@ CREATE TABLE channels (
                                 'settlement-mismatched')),
   network                     TEXT NOT NULL CHECK (network IN ('testnet', 'mainnet')),
   open_tx_hash                TEXT NOT NULL,
-  opened_at                   TEXT NOT NULL,
+  opened_at                   TEXT NOT NULL COLLATE "C",
   last_commit_at              TEXT,
   settlement_tx_hash          TEXT,
   returned_remainder          NUMERIC(39, 0),
@@ -35,9 +36,11 @@ CREATE TABLE channels (
   CHECK (committed >= 0 AND committed <= deposit)
 );
 
--- Listing queries: filter by status, or by counterparty and asset, then page by id.
-CREATE INDEX channels_status_idx ON channels (status, id);
-CREATE INDEX channels_counterparty_asset_idx ON channels (counterparty, asset, id);
+-- Listing queries (#179): newest first by opened_at then id, optionally
+-- filtered by status, or by counterparty and asset.
+CREATE INDEX channels_listing_idx ON channels (opened_at DESC, id DESC);
+CREATE INDEX channels_status_idx ON channels (status, opened_at DESC, id DESC);
+CREATE INDEX channels_counterparty_asset_idx ON channels (counterparty, asset, opened_at DESC, id DESC);
 
 -- One row per commitment. The primary key is the database-level backstop
 -- against a duplicate sequence, even if a bug skipped the compare-and-set.

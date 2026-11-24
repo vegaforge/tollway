@@ -775,6 +775,13 @@ describe("ChannelManager.close", () => {
       if (next) observedStatuses.push(next.status);
       return next;
     };
+    // The move to closing is a compare-and-set (#175), so watch that write too.
+    const origTransition = store.transitionChannel.bind(store);
+    store.transitionChannel = async (id, expectedStatus, patch) => {
+      const next = await origTransition(id, expectedStatus, patch);
+      observedStatuses.push(next.status);
+      return next;
+    };
 
     const { adapter } = createFakeAdapter();
     const manager = createChannelManager({ adapter, store });
@@ -1645,5 +1652,42 @@ describe("ChannelManager concurrent writers (#175)", () => {
     const last = stream.at(-1);
     expect(calls.closeChannel).toHaveLength(1);
     expect(calls.closeChannel[0]?.cumulativeAmount).toBe(last?.cumulativeAmount);
+  });
+});
+
+// ── listChannels ─────────────────────────────────────────────────────────────
+
+describe("ChannelManager.listChannels", () => {
+  function managerWithClock(adapter: MppChannelAdapter) {
+    let tick = 0;
+    return createChannelManager({
+      adapter,
+      now: () => new Date(Date.UTC(2026, 0, 1, 0, 0, tick++)).toISOString(),
+    });
+  }
+
+  it("lists tracked channels newest first and forwards filters and paging", async () => {
+    const { adapter } = createFakeAdapter();
+    const manager = managerWithClock(adapter);
+
+    for (const counterparty of ["GONE", "GTWO", "GTHREE"]) {
+      await manager.open({
+        counterparty,
+        asset: "CBIELTK6YBZJU5UP2WWQEUCYKLPU6AUNZ2BQ4WWFEIE3USCIHMXQDAMA",
+        deposit: "10000000",
+        network: "testnet",
+      });
+    }
+
+    const all = await manager.listChannels();
+    expect(all.channels.map((channel) => channel.id)).toEqual(["CTEST003", "CTEST002", "CTEST001"]);
+
+    const filtered = await manager.listChannels({ counterparty: "GTWO" });
+    expect(filtered.channels.map((channel) => channel.id)).toEqual(["CTEST002"]);
+
+    const first = await manager.listChannels({ limit: 1 });
+    expect(first.channels.map((channel) => channel.id)).toEqual(["CTEST003"]);
+    const second = await manager.listChannels({ limit: 1, cursor: first.nextCursor });
+    expect(second.channels.map((channel) => channel.id)).toEqual(["CTEST002"]);
   });
 });

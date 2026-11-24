@@ -2,6 +2,7 @@ import { createHash } from "node:crypto";
 import { TollwayError } from "@vegaforge/tollway-core";
 import { describe, expect, it } from "vitest";
 import { ChannelNotFoundError, CommitmentConflictError } from "../errors.js";
+import { encodeChannelCursor } from "../store-query.js";
 import { createRedisCommitmentStore, type RedisLikeClient } from "./redis.js";
 
 type Log = { op: string; keys: string[]; args: string[] };
@@ -288,9 +289,11 @@ describe("createRedisCommitmentStore: listings", () => {
     hashes.set("tollway:ch:{CB}:record", record("CB"));
     const store = createRedisCommitmentStore({ client });
 
-    const page = await store.listChannels({}, { limit: 1 });
+    const page = await store.listChannels({ limit: 1 });
 
-    expect(page.channels.map((c) => c.id)).toEqual(["CA"]);
-    expect(page.nextCursor).toBe("CA");
+    expect(page.channels.map((c) => c.id)).toEqual(["CB"]);
+    expect(page.nextCursor).toBe(
+      encodeChannelCursor({ openedAt: "2026-11-24T00:00:00.000Z", id: "CB" }),
+    );
   });
 });

@@ -25,9 +25,8 @@ import type { CommitmentAppendExpectation, CommitmentStore } from "../store.js";
 import { pageChannels } from "../store-query.js";
 import type {
   Channel,
-  ChannelFilter,
-  ChannelListPage,
-  ChannelListRequest,
+  ChannelListFilter,
+  ChannelPage,
   ChannelStatus,
   Commitment,
 } from "../types.js";
@@ -459,13 +458,10 @@ export function createRedisCommitmentStore(options: RedisCommitmentStoreOptions)
       return (await allChannels()).filter((channel) => channel.status === status);
     },
 
-    async listChannels(
-      filter: ChannelFilter,
-      request?: ChannelListRequest,
-    ): Promise<ChannelListPage> {
+    async listChannels(filter: ChannelListFilter = {}): Promise<ChannelPage> {
       // Reads every indexed channel. Fine for the sizes this store targets;
       // a status index is the next step if that changes (see the docs page).
-      return pageChannels(await allChannels(), filter, request);
+      return pageChannels(await allChannels(), filter);
     },
   };
 }

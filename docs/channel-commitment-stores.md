@@ -63,8 +63,11 @@ migrations will be numbered in order, and each applies once.
 exactly, and read back as the integer string. A `CHECK` keeps `committed` from
 passing `deposit`.
 
-**Ordering.** The `id` column uses collation `"C"`. The database then orders
-channels the same way the store's JavaScript does, so pages agree across stores.
+**Ordering.** The `id` and `opened_at` columns use collation `"C"`. The database
+then orders channels the same way the store's JavaScript does, newest first by
+`opened_at` and then id, so pages agree across stores. The listing is one keyset
+query, and the migration indexes it with and without the status and
+counterparty filters.
 
 **Isolation.** Appends run at `READ COMMITTED`, which the store sets explicitly.
 The compare-and-set is a conditional `UPDATE ... WHERE sequence = $n AND status = $m`.
@@ -87,9 +90,12 @@ If a rollback fails, the store destroys that pool connection rather than return
 it, and throws the original error.
 
 **Tests.** The unit tests run the store against a scripted client and check the
-SQL shape, the transaction boundaries and the conflict mapping. The SQL has not
-been run against a live PostgreSQL in this change. Run the conformance suite
-(below) against a real database before you rely on it.
+SQL shape, the transaction boundaries and the conflict mapping. The full
+conformance suite (below) passed against PostgreSQL 18 through `pg` with an
+eight-connection pool, so its concurrent-append case raced real connections. CI
+does not run it yet, because that needs a PostgreSQL service and a `pg`
+development dependency. Run the suite against your own database before you rely
+on it.
 
 ## Redis
 
@@ -135,7 +141,9 @@ record at a time. That is fine for the sizes this store targets. A status index
 is the next step if the number of channels grows.
 
 **Tests.** As with PostgreSQL, the unit tests use a scripted client and do not
-run the Lua. The conformance suite against a real Redis is still to be added.
+run the Lua. The full conformance suite passed against Redis 8.10 through
+`ioredis`, running the real scripts. CI does not run it yet, for the same reason
+as PostgreSQL.
 
 ## Running the conformance suite against a new store
 

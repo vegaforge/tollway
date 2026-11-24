@@ -2,6 +2,7 @@ import { readFile } from "node:fs/promises";
 import { TollwayError } from "@vegaforge/tollway-core";
 import { describe, expect, it } from "vitest";
 import { ChannelNotFoundError, CommitmentConflictError } from "../errors.js";
+import { encodeChannelCursor } from "../store-query.js";
 import {
   createPostgresCommitmentStore,
   type PostgresClient,
@@ -307,32 +308,33 @@ describe("createPostgresCommitmentStore: other writes", () => {
   it("builds the listing query from the set filters and reports a next cursor", async () => {
     const { pool, calls } = scriptedPool((text) => {
       if (text.startsWith("SELECT")) {
-        return rows(channelRow({ id: "CA" }), channelRow({ id: "CB" }), channelRow({ id: "CC" }));
+        return rows(channelRow({ id: "CC" }), channelRow({ id: "CB" }), channelRow({ id: "CA" }));
       }
       return EMPTY;
     });
     const store = createPostgresCommitmentStore({ client: pool });
+    const cursor = encodeChannelCursor({ openedAt: "2026-11-24T00:00:00.000Z", id: "CD" });
 
-    const page = await store.listChannels(
-      { status: "open", network: "testnet" },
-      { limit: 2, cursor: "CA" },
-    );
+    const page = await store.listChannels({ status: "open", network: "testnet", limit: 2, cursor });
 
     const select = calls.at(-1);
-    expect(select?.text).toContain("WHERE status = $1 AND network = $2 AND id > $3");
-    expect(select?.text).toContain("ORDER BY id LIMIT $4");
-    expect(select?.values).toEqual(["open", "testnet", "CA", 3]);
-    expect(page.channels.map((c) => c.id)).toEqual(["CA", "CB"]);
-    expect(page.nextCursor).toBe("CB");
+    expect(select?.text).toContain(
+      "WHERE status = $1 AND network = $2 AND (opened_at, id) < ($3, $4)",
+    );
+    expect(select?.text).toContain("ORDER BY opened_at DESC, id DESC LIMIT $5");
+    expect(select?.values).toEqual(["open", "testnet", "2026-11-24T00:00:00.000Z", "CD", 3]);
+    expect(page.channels.map((c) => c.id)).toEqual(["CC", "CB"]);
+    expect(page.nextCursor).toBe(
+      encodeChannelCursor({ openedAt: "2026-11-24T00:00:00.000Z", id: "CB" }),
+    );
   });
 
-  it("rejects a page size outside 1 to 500 before querying", async () => {
+  it("rejects a page size outside 1 to 200, or a foreign cursor, before querying", async () => {
     const { pool, calls } = scriptedPool(() => EMPTY);
     const store = createPostgresCommitmentStore({ client: pool });
 
-    await expect(store.listChannels({}, { limit: 501 })).rejects.toMatchObject({
-      code: "invalid-channel-query",
-    });
+    await expect(store.listChannels({ limit: 201 })).rejects.toBeInstanceOf(RangeError);
+    await expect(store.listChannels({ cursor: "CA" })).rejects.toBeInstanceOf(RangeError);
     expect(calls).toHaveLength(0);
   });
 

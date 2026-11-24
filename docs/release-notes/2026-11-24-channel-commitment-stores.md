@@ -22,9 +22,11 @@ channel state across restarts and across processes.
   A lost race throws `CommitmentConflictError` and writes nothing. The manager
   commits and closes through these methods, and a losing close throws
   `ChannelAlreadyClosedError`.
-- **`listChannels`.** A paged listing with exact-match filters on status,
-  counterparty, asset and network, ordered by channel id. Page sizes outside
-  1 to 500 throw `invalid-channel-query`.
+- **`listChannels`.** The listing from #227 gains a `network` filter, and every
+  store now answers it with the same rules (`store-query.ts`): newest first by
+  `openedAt` then id, an opaque cursor, a page size from 1 to 200, and a
+  `RangeError` for a bad size or cursor. The PostgreSQL store runs it as one
+  indexed keyset query.
 - **PostgreSQL store.** `createPostgresCommitmentStore`, with migration
   `packages/channels/migrations/0001_commitment_store.sql`. Amounts are
   `NUMERIC(39, 0)`. An append is one transaction, and a primary key backs the
@@ -37,8 +39,8 @@ channel state across restarts and across processes.
 ## Breaking for custom stores
 
 `CommitmentStore` changed. `appendCommitment` now takes an expectation and
-returns the advanced channel. `transitionChannel` and `listChannels` are new.
-A custom store must implement them. Use the conformance suite to check it.
+returns the advanced channel. `transitionChannel` is new.
+A custom store must implement it. Use the conformance suite to check it.
 
 ## Not in this release
 

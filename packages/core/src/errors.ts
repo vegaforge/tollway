@@ -31,7 +31,6 @@ export type TollwayErrorCode =
   | "channel-not-open"
   | "channel-already-closed"
   | "commitment-conflict"
-  | "invalid-channel-query"
   | "invalid-store-config"
   | "corrupt-channel-record"
   | "commitment-exceeds-deposit"

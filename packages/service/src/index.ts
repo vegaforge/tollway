@@ -20,6 +20,12 @@ export {
 } from "./app.js";
 export { type AuthenticatedKey, hashApiKey } from "./auth.js";
 export {
+  type ChannelsModuleOptions,
+  type ChannelView,
+  type CloseRequest,
+  createChannelsModule,
+} from "./channels.js";
+export {
   type ApiKeyConfig,
   type ApiKeyScope,
   apiKeyConfigSchema,

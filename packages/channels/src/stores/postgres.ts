@@ -19,12 +19,11 @@
 import { type StellarNetwork, TollwayError } from "@vegaforge/tollway-core";
 import { ChannelNotFoundError, CommitmentConflictError } from "../errors.js";
 import type { CommitmentAppendExpectation, CommitmentStore } from "../store.js";
-import { parseChannelListRequest } from "../store-query.js";
+import { decodeChannelCursor, parseChannelPageLimit, toChannelPage } from "../store-query.js";
 import type {
   Channel,
-  ChannelFilter,
-  ChannelListPage,
-  ChannelListRequest,
+  ChannelListFilter,
+  ChannelPage,
   ChannelStatus,
   Commitment,
 } from "../types.js";
@@ -476,38 +475,41 @@ export function createPostgresCommitmentStore(
       return result.rows.map(rowToChannel);
     },
 
-    async listChannels(
-      filter: ChannelFilter,
-      request?: ChannelListRequest,
-    ): Promise<ChannelListPage> {
-      const { limit, after } = parseChannelListRequest(request);
+    async listChannels(filter: ChannelListFilter = {}): Promise<ChannelPage> {
+      // The same rules as every other store (store-query.ts): exact filters,
+      // newest first by opened_at then id, keyset paging from the cursor.
+      const limit = parseChannelPageLimit(filter.limit);
+      const cursor = filter.cursor === undefined ? undefined : decodeChannelCursor(filter.cursor);
       const clauses: string[] = [];
       const params: unknown[] = [];
-      const add = (column: string, operator: string, value: unknown): void => {
+      const param = (value: unknown): string => {
         params.push(value);
-        clauses.push(`${column} ${operator} $${params.length}`);
+        return `$${params.length}`;
       };
-      if (filter.status !== undefined) add("status", "=", filter.status);
-      if (filter.counterparty !== undefined) add("counterparty", "=", filter.counterparty);
-      if (filter.asset !== undefined) add("asset", "=", filter.asset);
-      if (filter.network !== undefined) add("network", "=", filter.network);
-      if (after !== undefined) add("id", ">", after);
-      // One extra row tells us whether another page follows.
-      params.push(limit + 1);
+      if (filter.status !== undefined) clauses.push(`status = ${param(filter.status)}`);
+      if (filter.counterparty !== undefined) {
+        clauses.push(`counterparty = ${param(filter.counterparty)}`);
+      }
+      if (filter.asset !== undefined) clauses.push(`asset = ${param(filter.asset)}`);
+      if (filter.network !== undefined) clauses.push(`network = ${param(filter.network)}`);
+      if (cursor !== undefined) {
+        // Rows after the cursor in descending order. Both columns use
+        // collation "C" (see the migration), the code-unit order the other
+        // stores use.
+        const openedAt = param(cursor.openedAt);
+        const id = param(cursor.id);
+        clauses.push(`(opened_at, id) < (${openedAt}, ${id})`);
+      }
+      // One extra row tells whether another page follows.
+      const limitParam = param(limit + 1);
       const where = clauses.length > 0 ? `WHERE ${clauses.join(" AND ")}` : "";
 
       const result = await client.query(
         `SELECT ${CHANNEL_SELECT} FROM ${names.channels} ${where} ` +
-          `ORDER BY id LIMIT $${params.length}`,
+          `ORDER BY opened_at DESC, id DESC LIMIT ${limitParam}`,
         params,
       );
-      const channels = result.rows.map(rowToChannel);
-      const pageItems = channels.slice(0, limit);
-      const last = pageItems.at(-1);
-      if (channels.length > limit && last !== undefined) {
-        return { channels: pageItems, nextCursor: last.id };
-      }
-      return { channels: pageItems };
+      return toChannelPage(result.rows.map(rowToChannel), limit);
     },
   };
 }
