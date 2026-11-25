@@ -15,6 +15,7 @@ import {
   type Gate,
   type GateOutcome,
   type RouteTable,
+  readBodyStream,
   renderGateRejection,
 } from "@vegaforge/tollway-server";
 
@@ -56,6 +57,9 @@ export function withPaywall(
         method: request.method,
         url: requestUrl(request),
         headers: requestHeaders(request),
+        // Read from a clone, only for a route with bindBody, so the handler
+        // still reads the original body unchanged.
+        body: { read: (maxBytes) => readBodyStream(request.clone().body, maxBytes) },
       });
     } catch {
       return jsonResponse(GATE_ERROR_BODY, 502);

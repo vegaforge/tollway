@@ -15,6 +15,7 @@
     "../../packages/channels/src/index.ts",
     "../../packages/reconcile/src/index.ts",
     "../../packages/observability/src/index.ts",
+    "../../packages/signer-vault/src/index.ts",
     "../../packages/theme/src/index.ts",
     "../../packages/theme/src/preset.ts"
   ],

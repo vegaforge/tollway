@@ -492,6 +492,37 @@ describe("createMppChargeHandler", () => {
     });
   });
 
+  describe("deriveMppChargeNonce", () => {
+    it("is unchanged: base64url SHA-256 of the credential text (#163 regression)", async () => {
+      // Computed independently with node:crypto. The nonce keys replay
+      // protection, so an edge-runtime change must never alter it.
+      expect(await deriveMppChargeNonce("Payment eyJjaGFsbGVuZ2UiOiJ0b2xsd2F5LWVkZ2UifQ")).toBe(
+        "uga1r6Fo8en3zSP3dsTRHtse9H9AOj5mKv8mFlMLdl4",
+      );
+    });
+  });
+
+  describe("settle transport failures on edge runtimes (#163)", () => {
+    // A lost answer says nothing about the payment, which may have landed,
+    // so it must surface as a failure, never as a rejection that frees the
+    // payment for another settle.
+    it.each([
+      [
+        "Bun",
+        Object.assign(new Error("Unable to connect. Is the computer able to access the url?"), {
+          code: "ConnectionRefused",
+        }),
+      ],
+      ["workerd", new Error("Network connection lost.")],
+    ])("throws facilitator-unavailable on %s instead of rejecting", async (_runtime, error) => {
+      stub.mppx.verifyCredential.mockRejectedValue(error);
+      const handler = createMppChargeHandler(options());
+      await expect(
+        handler.settle({ payment: payment(credential()), offer, payer: PAYER, nonce: "n" }),
+      ).rejects.toMatchObject({ code: "facilitator-unavailable" });
+    });
+  });
+
   describe("settle error classification", () => {
     async function settleWith(error: unknown) {
       stub.mppx.verifyCredential.mockRejectedValue(error);

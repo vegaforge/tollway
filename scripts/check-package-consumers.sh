@@ -29,6 +29,7 @@ PUBLISHABLE=(
   packages/adapter-next
   packages/ai-sdk
   packages/channels
+  packages/cli
   packages/client
   packages/mcp
   packages/core
@@ -36,6 +37,7 @@ PUBLISHABLE=(
   packages/reconcile
   packages/server
   packages/service
+  packages/signer-vault
   packages/theme
 )
 
@@ -49,6 +51,7 @@ ENTRY_POINTS=(
   @vegaforge/tollway-adapter-next/proxy
   @vegaforge/tollway-ai-sdk
   @vegaforge/tollway-channels
+  @vegaforge/tollway-cli
   @vegaforge/tollway-client
   @vegaforge/tollway-client/mcp
   @vegaforge/tollway-client/sqlite
@@ -62,6 +65,7 @@ ENTRY_POINTS=(
   @vegaforge/tollway-server
   @vegaforge/tollway-server/testing
   @vegaforge/tollway-service
+  @vegaforge/tollway-signer-vault
   @vegaforge/tollway-theme
   @vegaforge/tollway-theme/preset
 )
