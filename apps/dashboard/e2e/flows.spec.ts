@@ -31,14 +31,17 @@ test("a channel-commitment receipt links to its channel", async ({ page }) => {
   await page.getByTestId("receipt-row-rcpt-channel-openai-01").click();
   await page.getByTestId("receipt-channel-link").click();
 
-  await expect(page).toHaveURL(/\/channels#channel-row-ch-openai-03$/);
-  await expect(page.getByRole("heading", { level: 1 })).toHaveText("Channels");
-  await expect(page.getByTestId("channel-row-ch-openai-03")).toBeVisible();
+  await expect(page).toHaveURL(/\/channels\/ch-openai-03$/);
+  await expect(page.getByRole("heading", { level: 1 })).toHaveText("Channel detail");
+  await expect(page.getByTestId("channel-detail")).toContainText("ch-openai-03");
 });
 
 test("the theme choice survives a reload", async ({ page }) => {
   await page.goto("/");
   const toggle = page.getByRole("button", { name: "Toggle color theme" });
+  // Before hydration the toggle reports "not pressed" in dark mode too, and a
+  // click is lost. Read its state and click only once it has mounted.
+  await expect(toggle).toHaveAttribute("data-ready", "true");
   const startsDark = (await toggle.getAttribute("aria-pressed")) === "true";
 
   await toggle.click();
@@ -48,10 +51,9 @@ test("the theme choice survives a reload", async ({ page }) => {
 
   await page.reload();
 
-  await expect(page.getByRole("button", { name: "Toggle color theme" })).toHaveAttribute(
-    "aria-pressed",
-    expected,
-  );
+  const reloaded = page.getByRole("button", { name: "Toggle color theme" });
+  await expect(reloaded).toHaveAttribute("data-ready", "true");
+  await expect(reloaded).toHaveAttribute("aria-pressed", expected);
   await expect(page.locator("html")).toHaveClass(startsDark ? /light/ : /dark/);
 });
 

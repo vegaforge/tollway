@@ -144,23 +144,15 @@ describe("min-channel-deposit trace", () => {
     perModel: { "mpp-channel": { minChannelDeposit: "200" } },
   };
 
-  it("passes a deposit at the minimum", async () => {
-    const trace = await engine(policy).evaluate(intent({ model: "mpp-channel", amount: "200" }));
-    expect(entry(trace, "min-channel-deposit")).toMatchObject({
-      outcome: "pass",
-      limit: "200",
-      current: null,
-      projected: "200",
-      window: null,
-    });
-  });
-
-  it("fails a deposit below the minimum", async () => {
+  // #181: a payment is never compared with the minimum deposit. A channel open is.
+  it("is not applicable to a channel payment, even one below the minimum", async () => {
     const trace = await engine(policy).evaluate(intent({ model: "mpp-channel", amount: "100" }));
     expect(entry(trace, "min-channel-deposit")).toMatchObject({
-      outcome: "fail",
-      limit: "200",
-      projected: "100",
+      configured: true,
+      outcome: "not-applicable",
+      limit: null,
+      projected: null,
+      window: null,
     });
   });
 
@@ -353,6 +345,9 @@ describe("evaluation after an earlier failure", () => {
       ["per-model-disabled", "fail"],
       ["min-channel-deposit", "not-applicable"],
       ["budget-daily", "fail"],
+      ["budget-weekly", "not-applicable"],
+      ["budget-monthly", "not-applicable"],
+      ["budget-rolling", "not-applicable"],
       ["budget-total", "pass"],
       ["per-service", "fail"],
       ["per-service-daily", "not-applicable"],

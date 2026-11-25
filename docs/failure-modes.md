@@ -33,7 +33,7 @@ While a payment is held:
 - this process keeps the payment's in-flight slot, so a retry here shares the
   held attempt and gets the same answer;
 - this process keeps renewing the cross-process settlement lock, so a retry in
-  any other process gets 409 `settlement in progress`;
+  any other process gets 409 `settlement-in-progress`;
 - nothing calls `/settle` for the payment again.
 
 The hold ends at the first of:
@@ -59,14 +59,16 @@ after `settlementLockTtlMs`. That is the one case where a retry can reach
 
 | Failure | Gate outcome | Payer may have been charged | Operator action |
 | ------- | ------------ | --------------------------- | --------------- |
-| `/verify` hangs past the deadline | rejected, 503, reason `facilitator-timeout`, `Retry-After: 1` | no | Check facilitator health; the agent retries with the same payment. |
-| `/verify` returns a malformed body, a non-protocol body, or a transport error | thrown `TollwayError("payment-failed")` | no | Adapter behaviour for a thrown gate error is #107; the payment was never settled. Check the facilitator version and URL. |
-| `/settle` hangs past the deadline | rejected, 503, reason `settlement-unknown`, `Retry-After` equal to the hold; payment held | possibly | Do not ask the agent to pay again. If the hold ends without an answer, reconcile the payment nonce on chain. |
+| `/verify` hangs past the deadline | rejected, 503, code `facilitator-unavailable`, `Retry-After` (default 1) | no | Check facilitator health; the agent retries with the same payment. |
+| `/verify` returns a malformed body, a non-protocol body, or a transport error | rejected, 503, code `facilitator-unavailable`, `Retry-After` (default 1) | no | The payment was never settled. Check the facilitator version and URL. |
+| `/verify` refuses the payment | rejected, 402, code `payment-invalid`, the facilitator's reason in `upstreamReason`, a fresh `PAYMENT-REQUIRED` | no | None; the agent signs a new payment. |
+| `/settle` hangs past the deadline | rejected, 503, code `settlement-unknown`, `Retry-After` equal to the hold; payment held | possibly | Do not ask the agent to pay again. If the hold ends without an answer, reconcile the payment nonce on chain. |
 | `/settle` answers success after the deadline | the original request already got the 503 above; the late receipt is cached, then the hold ends | yes | None. A retry replays the late receipt. |
 | `/settle` answers success after the deadline but the cache write fails | the hold continues to its end; the failure goes to `onCacheError` | yes | Reconcile the nonce on chain: once the hold ends, a retry would settle again. |
-| `/settle` returns `success: false` | rejected, 502, reason from the facilitator; payment freed | no | Treat as an insufficient balance or a rejected authorization; the agent may pay again. |
-| `/settle` fails after the request may have been sent (timeout, reset, error answer) | thrown `TollwayError("payment-failed")`; payment held | possibly | Same as a hung `/settle`: retries are refused until the hold ends. Check facilitator health. |
-| `/settle` connection refused or DNS failure | thrown `TollwayError("payment-failed")`; payment freed at once | no | Retriable. Check the facilitator URL and health. |
+| `/settle` returns `success: false` | rejected, 502, code `settlement-failed`, the facilitator's reason in `upstreamReason`; payment freed | no | Treat as an insufficient balance or a rejected authorization; the agent may pay again. |
+| `/settle` fails after the request may have been sent (timeout, reset, error answer) | rejected, 503, code `settlement-unknown`, `Retry-After` equal to the hold; payment held | possibly | Same as a hung `/settle`: retries are refused until the hold ends. Check facilitator health. |
+| `/settle` connection refused or DNS failure | rejected, 503, code `facilitator-unavailable`; payment freed at once | no | Retriable. Check the facilitator URL and health. |
+| A custom facilitator client throws anything other than `TollwayError("facilitator-unavailable")` or `TollwayError("outcome-unknown")` | thrown; a `/settle` failure keeps the payment held as above | possibly, for `/settle` | A defect in the client. Fix it; see docs/gate-errors.md, "Thrown errors". |
 | `/supported` fails | the gate never calls it; payments are unaffected | no | Capability checks run at startup (`createFacilitatorValidator`); see the deployment guide. |
 
 ## Settlement lock timing
@@ -84,7 +86,7 @@ not be released during the hold is reported through `onCacheError`.
 | Failure | Gate outcome | Payer may have been charged | Operator action |
 | ------- | ------------ | --------------------------- | --------------- |
 | `get` fails | thrown store error, nothing verified, nothing settled | no | Fail closed by design. Restore Redis; the agent retries. |
-| `SET NX` for the lock fails or the lock is held elsewhere | thrown store error, or rejected 409 `settlement in progress` | no | A 409 means another process is settling this payment; a thrown error means the store is down. |
+| `SET NX` for the lock fails or the lock is held elsewhere | thrown store error, or rejected 409 `settlement-in-progress` | no | A 409 means another process is settling this payment; a thrown error means the store is down. |
 | `set` fails after a successful settlement | settled, 200 with the receipt, `cacheError` set and sent to `onCacheError` | yes | The payer got its receipt. A retry may not be recognised as a replay until the write succeeds or the TTL passes. |
 | `release` fails after a successful settlement | settled, 200 with the receipt, `cacheError` set | yes | The lock expires at its TTL. Check Redis latency. |
 | renewal fails or the lock is lost mid-settlement | settled, 200 with the receipt, `lockLost` and `cacheError` set | yes | Treat as an alert: another process may have settled the same payment. Reconcile the nonce. |

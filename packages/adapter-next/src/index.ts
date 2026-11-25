@@ -11,10 +11,19 @@
  */
 
 import type { SignedReceipt } from "@vegaforge/tollway-core";
-import type { Gate, RouteTable } from "@vegaforge/tollway-server";
+import {
+  type Gate,
+  type GateOutcome,
+  type RouteTable,
+  readBodyStream,
+  renderGateRejection,
+} from "@vegaforge/tollway-server";
 
 /** Extra argument a paid handler receives: the verified receipt. */
 export type PaidContext = { receipt: SignedReceipt };
+
+/** The one body every adapter returns when the gate itself throws (#107). */
+const GATE_ERROR_BODY = { error: "payment backend unavailable" } as const;
 
 /** A route handler that only runs after payment has settled. */
 export type PaidHandler = (request: Request, context: PaidContext) => Response | Promise<Response>;
@@ -24,7 +33,7 @@ export type PaidHandler = (request: Request, context: PaidContext) => Response |
  * only on a settled payment, receives the verified receipt via the second
  * argument, and has the PAYMENT-RESPONSE and TOLLWAY-RECEIPT headers added to its response.
  * Otherwise the wrapper answers the request itself (402 with the challenge,
- * or the rejection status with `{ error: reason }`).
+ * or the rejection status with `{ error: { code, message } }`).
  *
  * Usage:
  *
@@ -42,11 +51,19 @@ export function withPaywall(
   handler: PaidHandler,
 ): (request: Request) => Promise<Response> {
   return async (request: Request): Promise<Response> => {
-    const outcome = await gate({
-      method: request.method,
-      url: requestUrl(request),
-      headers: requestHeaders(request),
-    });
+    let outcome: GateOutcome;
+    try {
+      outcome = await gate({
+        method: request.method,
+        url: requestUrl(request),
+        headers: requestHeaders(request),
+        // Read from a clone, only for a route with bindBody, so the handler
+        // still reads the original body unchanged.
+        body: { read: (maxBytes) => readBodyStream(request.clone().body, maxBytes) },
+      });
+    } catch {
+      return jsonResponse(GATE_ERROR_BODY, 502);
+    }
 
     if (outcome.kind === "settled") {
       const response = await handler(request, { receipt: outcome.receipt });
@@ -57,7 +74,10 @@ export function withPaywall(
       return jsonResponse(outcome.challenge, outcome.status, outcome.headers);
     }
 
-    return jsonResponse({ error: outcome.reason }, outcome.status, outcome.headers);
+    // The body and headers come from the server's one renderer, so every
+    // adapter answers each error code the same way (#161).
+    const rejection = renderGateRejection(outcome);
+    return jsonResponse(rejection.body, rejection.status, rejection.headers);
   };
 }
 

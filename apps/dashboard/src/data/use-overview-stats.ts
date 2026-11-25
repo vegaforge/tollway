@@ -9,7 +9,7 @@
  * a reload.
  *
  * On a `reset` event the stats revert to the stub zeros until the next
- * `metrics.delta` arrives; the view shows "—" for stale values.
+ * `metrics.delta` arrives; the view shows "," for stale values.
  */
 
 import { useCallback, useEffect, useRef, useState } from "react";

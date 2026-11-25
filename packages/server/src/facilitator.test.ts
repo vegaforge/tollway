@@ -214,6 +214,6 @@ describe("createHttpFacilitator", () => {
     fetchMock.mockResolvedValueOnce(new Response("upstream boom", { status: 503 }));
     await expect(
       createHttpFacilitator(FACILITATOR_URL).verify({ payment, offer }),
-    ).rejects.toMatchObject({ code: "payment-failed" });
+    ).rejects.toMatchObject({ code: "facilitator-unavailable" });
   });
 });

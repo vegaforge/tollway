@@ -14,12 +14,14 @@
  * The settler is the seam between this orchestrator and the protocol-
  * specific dance (Soroban auth entry signing for x402, MPP channel
  * commitments, etc.). Tests inject a mock settler; production wires a
- * settler backed by @x402/stellar (and later @stellar/mpp). Keeping the
+ * settler backed by @x402/stellar or @stellar/mpp. Keeping the
  * settler injected means the client itself stays pure orchestration and
  * the test surface is small.
  */
 
 import {
+  ChannelOpenFailedError,
+  type ChannelOpenSubmission,
   type CounterpartyQuarantine,
   canonicalJson,
   comparePolicyTraces,
@@ -41,6 +43,7 @@ import {
   TollwayError,
   verifyReceipt,
 } from "@vegaforge/tollway-core";
+import type { HttpExchange, PaidExchange } from "./exchange.js";
 import {
   type OfferChecks,
   OfferRejectedError,
@@ -63,6 +66,27 @@ import {
   type SignedTerms,
 } from "./retry.js";
 
+export type {
+  HttpExchange,
+  PaidExchange,
+  ReplayableRequest,
+  ReplayOptions,
+} from "./exchange.js";
+export {
+  createPaidFetch,
+  type PaidFetch,
+  type PaidFetchOptions,
+  type PaidResponse,
+} from "./paid-fetch.js";
+export {
+  type CachedPolicyEntry,
+  createMemoryPolicyCache,
+  type FetchedPolicy,
+  type FetchPolicyOptions,
+  fetchPolicy,
+  type PolicyCache,
+  PolicyFetchError,
+} from "./policy-fetcher.js";
 export {
   AmbiguousSettlementError,
   MAX_RETRY_AFTER_MS,
@@ -71,6 +95,17 @@ export {
   type SettlementOutcomeKind,
   type SignedTerms,
 } from "./retry.js";
+export {
+  type AgentSigner,
+  type AgentSignerCapabilities,
+  type AgentSignerCapability,
+  createKeypairSigner,
+  createSmartAccountSigner,
+  type MppKeyCapability,
+  SignerCapabilityError,
+  type SmartAccountSignerOptions,
+  signerModels,
+} from "./signer.js";
 
 /** Events the client emits so callers and observability can follow along. */
 export type ClientEvent =
@@ -116,8 +151,26 @@ export type ClientEvent =
   | { type: "policy:shadow-error"; resource: string; error: Error }
   | { type: "error"; resource: string; error: Error }
   | { type: "budget:warning"; remaining: string }
+  /**
+   * A channel settler opened or closed a payment channel. The client never
+   * opens channels itself: a settler reports these through
+   * `ClientSettler.subscribe` (#187).
+   */
   | { type: "channel:opened"; channelId: string }
   | { type: "channel:closed"; channelId: string }
+  /**
+   * The payment was made on another model than the one chosen (#183): a
+   * channel could not be opened, or the counterparty's channel path is
+   * cooling down after a failed open. The `payment` event that follows
+   * reports the model that actually paid.
+   */
+  | {
+      type: "fallback";
+      resource: string;
+      from: SettlementModel;
+      to: SettlementModel;
+      reason: string;
+    }
   | {
       type: "counterparty:quarantined";
       counterparty: string;
@@ -127,6 +180,9 @@ export type ClientEvent =
     };
 
 export type ClientEventHandler = (event: ClientEvent) => void;
+
+/** The events a settler may put on the client's stream. */
+export type SettlerEvent = Extract<ClientEvent, { type: "channel:opened" | "channel:closed" }>;
 
 /**
  * The agent-side analog of the server's `FacilitatorClient`. Given a
@@ -138,11 +194,66 @@ export type ClientEventHandler = (event: ClientEvent) => void;
 export interface ClientSettler {
   settle(input: SettleRequest): Promise<SignedReceipt>;
   /**
+   * Finishes an HTTP exchange the caller already started (#201): answers the
+   * 402 in `input.exchange.challenge` and replays `input.exchange.request`
+   * with the payment, without sending the unpaid request again. Returns the
+   * receipt and the paid response. A settler without it cannot be used by
+   * `createPaidFetch`.
+   */
+  settleExchange?(input: ExchangeSettleRequest): Promise<PaidExchange>;
+  /**
    * The Stellar address this settler pays from, when it knows it. The
    * client then requires `receipt.payer` to equal it.
    */
   readonly payer?: string;
+  /**
+   * Called once by `createClient` with a function that puts a settler's
+   * events on the client's `on()` stream (#187). A channel settler wires its
+   * channel manager's `channel:opened` and `channel:closed` lifecycle events
+   * through it. Settlers that have nothing to report leave it out.
+   */
+  subscribe?(emit: (event: SettlerEvent) => void): void;
 }
+
+/** What `onOrphanedChannel` is told about an open that may have landed (#183). */
+export type OrphanedChannel = {
+  counterparty: string;
+  asset: string;
+  channelId?: string;
+  txHash?: string;
+  error: Error;
+};
+
+/**
+ * Paying by x402 when a channel cannot be opened (#183). The fallback is
+ * taken only for an error with code `channel-open-failed`, which a channel
+ * settler throws when the open failed before any voucher was signed. Any
+ * later failure may have paid the service already and is never retried on
+ * another model.
+ */
+export type ChannelFallbackOptions = {
+  /** The settler that pays when the channel path cannot. */
+  x402: ClientSettler;
+  /**
+   * After a failed open, how long the counterparty's channel path rests
+   * before one request may try to open again. Doubles on each further
+   * failure, up to `maxCooldownMs`. Defaults to 60 seconds.
+   */
+  cooldownMs?: number;
+  /** The longest cooldown. Defaults to 15 minutes. */
+  maxCooldownMs?: number;
+  /**
+   * How many counterparty and asset pairs the cooldown remembers; the
+   * oldest is forgotten first. Defaults to 1000.
+   */
+  maxTracked?: number;
+  /**
+   * Called when an open may have landed on chain (`submission:
+   * "ambiguous"`), so the funder side can resume or recover the channel.
+   * A throwing callback does not fail the payment.
+   */
+  onOrphanedChannel?: (channel: OrphanedChannel) => void;
+};
 
 export type SettleRequest = {
   resource: string;
@@ -156,10 +267,34 @@ export type SettleRequest = {
   pinned?: SignedTerms;
 };
 
-export type TollwayClientOptions = {
+/** A settlement that finishes an exchange the caller started; see `ClientSettler.settleExchange`. */
+export type ExchangeSettleRequest = SettleRequest & { exchange: HttpExchange };
+
+/**
+ * Where payments go: one settler for every model, or one per model (#201).
+ * With `settlers`, a payment routed to a model that has no settler is refused
+ * with `no-viable-model`; it never falls through to another model.
+ */
+export type ClientSettlers =
+  | {
+      /** The protocol-specific signer / submitter for an offer. */
+      settler: ClientSettler;
+      settlers?: undefined;
+    }
+  | {
+      settler?: undefined;
+      /** One settler per settlement model the agent can pay. */
+      settlers: Partial<Record<SettlementModel, ClientSettler>>;
+    };
+
+export type TollwayClientOptions = ClientSettlers & {
   network: StellarNetwork;
-  /** The protocol-specific signer / submitter for an offer. */
-  settler: ClientSettler;
+  /**
+   * The models this agent can pay, for example `signerModels(signer)` (#205).
+   * The router only picks among them, and an explicit `model` outside them is
+   * refused. When omitted, every model is allowed.
+   */
+  supportedModels?: SettlementModel[];
   /** Optional policy engine. When omitted, every payment is allowed. */
   policy?: PolicyEngine;
   /**
@@ -236,6 +371,11 @@ export type TollwayClientOptions = {
    * never retries because the payment may have landed.
    */
   retry?: RetryOptions;
+  /**
+   * Falls back to x402 when a channel open fails (#183). Without it, a
+   * failed open is thrown like any other settler error.
+   */
+  fallback?: ChannelFallbackOptions;
 };
 
 export type PayRequest = {
@@ -252,6 +392,14 @@ export type PayRequest = {
    * the routed model, and the offer's amount, asset, payTo and network.
    */
   idempotencyKey?: string;
+  /**
+   * The request the agent sent and the 402 it got back, when the caller
+   * already made the first request (#201). The settler answers that 402 and
+   * replays the request, and `PayResult.response` carries the paid response.
+   * Concurrent calls share a settlement only when their method, URL and body
+   * are identical too.
+   */
+  exchange?: HttpExchange;
 };
 
 export type PayResult = {
@@ -268,6 +416,12 @@ export type PayResult = {
    * a hole, so treat this as an operational alert.
    */
   storeError?: Error;
+  /**
+   * The paid response, when the request carried an `exchange`. Each call
+   * gets its own copy, so a call that shared the settlement can read the
+   * body too.
+   */
+  response?: Response;
 };
 
 export interface TollwayClient {
@@ -291,6 +445,15 @@ export function createClient(options: TollwayClientOptions): TollwayClient {
       `receiptMaxSkewMs must be a non-negative finite number, got ${options.receiptMaxSkewMs}`,
     );
   }
+  if ((options.settler === undefined) === (options.settlers === undefined)) {
+    throw new TypeError("createClient: provide exactly one of settler or settlers");
+  }
+  if (options.supportedModels !== undefined && options.supportedModels.length === 0) {
+    throw new TypeError("createClient: supportedModels must name at least one model");
+  }
+  const fallback = options.fallback;
+  const cooldown = fallback ? createChannelCooldown(fallback) : undefined;
+  const clientNow = (): number => (options.clock ?? Date.now)();
   if (options.offerChecks) {
     // A typo in a ceiling fails here, at startup, not on the first payment.
     validateOfferChecks(options.offerChecks, options.network);
@@ -320,6 +483,55 @@ export function createClient(options: TollwayClientOptions): TollwayClient {
         // A bad handler must not poison the pay() promise. Observability
         // pipelines wire their own retry/log strategy; this is best-effort.
       }
+    }
+  }
+
+  // A settler reports channel lifecycle on the same stream as payments. A
+  // settler registered for several models subscribes once.
+  const subscribed = new Set<ClientSettler>();
+  for (const settler of [
+    ...(options.settler ? [options.settler] : Object.values(options.settlers ?? {})),
+    ...(fallback ? [fallback.x402] : []),
+  ]) {
+    if (subscribed.has(settler)) continue;
+    subscribed.add(settler);
+    settler.subscribe?.(emit);
+  }
+
+  /** The settler for a routed model. With `settlers`, a missing one is an error, never a fallthrough. */
+  function settlerFor(model: SettlementModel): ClientSettler {
+    if (options.settler) return options.settler;
+    const settler = options.settlers?.[model];
+    if (!settler) {
+      throw new TollwayError(
+        "no-viable-model",
+        `the router chose ${model}, but no settler is configured for ${model}`,
+      );
+    }
+    return settler;
+  }
+
+  /**
+   * Tells the funder side about an open that may have landed on chain, so a
+   * funded channel nobody tracks can be resumed or recovered (#176, #38).
+   * An error without a submission state is treated as possibly landed.
+   */
+  function reportOrphan(error: TollwayError, offer: PaymentOffer): void {
+    const submission: ChannelOpenSubmission =
+      error instanceof ChannelOpenFailedError ? error.submission : "ambiguous";
+    if (submission !== "ambiguous" || !fallback?.onOrphanedChannel) return;
+    const details = error instanceof ChannelOpenFailedError ? error : undefined;
+    try {
+      fallback.onOrphanedChannel({
+        counterparty: details?.counterparty ?? offer.payTo,
+        asset: details?.asset ?? offer.asset,
+        ...(details?.channelId === undefined ? {} : { channelId: details.channelId }),
+        ...(details?.txHash === undefined ? {} : { txHash: details.txHash }),
+        error,
+      });
+    } catch {
+      // The callback is an alert. A throwing one must not fail a payment
+      // that can still be made by x402.
     }
   }
 
@@ -376,15 +588,37 @@ export function createClient(options: TollwayClientOptions): TollwayClient {
     retry: { maxAttempts: number; sleep: (ms: number) => Promise<void> };
     request: PayRequest;
     model: SettlementModel;
+    settler: ClientSettler;
     freshAttempt: () => Promise<void>;
-  }): Promise<SignedReceipt> {
-    const { retry, request, model } = args;
+  }): Promise<SettlerAnswer> {
+    const { retry, request, model, settler } = args;
     let pinned: SignedTerms | undefined;
-    let next = () =>
-      options.settler.settle({ resource: request.resource, offer: request.offer, model });
+    let challenge = request.exchange?.challenge;
+    // One settler call with the current pin and, for an exchange, the
+    // current challenge.
+    const call = (): Promise<SignedReceipt | PaidExchange> => {
+      const base: SettleRequest = {
+        resource: request.resource,
+        offer: request.offer,
+        model,
+        ...(pinned === undefined ? {} : { pinned }),
+      };
+      if (request.exchange === undefined || challenge === undefined) return settler.settle(base);
+      if (!settler.settleExchange) {
+        throw new TollwayError(
+          "payment-failed",
+          `the ${model} settler cannot finish an HTTP exchange: it has no settleExchange`,
+        );
+      }
+      return settler.settleExchange({
+        ...base,
+        exchange: { request: request.exchange.request, challenge },
+      });
+    };
+    let next = call;
     for (let attempt = 1; ; attempt += 1) {
       try {
-        return await next();
+        return settlerAnswer(await next(), request.exchange !== undefined, model);
       } catch (rawError) {
         if (!(rawError instanceof SettlementOutcomeError)) throw rawError;
         if (rawError.kind === "ambiguous") {
@@ -422,6 +656,12 @@ export function createClient(options: TollwayClientOptions): TollwayClient {
         // retryable-with-fresh-auth
         if (attempt >= retry.maxAttempts) throw rawError;
         pinned = rawError.signedTerms ?? pinned;
+        if (request.exchange !== undefined) {
+          // The expired challenge cannot be answered again. Without the new
+          // one, retrying would mean sending the agent's request unpaid.
+          if (rawError.challenge === undefined) throw rawError;
+          challenge = rawError.challenge;
+        }
         await args.freshAttempt();
         emit({
           type: "retry",
@@ -429,14 +669,7 @@ export function createClient(options: TollwayClientOptions): TollwayClient {
           attempt: attempt + 1,
           reason: rawError.reason,
         });
-        const terms = pinned;
-        next = () =>
-          options.settler.settle({
-            resource: request.resource,
-            offer: request.offer,
-            model,
-            ...(terms === undefined ? {} : { pinned: terms }),
-          });
+        next = call;
       }
     }
   }
@@ -459,7 +692,11 @@ export function createClient(options: TollwayClientOptions): TollwayClient {
    * evaluates the policy, stores the receipt, records the spend and emits
    * `payment`, so calls that share the settlement are not counted twice.
    */
-  async function settleOnce(request: PayRequest, model: SettlementModel): Promise<Settled> {
+  async function settleOnce(
+    request: PayRequest,
+    model: SettlementModel,
+    settler: ClientSettler,
+  ): Promise<Settled> {
     try {
       const intent: PaymentIntent = {
         payee: request.offer.payTo,
@@ -472,12 +709,12 @@ export function createClient(options: TollwayClientOptions): TollwayClient {
       // `admit` evaluates and, when the policy allows the payment, counts
       // it as an attempt in the same step (issue #197). An engine written
       // before `admit` existed is evaluated instead.
-      const admit = async (engine: PolicyEngine): Promise<PolicyTrace> =>
-        engine.admit ? engine.admit(intent) : engine.evaluate(intent);
+      const admit = async (engine: PolicyEngine, toAdmit: PaymentIntent): Promise<PolicyTrace> =>
+        engine.admit ? engine.admit(toAdmit) : engine.evaluate(toAdmit);
 
       let activeTrace: PolicyTrace | undefined;
       if (options.policy) {
-        activeTrace = await admit(options.policy);
+        activeTrace = await admit(options.policy, intent);
         // No handler, no event object: the quiet path stays as cheap as a
         // plain check().
         if (handlers.length > 0) {
@@ -506,24 +743,68 @@ export function createClient(options: TollwayClientOptions): TollwayClient {
       blockIfDenied(activeTrace);
       if (options.shadow) await shadowAttempt(options.shadow, intent, request.resource);
 
-      // The retry runs inside the shared settlement (issue #210), so calls
-      // waiting on this purchase share one retried payment, and the
-      // receipt it ends with is bound to the offer below like any other.
-      const settled = await settleWithRetry({
-        retry: normaliseRetryOptions(options.retry),
-        request,
-        model,
-        freshAttempt: async () => {
-          // A new authorization is a new payment attempt: the policy is
-          // checked again, and a budget that now bites stops the retry.
-          if (options.policy) blockIfDenied(await admit(options.policy));
-          if (options.shadow) await shadowAttempt(options.shadow, intent, request.resource);
-        },
-      });
+      /**
+       * One payment on one model through one settler. The retry runs
+       * inside the shared settlement (issue #210), so calls waiting on this
+       * purchase share one retried payment.
+       */
+      const pay = (settler: ClientSettler, paying: PaymentIntent) =>
+        settleWithRetry({
+          retry: normaliseRetryOptions(options.retry),
+          request,
+          model: paying.model,
+          settler,
+          freshAttempt: async () => {
+            // A new authorization is a new payment attempt: the policy is
+            // checked again, and a budget that now bites stops the retry.
+            if (options.policy) blockIfDenied(await admit(options.policy, paying));
+            if (options.shadow) await shadowAttempt(options.shadow, paying, request.resource);
+          },
+        });
+
+      // What actually paid. A fallback (#183) changes all three.
+      let paidIntent = intent;
+      let paidBy = settler;
+      let settled: SettlerAnswer;
+      const channelKey = cooldownKey(request.offer);
+      try {
+        settled = await pay(settler, intent);
+        if (model === "mpp-channel") cooldown?.opened(channelKey);
+      } catch (rawError) {
+        // Anything but an open failure may already have paid the service
+        // (a voucher sent, a response lost), so it is never paid again.
+        if (model !== "mpp-channel" || !isChannelOpenFailure(rawError)) throw rawError;
+        cooldown?.failed(channelKey, clientNow());
+        reportOrphan(rawError, request.offer);
+        if (!fallback || !request.offer.models.includes("x402")) throw rawError;
+
+        // Nothing was offered to the service on the channel, so paying the
+        // same request by x402 cannot pay it twice. x402 is a different
+        // model, so the policy is asked again before paying.
+        paidIntent = { ...intent, model: "x402" };
+        paidBy = fallback.x402;
+        emit({
+          type: "fallback",
+          resource: request.resource,
+          from: "mpp-channel",
+          to: "x402",
+          reason: rawError.message,
+        });
+        if (options.policy) {
+          const fallbackTrace = await admit(options.policy, paidIntent);
+          if (handlers.length > 0) {
+            emit({ type: "policy:decision", resource: request.resource, trace: fallbackTrace });
+          }
+          blockIfDenied(fallbackTrace);
+        }
+        if (options.shadow) await shadowAttempt(options.shadow, paidIntent, request.resource);
+        settled = await pay(fallback.x402, paidIntent);
+      }
+      const paidModel = paidIntent.model;
 
       // Only the parsed receipt leaves pay(), never the settler's object,
       // so a field the signature does not cover cannot reach the caller.
-      const receipt = await checkedReceipt(settled, options.verifier);
+      const receipt = await checkedReceipt(settled.signed, options.verifier);
 
       // A valid signature proves only that the service signed something.
       // The receipt must describe this payment before it is stored,
@@ -531,10 +812,10 @@ export function createClient(options: TollwayClientOptions): TollwayClient {
       assertReceiptMatchesOffer({
         receipt,
         offer: request.offer,
-        model,
+        model: paidModel,
         network: options.network,
-        ...(options.settler.payer === undefined ? {} : { payer: options.settler.payer }),
-        now: (options.clock ?? Date.now)(),
+        ...(paidBy.payer === undefined ? {} : { payer: paidBy.payer }),
+        now: clientNow(),
         maxSkewMs: options.receiptMaxSkewMs ?? DEFAULT_RECEIPT_MAX_SKEW_MS,
       });
 
@@ -554,16 +835,25 @@ export function createClient(options: TollwayClientOptions): TollwayClient {
         }
       }
 
+      // Budgets advance once, for the model that actually paid.
       if (options.policy) {
-        await options.policy.record(intent);
+        await options.policy.record(paidIntent);
       }
       if (options.shadow) {
-        await shadowRecord(options.shadow, intent, request.resource);
+        await shadowRecord(options.shadow, paidIntent, request.resource);
       }
 
-      emit({ type: "payment", resource: request.resource, model, receipt });
-      return storeError ? { receipt, model, storeError } : { receipt, model };
+      emit({ type: "payment", resource: request.resource, model: paidModel, receipt });
+      return {
+        receipt,
+        model: paidModel,
+        ...(storeError ? { storeError } : {}),
+        ...(settled.response ? { response: settled.response } : {}),
+      };
     } catch (rawError) {
+      // A request that was allowed to try the channel after a cooldown frees
+      // that slot however it ended, so the next request may try again.
+      if (model === "mpp-channel") cooldown?.release(cooldownKey(request.offer));
       const error = normalizeError(rawError);
       emit({ type: "error", resource: request.resource, error });
       throw error;
@@ -576,7 +866,10 @@ export function createClient(options: TollwayClientOptions): TollwayClient {
     },
     async pay(request): Promise<PayResult> {
       let model: SettlementModel;
+      // The cooldown below sends a channel payment to the fallback's settler.
+      let settler: ClientSettler;
       let emittedQuarantine = false;
+      let fingerprint: string | undefined;
       try {
         // Refused before any policy check or signature: paying on the wrong
         // network is never what the agent configured.
@@ -620,7 +913,12 @@ export function createClient(options: TollwayClientOptions): TollwayClient {
           }
         }
 
-        const decision = await decideModel(options.router, request, quarantined);
+        const decision = await decideModel(
+          options.router,
+          request,
+          quarantined,
+          options.supportedModels,
+        );
         if (decision.reason === "quarantined" && !emittedQuarantine) {
           emittedQuarantine = true;
           emit({
@@ -631,6 +929,36 @@ export function createClient(options: TollwayClientOptions): TollwayClient {
           });
         }
         model = decision.model;
+        settler = settlerFor(model);
+
+        // After a failed open the counterparty's channel path rests (#183):
+        // requests go straight to x402 until the cooldown ends, and then one
+        // request at a time may try the channel again.
+        if (
+          model === "mpp-channel" &&
+          cooldown &&
+          request.offer.models.includes("x402") &&
+          cooldown.admit(cooldownKey(request.offer), clientNow()) === "cooling"
+        ) {
+          model = "x402";
+          settler = fallback?.x402 ?? settlerFor("x402");
+          emit({
+            type: "fallback",
+            resource: request.resource,
+            from: "mpp-channel",
+            to: "x402",
+            reason: "the channel path is cooling down after a failed open",
+          });
+        }
+        if (request.exchange) {
+          if (!settler.settleExchange) {
+            throw new TollwayError(
+              "payment-failed",
+              `the ${model} settler cannot finish an HTTP exchange: it has no settleExchange`,
+            );
+          }
+          fingerprint = await exchangeFingerprint(request.exchange);
+        }
       } catch (rawError) {
         const error = normalizeError(rawError);
         if (
@@ -652,7 +980,7 @@ export function createClient(options: TollwayClientOptions): TollwayClient {
       // A call that arrives while the same purchase is being settled waits
       // for that settlement instead of paying again. The map is read and
       // written with no await in between, so two calls cannot both miss it.
-      const key = purchaseKey(request, model);
+      const key = purchaseKey(request, model, fingerprint);
       const pending = inFlight.get(key);
       if (pending) {
         // A shared failure rejects here with the error the settling call
@@ -664,13 +992,13 @@ export function createClient(options: TollwayClientOptions): TollwayClient {
           model: shared.model,
           receipt: shared.receipt,
         });
-        return { ...shared, deduplicated: true };
+        return ownResult(shared, true);
       }
 
-      const attempt = settleOnce(request, model);
+      const attempt = settleOnce(request, model, settler);
       inFlight.set(key, attempt);
       try {
-        return { ...(await attempt), deduplicated: false };
+        return ownResult(await attempt, false);
       } finally {
         // Completed receipts are not kept: a later call is a new purchase.
         inFlight.delete(key);
@@ -680,14 +1008,70 @@ export function createClient(options: TollwayClientOptions): TollwayClient {
 }
 
 /** What one settlement produced, before a call marks it as its own or shared. */
-type Settled = { receipt: SignedReceipt; model: SettlementModel; storeError?: Error };
+type Settled = {
+  receipt: SignedReceipt;
+  model: SettlementModel;
+  storeError?: Error;
+  /** Never handed out itself: every call gets a clone, so each can read the body. */
+  response?: Response;
+};
+
+/** A settler's answer, before the receipt in it is checked. */
+type SettlerAnswer = { signed: unknown; response?: Response };
+
+/**
+ * Reads what a settler returned. For an exchange it must be the receipt and
+ * the paid response; anything else is a settler bug, refused before the
+ * receipt is trusted.
+ */
+function settlerAnswer(
+  value: SignedReceipt | PaidExchange,
+  exchange: boolean,
+  model: SettlementModel,
+): SettlerAnswer {
+  if (!exchange) return { signed: value };
+  if (!("response" in value) || !(value.response instanceof Response)) {
+    throw new TollwayError(
+      "payment-failed",
+      `the ${model} settler finished an HTTP exchange without returning the paid response`,
+    );
+  }
+  return { signed: value.receipt, response: value.response };
+}
+
+/** One call's result. The paid response is cloned per call, never shared. */
+function ownResult(settled: Settled, deduplicated: boolean): PayResult {
+  const { response, ...rest } = settled;
+  return { ...rest, deduplicated, ...(response ? { response: response.clone() } : {}) };
+}
+
+/**
+ * What makes two exchanges the same request: method, URL and a SHA-256 of
+ * the body. Two POSTs with different bodies are different purchases even
+ * when the offer is the same.
+ */
+async function exchangeFingerprint(exchange: HttpExchange): Promise<string> {
+  const { method, url, body } = exchange.request;
+  const digest = body
+    ? bytesToHex(new Uint8Array(await crypto.subtle.digest("SHA-256", body)))
+    : "";
+  return canonicalJson({ method: method.toUpperCase(), url, body: digest });
+}
+
+function bytesToHex(bytes: Uint8Array): string {
+  return Array.from(bytes, (byte) => byte.toString(16).padStart(2, "0")).join("");
+}
 
 /**
  * The key two calls must share to count as the same purchase. A caller's
  * `idempotencyKey` and a derived key carry different prefixes, so a caller's
  * string can never equal a derived key.
  */
-function purchaseKey(request: PayRequest, model: SettlementModel): string {
+function purchaseKey(
+  request: PayRequest,
+  model: SettlementModel,
+  fingerprint: string | undefined,
+): string {
   if (request.idempotencyKey !== undefined) {
     return `key:${request.idempotencyKey}`;
   }
@@ -698,7 +1082,89 @@ function purchaseKey(request: PayRequest, model: SettlementModel): string {
     asset: request.offer.asset,
     payTo: request.offer.payTo,
     network: request.offer.network,
+    ...(fingerprint === undefined ? {} : { exchange: fingerprint }),
   })}`;
+}
+
+/** True for the one error a channel settler throws when an open failed before any voucher. */
+function isChannelOpenFailure(error: unknown): error is TollwayError {
+  return error instanceof TollwayError && error.code === "channel-open-failed";
+}
+
+/** The channel path an offer would use: one counterparty, one asset. */
+function cooldownKey(offer: PaymentOffer): string {
+  return canonicalJson({ payTo: offer.payTo, asset: offer.asset, network: offer.network });
+}
+
+const DEFAULT_CHANNEL_COOLDOWN_MS = 60_000;
+const DEFAULT_MAX_CHANNEL_COOLDOWN_MS = 15 * 60_000;
+const DEFAULT_MAX_TRACKED_CHANNELS = 1000;
+
+type CooldownEntry = { failures: number; until: number; probing: boolean };
+
+/**
+ * Per counterparty and asset: how long the channel path rests after a
+ * failed open, and whether one request is already trying it again. Memory
+ * is bounded by `maxTracked`; the least recently touched entry goes first.
+ */
+function createChannelCooldown(options: ChannelFallbackOptions) {
+  const initial = options.cooldownMs ?? DEFAULT_CHANNEL_COOLDOWN_MS;
+  const max = options.maxCooldownMs ?? DEFAULT_MAX_CHANNEL_COOLDOWN_MS;
+  const maxTracked = options.maxTracked ?? DEFAULT_MAX_TRACKED_CHANNELS;
+  for (const [name, value] of [
+    ["fallback.cooldownMs", initial],
+    ["fallback.maxCooldownMs", max],
+  ] as const) {
+    if (!Number.isFinite(value) || value <= 0) {
+      throw new TypeError(`${name} must be a positive finite number, got ${value}`);
+    }
+  }
+  if (max < initial) {
+    throw new TypeError(
+      `fallback.maxCooldownMs (${max}) must be at least fallback.cooldownMs (${initial})`,
+    );
+  }
+  if (!Number.isSafeInteger(maxTracked) || maxTracked < 1) {
+    throw new TypeError(`fallback.maxTracked must be a positive integer, got ${maxTracked}`);
+  }
+
+  const entries = new Map<string, CooldownEntry>();
+
+  function put(key: string, entry: CooldownEntry): void {
+    entries.delete(key);
+    entries.set(key, entry);
+    while (entries.size > maxTracked) {
+      const oldest = entries.keys().next().value;
+      if (oldest === undefined) break;
+      entries.delete(oldest);
+    }
+  }
+
+  return {
+    /**
+     * `open`: no failure on record. `probe`: the cooldown has ended and this
+     * request is the one that tries the channel. `cooling`: pay by x402.
+     */
+    admit(key: string, now: number): "open" | "probe" | "cooling" {
+      const entry = entries.get(key);
+      if (!entry) return "open";
+      if (entry.probing || now < entry.until) return "cooling";
+      put(key, { ...entry, probing: true });
+      return "probe";
+    },
+    opened(key: string): void {
+      entries.delete(key);
+    },
+    failed(key: string, now: number): void {
+      const failures = (entries.get(key)?.failures ?? 0) + 1;
+      const wait = Math.min(max, initial * 2 ** Math.min(failures - 1, 30));
+      put(key, { failures, until: now + wait, probing: false });
+    },
+    release(key: string): void {
+      const entry = entries.get(key);
+      if (entry?.probing) put(key, { ...entry, probing: false });
+    },
+  };
 }
 
 /**
@@ -765,7 +1231,14 @@ async function decideModel(
   router: ModelRouter | undefined,
   request: PayRequest,
   quarantined: boolean,
+  supported: SettlementModel[] | undefined,
 ): Promise<RouteDecision> {
+  if (request.model && supported && !supported.includes(request.model)) {
+    throw new TollwayError(
+      "no-viable-model",
+      `the request asks for ${request.model}, but this agent can only pay [${supported.join(", ")}]`,
+    );
+  }
   if (request.model) {
     // An explicit model skips the router, so the quarantine rule the router
     // applies has to be applied here too: a quarantined counterparty never
@@ -778,12 +1251,19 @@ async function decideModel(
     }
     return { model: request.model, reason: "override" };
   }
-  if (!router) return { model: "x402", reason: "default" };
+  if (!router) {
+    if (!supported || supported.includes("x402")) return { model: "x402", reason: "default" };
+    throw new TollwayError(
+      "no-viable-model",
+      `without a router the client pays x402, which this agent cannot pay; configure a router`,
+    );
+  }
   return router.decide({
     counterparty: request.offer.payTo,
     resource: request.resource,
     offer: request.offer,
     ...(quarantined ? { quarantined: true } : {}),
+    ...(supported ? { allowedModels: supported } : {}),
   });
 }
 
@@ -792,6 +1272,13 @@ function normalizeError(value: unknown): Error {
   return new Error(typeof value === "string" ? value : JSON.stringify(value));
 }
 
+export {
+  createMppChargeSettler,
+  MPP_NETWORK_ID,
+  type MppChargeMode,
+  type MppChargeSettlerOptions,
+  offerAssetContract,
+} from "./mpp-charge-settler.js";
 export {
   type OfferCheckName,
   type OfferChecks,

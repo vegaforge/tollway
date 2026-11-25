@@ -18,6 +18,30 @@ export {
   type SettlementLock,
 } from "./cache.js";
 export {
+  type ChannelEvaluationReport,
+  type ChannelResolveOutcome,
+  type ChannelSettleOutcome,
+  type ChannelSettler,
+  type ChannelSettlerOptions,
+  createChannelSettler,
+  type SettlementTriggers,
+  validateSettlementTriggers,
+} from "./channel-settlement.js";
+export {
+  type AcceptedVoucher,
+  acceptedVoucherSchema,
+  type ChannelRecord,
+  type ChannelSettlementRecord,
+  type ChannelStatus,
+  type ChannelStore,
+  type CloseRateGuard,
+  type CloseRateLimit,
+  channelRecordSchema,
+  channelStatuses,
+  createInMemoryChannelStore,
+  createInMemoryCloseRateGuard,
+} from "./channel-store.js";
+export {
   type ChannelDispute,
   type ChannelLoss,
   type ChannelWatchRegistry,
@@ -62,6 +86,7 @@ export {
   type PaywallTarget,
   type PaywallValidation,
   parseFacilitatorCapabilities,
+  paymentTargets,
   type ValidationMode,
   validatePaywall,
 } from "./facilitator-capabilities.js";
@@ -74,14 +99,38 @@ export {
   type SettlementPinStore,
 } from "./failover-facilitator.js";
 export {
+  type BodyBinding,
+  createPaidCall,
   createPaywall,
   type DynamicPriceFunction,
   type Gate,
   type GateOutcome,
+  type PaidCall,
+  type PaidCallConfig,
+  type PaidCallDeps,
+  type PaidCallSettleInput,
+  type PaymentObserver,
+  type PaymentObserverEvent,
+  type PaymentObserverMetric,
+  type PaymentOption,
+  type PaymentOptionsConfig,
+  type PaymentPrevalidationOptions,
   type PaywallConfig,
   type PaywallDeps,
+  type PrevalidationRejection,
+  type SinglePaymentOptionConfig,
   type TollwayRequest,
 } from "./gate.js";
+export {
+  GATE_ERROR_CODES,
+  GATE_ERRORS,
+  type GateErrorBody,
+  type GateErrorCode,
+  type GateErrorSpec,
+  type GateRejection,
+  type RenderedGateRejection,
+  renderGateRejection,
+} from "./gate-errors.js";
 export {
   decodeHeader,
   decodePaymentRequiredHeader,
@@ -97,6 +146,7 @@ export {
   PAYMENT_SIGNATURE_HEADER,
   readHeader,
   readMppCredential,
+  TOLLWAY_CHANNEL_HEADER,
   TOLLWAY_QUOTE_HEADER,
   TOLLWAY_RECEIPT_HEADER,
 } from "./headers.js";
@@ -105,6 +155,20 @@ export {
   type KeySetResponseOptions,
   renderKeySetResponse,
 } from "./key-set-response.js";
+export {
+  createMppChannelHandler,
+  type MppChannelChallengeInput,
+  type MppChannelChallengeResult,
+  type MppChannelHandler,
+  type MppChannelOptions,
+  type MppChannelReconcileOutcome,
+  type MppChannelRefusal,
+  type MppChannelSettleInput,
+  type MppChannelSettleResult,
+  type MppChannelVerifyInput,
+  type MppChannelVerifyResult,
+  parseMppChannelCredential,
+} from "./mpp-channel.js";
 export {
   createMockMppChargeHandler,
   createMppChargeHandler,
@@ -119,10 +183,31 @@ export {
   type MppChargeVerifyResult,
 } from "./mpp-charge.js";
 export {
+  createOfferReceiptJwsSigner,
+  didKeyFromEd25519PublicKey,
+  type OfferReceiptOptions,
+} from "./offer-receipt.js";
+export {
+  createInMemoryPaymentReceiptArchive,
+  createRedisPaymentReceiptArchive,
+  type InMemoryPaymentReceiptArchiveOptions,
+  type PaymentReceiptArchive,
+  type RedisArchiveClient,
+  type RedisPaymentReceiptArchiveOptions,
+} from "./payment-receipt-archive.js";
+export {
+  BodyTooLargeError,
+  bytesBody,
+  concatChunks,
+  type RequestBodySource,
+  readBodyStream,
+} from "./request-body.js";
+export {
   createRouteTable,
   type RouteTable,
   type RouteTableEntry,
   type RouteTableMatch,
+  type RouteTableOption,
 } from "./route-table.js";
 export {
   createInMemoryServicePolicyStore,
@@ -136,3 +221,23 @@ export {
   type ServicePolicyStore,
   validateServicePolicy,
 } from "./service-policy.js";
+export {
+  createHorizonSponsorBalanceReader,
+  createSponsorMonitor,
+  type SponsorBalanceReader,
+  type SponsorHorizonClient,
+  type SponsorMonitor,
+  type SponsorMonitorOptions,
+  type SponsorMonitorSink,
+} from "./sponsor-monitor.js";
+export {
+  checkStellarExactPayment,
+  createLatestLedgerSource,
+  DEFAULT_MAX_PAYMENT_SIGNATURE_LENGTH,
+  type LatestLedgerSource,
+  type LatestLedgerSourceOptions,
+  type PrevalidationReason,
+  type PrevalidationResult,
+  type StellarExactCheckOptions,
+  type StellarExactTerms,
+} from "./stellar-static-validation.js";

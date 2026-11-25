@@ -27,6 +27,12 @@ export const modules = [
     description: "The agent-side client that pays 402 challenges.",
   },
   {
+    module: "ai-sdk/src",
+    slug: "ai-sdk",
+    importPath: "@vegaforge/tollway-ai-sdk",
+    description: "A Vercel AI SDK tool that fetches paid URLs within a Tollway budget.",
+  },
+  {
     module: "adapter-express/src",
     slug: "adapter-express",
     importPath: "@vegaforge/tollway-adapter-express",
@@ -73,6 +79,12 @@ export const modules = [
     slug: "observability",
     importPath: "@vegaforge/tollway-observability",
     description: "Metrics, summaries and time series for gate outcomes.",
+  },
+  {
+    module: "signer-vault/src",
+    slug: "signer-vault",
+    importPath: "@vegaforge/tollway-signer-vault",
+    description: "A receipt signer backed by a HashiCorp Vault Transit Ed25519 key.",
   },
   {
     module: "theme/src",

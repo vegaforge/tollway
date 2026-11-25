@@ -1,0 +1,109 @@
+---
+title: The tollway command
+description: Decode payment headers, verify receipts and inspect live 402 challenges from a terminal
+---
+
+`@vegaforge/tollway-cli` installs a `tollway` command for debugging paid routes. It is read-only: it decodes, verifies and inspects. No command takes a secret key, signs anything or makes a payment.
+
+```bash
+npx @vegaforge/tollway-cli --help
+```
+
+It needs Node 22 or later. Every command takes `--json` for machine-readable output, writes errors to stderr, and exits with:
+
+| Code | Meaning |
+| --- | --- |
+| `0` | The value decoded and validated, the receipt verified, or the URL asked for payment. |
+| `1` | The value is malformed or has the wrong shape, the receipt failed verification, or the URL did not answer 402. |
+| `2` | A usage error: an unknown command or flag, or a missing argument. |
+
+## tollway decode
+
+Decodes the value of a `PAYMENT-REQUIRED`, `PAYMENT-SIGNATURE`, `PAYMENT-RESPONSE` or `TOLLWAY-RECEIPT` header, names the shape it found, and validates it against that shape's schema. Pass the value as an argument, or `-` to read it from stdin. A line copied with its header name works too.
+
+Two encodings are in play. x402 headers are standard base64 of JSON; Tollway's own receipt header is base64url. The command detects which one a value uses and says so. A value that contains none of `+`, `/`, `-` or `_` reads the same in both alphabets and is reported as base64.
+
+```console
+$ tollway decode "PAYMENT-REQUIRED: eyJ4NDAyVmVyc2lvbiI6Mi..."
+x402 PaymentRequired (base64)
+{
+  "x402Version": 2,
+  "resource": {
+    "url": "/quotes/latest"
+  },
+  "accepts": [
+    {
+      "scheme": "exact",
+      "network": "stellar:testnet",
+      "amount": "10000",
+      "asset": "CBIELTK6YBZJU5UP2WWQEUCYKLPU6AUNZ2BQ4WWFEIE3USCIHMXQDAMA",
+      "payTo": "GDSERVICEDEMOXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX",
+      "maxTimeoutSeconds": 60,
+      "extra": {}
+    }
+  ]
+}
+```
+
+The shapes it recognises are a Tollway `SignedReceipt`, an x402 `PaymentRequired`, an x402 `PaymentPayload`, an x402 `SettleResponse`, and a Tollway offer.
+
+A `PAYMENT-SIGNATURE` carries a signed transaction envelope that anyone holding it could submit, so by default it is summarised: scheme, network, amount, asset, payee, and the payer read from the envelope's transfer. Pass `--raw` to print the whole value. Reading the payer loads the Stellar SDK, only for this header.
+
+```console
+$ tollway decode "$PAYMENT_SIGNATURE"
+x402 PaymentPayload (base64)
+  scheme   exact
+  network  stellar:testnet
+  amount   10000
+  asset    CBIELTK6YBZJU5UP2WWQEUCYKLPU6AUNZ2BQ4WWFEIE3USCIHMXQDAMA
+  payTo    GDSERVICEDEMOXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX
+  payer    GBPAYERDEMOXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX
+  The signed transaction envelope is hidden; pass --raw to print it.
+```
+
+A value that is not base64, not JSON, or not one of the shapes above exits `1`:
+
+```console
+$ tollway decode bm90IGpzb24
+tollway decode: the decoded base64 is not JSON
+```
+
+## tollway verify
+
+Verifies a signed receipt, given as a JSON file or as the encoded `TOLLWAY-RECEIPT` value (`-` reads stdin). Name the keys with exactly one of:
+
+- `--keys <file>`: a key-set document (`{ "keys": [...] }`, the form a service publishes with `renderKeySetResponse`), or a JSON object mapping key id to base64url Ed25519 public key.
+- `--jwks <url>`: the URL of a published key set. Only that URL is fetched.
+
+```console
+$ tollway verify receipt.json --keys keys.json
+valid: signed by receipts-2026-11
+
+$ tollway verify receipt.json --keys keys.json --json
+{
+  "valid": true,
+  "keyId": "receipts-2026-11"
+}
+```
+
+A receipt that does not verify prints the reason, such as `signature does not verify against any trusted key` or `key k1 is revoked`, and exits `1`.
+
+## tollway inspect
+
+Sends one unpaid request and, when the answer is a 402, explains the challenge: the price, asset, payee and network of every option, the settlement models offered (x402, plus mpp-charge when the 402 also carries an MPP challenge), and a facilitator if the challenge names one.
+
+```console
+$ tollway inspect https://api.example.com/quotes/latest
+https://api.example.com/quotes/latest asks for payment (402)
+  resource     /quotes/latest
+  models       x402
+  facilitator  not named in the challenge
+  option 1
+    price      10000 (asset base units)
+    asset      CBIELTK6YBZJU5UP2WWQEUCYKLPU6AUNZ2BQ4WWFEIE3USCIHMXQDAMA
+    payee      GDSERVICEDEMOXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX
+    network    stellar:testnet
+    scheme     exact, valid 60 s
+```
+
+Options: `--method <method>` (default `GET`), `--header name:value` (repeatable), `--timeout <ms>` (default 10000). Redirects are followed only within the same origin; a redirect to another origin is refused, so your headers never go somewhere you did not name. When a 402 has no `PAYMENT-REQUIRED` header, at most 64 KiB of its body is read. A URL that answers anything but 402 exits `1`.

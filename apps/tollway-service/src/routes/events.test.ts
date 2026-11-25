@@ -19,9 +19,25 @@ function authHeader(): Record<string, string> {
   return { authorization: `Bearer ${VALID_KEY}` };
 }
 
-/** Read the full body of a Response as text. */
+/**
+ * Read what an SSE response has sent so far, then cancel it. The stream never
+ * ends on its own (it polls and sends heartbeats until the client leaves), so
+ * reading it to the end would hang. Reading stops at the first heartbeat,
+ * which the route sends once it has written everything buffered; cancelling
+ * then fires the route's onAbort, as a disconnecting client would.
+ */
 async function body(response: Response): Promise<string> {
-  return response.text();
+  const reader = response.body?.getReader();
+  if (!reader) return "";
+  const decoder = new TextDecoder();
+  let text = "";
+  while (!text.includes(": heartbeat")) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    text += decoder.decode(value, { stream: true });
+  }
+  await reader.cancel();
+  return text;
 }
 
 /**
@@ -185,13 +201,11 @@ describe("GET /v1/events/stream resume from Last-Event-ID", () => {
   });
 
   it("sends a reset event when Last-Event-ID is older than the buffer", async () => {
-    // Fill the buffer beyond its capacity so event 1 is evicted.
+    // Fill a 3-event buffer with 5 events: it keeps 3, 4 and 5. A client that
+    // last saw id 1 has missed id 2, which is gone, so it must be reset.
     resetSharedBuffer(3);
     const buf = sharedEventBuffer();
-    buf.push("metrics.delta", { settledCount: 1 }); // id 1 — will be evicted
-    buf.push("metrics.delta", { settledCount: 2 }); // id 2
-    buf.push("metrics.delta", { settledCount: 3 }); // id 3
-    buf.push("metrics.delta", { settledCount: 4 }); // id 4 — evicts id 1
+    for (let i = 1; i <= 5; i++) buf.push("metrics.delta", { settledCount: i });
 
     const res = await app.request("/v1/events/stream", {
       headers: { ...authHeader(), "last-event-id": "1" },

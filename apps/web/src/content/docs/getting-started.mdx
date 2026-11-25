@@ -66,6 +66,46 @@ export const config = { matcher: ["/api/paid/:path*"] };
 
 The proxy runs on Node.js. It strips a caller-supplied Tollway receipt header and forwards only the receipt returned by the gate. In a route handler, `getProxyReceipt(request)` reads and schema-validates that receipt. The proxy also returns the `PAYMENT-RESPONSE` and `TOLLWAY-RECEIPT` headers to the caller.
 
+## Pay from an agent
+
+On the agent side, `createPaidFetch` is a drop-in `fetch` that pays 402s. It
+sends the request, reads an x402 or MPP challenge, runs your policy and
+router, pays through the x402 settler, and returns the paid response with the
+verified receipt:
+
+```ts
+import { createPolicyEngine, Ed25519Verifier } from "@vegaforge/tollway-core";
+import {
+  createClient,
+  createKeypairSigner,
+  createPaidFetch,
+  createX402Settler,
+  signerModels,
+} from "@vegaforge/tollway-client";
+
+const signer = createKeypairSigner(process.env.AGENT_SECRET as string, "testnet");
+const client = createClient({
+  network: "testnet",
+  settlers: { x402: createX402Settler({ signer, network: "testnet" }) },
+  supportedModels: signerModels(signer),
+  policy: createPolicyEngine({ budgets: { daily: "10000000" } }),
+  verifier: new Ed25519Verifier({ "service-key": servicePublicKey }),
+});
+
+const paidFetch = createPaidFetch({ client, network: "testnet" });
+const response = await paidFetch("https://api.example.com/quotes/latest", {
+  method: "POST",
+  headers: { "content-type": "application/json" },
+  body: JSON.stringify({ symbol: "XLM" }),
+});
+console.log(response.status, response.receipt?.receipt.id);
+```
+
+A paid call is two HTTP requests, the unpaid one and the paid retry, and a
+POST body is sent identically both times. A response that is not a 402 comes
+back untouched. The client README covers MPP challenges, signers and the
+limits on streaming bodies.
+
 ## When a payment fails
 
 The client retries an x402 payment only when retrying cannot pay twice. If the
@@ -87,14 +127,13 @@ Implemented and tested:
 - `@vegaforge/tollway-core`: the canonical receipt with an Ed25519 signer, the policy and budget engine, and the default model router.
 - `@vegaforge/tollway-server`: the payment gate for x402 and MPP charge, an HTTP facilitator client, a mock facilitator and MPP charge handler, and in-memory and Redis settlement caches.
 - The Express, Fastify, Next.js, and Hono adapters.
-- `@vegaforge/tollway-client` orchestration (policy, routing, receipt verification). You supply the payment signer.
+- `@vegaforge/tollway-client` orchestration (policy, routing, receipt verification), the x402 and MPP charge settlers, keypair and smart-account signers, and `createPaidFetch`.
 - `@vegaforge/tollway-channels` open, commit, and close against an injected channel adapter.
 - `@vegaforge/tollway-reconcile` drift detection and `@vegaforge/tollway-observability` metrics, exports, and webhooks.
 
 Still open, each with a tracking issue:
 
 - Real MPP charge settlement ([#100](https://github.com/vegaforge/tollway/issues/100)) and a real MPP channel adapter ([#101](https://github.com/vegaforge/tollway/issues/101)).
-- Channel recovery ([#38](https://github.com/vegaforge/tollway/issues/38)) and router promotion to channel mode ([#105](https://github.com/vegaforge/tollway/issues/105)).
 - x402 V2 wire compatibility ([#43](https://github.com/vegaforge/tollway/issues/43)) and a production x402 client signer ([#102](https://github.com/vegaforge/tollway/issues/102)).
 
 The README's Status section has the full list.

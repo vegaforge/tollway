@@ -11,9 +11,9 @@ import { useOverviewStats } from "@/data/use-overview-stats";
 export function OverviewLiveSection() {
   const state = useOverviewStats();
 
-  const settled = state.status === "ready" ? String(state.stats.settledCount) : "—";
-  const openChannels = state.status === "ready" ? String(state.stats.openChannels) : "—";
-  const anomalies = state.status === "ready" ? String(state.stats.anomalyCount) : "—";
+  const settled = state.status === "ready" ? String(state.stats.settledCount) : ",";
+  const openChannels = state.status === "ready" ? String(state.stats.openChannels) : ",";
+  const anomalies = state.status === "ready" ? String(state.stats.anomalyCount) : ",";
 
   return (
     <section className="mb-6">

@@ -129,6 +129,17 @@ describe("createDefaultRouter", () => {
     expect(afterRelease).toEqual({ model: "mpp-channel", reason: "offer" });
   });
 
+  it("keeps ignoring traffic when no threshold is configured", async () => {
+    const decision = await router.decide({
+      counterparty: "GSERVICE",
+      resource: "/a",
+      offer: { ...offer, models: ["x402", "mpp-channel"] },
+      allowedModels: ["x402", "mpp-channel"],
+      traffic: { requestsPerMinute: 10_000, windowSeconds: 3600 },
+    });
+    expect(decision).toEqual({ model: "x402", reason: "offer" });
+  });
+
   it("fails closed when quarantine lookup throws", async () => {
     const failingQuarantine: CounterpartyQuarantine = {
       async quarantine() {
@@ -160,5 +171,130 @@ describe("createDefaultRouter", () => {
         offer: { ...offer, models: ["mpp-channel"] },
       }),
     ).rejects.toThrow(TollwayError);
+  });
+});
+
+describe("createDefaultRouter traffic promotion", () => {
+  const channelThreshold = { requestsPerMinute: 100, minWindowSeconds: 300 };
+  const trafficRouter = createDefaultRouter({ channelThreshold });
+  const channelOffer = {
+    ...offer,
+    models: ["mpp-charge", "x402", "mpp-channel"],
+  } satisfies PaymentOffer;
+  const busyTraffic = { requestsPerMinute: 120, windowSeconds: 300 };
+
+  const scenarios: readonly {
+    name: string;
+    input: Parameters<ReturnType<typeof createDefaultRouter>["decide"]>[0];
+    expected: { model: string; reason: string };
+  }[] = [
+    {
+      name: "promotes a busy counterparty whose offer accepts channels",
+      input: {
+        counterparty: "GSERVICE",
+        resource: "/a",
+        offer: channelOffer,
+        traffic: busyTraffic,
+      },
+      expected: { model: "mpp-channel", reason: "traffic" },
+    },
+    {
+      name: "promotes a busy counterparty when policy allows channels",
+      input: {
+        counterparty: "GSERVICE",
+        resource: "/a",
+        allowedModels: ["x402", "mpp-channel"],
+        traffic: busyTraffic,
+      },
+      expected: { model: "mpp-channel", reason: "traffic" },
+    },
+    {
+      name: "does not promote below the request-rate threshold",
+      input: {
+        counterparty: "GSERVICE",
+        resource: "/a",
+        offer: channelOffer,
+        traffic: { requestsPerMinute: 99, windowSeconds: 300 },
+      },
+      expected: { model: "x402", reason: "offer" },
+    },
+    {
+      name: "does not promote over a window shorter than the minimum",
+      input: {
+        counterparty: "GSERVICE",
+        resource: "/a",
+        offer: channelOffer,
+        traffic: { requestsPerMinute: 500, windowSeconds: 299 },
+      },
+      expected: { model: "x402", reason: "offer" },
+    },
+    {
+      name: "does not promote when the offer excludes channels",
+      input: {
+        counterparty: "GSERVICE",
+        resource: "/a",
+        offer: { ...offer, models: ["x402"] },
+        traffic: busyTraffic,
+      },
+      expected: { model: "x402", reason: "offer" },
+    },
+    {
+      name: "does not promote when policy excludes channels",
+      input: {
+        counterparty: "GSERVICE",
+        resource: "/a",
+        offer: channelOffer,
+        allowedModels: ["x402"],
+        traffic: busyTraffic,
+      },
+      expected: { model: "x402", reason: "offer" },
+    },
+    {
+      name: "does not promote a quarantined counterparty",
+      input: {
+        counterparty: "GSERVICE",
+        resource: "/a",
+        offer: channelOffer,
+        traffic: busyTraffic,
+        quarantined: true,
+      },
+      expected: { model: "x402", reason: "quarantined" },
+    },
+    {
+      name: "keeps an explicit override ahead of traffic promotion",
+      input: {
+        counterparty: "GSERVICE",
+        resource: "/a",
+        offer: channelOffer,
+        traffic: busyTraffic,
+        override: "mpp-charge",
+      },
+      expected: { model: "mpp-charge", reason: "override" },
+    },
+  ];
+
+  for (const scenario of scenarios) {
+    it(scenario.name, async () => {
+      await expect(trafficRouter.decide(scenario.input)).resolves.toEqual(scenario.expected);
+    });
+  }
+
+  it.each([
+    ["requestsPerMinute", 0],
+    ["requestsPerMinute", -1],
+    ["requestsPerMinute", 1.5],
+    ["requestsPerMinute", Number.NaN],
+    ["requestsPerMinute", Number.POSITIVE_INFINITY],
+    ["minWindowSeconds", 0],
+    ["minWindowSeconds", -1],
+    ["minWindowSeconds", 1.5],
+    ["minWindowSeconds", Number.NaN],
+    ["minWindowSeconds", Number.POSITIVE_INFINITY],
+  ] as const)("rejects an invalid channelThreshold %s=%s", (field, value) => {
+    expect(() =>
+      createDefaultRouter({
+        channelThreshold: { requestsPerMinute: 100, minWindowSeconds: 300, [field]: value },
+      }),
+    ).toThrowError(TollwayError);
   });
 });

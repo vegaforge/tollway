@@ -13,7 +13,12 @@ type Policy = {
   policyVersion: 1; // required; 0 (unversioned) is migrated on parse
   mode?: "enforce" | "dry-run"; // default "enforce"
   budgets?: {
-    daily?: string;   // spend ceiling per UTC day, integer string in smallest unit
+    daily?: string;   // spend ceiling per calendar day, integer string in smallest unit
+    weekly?: string;  // spend ceiling per calendar week
+    monthly?: string; // spend ceiling per calendar month
+    rolling?: { windowSeconds: number; cap: string }; // ceiling over any sliding window
+    timezone?: string; // IANA zone for daily, weekly and monthly; default "UTC"
+    weekStartsOn?: "monday" | "sunday"; // first day of a week; default "monday"
     total?: string;   // lifetime ceiling for this policy
   };
   perService?: Record<string, {
@@ -109,11 +114,31 @@ The second works offline and matches the version you installed: point the editor
 
 **`mode`** is `enforce` unless you set it. In `enforce`, a failing rule blocks the payment. In `dry-run`, every rule is evaluated the same way, spend is recorded the same way, and the payment is allowed; the decision trace marks what enforce mode would have blocked. See "Dry-run and shadow policies" below. An unknown mode is refused at construction with a `PolicyValidationError`.
 
-**`budgets.daily`** is the per-UTC-day ceiling. The engine resets at the day boundary derived from the configured clock.
+**`budgets.daily`**, **`budgets.weekly`** and **`budgets.monthly`** are calendar budgets: a ceiling per local day, per week, and per month. **`budgets.timezone`** is the IANA time zone (for example `America/Los_Angeles`) those periods follow, and defaults to `UTC`, so a policy without it keeps the per-UTC-day budget it always had. **`budgets.weekStartsOn`** is `monday` (the default) or `sunday`. A zone name the runtime does not recognise is refused at construction with a `PolicyValidationError`.
+
+**`budgets.rolling`** = `{ windowSeconds, cap }` is a ceiling over any sliding window, for example 24 hours (`86400`). It uses the same bounded accumulator as `perService.window`.
+
+You can set any combination. Each budget is its own rule in the decision trace (`budget-daily`, `budget-weekly`, `budget-monthly`, `budget-rolling`), so the trace says which one stopped a payment. All count recorded, settled spend per asset.
+
+How the periods behave:
+
+- **Local wall clock.** A calendar day runs from local midnight to local midnight in `timezone`. Around a Daylight Saving Time change that day is 23 or 25 hours long, and it is still one period. A week starts at local midnight on `weekStartsOn`. A month starts at local midnight on the 1st, whatever its length, including 29 February.
+- **Stored per period.** Spend is kept under a period id such as `day:2026-11-18@America/Los_Angeles`, `week:2026-11-16@UTC` (the date the week starts) or `month:2026-11@Europe/London`. Nothing is reset in place: a new period starts with no spend, and closed periods are dropped. For one kind and zone, the ids sort in time order as plain strings.
+- **A clock that moves backwards** never reopens a period that has closed. The engine keeps counting toward the latest period it has seen until the clock passes it, so a stepped-back clock cannot hand out a second budget or count a payment twice.
+- **Midnight gaming.** A calendar budget refills the moment the period turns. An agent with a 10 USDC daily budget can spend 10 USDC at 23:59 and another 10 USDC at 00:01, two minutes apart. If that matters, add `rolling: { windowSeconds: 86400, cap: "100000000" }`: the last 24 hours always hold at most 10 USDC, wherever midnight falls. Using both is common: the calendar budget matches how you account, and the rolling one bounds bursts.
+
+```ts
+budgets: {
+  timezone: "America/New_York",
+  daily: "50000000",    // 5 USDC per New York business day
+  monthly: "500000000", // 50 USDC per calendar month
+  rolling: { windowSeconds: 86_400, cap: "50000000" }, // never more than 5 USDC in any 24 hours
+},
+```
 
 **`budgets.total`** is the lifetime ceiling for this policy. Useful for a fixed credit allocation.
 
-**`perService`** lets the agent cap exposure to a single counterparty independently of the global budget. The key is the payee address (or service id). Each entry carries up to three ceilings: `cap` is a lifetime cap (never resets), `dailyCap` resets at the same UTC midnight as `budgets.daily`, and `window = { windowSeconds, cap }` is a sliding rolling-window cap (for example 5 USDC per hour). All three count only recorded, settled spend and are tracked per `(payee, asset)`.
+**`perService`** lets the agent cap exposure to a single counterparty independently of the global budget. The key is the payee address (or service id). Each entry carries up to three ceilings: `cap` is a lifetime cap (never resets), `dailyCap` resets at UTC midnight (it does not follow `budgets.timezone`), and `window = { windowSeconds, cap }` is a sliding rolling-window cap (for example 5 USDC per hour). All three count only recorded, settled spend and are tracked per `(payee, asset)`.
 
 **`perResource`** mirrors the same three ceilings (`cap`, `dailyCap`, `window`) but keyed off the resource identifier the receipt carries. The identifier is compared as a plain string, so it includes any query string: `/api/quotes?pair=usd` and `/api/quotes` are different resources. An entry matches the resource exactly by default. Setting `match: "prefix"` lets one entry cover every resource that starts with its key, and the comparison is character by character, so the prefix `/api` also matches `/apix`. End a prefix with `/` to cover one path segment. No regex or glob is evaluated from config.
 
@@ -211,6 +236,15 @@ if (!decision.allowed) {
 
 After a settlement lands, the agent calls `engine.record(intent)` so daily and per-service totals advance.
 
+## Channel opens and headroom
+
+A channel locks its deposit when it opens, and the deposit is not spent until a payment draws it down. The policy engine checks the deposit at open time, through two calls:
+
+- `engine.headroom(asset, payee)` returns what the policy still allows for one asset and payee, as an integer string. It is the smallest remaining amount across the daily, weekly, monthly, rolling and total budgets, and the payee's per-service lifetime cap, `dailyCap` and rolling `window`. `limitedBy` names the ceiling that sets it, and both fields are `null` when no ceiling applies.
+- `engine.evaluateChannelOpen({ payee, asset, deposit })` checks the deposit against `minChannelDeposit` and against that headroom. It returns `allowed`, `wouldBlock`, the `rule` that blocks (or `null`), and a `detail` for logs. It does not record spend. A deposit is not spend: unspent funds return to the funder when the channel closes.
+
+`minChannelDeposit` applies only to channel opens. A per-request channel payment is never compared with it. Earlier releases compared every channel payment's price with the minimum, which blocked each channel payment priced below it and never checked a deposit. `sizeDeposit` in `@vegaforge/tollway-channels` uses `headroom` to choose the deposit.
+
 ## Decision traces
 
 `engine.evaluate(intent)` returns a decision trace: one entry for every rule, whether it applied or not, with the numbers it compared. `engine.check(intent)` is built on it. It evaluates the trace and reports the first failing entry, so the decision and its explanation cannot disagree. The client uses the same derivation (`decisionFromTrace`, exported from `@vegaforge/tollway-core`).
@@ -221,19 +255,22 @@ Rules are evaluated in this order. Static checks on the payment come first, then
 | ----- | ---- | ------------------------------- | ------ |
 | 1 | `per-model-disabled` | `per-model-disabled` | none |
 | 2 | `min-channel-deposit` | `min-channel-deposit` | none |
-| 3 | `budget-daily` | `budget` | `utc-day` |
-| 4 | `budget-total` | `budget` | `lifetime` |
-| 5 | `per-service` | `per-service` | `lifetime` |
-| 6 | `per-service-daily` | `per-service-daily` | `utc-day` |
-| 7 | `per-service-window` | `per-service-window` | `sliding`, configurable |
-| 8 | `per-resource` | `per-resource` | `lifetime` |
-| 9 | `per-resource-daily` | `per-resource-daily` | `utc-day` |
-| 10 | `per-resource-window` | `per-resource-window` | `sliding`, configurable |
-| 11 | `rate-limit` | `rate-limit` | `sliding`, 60 seconds |
-| 12 | `anomaly` | `anomaly` | `sliding`, 60 seconds |
-| 13 | `anomaly-adaptive` | `anomaly-adaptive` | `sliding`, 60 seconds |
+| 3 | `budget-daily` | `budget` | `utc-day`, or `calendar-day` with `timezone` set |
+| 4 | `budget-weekly` | `budget` | `calendar-week` |
+| 5 | `budget-monthly` | `budget` | `calendar-month` |
+| 6 | `budget-rolling` | `budget` | `sliding`, configurable |
+| 7 | `budget-total` | `budget` | `lifetime` |
+| 8 | `per-service` | `per-service` | `lifetime` |
+| 9 | `per-service-daily` | `per-service-daily` | `utc-day` |
+| 10 | `per-service-window` | `per-service-window` | `sliding`, configurable |
+| 11 | `per-resource` | `per-resource` | `lifetime` |
+| 12 | `per-resource-daily` | `per-resource-daily` | `utc-day` |
+| 13 | `per-resource-window` | `per-resource-window` | `sliding`, configurable |
+| 14 | `rate-limit` | `rate-limit` | `sliding`, 60 seconds |
+| 15 | `anomaly` | `anomaly` | `sliding`, 60 seconds |
+| 16 | `anomaly-adaptive` | `anomaly-adaptive` | `sliding`, 60 seconds |
 
-Both budget rules report `budget` to `check()` and `PolicyBlockedError`, as they always have. The trace keeps them apart with `id`.
+Every budget rule reports `budget` to `check()` and `PolicyBlockedError`, as the daily and total budgets always have. The trace keeps them apart with `id`.
 
 This is a real trace, for a sixth payment of 1 USDC (`10000000` at 7 decimals) under a 5 USDC daily budget, with the policy in dry-run:
 
@@ -342,7 +379,7 @@ What the fields mean:
 - **`configured`** says whether the policy sets the rule at all. A rule can be configured and still `not-applicable` to this payment: a cap for another payee, or a channel minimum on an x402 payment.
 - **`outcome`** is `pass`, `fail`, or `not-applicable`.
 - **`limit`**, **`current`** and **`projected`** are integer strings. `current` is the counter before this payment and `projected` is what the limit is compared with if it goes through. For amounts these are in the asset's smallest unit; for `rate-limit` they are request counts. A rule that keeps no counter has `current: null`, and a rule with no numeric limit (a disabled model) has `limit: null`.
-- **`window`** is the period the counter covers: `{ "kind": "utc-day", "day": "YYYY-MM-DD" }`, `{ "kind": "lifetime" }`, or `{ "kind": "sliding", "seconds": 60 }`. Static rules have `null`.
+- **`window`** is the period the counter covers: `{ "kind": "utc-day", "day": "YYYY-MM-DD" }`, `{ "kind": "calendar-day", "day": "YYYY-MM-DD", "timezone": "..." }`, `{ "kind": "calendar-week", "weekStart": "YYYY-MM-DD", "timezone": "..." }`, `{ "kind": "calendar-month", "month": "YYYY-MM", "timezone": "..." }`, `{ "kind": "lifetime" }`, or `{ "kind": "sliding", "seconds": 60 }`. Static rules have `null`.
 - **`intent`** holds the payee, resource, amount, asset, and model. A trace never carries request bodies or headers.
 
 `evaluate` does not record spend. Call `record` after the payment settles, as before.

@@ -14,18 +14,21 @@ import { SOROBAN_RPC_URLS } from "@stellar/mpp";
 import { channel as channelClient } from "@stellar/mpp/channel/client";
 import { close, getChannelState } from "@stellar/mpp/channel/server";
 import { Keypair, rpc, StrKey } from "@stellar/stellar-sdk";
-import { type StellarNetwork, TollwayError } from "@vegaforge/tollway-core";
+import { NotImplementedError, type StellarNetwork, TollwayError } from "@vegaforge/tollway-core";
 import { Credential, Store } from "mppx";
 import type {
   ChannelChainState,
+  ChannelState,
   CloseAdapterInput,
   CloseAdapterResult,
   FoundChannelSettlement,
   MppChannelAdapter,
   OpenAdapterInput,
   OpenAdapterResult,
+  RefundResult,
   SignCommitmentInput,
   SignedCommitment,
+  StartCloseResult,
 } from "./adapter.js";
 import { CloseNotSubmittedError } from "./errors.js";
 import { findSettlementInEvents } from "./stellar-settlement.js";
@@ -136,6 +139,28 @@ export function createStellarMppChannelAdapter(
         `this adapter is configured for ${options.network}, not ${requested}`,
       );
     }
+  }
+
+  /**
+   * One read-only `getChannelState` query, mapped to the manager's shape.
+   * The balance becomes an integer string; ledgers stay ledger numbers.
+   */
+  async function readChannelState(): Promise<ChannelState> {
+    const state = await getChannelState({
+      channel: channelContract,
+      network,
+      rpcUrl,
+      simulationTimeoutMs,
+    });
+    const chainState: ChannelState = {
+      balance: state.balance.toString(),
+      currentLedger: state.currentLedger,
+      refundWaitingPeriod: state.refundWaitingPeriod,
+    };
+    if (state.closeEffectiveAtLedger != null) {
+      chainState.closeEffectiveAtLedger = state.closeEffectiveAtLedger;
+    }
+    return chainState;
   }
 
   /** The close checks that run before anything is sent to the network. */
@@ -259,20 +284,37 @@ export function createStellarMppChannelAdapter(
 
     async getChannelState(input): Promise<ChannelChainState> {
       assertChannel(input.channelId, input.network);
-      const state = await getChannelState({
-        channel: channelContract,
-        network,
-        rpcUrl,
-        simulationTimeoutMs,
-      });
-      const chainState: ChannelChainState = {
-        balance: state.balance.toString(),
-        currentLedger: state.currentLedger,
-      };
-      if (state.closeEffectiveAtLedger != null) {
-        chainState.closeEffectiveAtLedger = state.closeEffectiveAtLedger;
-      }
+      const { refundWaitingPeriod: _period, ...chainState } = await readChannelState();
       return chainState;
+    },
+
+    async getState(input): Promise<ChannelState> {
+      assertChannel(input.channelId, input.network);
+      return readChannelState();
+    },
+
+    // @stellar/mpp@0.7.1 has no funder-side helpers. Invoking close_start and
+    // refund on the contract is #101. Until then both fail before anything is
+    // sent, rather than pretending an on-chain transaction happened. The
+    // close says it submitted nothing, so the manager can hand the channel
+    // back to the status it had.
+    async startClose(input): Promise<StartCloseResult> {
+      assertChannel(input.channelId, input.network);
+      throw new CloseNotSubmittedError(
+        input.channelId,
+        new NotImplementedError(
+          "StellarMppChannelAdapter.startClose",
+          "issue #101 (funder-side close_start contract invocation)",
+        ),
+      );
+    },
+
+    async refund(input): Promise<RefundResult> {
+      assertChannel(input.channelId, input.network);
+      throw new NotImplementedError(
+        "StellarMppChannelAdapter.refund",
+        "issue #101 (funder-side refund contract invocation)",
+      );
     },
 
     async findChannelSettlement(input): Promise<FoundChannelSettlement | null> {

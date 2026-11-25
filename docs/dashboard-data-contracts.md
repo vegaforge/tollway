@@ -127,7 +127,7 @@ The placeholder a widget shows when its data is unavailable. Every unwired widge
 
 ## The data-layer seam
 
-Wired views (currently Agents, Channels and Exports) follow one pattern, and unwired views (Overview model mix, Services, Receipts, Anomalies) follow another.
+Wired views (Overview, Agents, Channels, Channel detail, Receipts, Anomalies and Exports) follow one pattern, and unwired views (Overview spend over time, Services, Webhooks) follow another.
 
 ### Wired views: the `useXxx` / `fetchXxx` seam
 
@@ -159,13 +159,14 @@ A view that does not yet have a data hook renders an `EmptyState` directly insid
 
 | Route | View | Current source | Future source |
 | ----- | ---- | -------------- | ------------- |
-| `/` | Overview | `StatCard` placeholders plus `EmptyState`s for model mix, spend over time, recent receipts, anomalies | `@vegaforge/tollway-observability` (`summarize`, and `timeseries` for spend over time, wiring tracked in #232), `@vegaforge/tollway-core` (`SignedReceipt`), `anomaly.detected` events |
+| `/` | Overview | `useOverview` -> `fetchOverview` in `src/data/overview.ts`, with the anomalies strip from `useAnomalies` | `@vegaforge/tollway-observability` (`createObservabilityHub`, `record`, `summarize`); spend over time stays an `EmptyState` naming `timeseries()` |
 | `/agents` | Per-agent spend | `useAgentSpend` -> `fetchAgentSpend` stub in `src/data/agent-spend.ts` | `summarize({ payer })` per agent, or a future `byPayer` rollup on the hub |
 | `/agents/[agentId]` | One agent's spend, budget, and policy stops | `useAgentDetail` -> `fetchAgentDetail` stub in `src/data/agent-detail.ts` | #226 series filtered by payer, plus the #228 policy store per agent id |
 | `/services` | Per-service revenue | `EmptyState` with `summarize({ payee })` as the named source | `summarize({ payee })`, plus `timeseries({ payee, ... })` for the latency-per-model breakdown |
 | `/channels` | Open MPP channels | `useOpenChannels` -> `fetchOpenChannels` stub in `src/data/open-channels.ts` | Observability hub rollup over `channel.opened` / `channel.closed`, or a direct `ChannelManager.list` iteration |
-| `/receipts` | Signed receipt archive | `EmptyState` with `@vegaforge/tollway-core · SignedReceipt` as the named source | Receipt archive backed by the observability hub's receipt stream |
-| `/anomalies` | Anomaly feed | `EmptyState` with `anomaly.detected` as the named source | `anomaly.detected` event stream, with the rule that fired |
+| `/channels/[channelId]` | One channel's commitment stream, drawdown and reconcile status | `useChannelDetail` -> `fetchChannelDetail` stub in `src/data/channel-detail.ts` | `ChannelManager.get` and `list`, served over HTTP by #227 |
+| `/receipts` | Signed receipt archive | `useReceipts` -> `fetchReceipts` stub in `src/data/receipts.ts`; `?payee=` limits it to one counterparty | Receipt archive backed by the observability hub's receipt stream |
+| `/anomalies` | Anomaly feed | `useAnomalies` -> `fetchAnomalies` stub in `src/data/anomalies.ts`; `?agent=` limits it to one agent | Live `anomaly.detected`, `budget.warning`, policy-stop and drift events (#238) |
 | `/exports` | Exports and webhooks | `useMetricsExport` -> `fetchMetricsExport` stub in `src/data/metrics-export.ts` for Exports; `EmptyState` for Webhooks | `@vegaforge/tollway-observability` `export()` for JSON and CSV, and the `WebhookEvent` set for outgoing webhooks |
 
 The nav order in `apps/dashboard/src/components/shell/nav.ts` matches this table. Add new entries there when you add a route.
@@ -208,6 +209,48 @@ The engine compares each asset's spend against the same single number, and the v
 ### Policy stops
 
 A `PolicyStop` is a stored `PolicyTrace` from `@vegaforge/tollway-core`. `stopFromTrace` parses it with `policyTraceSchema`, which rejects an unknown trace version or a summary that contradicts its entries, and refuses a trace that did not block. The stop shows the blocking entry's rule id and its `detail`. The stub produces its traces by running the real engine's `evaluate()` over the agent's history, so the wording is exactly what the engine writes. The panel links to `/anomalies?agent=<id>`, which shows the filter until the anomaly feed is wired.
+
+## Overview contract
+
+`/` reads `OverviewSnapshot` from `src/data/overview.ts` through `useOverview()`. The snapshot holds the period, a `SpendSummary` subset from `@vegaforge/tollway-observability`, the open-channel rows and the five newest receipts.
+
+| Figure | Rule |
+| ------ | ---- |
+| Settled spend | Per asset, from the hub's `byAsset`. Only `settled` payments add to it. Assets are never added together. |
+| Payments settled | `byOutcome.settled` |
+| Failure rate | `failed / (settled + failed)` in basis points. A skipped payment was never sent, so it is outside the denominator. With nothing attempted the card says "No payments", never 0% or NaN. |
+| Open channels | Count of rows with status `open`, and remaining budget (`deposit - committed`) per asset. |
+| Model mix | Each model's share of that asset's settled spend. A model with no spend shows 0.00%. |
+
+## Channel detail contract
+
+`/channels/[channelId]` reads `ChannelDetail` from `src/data/channel-detail.ts` through `useChannelDetail(channelId)`. The hook's union is `loading | error | not-found | ready`. `not-found` means the source does not track the id, and it is not an error.
+
+| Field | Meaning |
+| ----- | ------- |
+| `channel` | The `Channel` record from `@vegaforge/tollway-channels` |
+| `commitments` | The whole stream, in sequence order. The page paginates 25 at a time. |
+| `reconciliation` | `never-reconciled`, `ok` (with a time), or `drift` (a list of `{ kind, detail }`). A channel never reconciled never reads as ok. |
+| `receipts` | Receipts whose settlement is this channel, newest first |
+
+`commitmentSteps` pairs each commitment with its change from the one before and flags a sequence gap or a falling total. The chart scales each amount with `scaleBasisPoints`, which divides in `bigint` and converts only the small ratio to a number, so amounts above `Number.MAX_SAFE_INTEGER` keep their place. The chart's accessible description and the stream table carry the same numbers as the drawing.
+
+The `DriftKind` list and `Drift` shape mirror `@vegaforge/tollway-reconcile`. The dashboard does not depend on that package, and adding the dependency changes `apps/dashboard/package.json`, which needs maintainer review. Keep the list in step with the reconcile package.
+
+## Anomalies contract
+
+`/anomalies` reads one page of `AnomalyEvent`s from `src/data/anomalies.ts` through `useAnomalies(query)`. The feed is newest first. Each variant maps to one real source:
+
+| `kind` | Source | Severity |
+| ------ | ------ | -------- |
+| `policy-stop` | A blocking entry in a policy trace (`PolicyRuleName` from `@vegaforge/tollway-core`) | high |
+| `spend-spike` | The `anomaly.detected` event (adaptive detection, #196) | medium |
+| `budget-warning` | The `budget.warning` event (thresholds, #195) | medium |
+| `reconciliation-drift` | A drift from `Reconciler.reconcileChannel` | high |
+
+The query filters by `kind`, `severity`, `counterparty` (the payee, or the counterparty for a drift) and `agentId`, then takes a page of `limit` events after `cursor`, the id of the last event on the previous page. An unknown cursor throws `RangeError`; it never restarts the feed.
+
+`describeAnomaly` in `src/lib/anomaly-copy.ts` writes the one-line explanation. `POLICY_RULE_COPY` and `DRIFT_COPY` are typed over the full rule and drift lists, so a new value without a sentence fails the typecheck, and a test checks the runtime lists too.
 
 ## Adding a new view
 

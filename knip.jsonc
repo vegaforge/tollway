@@ -4,5 +4,13 @@
   // Vitest and @vitejs/plugin-react resolve as a peer: pnpm overrides do not
   // reach auto-installed peers, and vite <= 7.3.6 has open security
   // advisories. Nothing imports it directly.
-  "ignoreDependencies": ["vite"]
+  "ignoreDependencies": ["vite"],
+  "workspaces": {
+    // The edge runners load their entry files by path (esbuild bundles
+    // src/worker.ts, and CI runs src/run-deno.ts and src/run-bun.ts with
+    // deno and bun directly), so knip cannot find them from an import.
+    "tests/edge": {
+      "entry": ["src/*.ts", "src/*.mjs"]
+    }
+  }
 }

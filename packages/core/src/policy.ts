@@ -1,3 +1,4 @@
+import { calendarPeriodId, PeriodSpendLedger, periodDate } from "./budget-period.js";
 import { TollwayError } from "./errors.js";
 import {
   type Policy,
@@ -28,6 +29,57 @@ export type PaymentIntent = {
   amount: string;
   asset: string;
   model: SettlementModel;
+};
+
+/**
+ * A channel the caller is about to open (#181). The deposit is what the
+ * channel locks, as an integer string in the asset's base units.
+ */
+export type ChannelOpenIntent = {
+  /** The counterparty the channel pays. Keys the per-service cap. */
+  payee: string;
+  asset: string;
+  deposit: string;
+};
+
+/**
+ * A rule that can block a channel open. The two spend ceilings are the rules
+ * the headroom query reports on.
+ */
+export type ChannelOpenRule =
+  | "min-channel-deposit"
+  | "budget-daily"
+  | "budget-weekly"
+  | "budget-monthly"
+  | "budget-rolling"
+  | "budget-total"
+  | "per-service"
+  | "per-service-daily"
+  | "per-service-window";
+
+/** What {@link PolicyEngine.evaluateChannelOpen} decided. Does not record spend. */
+export type ChannelOpenDecision = {
+  /** False when a rule blocks the open in enforce mode. Dry-run never blocks. */
+  allowed: boolean;
+  /** True when a rule would block the open, in either mode. */
+  wouldBlock: boolean;
+  /** The first rule that blocks the open, or null when none does. */
+  rule: ChannelOpenRule | null;
+  /** Says why, in words fit for a log line. */
+  detail: string;
+};
+
+/**
+ * How much an agent may still spend with one payee in one asset (#181).
+ * `headroom` is the smallest remaining amount across the spend ceilings that
+ * apply, as an integer string, and `limitedBy` names that ceiling. Both are
+ * null when the policy sets no ceiling for this asset and payee.
+ */
+export type PolicyHeadroom = {
+  asset: string;
+  payee: string;
+  headroom: string | null;
+  limitedBy: Exclude<ChannelOpenRule, "min-channel-deposit"> | null;
 };
 
 /**
@@ -62,6 +114,18 @@ export interface PolicyEngine {
   recordAttempt?(intent: PaymentIntent): Promise<void>;
   /** Records a settled payment so budgets and anomaly windows advance. */
   record(intent: PaymentIntent): Promise<void>;
+  /**
+   * The spend room left for one asset and payee (#181). Read-only. Optional,
+   * so engines written before this release still satisfy the interface.
+   */
+  headroom?(asset: string, payee: string): Promise<PolicyHeadroom>;
+  /**
+   * Checks a channel open's deposit against `minChannelDeposit` and the
+   * headroom for its asset and payee (#181). Does not record spend, because
+   * a deposit is not spend: unspent funds return to the funder on close.
+   * Optional, like `headroom`.
+   */
+  evaluateChannelOpen?(open: ChannelOpenIntent): Promise<ChannelOpenDecision>;
 }
 
 export type AdaptiveAnomalyEvent = {
@@ -85,15 +149,39 @@ function parseAmount(s: string): bigint {
   return BigInt(s);
 }
 
+/** One spend ceiling for a payee and asset: its limit, and what is spent under it. */
+type SpendCeilingLimit = {
+  rule:
+    | "budget-daily"
+    | "budget-weekly"
+    | "budget-monthly"
+    | "budget-rolling"
+    | "budget-total"
+    | "per-service"
+    | "per-service-daily"
+    | "per-service-window";
+  limit: bigint;
+  spent: bigint;
+};
+
 /** Spend and request history the stateful rules read. */
 type EngineState = {
   day: string;
-  dailySpend: Map<string, bigint>;
+  /**
+   * Issue #198: budget spend per calendar period, in the policy's time zone.
+   * Each ledger keys spend by period id and never moves back to a closed
+   * period, so a clock that steps backwards cannot reopen a spent budget.
+   */
+  dailyBudget: PeriodSpendLedger;
+  weeklyBudget: PeriodSpendLedger;
+  monthlyBudget: PeriodSpendLedger;
+  /** Issue #198: the rolling budget, one bounded accumulator per asset (#192). */
+  rollingBudgetSpend: Map<string, RollingSum>;
   totalSpend: Map<string, bigint>;
   serviceSpend: Map<string, bigint>;
   /**
-   * Issue #192: per-service calendar-day spend, reset in
-   * `resetDailyIfNeeded` alongside `dailySpend`.
+   * Issue #192: per-service UTC-day spend, cleared in
+   * `resetDailyIfNeeded` when the UTC date changes.
    */
   serviceDailySpend: Map<string, bigint>;
   /**
@@ -284,44 +372,37 @@ const perModelDisabled: RuleEvaluator = ({ policy, intent }) => {
   };
 };
 
-const minChannelDeposit: RuleEvaluator = ({ policy, intent, amount }) => {
+/**
+ * The minimum channel deposit guards opening a channel, not each payment on
+ * one (#181). Comparing every per-request price with it blocked each channel
+ * payment priced below the minimum, and no deposit was ever checked.
+ * `evaluateChannelOpen` checks the deposit, so this rule never applies to a
+ * payment. It stays in the trace so the reason is visible.
+ */
+const minChannelDeposit: RuleEvaluator = ({ policy, intent }) => {
   const base = { id: "min-channel-deposit", rule: "min-channel-deposit", window: null } as const;
   const configured = Object.values(policy.perModel ?? {}).some(
     (cfg) => cfg?.minChannelDeposit != null,
   );
-  const min = policy.perModel?.["mpp-channel"]?.minChannelDeposit;
-  // The minimum only guards channel opens; other models have no deposit.
-  if (intent.model !== "mpp-channel" || min == null) {
-    return {
-      ...base,
-      configured,
-      outcome: "not-applicable",
-      limit: null,
-      current: null,
-      projected: null,
-      detail:
-        intent.model === "mpp-channel"
-          ? "policy sets no minimum channel deposit for mpp-channel"
-          : `minimum channel deposit does not apply to ${intent.model}`,
-    };
-  }
-  const minDeposit = parseAmount(min);
-  const fails = amount < minDeposit;
   return {
     ...base,
     configured,
-    outcome: fails ? "fail" : "pass",
-    limit: minDeposit.toString(),
+    outcome: "not-applicable",
+    limit: null,
     current: null,
-    projected: amount.toString(),
-    detail: fails
-      ? `amount ${intent.amount} is below minimum channel deposit ${min}`
-      : `amount ${intent.amount} meets minimum channel deposit ${min}`,
+    projected: null,
+    detail:
+      intent.model === "mpp-channel"
+        ? "minimum channel deposit is checked when a channel opens, not per payment"
+        : `minimum channel deposit does not apply to ${intent.model}`,
   };
 };
 
 type SpendCeilingId =
   | "budget-daily"
+  | "budget-weekly"
+  | "budget-monthly"
+  | "budget-rolling"
   | "budget-total"
   | "per-service"
   | "per-service-daily"
@@ -342,6 +423,9 @@ type SpendCeilingRule =
 function ruleOf(id: SpendCeilingId): SpendCeilingRule {
   switch (id) {
     case "budget-daily":
+    case "budget-weekly":
+    case "budget-monthly":
+    case "budget-rolling":
     case "budget-total":
       return "budget";
     case "per-service":
@@ -403,17 +487,81 @@ function spendCeiling(
   };
 }
 
-const budgetDaily: RuleEvaluator = ({ policy, intent, amount, state }) =>
-  spendCeiling(
+const budgetDaily: RuleEvaluator = ({ policy, intent, amount, now, state }) => {
+  const tz = policy.budgets?.timezone;
+  const day = periodDate(state.dailyBudget.period(now));
+  return spendCeiling(
     "budget-daily",
     "daily budget",
     `for ${intent.asset}`,
     policy.budgets?.daily,
     policy.budgets?.daily != null,
-    state.dailySpend.get(intent.asset) ?? 0n,
+    state.dailyBudget.spent(now, intent.asset),
     amount,
-    { kind: "utc-day", day: state.day },
+    // Without a time zone the period is the UTC day, reported as before.
+    tz != null ? { kind: "calendar-day", day, timezone: tz } : { kind: "utc-day", day },
   );
+};
+
+const budgetWeekly: RuleEvaluator = ({ policy, intent, amount, now, state }) =>
+  spendCeiling(
+    "budget-weekly",
+    "weekly budget",
+    `for ${intent.asset}`,
+    policy.budgets?.weekly,
+    policy.budgets?.weekly != null,
+    state.weeklyBudget.spent(now, intent.asset),
+    amount,
+    {
+      kind: "calendar-week",
+      weekStart: periodDate(state.weeklyBudget.period(now)),
+      timezone: policy.budgets?.timezone ?? "UTC",
+    },
+  );
+
+const budgetMonthly: RuleEvaluator = ({ policy, intent, amount, now, state }) =>
+  spendCeiling(
+    "budget-monthly",
+    "monthly budget",
+    `for ${intent.asset}`,
+    policy.budgets?.monthly,
+    policy.budgets?.monthly != null,
+    state.monthlyBudget.spent(now, intent.asset),
+    amount,
+    {
+      kind: "calendar-month",
+      month: periodDate(state.monthlyBudget.period(now)),
+      timezone: policy.budgets?.timezone ?? "UTC",
+    },
+  );
+
+const budgetRolling: RuleEvaluator = ({ policy, intent, amount, now, state }) => {
+  const config = policy.budgets?.rolling;
+  if (config == null) {
+    return {
+      id: "budget-rolling",
+      rule: "budget",
+      configured: false,
+      outcome: "not-applicable",
+      limit: null,
+      current: null,
+      projected: null,
+      window: null,
+      detail: `policy sets no rolling budget for ${intent.asset}`,
+    };
+  }
+  const current = state.rollingBudgetSpend.get(intent.asset)?.sum(now) ?? 0n;
+  return spendCeiling(
+    "budget-rolling",
+    `${config.windowSeconds}s rolling budget`,
+    `for ${intent.asset}`,
+    config.cap,
+    true,
+    current,
+    amount,
+    { kind: "sliding", seconds: config.windowSeconds },
+  );
+};
 
 const budgetTotal: RuleEvaluator = ({ policy, intent, amount, state }) =>
   spendCeiling(
@@ -732,6 +880,9 @@ const RULES: readonly RuleEvaluator[] = [
   perModelDisabled,
   minChannelDeposit,
   budgetDaily,
+  budgetWeekly,
+  budgetMonthly,
+  budgetRolling,
   budgetTotal,
   perService,
   perServiceDaily,
@@ -767,9 +918,17 @@ export function createPolicyEngine(
   const policy = parsed.policy;
   const clock = opts?.clock ?? Date.now;
   const mode: PolicyMode = policy.mode ?? "enforce";
+  const budgetTimezone = policy.budgets?.timezone ?? "UTC";
+  const weekStartsOn = policy.budgets?.weekStartsOn ?? "monday";
+  const initialNow = clock();
   const state: EngineState = {
-    day: utcDate(clock),
-    dailySpend: new Map(),
+    day: utcDate(() => initialNow),
+    dailyBudget: new PeriodSpendLedger((t) => calendarPeriodId("day", t, budgetTimezone)),
+    weeklyBudget: new PeriodSpendLedger((t) =>
+      calendarPeriodId("week", t, budgetTimezone, weekStartsOn),
+    ),
+    monthlyBudget: new PeriodSpendLedger((t) => calendarPeriodId("month", t, budgetTimezone)),
+    rollingBudgetSpend: new Map(),
     totalSpend: new Map(),
     serviceSpend: new Map(),
     serviceDailySpend: new Map(),
@@ -782,10 +941,9 @@ export function createPolicyEngine(
     adaptive: new Map(),
   };
 
-  function resetDailyIfNeeded(): void {
-    const today = utcDate(clock);
+  function resetDailyIfNeeded(now = clock()): void {
+    const today = utcDate(() => now);
     if (today !== state.day) {
-      state.dailySpend.clear();
       state.serviceDailySpend.clear();
       state.resourceDailySpend.clear();
       state.day = today;
@@ -817,16 +975,27 @@ export function createPolicyEngine(
   }
 
   function applyRecord(intent: PaymentIntent): void {
-    resetDailyIfNeeded();
+    const now = clock();
+    resetDailyIfNeeded(now);
     const amount = parseAmount(intent.amount);
-    const { dailySpend, totalSpend, serviceSpend } = state;
+    const { totalSpend, serviceSpend } = state;
 
-    dailySpend.set(intent.asset, (dailySpend.get(intent.asset) ?? 0n) + amount);
+    // Every calendar ledger advances, configured or not, so the headroom
+    // and trace of a budget added later read the same history.
+    state.dailyBudget.add(now, intent.asset, amount);
+    state.weeklyBudget.add(now, intent.asset, amount);
+    state.monthlyBudget.add(now, intent.asset, amount);
+    if (policy.budgets?.rolling != null) {
+      let accumulator = state.rollingBudgetSpend.get(intent.asset);
+      if (!accumulator) {
+        accumulator = new RollingSum({ windowMs: policy.budgets.rolling.windowSeconds * 1_000 });
+        state.rollingBudgetSpend.set(intent.asset, accumulator);
+      }
+      accumulator.add(now, amount);
+    }
     totalSpend.set(intent.asset, (totalSpend.get(intent.asset) ?? 0n) + amount);
     const svcKey = serviceKey(intent.payee, intent.asset);
     serviceSpend.set(svcKey, (serviceSpend.get(svcKey) ?? 0n) + amount);
-
-    const now = clock();
 
     // Issue #192: record into the per-service daily and rolling-window
     // accumulators when the policy declares them. The rolling-window
@@ -895,6 +1064,11 @@ export function createPolicyEngine(
    * bounded under traffic that bursts and then stops.
    */
   function pruneRollingSums(now: number): void {
+    for (const [key, accumulator] of state.rollingBudgetSpend) {
+      if (accumulator.prune(now)) {
+        state.rollingBudgetSpend.delete(key);
+      }
+    }
     for (const [key, accumulator] of state.serviceWindowSpend) {
       if (accumulator.prune(now)) {
         state.serviceWindowSpend.delete(key);
@@ -956,6 +1130,142 @@ export function createPolicyEngine(
     if (state.rateLimiter?.count === "attempts") state.rateLimiter.record(intent.payee, clock());
   }
 
+  /**
+   * The spend ceilings that apply to one asset and payee, each with its limit
+   * and what has been spent under it. The daily ceiling is read after the
+   * day rolls over, so yesterday's spend is not counted.
+   */
+  function spendCeilings(payee: string, asset: string): SpendCeilingLimit[] {
+    const now = clock();
+    resetDailyIfNeeded(now);
+    const ceilings: SpendCeilingLimit[] = [];
+    const daily = policy.budgets?.daily;
+    if (daily != null) {
+      ceilings.push({
+        rule: "budget-daily",
+        limit: parseAmount(daily),
+        spent: state.dailyBudget.spent(now, asset),
+      });
+    }
+    const weekly = policy.budgets?.weekly;
+    if (weekly != null) {
+      ceilings.push({
+        rule: "budget-weekly",
+        limit: parseAmount(weekly),
+        spent: state.weeklyBudget.spent(now, asset),
+      });
+    }
+    const monthly = policy.budgets?.monthly;
+    if (monthly != null) {
+      ceilings.push({
+        rule: "budget-monthly",
+        limit: parseAmount(monthly),
+        spent: state.monthlyBudget.spent(now, asset),
+      });
+    }
+    const rolling = policy.budgets?.rolling;
+    if (rolling != null) {
+      ceilings.push({
+        rule: "budget-rolling",
+        limit: parseAmount(rolling.cap),
+        spent: state.rollingBudgetSpend.get(asset)?.sum(now) ?? 0n,
+      });
+    }
+    const total = policy.budgets?.total;
+    if (total != null) {
+      ceilings.push({
+        rule: "budget-total",
+        limit: parseAmount(total),
+        spent: state.totalSpend.get(asset) ?? 0n,
+      });
+    }
+    const service = policy.perService?.[payee];
+    const key = serviceKey(payee, asset);
+    if (service?.cap != null) {
+      ceilings.push({
+        rule: "per-service",
+        limit: parseAmount(service.cap),
+        spent: state.serviceSpend.get(key) ?? 0n,
+      });
+    }
+    // The #192 caps bound spend with this payee too, so a deposit sized past
+    // them would lock funds the policy will not let the agent spend.
+    if (service?.dailyCap != null) {
+      ceilings.push({
+        rule: "per-service-daily",
+        limit: parseAmount(service.dailyCap),
+        spent: state.serviceDailySpend.get(key) ?? 0n,
+      });
+    }
+    if (service?.window != null) {
+      ceilings.push({
+        rule: "per-service-window",
+        limit: parseAmount(service.window.cap),
+        spent: state.serviceWindowSpend.get(key)?.sum(clock()) ?? 0n,
+      });
+    }
+    return ceilings;
+  }
+
+  /** What is left under a ceiling. Never negative: an exhausted ceiling has none left. */
+  function remaining(limit: bigint, spent: bigint): bigint {
+    return limit > spent ? limit - spent : 0n;
+  }
+
+  function headroomOf(asset: string, payee: string): PolicyHeadroom {
+    let tightest: { rule: SpendCeilingLimit["rule"]; left: bigint } | undefined;
+    for (const ceiling of spendCeilings(payee, asset)) {
+      const left = remaining(ceiling.limit, ceiling.spent);
+      if (tightest === undefined || left < tightest.left) {
+        tightest = { rule: ceiling.rule, left };
+      }
+    }
+    return {
+      asset,
+      payee,
+      headroom: tightest === undefined ? null : tightest.left.toString(),
+      limitedBy: tightest?.rule ?? null,
+    };
+  }
+
+  function evaluateChannelOpenNow(open: ChannelOpenIntent): ChannelOpenDecision {
+    const deposit = parseAmount(open.deposit);
+    const failures: Array<{ rule: ChannelOpenRule; detail: string }> = [];
+
+    const min = policy.perModel?.["mpp-channel"]?.minChannelDeposit;
+    if (min != null && deposit < parseAmount(min)) {
+      failures.push({
+        rule: "min-channel-deposit",
+        detail: `deposit ${open.deposit} is below minimum channel deposit ${min}`,
+      });
+    }
+    for (const ceiling of spendCeilings(open.payee, open.asset)) {
+      const left = remaining(ceiling.limit, ceiling.spent);
+      if (deposit > left) {
+        failures.push({
+          rule: ceiling.rule,
+          detail: `deposit ${open.deposit} exceeds the ${ceiling.rule} headroom of ${left}`,
+        });
+      }
+    }
+
+    const blocker = failures[0];
+    if (blocker === undefined) {
+      return {
+        allowed: true,
+        wouldBlock: false,
+        rule: null,
+        detail: `deposit ${open.deposit} is within policy`,
+      };
+    }
+    return {
+      allowed: mode === "dry-run",
+      wouldBlock: true,
+      rule: blocker.rule,
+      detail: blocker.detail,
+    };
+  }
+
   return {
     mode,
 
@@ -985,6 +1295,14 @@ export function createPolicyEngine(
       const now = clock();
       pruneWindow(now);
       pruneRollingSums(now);
+    },
+
+    async headroom(asset: string, payee: string): Promise<PolicyHeadroom> {
+      return headroomOf(asset, payee);
+    },
+
+    async evaluateChannelOpen(open: ChannelOpenIntent): Promise<ChannelOpenDecision> {
+      return evaluateChannelOpenNow(open);
     },
   };
 }

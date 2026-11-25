@@ -86,6 +86,13 @@ eventsRouter.get("/stream", requireApiKey("read"), async (c) => {
         id: String(buffer.latestId),
       });
       if (aborted) return;
+      // Then everything still buffered, so a new client starts with the
+      // recent events instead of an empty feed.
+      for (const event of buffer.all()) {
+        if (aborted) return;
+        if (filter !== null && !filter.has(event.type)) continue;
+        await stream.writeSSE({ event: event.type, data: event.data, id: String(event.id) });
+      }
     }
 
     // Track the highest id we have delivered so far.

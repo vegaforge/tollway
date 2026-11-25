@@ -27,6 +27,23 @@ const gate = createPaywall(config, { signer, facilitator, cache, receiptVersion:
 
 v1 receipts already in the cache keep being served to retries after the switch.
 
+## Replaying a settled payment after the cache expires
+
+The settlement cache keeps a receipt for 30 seconds by default. To give a payer its original receipt when it retries later, configure a receipt archive:
+
+```ts
+import { createRedisPaymentReceiptArchive } from "@vegaforge/tollway-server";
+
+createPaywall(config, {
+  signer,
+  facilitator,
+  cache,
+  receiptArchive: createRedisPaymentReceiptArchive({ client: redis, retentionMs: 7 * 86_400_000 }),
+});
+```
+
+The gate looks the payment up by a key derived from the signed payment, before `/verify`, and answers with the original receipt and `replayed: true`. The same offer and method binding applies as for a cached receipt, so a payment settled for one route is a `409 offer-mismatch` on any other. Whoever holds the exact payment bytes can fetch that one resource again until the entry expires, so keep `PAYMENT-SIGNATURE` values out of logs. Redis entries have no TTL unless you set `retentionMs`; `createInMemoryPaymentReceiptArchive` suits a single process.
+
 ## Why signing sits behind an interface
 
 `ReceiptSigner` is the seam between Tollway and the key. The default `Ed25519Signer` uses WebCrypto so it runs unchanged in Node and in edge runtimes, but the same interface accepts a KMS-backed or HSM-backed signer with no other change. Any object that satisfies the interface is a valid signer.
@@ -68,6 +85,22 @@ If a key is compromised, mark it `{ state: "revoked" }`. Every receipt it ever s
 
 Load a persisted key with `Ed25519Signer.fromPrivateKey` (seed or PKCS#8), `Ed25519Signer.fromJwk`, `EcdsaP256Signer.fromPkcs8` or `EcdsaP256Signer.fromJwk`, so every instance of a service signs with the same published key.
 
+## x402 offer-receipt extension
+
+Set `offerReceipt: true` on a paywall and the gate also issues the x402 offer-receipt extension, so stock x402 clients get proof in a format they already read:
+
+- the 402 carries a signed offer for each x402 payment option, in `extensions["offer-receipt"].info.offers`;
+- the paid response's `PAYMENT-RESPONSE` carries a signed receipt, in `extensions["offer-receipt"].info.receipt`.
+
+```ts
+const gate = createPaywall(
+  { amount: "10000", asset, payTo, network: "testnet", offerReceipt: { includeTxHash: false } },
+  { signer, facilitator },
+);
+```
+
+The Tollway receipt in `TOLLWAY-RECEIPT` stays the authoritative record. The extension receipt is a short delivery attestation derived from it (resource, payer, network, time), with no amount, asset or model. Both are signed with the same key; the JWS `kid` is a `did:key` for Ed25519, a `did:jwk` for P-256, or a `did:web` you set. The transaction hash is left out of the extension receipt unless you set `includeTxHash: true`, because it ties the payer's account to the resource for anyone who sees the receipt. Signed offers never outlive the payment timeout and are cached, so a burst of unpaid requests does not cost a signature each. With the option off nothing changes on the wire. Details are in [`docs/receipt-format.md`](https://github.com/vegaforge/tollway/blob/main/docs/receipt-format.md#x402-offer-receipt-extension).
+
 ## In the code
 
 ```ts
@@ -103,6 +136,12 @@ if (result.valid) {
   console.log(result.receipt.receipt.amount);
 }
 ```
+
+## Receipt log
+
+A single receipt cannot be forged, but a collection of receipts can still lose a member without trace. `createReceiptLog` in `@vegaforge/tollway-core` keeps receipts in an append-only log where every entry commits to the previous one by SHA-256, and signs checkpoints of the log's size and head hash with the same signer as receipts. `verifyReceiptLog(entries, { verifier, checkpoint })` then reports the first modified, missing or reordered entry. `openJsonlReceiptLogStore` in `@vegaforge/tollway-observability` stores the log as an fsynced JSON Lines file.
+
+Removing entries from the end of a log cannot be detected without a checkpoint kept outside it, so send checkpoints somewhere the log's operator cannot rewrite. The format, the guarantees and offline verification are in [`docs/receipt-log.md`](https://github.com/vegaforge/tollway/blob/main/docs/receipt-log.md).
 
 ## Reference
 

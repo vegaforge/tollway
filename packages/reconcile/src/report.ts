@@ -1,5 +1,10 @@
 import { TollwayError } from "@vegaforge/tollway-core";
-import type { Drift, DriftKind, ReconciliationResult } from "./index.js";
+import {
+  type Drift,
+  type DriftKind,
+  type ReconciliationResult,
+  reconciliationSubjectId,
+} from "./index.js";
 
 export const RECONCILIATION_REPORT_VERSION = 1 as const;
 
@@ -7,16 +12,32 @@ export type DriftSeverity = "low" | "medium" | "high" | "critical";
 
 /**
  * Conservative default severity for each drift kind. Financial loss and
- * tampering indicators are critical; unexpected settlements or invalid records
- * are high; stream anomalies are medium; foreign commitments are low.
+ * tampering indicators are critical (a receipt the chain contradicts, a
+ * channel contract paying the wrong party or token, tokens leaving a channel
+ * beyond its commitments); unexpected settlements, invalid records, a
+ * missing transaction and a close that is under way are high; stream
+ * anomalies are medium; foreign commitments are low.
  */
 export const DEFAULT_DRIFT_SEVERITY: Record<DriftKind, DriftSeverity> = {
   "under-settled": "critical",
   "unexpected-remainder": "critical",
   "non-monotonic-cumulative": "critical",
+  "tx-failed": "critical",
+  "transfer-missing": "critical",
+  "amount-mismatch": "critical",
+  "payee-mismatch": "critical",
+  "payer-mismatch": "critical",
+  "asset-mismatch": "critical",
+  "recipient-mismatch": "critical",
+  "token-mismatch": "critical",
+  "balance-mismatch": "critical",
   "over-settled": "high",
   "missing-commitment": "high",
   "malformed-record": "high",
+  "tx-not-found": "high",
+  "network-mismatch": "high",
+  "closed-on-chain": "high",
+  "funder-mismatch": "high",
   "sequence-gap": "medium",
   "duplicate-sequence": "medium",
   "foreign-commitment": "low",
@@ -56,9 +77,13 @@ export type BuildReconciliationReportOptions = {
 };
 
 export type ReconciliationReportEntry = {
+  /** The channel id or transaction hash the result is about. */
   subject: string;
+  status: ReconciliationResult["status"];
   ok: boolean;
   drift: Drift[];
+  /** Why an `unverifiable` or `retryable` result could not be checked. */
+  reason?: string;
   amounts?: ReconciliationAmounts;
 };
 
@@ -66,6 +91,10 @@ export type ReconciliationReportTotals = {
   total: number;
   ok: number;
   drifted: number;
+  /** Results the chain can no longer confirm or contradict. Not drift. */
+  unverifiable: number;
+  /** Results whose check could not run and should be retried. Not drift. */
+  retryable: number;
   driftItems: number;
   byDriftKind: Record<DriftKind, number>;
   amounts?: {
@@ -117,6 +146,8 @@ export function buildReconciliationReport(
 
   let okCount = 0;
   let driftedCount = 0;
+  let unverifiableCount = 0;
+  let retryableCount = 0;
   let driftItems = 0;
   let hasAmounts = false;
   let totalExpected = 0n;
@@ -124,22 +155,35 @@ export function buildReconciliationReport(
   let totalRemainder = 0n;
 
   const entries: ReconciliationReportEntry[] = results.map((result) => {
-    const drift = result.ok ? [] : result.drift.map((d) => ({ ...d }));
+    const drift = result.status === "drift" ? result.drift.map((d) => ({ ...d })) : [];
 
-    if (result.ok) {
-      okCount += 1;
-    } else {
-      driftedCount += 1;
-      driftItems += drift.length;
-      for (const item of drift) {
-        byDriftKind[item.kind] += 1;
-      }
+    switch (result.status) {
+      case "ok":
+        okCount += 1;
+        break;
+      case "drift":
+        driftedCount += 1;
+        driftItems += drift.length;
+        for (const item of drift) {
+          byDriftKind[item.kind] += 1;
+        }
+        break;
+      case "unverifiable":
+        unverifiableCount += 1;
+        break;
+      case "retryable":
+        retryableCount += 1;
+        break;
     }
 
     const entry: ReconciliationReportEntry = {
-      subject: result.channelId,
+      subject: reconciliationSubjectId(result.subject),
+      status: result.status,
       ok: result.ok,
       drift,
+      ...(result.status === "unverifiable" || result.status === "retryable"
+        ? { reason: result.reason }
+        : {}),
     };
 
     if (result.amounts) {
@@ -167,6 +211,8 @@ export function buildReconciliationReport(
     total: results.length,
     ok: okCount,
     drifted: driftedCount,
+    unverifiable: unverifiableCount,
+    retryable: retryableCount,
     driftItems,
     byDriftKind,
     ...(hasAmounts

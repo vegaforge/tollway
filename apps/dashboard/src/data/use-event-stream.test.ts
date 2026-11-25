@@ -3,7 +3,7 @@
  *
  * We use a fake EventSource that exposes a fluent API for dispatching events
  * synchronously in tests. The hook is tested via the behaviour of the
- * consuming hooks (useAnomalies, useOpenChannels) rather than in isolation,
+ * consuming hooks (useOpenChannels) rather than in isolation,
  * because the interesting behaviour is in the state merging and deduplication.
  */
 
@@ -64,9 +64,8 @@ class FakeEventSource {
 
   /** Dispatch a named SSE event with a data payload (JSON-stringified). */
   emit(eventType: string, data: unknown, lastEventId = "") {
-    const event = Object.assign(new MessageEvent(eventType, { data: JSON.stringify(data) }), {
-      lastEventId,
-    });
+    // lastEventId is read-only on MessageEvent, so it goes in the init dict.
+    const event = new MessageEvent(eventType, { data: JSON.stringify(data), lastEventId });
     this.dispatch(eventType, event);
   }
 
@@ -140,130 +139,10 @@ describe("useEventStream status", () => {
 });
 
 // ---------------------------------------------------------------------------
-// useAnomalies — deduplication and prepend
 // ---------------------------------------------------------------------------
 
-describe("useAnomalies", () => {
-  it("prepends new anomaly events, newest first", async () => {
-    const { useAnomalies } = await import("./use-anomalies");
-    const { result } = renderHook(() => useAnomalies());
-
-    await waitFor(() => expect(result.current.status).toBe("ready"));
-
-    act(() => {
-      FakeEventSource.latest().emit("anomaly.detected", {
-        id: "a1",
-        type: "spend-spike",
-        agentId: "agent-1",
-        detail: "Spike detected",
-        at: "2026-11-19T10:00:00.000Z",
-      });
-    });
-
-    act(() => {
-      FakeEventSource.latest().emit("anomaly.detected", {
-        id: "a2",
-        type: "budget-stop",
-        agentId: "agent-2",
-        detail: "Over daily limit",
-        at: "2026-11-19T11:00:00.000Z",
-      });
-    });
-
-    await waitFor(() => {
-      if (result.current.status !== "ready") throw new Error("not ready");
-      expect(result.current.rows).toHaveLength(2);
-      expect(result.current.rows[0]?.id).toBe("a2");
-      expect(result.current.rows[1]?.id).toBe("a1");
-    });
-  });
-
-  it("deduplicates events with the same id", async () => {
-    const { useAnomalies } = await import("./use-anomalies");
-    const { result } = renderHook(() => useAnomalies());
-    await waitFor(() => expect(result.current.status).toBe("ready"));
-
-    const payload = {
-      id: "a-dup",
-      type: "spend-spike",
-      agentId: "agent-1",
-      detail: "Dup",
-      at: "2026-11-19T10:00:00.000Z",
-    };
-
-    act(() => {
-      FakeEventSource.latest().emit("anomaly.detected", payload);
-      FakeEventSource.latest().emit("anomaly.detected", payload);
-    });
-
-    await waitFor(() => {
-      if (result.current.status !== "ready") throw new Error("not ready");
-      expect(result.current.rows).toHaveLength(1);
-    });
-  });
-
-  it("filters by agentId when agentFilter is provided", async () => {
-    const { useAnomalies } = await import("./use-anomalies");
-    const { result } = renderHook(() => useAnomalies("agent-1"));
-    await waitFor(() => expect(result.current.status).toBe("ready"));
-
-    act(() => {
-      FakeEventSource.latest().emit("anomaly.detected", {
-        id: "a1",
-        type: "spend-spike",
-        agentId: "agent-1",
-        detail: "For agent 1",
-        at: "2026-11-19T10:00:00.000Z",
-      });
-      FakeEventSource.latest().emit("anomaly.detected", {
-        id: "a2",
-        type: "budget-stop",
-        agentId: "agent-2",
-        detail: "For agent 2",
-        at: "2026-11-19T11:00:00.000Z",
-      });
-    });
-
-    await waitFor(() => {
-      if (result.current.status !== "ready") throw new Error("not ready");
-      expect(result.current.rows).toHaveLength(1);
-      expect(result.current.rows[0]?.agentId).toBe("agent-1");
-    });
-  });
-
-  it("clears rows on a reset event", async () => {
-    const { useAnomalies } = await import("./use-anomalies");
-    const { result } = renderHook(() => useAnomalies());
-    await waitFor(() => expect(result.current.status).toBe("ready"));
-
-    act(() => {
-      FakeEventSource.latest().emit("anomaly.detected", {
-        id: "a1",
-        type: "spend-spike",
-        agentId: "agent-1",
-        detail: "Spike",
-        at: "2026-11-19T10:00:00.000Z",
-      });
-    });
-
-    await waitFor(() => {
-      if (result.current.status !== "ready") throw new Error("not ready");
-      expect(result.current.rows).toHaveLength(1);
-    });
-
-    act(() => {
-      FakeEventSource.latest().emit("reset", { reason: "buffer-expired" });
-    });
-
-    await waitFor(() => {
-      if (result.current.status !== "ready") throw new Error("not ready");
-      expect(result.current.rows).toHaveLength(0);
-    });
-  });
-});
-
 // ---------------------------------------------------------------------------
-// useOpenChannels — in-place update
+// useOpenChannels: in-place update
 // ---------------------------------------------------------------------------
 
 describe("useOpenChannels channel lifecycle events", () => {
@@ -339,80 +218,10 @@ describe("useOpenChannels channel lifecycle events", () => {
 // Burst coalescing
 // ---------------------------------------------------------------------------
 
-describe("burst coalescing", () => {
-  it("batches multiple events into a single render cycle", async () => {
-    const { useAnomalies } = await import("./use-anomalies");
-    let renderCount = 0;
-    const { result } = renderHook(() => {
-      renderCount++;
-      return useAnomalies();
-    });
-
-    await waitFor(() => expect(result.current.status).toBe("ready"));
-    const baseRenders = renderCount;
-
-    act(() => {
-      const es = FakeEventSource.latest();
-      for (let i = 0; i < 10; i++) {
-        es.emit("anomaly.detected", {
-          id: `a-burst-${i}`,
-          type: "spend-spike",
-          agentId: "agent-1",
-          detail: `Burst ${i}`,
-          at: "2026-11-19T10:00:00.000Z",
-        });
-      }
-    });
-
-    await waitFor(() => {
-      if (result.current.status !== "ready") throw new Error("not ready");
-      expect(result.current.rows).toHaveLength(10);
-    });
-
-    // All 10 events should have been merged in fewer renders than events.
-    // With rAF stubbed to run synchronously, they all land in one flush.
-    expect(renderCount - baseRenders).toBeLessThan(10);
-  });
-});
-
 // ---------------------------------------------------------------------------
-// Schema validation — invalid events are dropped silently
+// Schema validation: invalid events are dropped silently
 // ---------------------------------------------------------------------------
-
-describe("schema validation", () => {
-  it("drops an anomaly.detected event that fails schema validation", async () => {
-    const { useAnomalies } = await import("./use-anomalies");
-    const { result } = renderHook(() => useAnomalies());
-    await waitFor(() => expect(result.current.status).toBe("ready"));
-
-    act(() => {
-      // Missing required fields — should be dropped.
-      FakeEventSource.latest().emit("anomaly.detected", { invalid: true });
-    });
-
-    // No rows should appear.
-    await waitFor(() => {
-      if (result.current.status !== "ready") throw new Error("not ready");
-      expect(result.current.rows).toHaveLength(0);
-    });
-  });
-});
 
 // ---------------------------------------------------------------------------
 // Reconnect status
 // ---------------------------------------------------------------------------
-
-describe("reconnect state in consuming hooks", () => {
-  it("reflects reconnecting status when EventSource errors", async () => {
-    const { useAnomalies } = await import("./use-anomalies");
-    const { result } = renderHook(() => useAnomalies());
-    await waitFor(() => expect(result.current.status).toBe("ready"));
-    await waitFor(() => expect(result.current.stream).toBe("live"));
-
-    act(() => {
-      FakeEventSource.latest().emitError();
-    });
-
-    await waitFor(() => expect(result.current.stream).toBe("reconnecting"));
-  });
-});

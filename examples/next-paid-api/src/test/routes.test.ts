@@ -11,6 +11,7 @@ import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
 import { GET as quote } from "../app/api/quote/route";
 import { GET as receiptKey } from "../app/api/receipt-key/route";
 import { POST as summarize } from "../app/api/summarize/route";
+import { DEFAULT_TESTNET_ASSET, DEFAULT_TESTNET_PAY_TO } from "../lib/config";
 import { getServices, QUOTE_PRICE, SUMMARIZE_PRICE } from "../lib/services";
 
 /**
@@ -25,16 +26,19 @@ async function publishedVerifier(): Promise<Ed25519Verifier> {
   return new Ed25519Verifier({ [body.keyId]: body.publicKey });
 }
 
-/** A standard-base64 x402 V2 payment header, as a stock client writes it. */
-function paymentHeader(transaction: string): string {
+/**
+ * A standard-base64 x402 V2 payment header, as a stock client writes it: its
+ * `accepted` is the route's own terms, which the gate matches exactly (#158).
+ */
+function paymentHeader(transaction: string, amount = QUOTE_PRICE): string {
   return encodePaymentSignatureHeader({
     x402Version: 2,
     accepted: {
       scheme: "exact",
       network: "stellar:testnet",
-      asset: "CBIELTK6YBZJU5UP2WWQEUCYKLPU6AUNZ2BQ4WWFEIE3USCIHMXQDAMA",
-      amount: "10000",
-      payTo: "GSERVICEXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX",
+      asset: DEFAULT_TESTNET_ASSET,
+      amount,
+      payTo: DEFAULT_TESTNET_PAY_TO,
       maxTimeoutSeconds: 60,
       extra: {},
     },
@@ -117,7 +121,7 @@ describe("POST /api/summarize", () => {
     const paid = await summarize(
       new Request(`${BASE}/api/summarize`, {
         method: "POST",
-        headers: { [PAYMENT_SIGNATURE_HEADER]: paymentHeader("summarize-pay-1") },
+        headers: { [PAYMENT_SIGNATURE_HEADER]: paymentHeader("summarize-pay-1", SUMMARIZE_PRICE) },
         body: JSON.stringify({ text: "Tollway charges agents. It settles on Stellar." }),
       }),
     );
@@ -134,7 +138,9 @@ describe("POST /api/summarize", () => {
     const response = await summarize(
       new Request(`${BASE}/api/summarize`, {
         method: "POST",
-        headers: { [PAYMENT_SIGNATURE_HEADER]: paymentHeader("summarize-pay-bad-body") },
+        headers: {
+          [PAYMENT_SIGNATURE_HEADER]: paymentHeader("summarize-pay-bad-body", SUMMARIZE_PRICE),
+        },
         body: "not json",
       }),
     );

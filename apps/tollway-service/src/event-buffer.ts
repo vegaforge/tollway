@@ -62,6 +62,11 @@ export class EventBuffer {
     return this.events.filter((e) => e.id > afterId);
   }
 
+  /** Every buffered event, oldest first, for a fresh connection to replay. */
+  all(): BufferedEvent[] {
+    return [...this.events];
+  }
+
   /** The id of the most recently appended event, or 0 when empty. */
   get latestId(): number {
     return this.nextId - 1;
@@ -83,7 +88,7 @@ export function sharedEventBuffer(): EventBuffer {
   return _sharedBuffer;
 }
 
-/** Replace the shared buffer — test use only. */
+/** Replace the shared buffer: test use only. */
 export function resetSharedBuffer(capacity?: number): void {
   _sharedBuffer = new EventBuffer(capacity);
 }

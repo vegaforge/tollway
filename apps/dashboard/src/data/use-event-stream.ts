@@ -121,7 +121,9 @@ export function useEventStream(options: UseEventStreamOptions): StreamStatus {
   const typesKey = types ? [...types].sort().join(",") : "";
 
   useEffect(() => {
-    if (!enabled) {
+    // No EventSource (server rendering, or a runtime without it): stay paused
+    // and keep showing the polled data, rather than throwing.
+    if (!enabled || typeof EventSource === "undefined") {
       setStatus("paused");
       return;
     }

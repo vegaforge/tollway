@@ -219,7 +219,7 @@ describe("createX402Settler", () => {
     const { fetch } = scriptedFetch();
     const created = settler(fetch);
     expect(JSON.stringify(created)).not.toContain(AGENT.secret());
-    expect(Object.keys(created).sort()).toEqual(["payer", "settle"]);
+    expect(Object.keys(created).sort()).toEqual(["payer", "settle", "settleExchange"]);
     // The payer is the public address, which the client checks receipts against.
     expect(created.payer).toBe(AGENT.publicKey());
   });

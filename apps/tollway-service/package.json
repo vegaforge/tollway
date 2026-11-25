@@ -1,8 +1,8 @@
 {
-  "name": "@vegaforge/tollway-service",
+  "name": "@vegaforge/tollway-live-service",
   "version": "0.0.0",
   "private": true,
-  "description": "Tollway observability service – event ingestion and SSE stream",
+  "description": "Tollway observability service \u2013 event ingestion and SSE stream",
   "license": "Apache-2.0",
   "type": "module",
   "scripts": {
@@ -14,9 +14,7 @@
   },
   "dependencies": {
     "@hono/node-server": "^1.14.4",
-    "@vegaforge/tollway-channels": "workspace:*",
     "@vegaforge/tollway-core": "workspace:*",
-    "@vegaforge/tollway-observability": "workspace:*",
     "hono": "^4.8.5",
     "zod": "^4.6.7"
   },

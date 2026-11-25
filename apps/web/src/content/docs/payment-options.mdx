@@ -1,0 +1,42 @@
+---
+title: Payment options
+description: Accept several assets or networks on one route and settle with the payer's choice.
+---
+
+One paid route can offer more than one way to pay, for example USDC on mainnet and on testnet. List them in `accepts`, in your order of preference:
+
+```ts
+import { createHttpFacilitator, createPaywall } from "@vegaforge/tollway-server";
+
+const gate = createPaywall(
+  {
+    accepts: [
+      {
+        amount: "10000",
+        asset: "CCW67TSZV3SSS2HXMBQ5JFGCKJNXKZM7UQUWUZPUTHXSTZLEO7SJMI75",
+        payTo: SERVICE_ACCOUNT,
+        network: "mainnet",
+        facilitator: createHttpFacilitator(MAINNET_FACILITATOR_URL),
+      },
+      {
+        amount: "10000",
+        asset: "CBIELTK6YBZJU5UP2WWQEUCYKLPU6AUNZ2BQ4WWFEIE3USCIHMXQDAMA",
+        payTo: SERVICE_ACCOUNT,
+        network: "testnet",
+        facilitator: createHttpFacilitator(TESTNET_FACILITATOR_URL),
+      },
+    ],
+  },
+  { signer, cache },
+);
+```
+
+The 402 lists every option. The payer signs one and names it in `accepted`; the gate settles only if `accepted` matches one of your options exactly (scheme, network, asset, payee, amount and timeout). A payment that names anything else gets a fresh 402. The matched option's facilitator verifies and settles it, and the receipt records that option's asset, amount and network.
+
+A payment settled for one option can never be replayed for another: it gets `409 offer-mismatch`.
+
+The single-option fields (`amount`, `asset`, `payTo`, `network`) keep working and produce exactly the same 402 as before. Dynamic pricing works on single-option routes only.
+
+If you type a shared base config with `Pick<PaywallConfig, ...>` or `Omit<PaywallConfig, ...>`, use `SinglePaymentOptionConfig` instead, because `PaywallConfig` now also has the `accepts` form.
+
+Check each option against its facilitator at startup with `paymentTargets(config)`, which returns one `validatePaywall` target per option.
