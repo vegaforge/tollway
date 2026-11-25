@@ -81,8 +81,9 @@ describe("budget-capped scenario", () => {
       expectedSettled: "30000",
       actualSettled: "25000",
     });
-    // The failed close rolls the channel back so the operator can retry.
-    expect(result.drift.channelStatusAfterRefusal).toBe("open");
+    // The manager parks the channel as settlement-mismatched: the close is on
+    // chain, so it cannot reopen, and an operator has to look at it.
+    expect(result.drift.channelStatusAfterRefusal).toBe("settlement-mismatched");
   });
 
   it("flags the under-settled drift with its shortfall", () => {

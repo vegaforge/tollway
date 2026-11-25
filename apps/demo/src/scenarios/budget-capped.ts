@@ -72,6 +72,7 @@ const CHANNEL_SETTLED = "25000";
  * `rule: "budget"`.
  */
 export const BUDGET_STOP_POLICY: Policy = {
+  policyVersion: 1,
   mode: "enforce",
   budgets: { daily: (BigInt(ROUTE_PRICE) * BigInt(PAYMENTS_IN_BUDGET)).toString() },
   perModel: { x402: { enabled: true } },
@@ -83,6 +84,7 @@ export const BUDGET_STOP_POLICY: Policy = {
  * third's projected minute spend (30 000) is refused with `rule: "anomaly"`.
  */
 export const ANOMALY_STOP_POLICY: Policy = {
+  policyVersion: 1,
   mode: "enforce",
   budgets: { daily: "100000" },
   anomaly: { maxSpendPerMinute: "25000" },
@@ -178,6 +180,9 @@ function withCounts(inner: FacilitatorClient): {
 } {
   const counts: FacilitatorCounts = { verify: 0, settle: 0 };
   const facilitator: FacilitatorClient = {
+    // Keep the mock facilitator's marker: without it the gate validates the
+    // mock payment's placeholder transaction locally and refuses it.
+    ...(inner.acceptsMockPayments === true ? { acceptsMockPayments: true } : {}),
     async verify(input) {
       counts.verify += 1;
       return inner.verify(input);
@@ -201,7 +206,15 @@ function withCounts(inner: FacilitatorClient): {
 async function startGatedService(): Promise<GatedService> {
   const signer = await Ed25519Signer.generate("tollway-demo-budget-capped");
   const { facilitator, counts } = withCounts(createMockFacilitator());
+  const app = express();
+  const server = app.listen(0);
+  await new Promise<void>((resolve) => server.once("listening", () => resolve()));
+  const { port } = server.address() as AddressInfo;
+  const resource = `http://127.0.0.1:${port}/quotes/latest`;
   const config: PaywallConfig = {
+    // The full URL the client pays for, so the receipt names the same
+    // resource the client checks it against.
+    resource,
     amount: ROUTE_PRICE,
     asset: ASSET,
     payTo: PAY_TO,
@@ -216,15 +229,9 @@ async function startGatedService(): Promise<GatedService> {
     cache: createInMemorySettlementCache(),
   });
 
-  const app = express();
   app.get("/quotes/latest", expressPaywall(gate), (_req, res) => {
     res.json({ symbol: "XLM/USD", price: "0.1234" });
   });
-
-  const server = app.listen(0);
-  await new Promise<void>((resolve) => server.once("listening", () => resolve()));
-  const { port } = server.address() as AddressInfo;
-  const resource = `http://127.0.0.1:${port}/quotes/latest`;
 
   return {
     resource,
@@ -416,12 +423,28 @@ function createOfflineAdapter(settledAmount: string): MppChannelAdapter {
         returnedRemainder: String(BigInt(CHANNEL_DEPOSIT) - BigInt(settledAmount)),
       };
     },
+    async getChannelState() {
+      return { balance: CHANNEL_DEPOSIT, currentLedger: 1 };
+    },
+    async getState() {
+      return { balance: CHANNEL_DEPOSIT, currentLedger: 1, refundWaitingPeriod: 100 };
+    },
+    async findChannelSettlement() {
+      return null;
+    },
+    // The demo closes cooperatively; the funder-side recovery path is not used.
+    async startClose() {
+      throw new Error("startClose is not used by the offline demo adapter");
+    },
+    async refund() {
+      throw new Error("refund is not used by the offline demo adapter");
+    },
   };
 }
 
 function driftOf(result: ReconciliationResult, kind: DriftKind): Drift {
-  if (result.ok) {
-    throw new Error(`expected a ${kind} drift, but reconciliation reported no drift`);
+  if (result.status !== "drift") {
+    throw new Error(`expected a ${kind} drift, but reconciliation reported ${result.status}`);
   }
   const drift = result.drift.find((item) => item.kind === kind);
   if (!drift) {
@@ -472,7 +495,7 @@ async function runDriftPhase(say: (line: string) => void): Promise<DriftPhaseRes
   }
   const afterRefusal = await manager.get(channel.id);
   if (!afterRefusal) throw new Error(`channel ${channel.id} disappeared after the refused close`);
-  say(`   channel rolled back to "${afterRefusal.status}", so the operator can retry`);
+  say(`   channel marked "${afterRefusal.status}" for an operator to resolve`);
 
   const records = commitments.map((commitment) => ({
     channelId: commitment.channelId,
@@ -530,6 +553,8 @@ async function runDriftPhase(say: (line: string) => void): Promise<DriftPhaseRes
 
 function anomalyEvent(channelId: string, drift: Drift, shortfall: string | null): TollwayEvent {
   return {
+    // Deterministic, so a replayed demo emits the same event ids.
+    id: `anomaly-${channelId}-${drift.kind}`,
     type: "anomaly.detected",
     at: new Date(CLOCK_START).toISOString(),
     data: {
