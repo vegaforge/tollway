@@ -102,6 +102,7 @@ export {
   type AbandonReason,
   type AuthorizedPayment,
   type AuthorizeOutcome,
+  type BodyBinding,
   createPaidCall,
   createPaywall,
   type DynamicPriceFunction,
@@ -200,6 +201,13 @@ export {
   type RedisArchiveClient,
   type RedisPaymentReceiptArchiveOptions,
 } from "./payment-receipt-archive.js";
+export {
+  BodyTooLargeError,
+  bytesBody,
+  concatChunks,
+  type RequestBodySource,
+  readBodyStream,
+} from "./request-body.js";
 export {
   createRouteTable,
   type RouteTable,

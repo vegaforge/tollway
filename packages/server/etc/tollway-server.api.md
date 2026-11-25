@@ -65,6 +65,21 @@ export type AuthorizedPayment = {
 // @public
 export type AuthorizeOutcome = GateOutcome | AuthorizedPayment;
 
+// @public
+export type BodyBinding = {
+    maxBytes: number;
+    contentTypes?: readonly string[];
+};
+
+// @public
+export class BodyTooLargeError extends TollwayError {
+    constructor(maxBytes: number);
+    readonly maxBytes: number;
+}
+
+// @public
+export function bytesBody(bytes: Uint8Array): RequestBodySource;
+
 // @public (undocumented)
 export type ChannelDispute = {
     channelId: string;
@@ -281,6 +296,9 @@ export type CloseRateLimit = {
     maxCloses: number;
     windowMs: number;
 };
+
+// @public
+export function concatChunks(chunks: readonly Uint8Array[], total: number): Uint8Array;
 
 // @public
 export function createChannelSettler(options: ChannelSettlerOptions): ChannelSettler;
@@ -598,6 +616,12 @@ export type GateErrorCode =
 | "handler-timeout"
 /** Two-phase settlement: the route's response was larger than the gate holds. */
 | "response-too-large"
+/** The body is larger than the route's `bindBody.maxBytes` (#164). */
+| "body-too-large"
+/** The route binds the body and does not accept its content type or encoding. */
+| "body-not-supported"
+/** The route binds the body, but the adapter did not pass it to the gate. */
+| "body-not-provided"
 /** The MPP channel named in TOLLWAY-CHANNEL failed its on-chain checks or no longer takes vouchers (#173). */
 | "channel-refused"
 /** Too many channel registrations or channel closes; try again after Retry-After (#173, #174). */
@@ -1134,6 +1158,9 @@ export type PrevalidationResult = {
 };
 
 // @public
+export function readBodyStream(stream: ReadableStream<Uint8Array> | null, maxBytes: number): Promise<Uint8Array>;
+
+// @public
 export function readBodyWithin(body: ReadableStream<Uint8Array> | null, maxBytes: number): Promise<{
     ok: true;
     bytes: Uint8Array<ArrayBuffer>;
@@ -1195,6 +1222,11 @@ export function renderGateRejection(rejection: GateRejection): RenderedGateRejec
 
 // @public
 export function renderKeySetResponse(document: KeySetDocument, options?: KeySetResponseOptions): KeySetResponse;
+
+// @public
+export type RequestBodySource = {
+    read(maxBytes: number): Promise<Uint8Array>;
+};
 
 // @public
 export function responseTooLarge(maxBytes: number): GateRejection;
@@ -1459,6 +1491,7 @@ export type TollwayRequest = {
     method: string;
     url: string;
     headers: Record<string, string | string[] | undefined>;
+    body?: RequestBodySource;
 };
 
 // @public
@@ -1520,8 +1553,8 @@ export type X402Terms = {
 
 // Warnings were encountered during analysis:
 //
-// dist/discovery-BElAle10.d.ts:654:9 - (ae-forgotten-export) The symbol "StellarSigner$1" needs to be exported by the entry point index.d.ts
-// dist/discovery-BElAle10.d.ts:825:9 - (ae-forgotten-export) The symbol "StellarSigner" needs to be exported by the entry point index.d.ts
+// dist/discovery-QVLZWt7Q.d.ts:660:9 - (ae-forgotten-export) The symbol "StellarSigner$1" needs to be exported by the entry point index.d.ts
+// dist/discovery-QVLZWt7Q.d.ts:831:9 - (ae-forgotten-export) The symbol "StellarSigner" needs to be exported by the entry point index.d.ts
 // dist/index.d.ts:50:9 - (ae-forgotten-export) The symbol "StellarSigner_2" needs to be exported by the entry point index.d.ts
 // dist/index.d.ts:172:9 - (ae-forgotten-export) The symbol "WatchtowerEvent" needs to be exported by the entry point index.d.ts
 // dist/index.d.ts:176:5 - (ae-forgotten-export) The symbol "ChannelState" needs to be exported by the entry point index.d.ts

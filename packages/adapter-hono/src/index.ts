@@ -14,6 +14,7 @@ import {
   type GateOutcome,
   type PaywallOptions,
   type RouteTable,
+  readBodyStream,
   readBodyWithin,
   renderGateRejection,
   responseTooLarge,
@@ -61,6 +62,9 @@ export function honoPaywall(gate: Gate, options?: PaywallOptions): MiddlewareHan
       method: c.req.method,
       url: requestUrl(c),
       headers: requestHeaders(c),
+      // Read from a clone, only for a route with bindBody, so the handler
+      // still reads the original body unchanged.
+      body: { read: (maxBytes) => readBodyStream(c.req.raw.clone().body, maxBytes) },
     };
     let outcome: AuthorizeOutcome;
     try {

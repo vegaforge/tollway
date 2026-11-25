@@ -1,5 +1,6 @@
 import {
   base64UrlToBytes,
+  bindBodyToResource,
   buildReceipt,
   bytesToBase64Url,
   canonicalJson,
@@ -86,6 +87,7 @@ import {
   resolvePaymentOptions,
 } from "./payment-options.js";
 import type { PaymentReceiptArchive } from "./payment-receipt-archive.js";
+import { BodyTooLargeError, type RequestBodySource } from "./request-body.js";
 import {
   createInMemoryServicePolicyStore,
   SERVICE_POLICY_DENIALS,
@@ -114,6 +116,34 @@ export type TollwayRequest = {
   method: string;
   url: string;
   headers: Record<string, string | string[] | undefined>;
+  /**
+   * The request body, for routes with `bindBody` (#164). Adapters supply it
+   * without consuming the body the route handler reads; see
+   * {@link RequestBodySource}. Routes without `bindBody` never read it.
+   */
+  body?: RequestBodySource;
+};
+
+/**
+ * Binds the request body into the paid resource identity (#164), for routes
+ * where the body is what is bought, such as an inference prompt. The
+ * identity becomes `<resource>#body-sha256=<digest>` (see
+ * `bindBodyToResource` in @vegaforge/tollway-core), so a payment for one
+ * body never unlocks another, and the receipt records which body was paid.
+ */
+export type BodyBinding = {
+  /**
+   * Largest body accepted, in bytes. A larger one gets 413 before any
+   * facilitator call; the limit is enforced while reading. Reading a body
+   * holds it in memory, so keep this as small as the route allows.
+   */
+  maxBytes: number;
+  /**
+   * Media types accepted, compared without parameters (`application/json`
+   * matches `application/json; charset=utf-8`). Others get 415. Unset
+   * accepts any.
+   */
+  contentTypes?: readonly string[];
 };
 
 export type DynamicPriceFunction = (request: TollwayRequest) => string | Promise<string>;
@@ -171,6 +201,8 @@ type PaywallCommon = {
    * at `createPaywall`. See `DiscoveryDeclaration` and docs/discovery.
    */
   discovery?: DiscoveryDeclaration;
+  /** Bind the request body into the resource identity. See {@link BodyBinding}. */
+  bindBody?: BodyBinding;
   /**
    * Issues the x402 offer-receipt extension (#172), signed with
    * `PaywallDeps.signer`: a signed offer per x402 requirement in the 402's
@@ -2224,6 +2256,81 @@ async function paymentRequired(
   return { kind: "payment-required", status: 402, headers, challenge };
 }
 
+function checkBodyBinding(binding: BodyBinding): void {
+  if (!(Number.isSafeInteger(binding.maxBytes) && binding.maxBytes > 0)) {
+    throw new TypeError(
+      `bindBody.maxBytes must be a positive integer number of bytes, got ${binding.maxBytes}`,
+    );
+  }
+}
+
+function mediaType(headers: TollwayRequest["headers"]): string {
+  return (readHeader(headers, "content-type") ?? "").split(";")[0]?.trim().toLowerCase() ?? "";
+}
+
+/**
+ * Reads the body within the route's limit and returns the bound resource
+ * identity, or the outcome that refuses the request.
+ */
+async function bindRequestBody(
+  binding: BodyBinding,
+  resource: string,
+  request: TollwayRequest,
+): Promise<{ ok: true; resource: string } | { ok: false; outcome: GateOutcome }> {
+  const encoding = readHeader(request.headers, "content-encoding")?.trim().toLowerCase();
+  if (encoding && encoding !== "identity") {
+    // The digest is over the bytes as sent. A compressed body would bind the
+    // compressed bytes, which a client cannot reproduce from what it meant
+    // to send, so it is refused rather than half supported.
+    return {
+      ok: false,
+      outcome: gateRejection(
+        "body-not-supported",
+        `this route binds the request body and does not accept Content-Encoding ${encoding}; send it uncompressed`,
+      ),
+    };
+  }
+  if (binding.contentTypes && !binding.contentTypes.includes(mediaType(request.headers))) {
+    return {
+      ok: false,
+      outcome: gateRejection(
+        "body-not-supported",
+        `this route accepts ${binding.contentTypes.join(", ")} bodies, not ${mediaType(request.headers) || "an untyped body"}`,
+      ),
+    };
+  }
+  const declared = Number(readHeader(request.headers, "content-length"));
+  if (Number.isFinite(declared) && declared > binding.maxBytes) {
+    return { ok: false, outcome: bodyTooLarge(binding.maxBytes) };
+  }
+  if (!request.body) {
+    // Binding without the body would bind nothing: fail closed.
+    return {
+      ok: false,
+      outcome: gateRejection(
+        "body-not-provided",
+        "this route binds the request body, but the adapter did not pass one",
+      ),
+    };
+  }
+  let bytes: Uint8Array;
+  try {
+    bytes = await request.body.read(binding.maxBytes);
+  } catch (error) {
+    if (error instanceof BodyTooLargeError)
+      return { ok: false, outcome: bodyTooLarge(binding.maxBytes) };
+    throw error;
+  }
+  return { ok: true, resource: await bindBodyToResource(resource, bytes) };
+}
+
+function bodyTooLarge(maxBytes: number): GateOutcome {
+  return gateRejection(
+    "body-too-large",
+    `the request body is larger than this route's ${maxBytes} byte limit`,
+  );
+}
+
 /**
  * Adds the MPP channel challenge to a 402 (#173). A channel challenge names
  * one channel contract, so it is only issued to an agent that says which
@@ -2635,6 +2742,7 @@ export function createPaywallWithInFlight(
   const isFailureStatus =
     config.twoPhase?.isFailureStatus ?? ((status: number) => status >= 500 && status <= 599);
   if (config.discovery) checkDiscoveryDeclaration(config.discovery);
+  if (config.bindBody) checkBodyBinding(config.bindBody);
   const acceptedModels = config.models ?? ["x402"];
   // The offer-receipt extension (#172) answers an HTTP 402, so only the gate
   // adds it to the shared settlement context.
@@ -2677,6 +2785,16 @@ export function createPaywallWithInFlight(
 
   const run = async (request: TollwayRequest, phase?: SettlementPhase): Promise<GateOutcome> => {
     const method = request.method.toUpperCase();
+
+    // Read and bind the body first: an oversized or unbindable body is
+    // refused before any payment is decoded or any facilitator is called.
+    let boundResource: string | undefined;
+    if (config.bindBody) {
+      const bound = await bindRequestBody(config.bindBody, config.resource ?? request.url, request);
+      if (!bound.ok) return bound.outcome;
+      boundResource = bound.resource;
+    }
+
     const signatureHeader = readHeader(request.headers, PAYMENT_SIGNATURE_HEADER);
     const mppCredential =
       acceptedModels.includes("mpp-charge") || acceptedModels.includes("mpp-channel")
@@ -2717,7 +2835,7 @@ export function createPaywallWithInFlight(
       paymentId = read.id;
     }
 
-    const resource = config.resource ?? request.url;
+    const resource = boundResource ?? config.resource ?? request.url;
     let dynamicAmount: string | undefined;
     let quote: string | undefined;
     let candidateQuote: string | undefined;

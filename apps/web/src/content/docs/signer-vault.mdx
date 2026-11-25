@@ -1,0 +1,103 @@
+---
+title: Vault Transit signer
+description: Sign receipts with an Ed25519 key that never leaves HashiCorp Vault
+---
+
+`@vegaforge/tollway-signer-vault` is a `ReceiptSigner` whose private key lives in [Vault Transit](https://developer.hashicorp.com/vault/docs/secrets/transit). The gate holds only a Vault token. Every receipt signature is one request to `POST /v1/<mount>/sign/<name>`, so the key is never in process memory, never in a config file and never in a crash dump.
+
+Receipts it signs are ordinary Ed25519 receipts. `Ed25519Verifier` and the key-set verifier accept them, and nothing else in Tollway changes.
+
+## Setting it up
+
+Create an Ed25519 key in Transit:
+
+```bash
+vault secrets enable transit
+vault write -f transit/keys/tollway-receipts type=ed25519
+```
+
+Then pass the signer to the gate in place of `Ed25519Signer`:
+
+```ts
+import { createPaywall } from "@vegaforge/tollway-server";
+import { createVaultTransitSigner } from "@vegaforge/tollway-signer-vault";
+
+const signer = await createVaultTransitSigner({
+  address: "https://vault.internal:8200",
+  token: () => readTokenFromAgentSink(), // or a string
+  keyName: "tollway-receipts",
+  mount: "transit", // the default
+  namespace: "payments", // Vault Enterprise only
+  timeoutMs: 5_000, // the default
+});
+
+const gate = createPaywall(config, { signer, facilitator, cache });
+```
+
+`createVaultTransitSigner` reads the key once. It checks the key is `ed25519`, resolves the latest version, and fails at startup if anything is wrong. A token provider function is called before every request, so it can hand back a renewed or short-lived token.
+
+## The key version is pinned
+
+Transit signs with a key's latest version unless told otherwise. If the signer reported a fixed `keyId` and let Vault pick the version, a rotation would quietly change the key behind that `keyId`, and every receipt signed after it would fail verification.
+
+So the signer resolves a version when it is created and sends `key_version` on every sign call. The version is part of the `keyId`:
+
+```text
+vault-transit:transit/tollway-receipts:v3
+```
+
+Vault's answer carries the version it used (`vault:v3:...`). The signer checks it equals the pinned version and refuses the signature if not. It never accepts a signature from a version it did not ask for.
+
+Pass `keyVersion` to pin a version other than the latest.
+
+## Rotating the key
+
+1. `vault write -f transit/keys/tollway-receipts/rotate`. The running signer keeps signing with its pinned version.
+2. Create a new signer. It resolves the new version and has a new `keyId`.
+3. Publish the new public key with `signer.publicJwk()` in your key-set document, next to the old one, before the new signer takes traffic.
+4. Switch the gate to the new signer.
+5. Once no verifier needs the old version, mark it `retired` in the key set. Raise the key's `min_decryption_version` in Vault only if you also want Vault to refuse it.
+
+`publicJwk()` returns the pinned version's public key with its `kid` and `alg`, ready for `renderKeySetResponse`.
+
+## Vault policy
+
+Give the gate's token only what signing needs:
+
+```hcl
+path "transit/sign/tollway-receipts" {
+  capabilities = ["update"]
+}
+
+path "transit/keys/tollway-receipts" {
+  capabilities = ["read"]
+}
+```
+
+`read` on `keys/<name>` exposes the public keys and versions, never the private key. The token cannot rotate, export or delete the key.
+
+## When Vault fails
+
+Every failure is a `VaultTransitError`, a `TollwayError` with code `signer-failed`, and a `kind` you can branch on:
+
+| `kind` | Cause |
+| --- | --- |
+| `sealed` | Vault answered 503 and is sealed. |
+| `permission-denied` | The token is missing, expired or lacks the policy above. |
+| `key-missing` | The key, or the pinned version, does not exist. |
+| `timeout` | No answer within `timeoutMs`. |
+| `unavailable` | Vault could not be reached. |
+| `aborted` | The `signal` you passed was aborted. |
+| `version-mismatch` | Vault signed with a version other than the pinned one. |
+| `invalid-response` | The answer was not what Transit returns. |
+| `unsupported-key-type` | The key is not `ed25519` (code `invalid-signing-key`). |
+
+`status` and Vault's `request_id` are on the error when Vault sent them. The token never appears in an error message or a log line; if Vault ever echoes it, it is replaced with `[redacted]`.
+
+The gate signs after settlement. If Vault is down when a payment settles, the payment has still moved, but the gate cannot produce its receipt: the request fails with the signer's `VaultTransitError`, and no receipt is written to the settlement cache, so a retry cannot be answered from the cache either. Alert on `signer-failed` and reconcile those payments from the facilitator's records. There is deliberately no fallback to an in-memory key: it would hide the outage and leave receipts signed by a key no verifier trusts.
+
+## Cost per request
+
+Each settled request adds one round trip to Vault. Against a Vault 2.2 dev server on the same machine, the integration test measured 1.7 ms per signature on average. Expect the network latency between the gate and Vault on top of that in production.
+
+ECDSA P-256 Transit keys are not supported yet. Transit returns them DER-encoded, and receipts carry P1363 signatures, so they are left to the ES256 work rather than half supported.

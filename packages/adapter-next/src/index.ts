@@ -17,6 +17,7 @@ import {
   type Gate,
   type PaywallOptions,
   type RouteTable,
+  readBodyStream,
   readBodyWithin,
   renderGateRejection,
   responseTooLarge,
@@ -95,6 +96,9 @@ export function withPaywall(
       method: request.method,
       url: requestUrl(request),
       headers: requestHeaders(request),
+      // Read from a clone, only for a route with bindBody, so the handler
+      // still reads the original body unchanged.
+      body: { read: (maxBytes) => readBodyStream(request.clone().body, maxBytes) },
     };
     let outcome: AuthorizeOutcome;
     try {
