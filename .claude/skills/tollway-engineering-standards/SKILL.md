@@ -17,7 +17,7 @@ import points down the stack.
 ```text
 apps            dashboard   demo   web                (private, never published)
                     |         |      |
-adapters        adapter-express  adapter-fastify  adapter-next  adapter-hono
+adapters        adapter-express  adapter-fastify  adapter-next  adapter-hono  mcp
                     |
 service side    server                 client   channels   reconcile   observability
                     |                     |         |          |             |
@@ -34,6 +34,7 @@ What each layer may import:
 | `@vegaforge/tollway-server` | `core`, `@x402/core`, `@x402/stellar`, `@x402/extensions` (Bazaar discovery and the payment-identifier extension, #153), `@stellar/stellar-sdk` (at the version `@x402/stellar` itself depends on, for local payment pre-validation, #159), and the MPP libraries its `package.json` lists | adapters, `client`, apps |
 | `@vegaforge/tollway-client`, `channels`, `reconcile`, `observability` | `core` | each other, `server`, adapters, apps |
 | `@vegaforge/tollway-adapter-*` | `server` (runtime), `core` (types), its own framework as a peer | another adapter, apps |
+| `@vegaforge/tollway-mcp` | `server`, `core`, `@x402/core` | adapters, `client`, apps |
 | `apps/*` | any package | another app |
 
 Rules that follow from the table:

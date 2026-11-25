@@ -33,6 +33,11 @@ export type GateErrorCode =
   /** The router chose a settlement model this gate does not implement. */
   | "model-not-supported"
   /**
+   * A paid call's work (an MCP tool, say) failed after the payment was
+   * verified, so the payment was not settled and may be sent again (#206).
+   */
+  | "work-failed"
+  /**
    * Two-phase settlement (#152): the payment was verified but deliberately
    * not settled (the route failed, or the lock lapsed while it ran). It is
    * still unspent, so the same payment may be sent again.
@@ -85,6 +90,7 @@ export const GATE_ERRORS: Readonly<Record<GateErrorCode, GateErrorSpec>> = {
   "price-unavailable": { status: 500, retrySamePayment: false, headers: [] },
   "handler-not-configured": { status: 500, retrySamePayment: false, headers: [] },
   "model-not-supported": { status: 501, retrySamePayment: false, headers: [] },
+  "work-failed": { status: 424, retrySamePayment: true, headers: [] },
   "payment-not-settled": { status: 503, retrySamePayment: true, headers: ["retry-after"] },
   "handler-timeout": { status: 504, retrySamePayment: false, headers: [] },
   "response-too-large": { status: 500, retrySamePayment: false, headers: [] },

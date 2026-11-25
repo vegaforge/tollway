@@ -34,6 +34,7 @@ PUBLISHABLE=(
   packages/ai-sdk
   packages/channels
   packages/client
+  packages/mcp
   packages/core
   packages/observability
   packages/reconcile

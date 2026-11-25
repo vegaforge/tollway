@@ -48,6 +48,7 @@ challenge, fixes its request, or stops.
 | `price-unavailable` | 500 | no | | The route's dynamic price function threw or returned an invalid price. Nothing was charged. |
 | `handler-not-configured` | 500 | no | | The route accepts a model whose handler is missing, or a route table is not ready. |
 | `model-not-supported` | 501 | no | | The router chose a settlement model this gate does not implement. |
+| `work-failed` | 424 | yes | | Only from `createPaidCall`, such as a paid MCP tool: the paid work failed after the payment was verified, so nothing was settled or cached. The same payment may be sent again. |
 | `payment-not-settled` | 503 | yes, after `Retry-After` | `Retry-After` | Two-phase settlement (#152): the payment was verified but not settled, because the route failed or the settlement lock lapsed while it ran. A request that waited on that payment gets this; the payment is still unspent. |
 | `handler-timeout` | 504 | no | | Two-phase settlement: the route ran longer than the payment's validity window (`maxTimeoutSeconds`), so the payment was not settled. |
 | `response-too-large` | 500 | no | | Two-phase settlement: the route's response was larger than `twoPhase.maxResponseBytes`, so it was discarded and the payment was not settled. |

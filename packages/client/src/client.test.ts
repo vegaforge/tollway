@@ -1505,3 +1505,91 @@ describe("createClient concurrent payments", () => {
     expect(held.settle).toHaveBeenCalledTimes(2);
   });
 });
+
+describe("settlers per model and supported models (#201, #205)", () => {
+  const both: PaymentOffer = { ...OFFER, models: ["x402", "mpp-charge"] };
+
+  it("requires exactly one of settler or settlers", () => {
+    expect(() =>
+      createClient({ network: "testnet", settler: mockSettler(), settlers: {} } as never),
+    ).toThrow(/exactly one of settler or settlers/);
+    expect(() => createClient({ network: "testnet" } as never)).toThrow(
+      /exactly one of settler or settlers/,
+    );
+  });
+
+  it("pays through the settler registered for the routed model", async () => {
+    const x402 = mockSettler();
+    const mpp = mockSettler(mppChargeReceipt);
+    const client = createClient({
+      network: "testnet",
+      settlers: { x402, "mpp-charge": mpp },
+      router: { decide: async () => ({ model: "mpp-charge", reason: "offer" }) },
+      verifier,
+    });
+
+    const result = await client.pay({ resource: OFFER.resource, offer: both });
+
+    expect(result.model).toBe("mpp-charge");
+    expect(mpp.settle).toHaveBeenCalledTimes(1);
+    expect(x402.settle).not.toHaveBeenCalled();
+  });
+
+  it("refuses a routed model with no settler instead of falling through", async () => {
+    const x402 = mockSettler();
+    const client = createClient({
+      network: "testnet",
+      settlers: { x402 },
+      router: { decide: async () => ({ model: "mpp-charge", reason: "offer" }) },
+    });
+
+    const error = await client.pay({ resource: OFFER.resource, offer: both }).catch((e) => e);
+
+    expect(error).toBeInstanceOf(TollwayError);
+    expect(error.code).toBe("no-viable-model");
+    expect(error.message).toContain("no settler is configured for mpp-charge");
+    expect(x402.settle).not.toHaveBeenCalled();
+  });
+
+  it("passes supportedModels to the router as the allowed models", async () => {
+    const decide = vi.fn(async () => ({ model: "mpp-charge" as const, reason: "offer" as const }));
+    const client = createClient({
+      network: "testnet",
+      settler: mockSettler(mppChargeReceipt),
+      supportedModels: ["mpp-charge"],
+      router: { decide },
+    });
+
+    await client.pay({ resource: OFFER.resource, offer: both });
+
+    expect(decide).toHaveBeenCalledWith(expect.objectContaining({ allowedModels: ["mpp-charge"] }));
+  });
+
+  it("refuses an explicit model the agent cannot pay", async () => {
+    const settler = mockSettler();
+    const client = createClient({ network: "testnet", settler, supportedModels: ["x402"] });
+
+    const error = await client
+      .pay({ resource: OFFER.resource, offer: both, model: "mpp-charge" })
+      .catch((e) => e);
+
+    expect(error.code).toBe("no-viable-model");
+    expect(settler.settle).not.toHaveBeenCalled();
+  });
+
+  it("does not default to x402 without a router when the agent cannot pay x402", async () => {
+    const settler = mockSettler();
+    const client = createClient({ network: "testnet", settler, supportedModels: ["mpp-charge"] });
+
+    const error = await client.pay({ resource: OFFER.resource, offer: both }).catch((e) => e);
+
+    expect(error.code).toBe("no-viable-model");
+    expect(settler.settle).not.toHaveBeenCalled();
+  });
+
+  it("refuses an empty supportedModels list", () => {
+    expect(() =>
+      createClient({ network: "testnet", settler: mockSettler(), supportedModels: [] }),
+    ).toThrow(/at least one model/);
+  });
+});
