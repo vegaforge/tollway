@@ -1593,3 +1593,56 @@ describe("settlers per model and supported models (#201, #205)", () => {
     ).toThrow(/at least one model/);
   });
 });
+
+// Regression lock for #189: a budget is reserved before the settler is called,
+// so payments in flight at the same time cannot all pass the same budget.
+describe("createClient policy reservations (#189)", () => {
+  it("lets only as many concurrent payments settle as the daily budget fits", async () => {
+    // Ten payments of 10000 against a 20000 budget: exactly two may settle.
+    const policy = createPolicyEngine({ budgets: { daily: "20000" } });
+    const settle = vi.fn(async () => {
+      await inFlight();
+      return baselineReceipt;
+    });
+    const client = createClient({ network: "testnet", settler: { settle }, policy });
+
+    const results = await Promise.allSettled(
+      Array.from({ length: 10 }, () => client.pay({ resource: OFFER.resource, offer: OFFER })),
+    );
+
+    expect(settle).toHaveBeenCalledTimes(2);
+    const rejected = results.filter((result) => result.status === "rejected");
+    expect(rejected).toHaveLength(8);
+    for (const result of rejected) {
+      expect(result.reason).toBeInstanceOf(PolicyBlockedError);
+    }
+  });
+
+  it("still counts a payment whose receipt then fails verification", async () => {
+    // The service settled the payment, so its spend counts even though the
+    // receipt is refused. Without it the budget would look unspent.
+    const policy = createPolicyEngine({ budgets: { daily: "15000" } });
+    const otherVerifier = Ed25519Verifier.forSigner(
+      await Ed25519Signer.generate("other-client-key"),
+    );
+    const client = createClient({
+      network: "testnet",
+      settler: mockSettler(),
+      policy,
+      verifier: otherVerifier,
+    });
+
+    await expect(client.pay({ resource: OFFER.resource, offer: OFFER })).rejects.toBeInstanceOf(
+      ReceiptVerificationError,
+    );
+
+    const next = await policy.check({
+      payee: OFFER.payTo,
+      resource: OFFER.resource,
+      amount: OFFER.amount,
+      asset: OFFER.asset,
+      model: "x402",
+    });
+    expect(next.allowed).toBe(false);
+  });
+});
