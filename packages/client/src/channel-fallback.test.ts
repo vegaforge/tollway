@@ -99,7 +99,9 @@ describe("x402 fallback when a channel open fails (#183)", () => {
     const channel = channelSettler(openFailed());
     const x402 = x402Settler();
     const policy = createPolicyEngine({});
-    const record = vi.spyOn(policy, "record");
+    // The engine reserves (#189): the hold that is committed is the x402 one.
+    const reserve = vi.spyOn(policy, "reserve");
+    const record = vi.spyOn(policy, "commit");
     const client = createClient({
       network: "testnet",
       settler: channel.settler,
@@ -119,7 +121,7 @@ describe("x402 fallback when a channel open fails (#183)", () => {
       model: "x402",
     });
     expect(record).toHaveBeenCalledTimes(1);
-    expect(record.mock.calls[0]?.[0]).toMatchObject({ model: "x402" });
+    expect(reserve.mock.calls.at(-1)?.[0]).toMatchObject({ model: "x402" });
     const types = events.map((event) => event.type);
     expect(types).toContain("fallback");
     expect(types.indexOf("fallback")).toBeLessThan(types.indexOf("payment"));

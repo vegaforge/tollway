@@ -177,6 +177,17 @@ export class PeriodSpendLedger {
     this.#spend.set(key, (this.#spend.get(key) ?? 0n) + amount);
   }
 
+  /**
+   * Adds to a period named earlier, for undoing a reservation (#189). A period
+   * that has closed is left alone: its spend no longer counts toward any
+   * budget, and writing into the current period would be wrong.
+   */
+  addInPeriod(periodId: string, asset: string, amount: bigint): void {
+    if (periodId !== this.#current) return;
+    const key = `${periodId}|${asset}`;
+    this.#spend.set(key, (this.#spend.get(key) ?? 0n) + amount);
+  }
+
   /** How many period and asset entries are held. For tests of the memory bound. */
   get size(): number {
     return this.#spend.size;
