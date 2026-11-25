@@ -141,6 +141,8 @@ export function createMemoryReceiptLogStore(): ReceiptLogStore;
 export function createPolicyEngine(input: PolicyInput, opts?: {
     clock?: () => number;
     onAnomalyDetected?: (event: AdaptiveAnomalyEvent) => void | Promise<void>;
+    reservationTtlMs?: number;
+    onReservationExpired?: (reservation: PolicyReservation, intent: PaymentIntent) => void;
 }): PolicyEngine;
 
 // @public
@@ -497,12 +499,15 @@ export type PolicyDecision = {
 export interface PolicyEngine {
     admit?(intent: PaymentIntent): Promise<PolicyTrace>;
     check(intent: PaymentIntent): Promise<PolicyDecision>;
+    commit?(reservation: PolicyReservation): Promise<void>;
     evaluate(intent: PaymentIntent): Promise<PolicyTrace>;
     evaluateChannelOpen?(open: ChannelOpenIntent): Promise<ChannelOpenDecision>;
     headroom?(asset: string, payee: string): Promise<PolicyHeadroom>;
     readonly mode: PolicyMode;
     record(intent: PaymentIntent): Promise<void>;
     recordAttempt?(intent: PaymentIntent): Promise<void>;
+    release?(reservation: PolicyReservation): Promise<void>;
+    reserve?(intent: PaymentIntent): Promise<PolicyReservationAttempt>;
 }
 
 // @public
@@ -548,6 +553,25 @@ export type PolicyParseResult = {
     ok: false;
     issues: PolicyIssue[];
 };
+
+// @public
+export type PolicyReservation = {
+    readonly id: string;
+    readonly expiresAt: string;
+};
+
+// @public
+export type PolicyReservationAttempt = {
+    trace: PolicyTrace;
+    reservation?: PolicyReservation;
+};
+
+// @public
+export class PolicyReservationError extends TollwayError {
+    constructor(reservationId: string, detail: string);
+    // (undocumented)
+    readonly reservationId: string;
+}
 
 // @public
 export type PolicyRuleId = (typeof policyRuleIds)[number];
@@ -1340,7 +1364,7 @@ export class TollwayError extends Error {
 }
 
 // @public
-export type TollwayErrorCode = "not-implemented" | "no-viable-model" | "invalid-receipt" | "invalid-signing-key" | "signer-failed" | "body-too-large" | "invalid-amount" | "invalid-quote" | "invalid-discovery" | "invalid-policy" | "canonicalization-failed" | "invalid-signature-encoding" | "invalid-key-set" | "key-set-unavailable" | "budget-exceeded" | "payment-failed" | "outcome-unknown" | "facilitator-unsupported" | "facilitator-unavailable" | "facilitator-invalid-response" | "policy-blocked" | "offer-rejected" | "receipt-verification-failed" | "receipt-offer-mismatch" | "offer-network-mismatch" | "channel-not-found" | "channel-not-open" | "channel-already-closed" | "commitment-conflict" | "invalid-store-config" | "corrupt-channel-record" | "commitment-exceeds-deposit" | "settlement-mismatch" | "recovery-not-effective" | "counterparty-quarantined" | "channel-open-failed" | "invalid-metrics-query" | "invalid-metric" | "metrics-query-too-large" | "invalid-receipt-query" | "invalid-cursor" | "corrupt-receipt" | "receipt-conflict" | "receipt-log-conflict" | "corrupt-receipt-log";
+export type TollwayErrorCode = "not-implemented" | "no-viable-model" | "invalid-receipt" | "invalid-signing-key" | "signer-failed" | "body-too-large" | "invalid-amount" | "invalid-quote" | "invalid-discovery" | "invalid-policy" | "canonicalization-failed" | "invalid-signature-encoding" | "invalid-key-set" | "key-set-unavailable" | "budget-exceeded" | "payment-failed" | "outcome-unknown" | "facilitator-unsupported" | "facilitator-unavailable" | "facilitator-invalid-response" | "policy-blocked" | "offer-rejected" | "receipt-verification-failed" | "receipt-offer-mismatch" | "offer-network-mismatch" | "channel-not-found" | "channel-not-open" | "channel-already-closed" | "commitment-conflict" | "policy-reservation" | "channel-pool-exhausted" | "invalid-store-config" | "corrupt-channel-record" | "commitment-exceeds-deposit" | "settlement-mismatch" | "recovery-not-effective" | "counterparty-quarantined" | "channel-open-failed" | "invalid-metrics-query" | "invalid-metric" | "metrics-query-too-large" | "invalid-receipt-query" | "invalid-cursor" | "corrupt-receipt" | "receipt-conflict" | "receipt-log-conflict" | "corrupt-receipt-log";
 
 // @public
 export type TrafficSnapshot = {
