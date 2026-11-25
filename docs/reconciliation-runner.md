@@ -197,18 +197,18 @@ Persists outcomes keyed by subject (channel or receipt) and run ID.
 ```typescript
 interface ReconciliationResultStore {
   put(outcome: ReconciliationOutcome): Promise<void>;
-  get(subject: ReconciliationSubject): Promise<ReconciliationOutcome | undefined>;
+  get(subject: RunSubject): Promise<ReconciliationOutcome | undefined>;
   listByRun(runId: string): Promise<readonly ReconciliationOutcome[]>;
 }
 
 type ReconciliationOutcome = {
-  subject: ReconciliationSubject;
+  subject: RunSubject;
   runId: string;
   timestamp: string; // ISO-8601
   result: ReconciliationResult | ReconciliationFailure;
 };
 
-type ReconciliationSubject =
+type RunSubject =
   | { kind: "channel"; channelId: string }
   | { kind: "receipt"; receiptId: string };
 ```

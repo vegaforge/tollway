@@ -27,10 +27,10 @@ function generateMockChannels(count: number): ChannelReconciliationInput[] {
     let settledAmount = committed.toString();
     if (i % 20 === 0) {
       // Every 20th channel under-settles by 10%.
-      settledAmount = (committed * 9n / 10n).toString();
+      settledAmount = ((committed * 9n) / 10n).toString();
     } else if (i % 30 === 0) {
       // Every 30th channel over-settles by 5%.
-      settledAmount = (committed * 105n / 100n).toString();
+      settledAmount = ((committed * 105n) / 100n).toString();
     }
 
     return {
@@ -70,7 +70,7 @@ async function main() {
   const cursors = createMemoryCursorStore();
   const reconciler = createReconciler({
     // Optional: suppress specific drift kinds for demonstration.
-    suppress: (drift) => {
+    suppress: (_drift) => {
       // In production, you might suppress known-acceptable divergences.
       return false;
     },

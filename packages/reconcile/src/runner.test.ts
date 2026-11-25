@@ -5,7 +5,7 @@
  */
 
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { createReconciler } from "./index.js";
+import { createReconciler, type ReconciliationResult } from "./index.js";
 import {
   type ChannelReconciliationInput,
   createMemoryChannelReconciliationSource,
@@ -14,7 +14,6 @@ import {
   createReconciliationRunner,
   type ReconciliationFailure,
   type ReconciliationOutcome,
-  type ReconciliationResult,
 } from "./runner.js";
 
 describe("createReconciliationRunner", () => {
@@ -64,9 +63,9 @@ describe("createReconciliationRunner", () => {
     const allOutcomes: ReconciliationOutcome[] = [];
     for (const channel of channels) {
       const outcome = await results.get({ kind: "channel", channelId: channel.channelId });
-      expect(outcome).toBeDefined();
-      expect(outcome!.result).toMatchObject({ ok: true });
-      allOutcomes.push(outcome!);
+      if (outcome === undefined) throw new Error(`no outcome for ${channel.channelId}`);
+      expect(outcome.result).toMatchObject({ ok: true });
+      allOutcomes.push(outcome);
     }
 
     expect(allOutcomes).toHaveLength(125);
@@ -105,13 +104,15 @@ describe("createReconciliationRunner", () => {
     const cursors = createMemoryCursorStore();
     const reconciler = createReconciler();
 
-    let resultsPutCalls: string[] = [];
-    let cursorsPutCalls: Array<{ source: string; cursor: string | undefined }> = [];
+    const resultsPutCalls: string[] = [];
+    const cursorsPutCalls: Array<{ source: string; cursor: string | undefined }> = [];
 
     const wrappedResults = {
       put: async (outcome: ReconciliationOutcome) => {
         resultsPutCalls.push(
-          outcome.subject.kind === "channel" ? outcome.subject.channelId : outcome.subject.receiptId,
+          outcome.subject.kind === "channel"
+            ? outcome.subject.channelId
+            : outcome.subject.receiptId,
         );
         await results.put(outcome);
       },
@@ -173,10 +174,21 @@ describe("createReconciliationRunner", () => {
         if (attempts <= 2) {
           throw new Error("Network timeout");
         }
-        return { ok: true, channelId: "channel-fail" } as ReconciliationResult;
+        return {
+          status: "ok",
+          ok: true,
+          subject: { kind: "channel", channelId: "channel-fail" },
+        } as ReconciliationResult;
       },
       async reconcileCharge() {
-        return { ok: true, channelId: "charge" } as ReconciliationResult;
+        return {
+          status: "ok",
+          ok: true,
+          subject: { kind: "channel", channelId: "charge" },
+        } as ReconciliationResult;
+      },
+      async checkOpenChannel() {
+        throw new Error("not used by the runner");
       },
     };
 
@@ -223,14 +235,21 @@ describe("createReconciliationRunner", () => {
     const results = createMemoryReconciliationResultStore();
     const cursors = createMemoryCursorStore();
 
-    let attempts = 0;
+    let _attempts = 0;
     const alwaysFailingReconciler = {
       async reconcileChannel() {
-        attempts++;
+        _attempts++;
         throw new Error("Network timeout");
       },
       async reconcileCharge() {
-        return { ok: true, channelId: "charge" } as ReconciliationResult;
+        return {
+          status: "ok",
+          ok: true,
+          subject: { kind: "channel", channelId: "charge" },
+        } as ReconciliationResult;
+      },
+      async checkOpenChannel() {
+        throw new Error("not used by the runner");
       },
     };
 
@@ -257,7 +276,7 @@ describe("createReconciliationRunner", () => {
     const outcome = await results.get({ kind: "channel", channelId: "channel-always-fail" });
     expect(outcome).toBeDefined();
 
-    const result = outcome!.result as ReconciliationFailure;
+    const result = outcome?.result as ReconciliationFailure;
     expect(result.ok).toBe(false);
     expect(result.kind).toBe("transient");
     expect(result.error).toContain("Network timeout");
@@ -288,10 +307,21 @@ describe("createReconciliationRunner", () => {
         maxInflight = Math.max(maxInflight, inflightCount);
         await new Promise((resolve) => setTimeout(resolve, 100));
         inflightCount--;
-        return { ok: true, channelId: "channel" } as ReconciliationResult;
+        return {
+          status: "ok",
+          ok: true,
+          subject: { kind: "channel", channelId: "channel" },
+        } as ReconciliationResult;
       },
       async reconcileCharge() {
-        return { ok: true, channelId: "charge" } as ReconciliationResult;
+        return {
+          status: "ok",
+          ok: true,
+          subject: { kind: "channel", channelId: "charge" },
+        } as ReconciliationResult;
+      },
+      async checkOpenChannel() {
+        throw new Error("not used by the runner");
       },
     };
 
@@ -303,13 +333,16 @@ describe("createReconciliationRunner", () => {
       concurrency: 3,
     });
 
-    const runPromise = runner.start();
+    const _runPromise = runner.start();
 
     // Allow some work to start.
     await vi.advanceTimersByTimeAsync(50);
 
-    // Stop the runner.
-    await runner.stop();
+    // Stop the runner. In-flight checks sleep on fake timers, so the clock
+    // has to move for them to finish while stop() waits for them.
+    const stopped = runner.stop();
+    await vi.advanceTimersByTimeAsync(1000);
+    await stopped;
 
     // Verify no work is in flight after stop.
     expect(inflightCount).toBe(0);
@@ -347,7 +380,7 @@ describe("createReconciliationRunner", () => {
 
     const firstOutcome = await results.get({ kind: "channel", channelId: "channel-1" });
     expect(firstOutcome).toBeDefined();
-    expect(firstOutcome!.result).toMatchObject({ ok: true });
+    expect(firstOutcome?.result).toMatchObject({ ok: true });
 
     // Reset cursor to re-run the same range.
     await cursors.put("channels", undefined);
@@ -359,8 +392,8 @@ describe("createReconciliationRunner", () => {
     expect(secondOutcome).toBeDefined();
 
     // Results should be the same (idempotent).
-    expect(secondOutcome!.result).toMatchObject({ ok: true });
-    expect(secondOutcome!.subject).toEqual(firstOutcome!.subject);
+    expect(secondOutcome?.result).toMatchObject({ ok: true });
+    expect(secondOutcome?.subject).toEqual(firstOutcome?.subject);
   });
 
   it("respects concurrency limit for RPC calls", async () => {
@@ -388,10 +421,21 @@ describe("createReconciliationRunner", () => {
         maxInflight = Math.max(maxInflight, inflightCount);
         await new Promise((resolve) => setTimeout(resolve, 10));
         inflightCount--;
-        return { ok: true, channelId: "channel" } as ReconciliationResult;
+        return {
+          status: "ok",
+          ok: true,
+          subject: { kind: "channel", channelId: "channel" },
+        } as ReconciliationResult;
       },
       async reconcileCharge() {
-        return { ok: true, channelId: "charge" } as ReconciliationResult;
+        return {
+          status: "ok",
+          ok: true,
+          subject: { kind: "channel", channelId: "charge" },
+        } as ReconciliationResult;
+      },
+      async checkOpenChannel() {
+        throw new Error("not used by the runner");
       },
     };
 
@@ -403,7 +447,10 @@ describe("createReconciliationRunner", () => {
       concurrency: 5,
     });
 
-    await runner.runOnce();
+    // Each check sleeps on a fake timer, so the clock has to move.
+    const ran = runner.runOnce();
+    await vi.advanceTimersByTimeAsync(10_000);
+    await ran;
     await vi.runAllTimersAsync();
 
     // Max in-flight should not exceed the concurrency limit.
@@ -435,7 +482,14 @@ describe("createReconciliationRunner", () => {
         throw new Error("Invalid data");
       },
       async reconcileCharge() {
-        return { ok: true, channelId: "charge" } as ReconciliationResult;
+        return {
+          status: "ok",
+          ok: true,
+          subject: { kind: "channel", channelId: "charge" },
+        } as ReconciliationResult;
+      },
+      async checkOpenChannel() {
+        throw new Error("not used by the runner");
       },
     };
 
@@ -457,7 +511,7 @@ describe("createReconciliationRunner", () => {
     const outcome = await results.get({ kind: "channel", channelId: "channel-bad" });
     expect(outcome).toBeDefined();
 
-    const result = outcome!.result as ReconciliationFailure;
+    const result = outcome?.result as ReconciliationFailure;
     expect(result.ok).toBe(false);
     expect(result.kind).toBe("unverified");
     expect(result.retriesExhausted).toBeUndefined();
@@ -494,7 +548,7 @@ describe("createReconciliationRunner", () => {
     for (let i = 0; i < 15; i++) {
       const outcome = await results.get({ kind: "channel", channelId: `channel-${i}` });
       expect(outcome).toBeDefined();
-      expect(outcome!.result).toMatchObject({ ok: true });
+      expect(outcome?.result).toMatchObject({ ok: true });
     }
 
     // Cursor should be at the end.
@@ -536,7 +590,7 @@ describe("createReconciliationRunner", () => {
     for (let i = 5; i < 10; i++) {
       const outcome = await results.get({ kind: "channel", channelId: `channel-${i}` });
       expect(outcome).toBeDefined();
-      expect(outcome!.result).toMatchObject({ ok: true });
+      expect(outcome?.result).toMatchObject({ ok: true });
     }
 
     // Channels 0-4 should not be processed.

@@ -8,7 +8,6 @@
 
 import type {
   CommitmentRecord,
-  Drift,
   Reconciler,
   ReconciliationResult,
   SettlementRecord,
@@ -66,14 +65,14 @@ export type ReceiptReconciliationInput = {
   // orchestrates the structural reconciliation for now.
 };
 
-/** Subject undergoing reconciliation. */
-export type ReconciliationSubject =
+/** What one runner check is about: a tracked channel, or a stored receipt. */
+export type RunSubject =
   | { kind: "channel"; channelId: string }
   | { kind: "receipt"; receiptId: string };
 
 /** The outcome of reconciling one subject in one run. */
 export type ReconciliationOutcome = {
-  subject: ReconciliationSubject;
+  subject: RunSubject;
   runId: string;
   /** ISO-8601 timestamp when the check ran. */
   timestamp: string;
@@ -104,7 +103,7 @@ export interface ReconciliationResultStore {
    * Retrieves the most recent outcome for a subject, if any. Used to decide
    * whether a subject needs re-reconciliation.
    */
-  get(subject: ReconciliationSubject): Promise<ReconciliationOutcome | undefined>;
+  get(subject: RunSubject): Promise<ReconciliationOutcome | undefined>;
 
   /**
    * Lists all outcomes for a run, ordered by timestamp. Used for reporting
@@ -173,7 +172,11 @@ export interface ReconciliationRunner {
 
 /** In-flight retry state for one subject. */
 type RetryState = {
-  subject: ReconciliationSubject;
+  subject: RunSubject;
+  /** What to check again; a retry re-runs the same input. */
+  input:
+    | { kind: "channel"; value: ChannelReconciliationInput }
+    | { kind: "receipt"; value: ReceiptReconciliationInput };
   attempts: number;
   nextAttemptAt: number;
   lastError: string;
@@ -208,7 +211,7 @@ export function createReconciliationRunner(
   let running = false;
   let timer: NodeJS.Timeout | undefined;
   let abortController: AbortController | undefined;
-  let inflightPromises: Set<Promise<void>> = new Set();
+  const inflightPromises: Set<Promise<void>> = new Set();
   const retryQueue: Map<string, RetryState> = new Map();
   const semaphore = new Semaphore(concurrency);
 
@@ -219,23 +222,28 @@ export function createReconciliationRunner(
   ): Promise<void> {
     if (signal.aborted) return;
 
-    const subject: ReconciliationSubject = { kind: "channel", channelId: input.channelId };
+    const subject: RunSubject = { kind: "channel", channelId: input.channelId };
     const subjectKey = serializeSubject(subject);
 
     try {
       await semaphore.acquire(signal);
-      if (signal.aborted) {
-        semaphore.release();
-        return;
-      }
+      // The finally block releases the permit; releasing here as well would
+      // hand out one permit too many.
+      if (signal.aborted) return;
 
       let result: ReconciliationResult | ReconciliationFailure;
 
       if (input.settlement) {
         result = await reconciler.reconcileChannel(input.commitments, input.settlement);
       } else {
-        // Open channels with periodic live checks are deferred beyond v0.
-        result = { ok: true, channelId: input.channelId };
+        // An open channel has no settlement to compare yet. Its live check
+        // (checkOpenChannel with a contract snapshot) is not wired into the
+        // runner, so it is reported as unverified, not as consistent (#365).
+        result = {
+          ok: false,
+          kind: "unverified",
+          error: "open-channel checks are not implemented in the runner yet (#365)",
+        };
       }
 
       const outcome: ReconciliationOutcome = {
@@ -250,7 +258,7 @@ export function createReconciliationRunner(
       // Clear retry state on success.
       retryQueue.delete(subjectKey);
     } catch (error) {
-      await handleFailure(subject, runId, error, signal);
+      await handleFailure(subject, runId, error, signal, { kind: "channel", value: input });
     } finally {
       semaphore.release();
     }
@@ -263,19 +271,24 @@ export function createReconciliationRunner(
   ): Promise<void> {
     if (signal.aborted) return;
 
-    const subject: ReconciliationSubject = { kind: "receipt", receiptId: input.receiptId };
+    const subject: RunSubject = { kind: "receipt", receiptId: input.receiptId };
     const subjectKey = serializeSubject(subject);
 
     try {
       await semaphore.acquire(signal);
-      if (signal.aborted) {
-        semaphore.release();
-        return;
-      }
+      // The finally block releases the permit; releasing here as well would
+      // hand out one permit too many.
+      if (signal.aborted) return;
 
-      // On-chain settlement confirmation is out of scope for the runner in v0.
-      // The runner only orchestrates structural reconciliation for now.
-      const result: ReconciliationResult = { ok: true, channelId: input.receiptId };
+      // Receipts are not checked yet: the runner has only a receipt id, and
+      // confirming one on chain needs the signed receipt (reconcileCharge).
+      // Report it as unverified rather than claiming it is consistent; the
+      // receipt check is tracked in #365.
+      const result: ReconciliationFailure = {
+        ok: false,
+        kind: "unverified",
+        error: "receipt reconciliation is not implemented in the runner yet (#365)",
+      };
 
       const outcome: ReconciliationOutcome = {
         subject,
@@ -289,17 +302,18 @@ export function createReconciliationRunner(
       // Clear retry state on success.
       retryQueue.delete(subjectKey);
     } catch (error) {
-      await handleFailure(subject, runId, error, signal);
+      await handleFailure(subject, runId, error, signal, { kind: "receipt", value: input });
     } finally {
       semaphore.release();
     }
   }
 
   async function handleFailure(
-    subject: ReconciliationSubject,
+    subject: RunSubject,
     runId: string,
     error: unknown,
     signal: AbortSignal,
+    input: RetryState["input"],
   ): Promise<void> {
     if (signal.aborted) return;
 
@@ -355,40 +369,35 @@ export function createReconciliationRunner(
     );
     const delay = retryConfig.jitter ? baseDelay * (0.5 + Math.random() * 0.5) : baseDelay;
 
+    // Record the transient failure now, so the result store shows the
+    // subject as pending a retry rather than missing.
+    await results.put({
+      subject,
+      runId,
+      timestamp: new Date().toISOString(),
+      result: { ok: false, kind: "transient", error: errorMessage },
+    });
     retryQueue.set(subjectKey, {
       subject,
+      input,
       attempts,
       nextAttemptAt: Date.now() + delay,
       lastError: errorMessage,
     });
   }
 
+  /** Re-runs every retry that is due. A retry that fails again reschedules itself. */
   async function processRetries(runId: string, signal: AbortSignal): Promise<void> {
     const now = Date.now();
-    const ready: RetryState[] = [];
-
-    for (const state of retryQueue.values()) {
-      if (state.nextAttemptAt <= now) {
-        ready.push(state);
-      }
-    }
-
-    const promises: Promise<void>[] = [];
-    for (const state of ready) {
-      if (signal.aborted) break;
-
-      if (state.subject.kind === "channel") {
-        // Retry requires fetching the channel data again.
-        // For simplicity, we'll skip detailed retry in this initial implementation
-        // and just clear the retry state. A production version would re-fetch.
-        retryQueue.delete(serializeSubject(state.subject));
-      } else {
-        // Similarly for receipts.
-        retryQueue.delete(serializeSubject(state.subject));
-      }
-    }
-
-    await Promise.all(promises);
+    const ready = [...retryQueue.values()].filter((state) => state.nextAttemptAt <= now);
+    await Promise.all(
+      ready.map((state) => {
+        if (signal.aborted) return Promise.resolve();
+        return state.input.kind === "channel"
+          ? reconcileChannel(state.input.value, runId, signal)
+          : reconcileReceipt(state.input.value, runId, signal);
+      }),
+    );
   }
 
   async function runChannels(runId: string, signal: AbortSignal): Promise<void> {
@@ -460,10 +469,12 @@ export function createReconciliationRunner(
     const runId = generateRunId();
 
     try {
+      // Due retries run after this run's fresh checks, so a subject that
+      // fails in this run waits for its backoff before it is tried again.
+      await processRetries(runId, controller.signal);
       await Promise.all([
         runChannels(runId, controller.signal),
         runReceipts(runId, controller.signal),
-        processRetries(runId, controller.signal),
       ]);
     } finally {
       // Wait for all in-flight work to complete.
@@ -565,7 +576,7 @@ class Semaphore {
   }
 }
 
-function serializeSubject(subject: ReconciliationSubject): string {
+function serializeSubject(subject: RunSubject): string {
   return subject.kind === "channel"
     ? `channel:${subject.channelId}`
     : `receipt:${subject.receiptId}`;
@@ -613,10 +624,11 @@ export function createMemoryReconciliationResultStore(): ReconciliationResultSto
       const key = serializeSubject(outcome.subject);
       outcomes.set(key, outcome);
 
-      if (!byRun.has(outcome.runId)) {
-        byRun.set(outcome.runId, []);
+      let runOutcomes = byRun.get(outcome.runId);
+      if (runOutcomes === undefined) {
+        runOutcomes = [];
+        byRun.set(outcome.runId, runOutcomes);
       }
-      const runOutcomes = byRun.get(outcome.runId)!;
       const existingIndex = runOutcomes.findIndex(
         (o) => serializeSubject(o.subject) === key && o.runId === outcome.runId,
       );

@@ -101,6 +101,18 @@ export type ChannelDriftKind = "under-settled" | "over-settled" | "missing-commi
 | "duplicate-sequence";
 
 // @public
+export type ChannelReconciliationInput = {
+    channelId: string;
+    commitments: CommitmentRecord[];
+    settlement?: SettlementRecord;
+};
+
+// @public
+export interface ChannelReconciliationSource {
+    listChannels(cursor?: Cursor, limit?: number): Promise<Page<ChannelReconciliationInput>>;
+}
+
+// @public
 export interface ChannelStateReader {
     getChannelState(channelId: string, network: StellarNetwork): Promise<OnChainChannelState>;
 }
@@ -157,7 +169,19 @@ export function confirmCharge(receipt: ChargeReceipt, tx: ChainTransaction, asse
 export function createDriftAlertBridge(options: DriftAlertBridgeOptions): DriftAlertBridge;
 
 // @public
+export function createMemoryChannelReconciliationSource(channels: ChannelReconciliationInput[]): ChannelReconciliationSource;
+
+// @public
+export function createMemoryCursorStore(): CursorStore;
+
+// @public
 export function createMemoryDriftAlertStore(initialResults?: readonly ReconciliationResult[]): DriftAlertStore;
+
+// @public
+export function createMemoryReceiptReconciliationSource(receipts: ReceiptReconciliationInput[]): ReceiptReconciliationSource;
+
+// @public
+export function createMemoryReconciliationResultStore(): ReconciliationResultStore;
 
 // @public
 export function createQuarantineEnforcer(options: QuarantineEnforcerOptions): ReconciliationQuarantineEnforcer;
@@ -165,10 +189,22 @@ export function createQuarantineEnforcer(options: QuarantineEnforcerOptions): Re
 // @public (undocumented)
 export function createReconciler(options?: ReconcilerOptions): Reconciler;
 
+// @public
+export function createReconciliationRunner(config: ReconciliationRunnerConfig): ReconciliationRunner;
+
 // @public (undocumented)
 export type CsvReportOptions = {
     severity?: Partial<Record<DriftKind, DriftSeverity>>;
 };
+
+// @public
+export type Cursor = string;
+
+// @public
+export interface CursorStore {
+    get(source: "channels" | "receipts"): Promise<Cursor | undefined>;
+    put(source: "channels" | "receipts", cursor: Cursor | undefined): Promise<void>;
+}
 
 // @public
 export const DEFAULT_DRIFT_ACTIONS: Record<DriftKind, DriftAction> & Record<string, DriftAction>;
@@ -299,6 +335,12 @@ export type OpenChannelSnapshot = {
     funder?: string;
 };
 
+// @public
+export type Page<T> = {
+    items: readonly T[];
+    nextCursor?: Cursor;
+};
+
 // @public (undocumented)
 export type ProcessedDriftAction = {
     drift: Drift;
@@ -329,6 +371,16 @@ export type QuarantineEnforcerOptions = {
 };
 
 // @public
+export type ReceiptReconciliationInput = {
+    receiptId: string;
+};
+
+// @public
+export interface ReceiptReconciliationSource {
+    listReceipts(cursor?: Cursor, limit?: number): Promise<Page<ReceiptReconciliationInput>>;
+}
+
+// @public
 export function reconcileOpenChannel(snapshot: OpenChannelSnapshot, state: OnChainChannelState): OpenChannelDrift[];
 
 // @public (undocumented)
@@ -356,6 +408,22 @@ export type ReconciliationAmounts = {
     expected?: string;
     settled?: string;
     remainder?: string;
+};
+
+// @public
+export type ReconciliationFailure = {
+    ok: false;
+    kind: "unverified" | "transient";
+    error: string;
+    retriesExhausted?: boolean;
+};
+
+// @public
+export type ReconciliationOutcome = {
+    subject: RunSubject;
+    runId: string;
+    timestamp: string;
+    result: ReconciliationResult | ReconciliationFailure;
 };
 
 // @public (undocumented)
@@ -433,6 +501,35 @@ export type ReconciliationResult = {
 };
 
 // @public
+export interface ReconciliationResultStore {
+    get(subject: RunSubject): Promise<ReconciliationOutcome | undefined>;
+    listByRun(runId: string): Promise<readonly ReconciliationOutcome[]>;
+    put(outcome: ReconciliationOutcome): Promise<void>;
+}
+
+// @public
+export interface ReconciliationRunner {
+    runOnce(): Promise<void>;
+    start(): Promise<void>;
+    stop(): Promise<void>;
+}
+
+// @public
+export type ReconciliationRunnerConfig = {
+    sources: {
+        channels?: ChannelReconciliationSource;
+        receipts?: ReceiptReconciliationSource;
+    };
+    reconciler: Reconciler;
+    results: ReconciliationResultStore;
+    cursors: CursorStore;
+    intervalMs?: number;
+    pageSize?: number;
+    concurrency?: number;
+    retry?: RetryConfig;
+};
+
+// @public
 export type ReconciliationSubject = {
     kind: "channel";
     channelId: string;
@@ -453,6 +550,24 @@ export type ReportRange = {
 
 // @public (undocumented)
 export function resolveDriftSeverity(kind: DriftKind, overrides?: Partial<Record<DriftKind, DriftSeverity>>): DriftSeverity;
+
+// @public
+export type RetryConfig = {
+    maxAttempts?: number;
+    initialDelayMs?: number;
+    backoffMultiplier?: number;
+    maxDelayMs?: number;
+    jitter?: boolean;
+};
+
+// @public
+export type RunSubject = {
+    kind: "channel";
+    channelId: string;
+} | {
+    kind: "receipt";
+    receiptId: string;
+};
 
 // @public
 export type SettlementRecord = {

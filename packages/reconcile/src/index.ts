@@ -489,13 +489,13 @@ export {
 export {
   type ChannelReconciliationInput,
   type ChannelReconciliationSource,
+  type Cursor,
+  type CursorStore,
   createMemoryChannelReconciliationSource,
   createMemoryCursorStore,
   createMemoryReceiptReconciliationSource,
   createMemoryReconciliationResultStore,
   createReconciliationRunner,
-  type Cursor,
-  type CursorStore,
   type Page,
   type ReceiptReconciliationInput,
   type ReceiptReconciliationSource,
@@ -504,6 +504,6 @@ export {
   type ReconciliationResultStore,
   type ReconciliationRunner,
   type ReconciliationRunnerConfig,
-  type ReconciliationSubject,
   type RetryConfig,
+  type RunSubject,
 } from "./runner.js";
