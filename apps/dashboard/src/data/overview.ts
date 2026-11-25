@@ -43,13 +43,16 @@ export const RECENT_RECEIPT_COUNT = 5;
  * payments, the channels, and the newest receipts.
  */
 export async function fetchOverview(): Promise<OverviewSnapshot> {
-  const [channels, receipts] = await Promise.all([fetchOpenChannels(), fetchReceipts()]);
+  const [channels, receiptsResult] = await Promise.all([
+    fetchOpenChannels(),
+    fetchReceipts({ limit: 100 }),
+  ]);
 
   const hub = createObservabilityHub();
   for (const metric of STUB_PAYMENTS) hub.record(metric);
   const spend = hub.summarize({ from: STUB_PERIOD.from, to: STUB_PERIOD.to });
 
-  const recentReceipts = [...receipts.rows]
+  const recentReceipts = [...receiptsResult.page.rows]
     .sort((a, b) => b.receipt.issuedAt.localeCompare(a.receipt.issuedAt))
     .slice(0, RECENT_RECEIPT_COUNT);
 

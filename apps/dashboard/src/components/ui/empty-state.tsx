@@ -9,15 +9,23 @@ export function EmptyState({
   body,
   source,
   icon,
+  action,
+  "data-testid": testId,
 }: {
   title: string;
   body: string;
   /** Where the data will come from, e.g. "@vegaforge/tollway-observability · summarize()". */
   source?: string;
   icon?: ReactNode;
+  /** An optional action node rendered below the body, e.g. a "clear filters" button. */
+  action?: ReactNode;
+  "data-testid"?: string;
 }) {
   return (
-    <div className="flex flex-col items-center gap-2 rounded-lg border border-dashed border-border-strong bg-surface-2 px-6 py-10 text-center">
+    <div
+      data-testid={testId}
+      className="flex flex-col items-center gap-2 rounded-lg border border-dashed border-border-strong bg-surface-2 px-6 py-10 text-center"
+    >
       {icon && <span className="text-muted">{icon}</span>}
       <p className="text-sm font-medium">{title}</p>
       <p className="max-w-md text-sm text-muted">{body}</p>
@@ -26,6 +34,7 @@ export function EmptyState({
           {source}
         </code>
       )}
+      {action && <div className="mt-1">{action}</div>}
     </div>
   );
 }

@@ -9,12 +9,16 @@ import {
   verifyReceipt,
 } from "@vegaforge/tollway-core";
 import Link from "next/link";
-import { useEffect, useMemo, useState } from "react";
+import { usePathname, useRouter, useSearchParams } from "next/navigation";
+import { useCallback, useEffect, useMemo, useState } from "react";
 
+import { EmptyState } from "@/components/ui/empty-state";
 import { Panel } from "@/components/ui/panel";
-import type { ReceiptRow } from "@/data/receipts";
+import type { KeySetInfo, ReceiptQuery } from "@/data/receipts";
 import { useReceipts } from "@/data/use-receipts";
 import { formatAmount } from "@/lib/amount";
+
+// ── constants ─────────────────────────────────────────────────────────────────
 
 const MODEL_LABEL: Record<ReceiptBody["model"], string> = {
   x402: "x402",
@@ -22,9 +26,90 @@ const MODEL_LABEL: Record<ReceiptBody["model"], string> = {
   "mpp-channel": "MPP channel",
 };
 
+const MODELS: Array<ReceiptBody["model"]> = ["x402", "mpp-charge", "mpp-channel"];
+
+const selectClass =
+  "rounded-md border border-border bg-surface px-2 py-1.5 text-sm text-foreground focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-primary";
+
+const inputClass =
+  "w-full rounded-md border border-border bg-surface px-2 py-1.5 text-sm text-foreground placeholder:text-muted focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-primary";
+
+// ── URL param helpers ─────────────────────────────────────────────────────────
+
+function parseParams(params: URLSearchParams): {
+  search: string;
+  payer: string;
+  payee: string;
+  model: string;
+  asset: string;
+  network: string;
+  from: string;
+  to: string;
+  cursor: string | null;
+} {
+  return {
+    search: params.get("search") ?? "",
+    payer: params.get("payer") ?? "",
+    payee: params.get("payee") ?? "",
+    model: params.get("model") ?? "",
+    asset: params.get("asset") ?? "",
+    network: params.get("network") ?? "",
+    from: params.get("from") ?? "",
+    to: params.get("to") ?? "",
+    cursor: params.get("cursor") ?? null,
+  };
+}
+
+function buildQuery(parsed: ReturnType<typeof parseParams>): ReceiptQuery {
+  const q: ReceiptQuery = {};
+  if (parsed.search) q.search = parsed.search;
+  if (parsed.payer) q.payer = parsed.payer;
+  if (parsed.payee) q.payee = parsed.payee;
+  if (parsed.model) q.model = parsed.model as ReceiptBody["model"];
+  if (parsed.asset) q.asset = parsed.asset;
+  if (parsed.network) q.network = parsed.network;
+  if (parsed.from) q.from = parsed.from;
+  if (parsed.to) q.to = parsed.to;
+  if (parsed.cursor) q.cursor = parsed.cursor;
+  return q;
+}
+
+function hasActiveFilters(parsed: ReturnType<typeof parseParams>): boolean {
+  return !!(
+    parsed.search ||
+    parsed.payer ||
+    parsed.payee ||
+    parsed.model ||
+    parsed.asset ||
+    parsed.network ||
+    parsed.from ||
+    parsed.to
+  );
+}
+
+function describeActiveFilters(parsed: ReturnType<typeof parseParams>): string {
+  const parts: string[] = [];
+  if (parsed.search) parts.push(`search "${parsed.search}"`);
+  if (parsed.payer) parts.push(`payer ${truncate(parsed.payer, 8, 6)}`);
+  if (parsed.payee) parts.push(`payee ${truncate(parsed.payee, 8, 6)}`);
+  if (parsed.model)
+    parts.push(`model ${MODEL_LABEL[parsed.model as ReceiptBody["model"]] ?? parsed.model}`);
+  if (parsed.asset) parts.push(`asset ${assetCode(parsed.asset)}`);
+  if (parsed.network) parts.push(`network ${parsed.network}`);
+  if (parsed.from) parts.push(`from ${parsed.from.slice(0, 10)}`);
+  if (parsed.to) parts.push(`to ${parsed.to.slice(0, 10)}`);
+  return parts.join(", ");
+}
+
+// ── utilities ─────────────────────────────────────────────────────────────────
+
 function truncate(value: string, head = 6, tail = 4): string {
   if (value.length <= head + tail + 3) return value;
   return `${value.slice(0, head)}…${value.slice(-tail)}`;
+}
+
+function assetCode(asset: string): string {
+  return asset.split(":")[0] ?? asset;
 }
 
 function settlementSummary(ref: SettlementRef): string {
@@ -34,53 +119,220 @@ function settlementSummary(ref: SettlementRef): string {
   return `${ref.channelId} · seq ${ref.sequence}`;
 }
 
+// ── main view ─────────────────────────────────────────────────────────────────
+
 /**
  * `payee` limits the archive to receipts paid to one counterparty. The
- * anomaly feed links here with it, so an operator sees every receipt behind a
- * drift or a stop. Null shows the whole archive.
+ * anomaly feed links here with it. When set, the filter bar is hidden and
+ * the payee filter is shown as a banner instead.
  */
 export function ReceiptsView({ payee = null }: { payee?: string | null }) {
-  const state = useReceipts();
+  const params = useSearchParams();
+  const router = useRouter();
+  const pathname = usePathname();
 
-  const allRows = state.status === "ready" ? state.rows : [];
-  const rows = useMemo(
-    () => (payee === null ? allRows : allRows.filter((row) => row.receipt.payee === payee)),
-    [allRows, payee],
+  const parsed = useMemo(() => parseParams(params), [params]);
+
+  // If a payee prop is provided (from the anomaly feed), override the URL
+  // payee filter silently.
+  const effectiveParsed = useMemo(
+    () => (payee !== null ? { ...parsed, payee } : parsed),
+    [parsed, payee],
   );
-  const trustedKeys = state.status === "ready" ? state.trustedKeys : null;
+
+  const query = useMemo(() => buildQuery(effectiveParsed), [effectiveParsed]);
+  const state = useReceipts(query);
 
   const [selectedId, setSelectedId] = useState<string | null>(null);
+
+  const rows = state.status === "ready" ? state.page.rows : [];
+  const keySet = state.status === "ready" ? state.keySet : null;
+
   const selected = useMemo(
     () => rows.find((row) => row.receipt.id === selectedId) ?? null,
     [rows, selectedId],
   );
 
+  // Push a URL update. Filter changes reset the cursor.
+  const pushParams = useCallback(
+    (updates: Partial<ReturnType<typeof parseParams>>, resetCursor = true) => {
+      const next = new URLSearchParams(params);
+      for (const [key, value] of Object.entries(updates)) {
+        if (value === null || value === "" || value === undefined) {
+          next.delete(key);
+        } else {
+          next.set(key, value);
+        }
+      }
+      if (resetCursor) next.delete("cursor");
+      router.push(`${pathname}?${next.toString()}`);
+    },
+    [params, pathname, router],
+  );
+
+  const clearFilters = useCallback(() => {
+    const next = new URLSearchParams();
+    if (payee === null && params.get("payee")) {
+      // keep payee if it came from the banner, not the bar
+    }
+    router.push(`${pathname}?${next.toString()}`);
+  }, [params, pathname, payee, router]);
+
+  const nextCursor = state.status === "ready" ? state.page.nextCursor : null;
+  const isFirstPage = !effectiveParsed.cursor;
+
   return (
     <Panel
       title="Receipts"
-      description={
-        payee === null
-          ? "Payer, payee, amount, model, and settlement reference"
-          : "Receipts paid to one counterparty"
-      }
+      description="Signed receipt archive: searchable, filterable, and paginated."
     >
-      {payee === null ? null : (
+      {/* Payee-filter banner (from anomaly feed) */}
+      {payee !== null ? (
         <p data-testid="receipts-payee-filter" className="mb-4 text-sm">
           Paid to <span className="font-mono">{payee}</span>.{" "}
           <Link className="underline" href="/receipts">
             Show all receipts
           </Link>
         </p>
-      )}
+      ) : null}
+
+      {/* Filter bar — hidden when a payee prop locks the view */}
+      {payee === null ? (
+        <div
+          data-testid="receipts-filter-bar"
+          className="mb-6 grid gap-3 sm:grid-cols-2 lg:grid-cols-4"
+        >
+          {/* Free-text search */}
+          <label className="flex flex-col gap-1 text-xs text-muted sm:col-span-2">
+            Search
+            <input
+              type="search"
+              aria-label="Search receipts"
+              placeholder="id, payer, payee, resource, tx hash…"
+              className={inputClass}
+              value={parsed.search}
+              onChange={(e) => pushParams({ search: e.target.value })}
+            />
+          </label>
+
+          {/* Model filter */}
+          <label className="flex flex-col gap-1 text-xs text-muted">
+            Model
+            <select
+              aria-label="Model"
+              className={selectClass}
+              value={parsed.model}
+              onChange={(e) => pushParams({ model: e.target.value })}
+            >
+              <option value="">All models</option>
+              {MODELS.map((m) => (
+                <option key={m} value={m}>
+                  {MODEL_LABEL[m]}
+                </option>
+              ))}
+            </select>
+          </label>
+
+          {/* Network filter */}
+          <label className="flex flex-col gap-1 text-xs text-muted">
+            Network
+            <select
+              aria-label="Network"
+              className={selectClass}
+              value={parsed.network}
+              onChange={(e) => pushParams({ network: e.target.value })}
+            >
+              <option value="">All networks</option>
+              <option value="testnet">testnet</option>
+              <option value="mainnet">mainnet</option>
+            </select>
+          </label>
+
+          {/* Payer filter */}
+          <label className="flex flex-col gap-1 text-xs text-muted">
+            Payer
+            <input
+              type="text"
+              aria-label="Payer address"
+              placeholder="Stellar address…"
+              className={inputClass}
+              value={parsed.payer}
+              onChange={(e) => pushParams({ payer: e.target.value })}
+            />
+          </label>
+
+          {/* Payee filter */}
+          <label className="flex flex-col gap-1 text-xs text-muted">
+            Payee
+            <input
+              type="text"
+              aria-label="Payee address"
+              placeholder="Stellar address…"
+              className={inputClass}
+              value={parsed.payee}
+              onChange={(e) => pushParams({ payee: e.target.value })}
+            />
+          </label>
+
+          {/* From date */}
+          <label className="flex flex-col gap-1 text-xs text-muted">
+            From (UTC)
+            <input
+              type="datetime-local"
+              aria-label="From date"
+              className={inputClass}
+              value={parsed.from ? parsed.from.slice(0, 16) : ""}
+              onChange={(e) =>
+                pushParams({ from: e.target.value ? `${e.target.value}:00.000Z` : "" })
+              }
+            />
+          </label>
+
+          {/* To date */}
+          <label className="flex flex-col gap-1 text-xs text-muted">
+            To (UTC)
+            <input
+              type="datetime-local"
+              aria-label="To date"
+              className={inputClass}
+              value={parsed.to ? parsed.to.slice(0, 16) : ""}
+              onChange={(e) =>
+                pushParams({ to: e.target.value ? `${e.target.value}:00.000Z` : "" })
+              }
+            />
+          </label>
+        </div>
+      ) : null}
+
+      {/* Loading / error */}
       {state.status === "loading" ? <ReceiptsTableSkeleton /> : null}
       {state.status === "error" ? <ReceiptsTableError error={state.error} /> : null}
+
+      {/* Ready */}
       {state.status === "ready" ? (
         rows.length === 0 ? (
-          <p className="text-sm text-muted">
-            {payee === null
-              ? "No receipts yet. Wire a paid route and the archive will populate."
-              : "No receipts were paid to this counterparty."}
-          </p>
+          hasActiveFilters(effectiveParsed) || payee !== null ? (
+            <EmptyState
+              data-testid="receipts-empty-filtered"
+              title="No receipts match these filters"
+              body={`Active filters: ${describeActiveFilters(effectiveParsed) || `payee ${payee ?? ""}`}.`}
+              action={
+                payee === null ? (
+                  <button
+                    type="button"
+                    onClick={clearFilters}
+                    className="mt-2 text-sm underline hover:text-foreground"
+                  >
+                    Clear filters
+                  </button>
+                ) : undefined
+              }
+            />
+          ) : (
+            <p className="text-sm text-muted">
+              No receipts yet. Wire a paid route and the archive will populate.
+            </p>
+          )
         ) : (
           <div className="flex flex-col gap-6">
             <ReceiptsTable
@@ -88,8 +340,32 @@ export function ReceiptsView({ payee = null }: { payee?: string | null }) {
               selectedId={selectedId}
               onSelect={(id) => setSelectedId((prev) => (prev === id ? null : id))}
             />
-            {selected && trustedKeys ? (
-              <ReceiptDetail receipt={selected} trustedKeys={trustedKeys} />
+
+            {/* Pagination */}
+            <nav aria-label="Receipt pages" className="flex items-center justify-between text-sm">
+              <button
+                type="button"
+                onClick={() => pushParams({ cursor: null }, false)}
+                disabled={isFirstPage}
+                className="rounded-md border border-border px-3 py-1 disabled:opacity-50"
+              >
+                Newer
+              </button>
+              <button
+                type="button"
+                onClick={() => {
+                  if (nextCursor !== null) pushParams({ cursor: nextCursor }, false);
+                }}
+                disabled={nextCursor === null}
+                className="rounded-md border border-border px-3 py-1 disabled:opacity-50"
+              >
+                Older
+              </button>
+            </nav>
+
+            {/* Detail panel */}
+            {selected && keySet ? (
+              <ReceiptDetail receipt={selected} keySet={keySet} />
             ) : (
               <p className="text-xs text-muted">
                 Select a row to expand the signed receipt, verify its signature, and follow the
@@ -103,12 +379,14 @@ export function ReceiptsView({ payee = null }: { payee?: string | null }) {
   );
 }
 
+// ── table ─────────────────────────────────────────────────────────────────────
+
 function ReceiptsTable({
   rows,
   selectedId,
   onSelect,
 }: {
-  rows: ReceiptRow[];
+  rows: SignedReceipt[];
   selectedId: string | null;
   onSelect: (id: string) => void;
 }) {
@@ -154,7 +432,6 @@ function ReceiptsTable({
                     aria-pressed={isSelected}
                     className="block rounded font-mono text-xs text-muted focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-primary"
                   >
-                    {/* The accessible name contains the visible payer text (WCAG 2.5.3). */}
                     <span className="sr-only">Select receipt {receipt.id}, payer </span>
                     {truncate(receipt.payer, 8, 6)}
                   </button>
@@ -184,32 +461,41 @@ function ReceiptsTable({
   );
 }
 
-function ReceiptDetail({
-  receipt,
-  trustedKeys,
-}: {
-  receipt: SignedReceipt;
-  trustedKeys: Record<string, Uint8Array>;
-}) {
+// ── detail panel ──────────────────────────────────────────────────────────────
+
+function ReceiptDetail({ receipt, keySet }: { receipt: SignedReceipt; keySet: KeySetInfo }) {
   const [verification, setVerification] = useState<
     | { status: "verifying" }
-    | { status: "verified"; result: ReceiptVerification }
+    | { status: "unknown-key" }
+    | { status: "verified"; result: ReceiptVerification; keyId: string; keySetSource: string }
     | { status: "error"; error: Error }
   >({ status: "verifying" });
 
-  // Verifying on selection rather than on a button click matches the issue
-  // acceptance criterion ("a detail view that verifies the signature") and
-  // keeps the panel honest: a tampered or stale-keyed receipt surfaces an
-  // invalid pill the moment the user opens it. Re-runs when the user picks
-  // a different row.
   useEffect(() => {
     let cancelled = false;
     setVerification({ status: "verifying" });
-    const verifier = new Ed25519Verifier(trustedKeys);
+
+    const keyId = receipt.signature.keyId;
+
+    // Check whether the key is in the trusted set before attempting
+    // verification; unknown keys are distinct from invalid signatures.
+    if (!(keyId in keySet.keys)) {
+      if (!cancelled) setVerification({ status: "unknown-key" });
+      return () => {
+        cancelled = true;
+      };
+    }
+
+    const verifier = new Ed25519Verifier(keySet.keys);
     verifyReceipt(receipt, verifier)
       .then((result) => {
         if (cancelled) return;
-        setVerification({ status: "verified", result });
+        setVerification({
+          status: "verified",
+          result,
+          keyId,
+          keySetSource: keySet.source,
+        });
       })
       .catch((err: unknown) => {
         if (cancelled) return;
@@ -218,10 +504,13 @@ function ReceiptDetail({
           error: err instanceof Error ? err : new Error(String(err)),
         });
       });
+
     return () => {
       cancelled = true;
     };
-  }, [receipt, trustedKeys]);
+  }, [receipt, keySet]);
+
+  const json = JSON.stringify(receipt, null, 2);
 
   return (
     <section
@@ -267,6 +556,14 @@ function ReceiptDetail({
         <dl className="mt-2 grid grid-cols-1 gap-2 sm:grid-cols-2">
           <Detail label="Key id" value={receipt.signature.keyId} mono />
           <Detail label="Algorithm" value={receipt.signature.algorithm} />
+          {verification.status === "verified" ? (
+            <div className="sm:col-span-2">
+              <dt className="text-[10px] uppercase tracking-wide text-muted">Key set</dt>
+              <dd className="mt-0.5 break-all font-mono text-xs text-muted">
+                {verification.keySetSource}
+              </dd>
+            </div>
+          ) : null}
         </dl>
         <p
           className="mt-2 break-all font-mono text-[11px] text-muted"
@@ -275,9 +572,49 @@ function ReceiptDetail({
           {receipt.signature.value}
         </p>
       </footer>
+
+      {/* Copy / download actions */}
+      <div className="mt-4 flex flex-wrap gap-2 border-t border-border pt-3">
+        <CopyButton json={json} />
+        <DownloadButton json={json} id={receipt.receipt.id} />
+      </div>
     </section>
   );
 }
+
+function CopyButton({ json }: { json: string }) {
+  const [copied, setCopied] = useState(false);
+  return (
+    <button
+      type="button"
+      data-testid="receipt-copy-json"
+      onClick={() => {
+        void navigator.clipboard.writeText(json).then(() => {
+          setCopied(true);
+          setTimeout(() => setCopied(false), 2000);
+        });
+      }}
+      className="rounded-md border border-border px-3 py-1.5 text-xs hover:bg-surface"
+    >
+      {copied ? "Copied!" : "Copy receipt JSON"}
+    </button>
+  );
+}
+
+function DownloadButton({ json, id }: { json: string; id: string }) {
+  return (
+    <a
+      data-testid="receipt-download-json"
+      href={`data:application/json,${encodeURIComponent(json)}`}
+      download={`receipt-${id}.json`}
+      className="rounded-md border border-border px-3 py-1.5 text-xs hover:bg-surface"
+    >
+      Download
+    </a>
+  );
+}
+
+// ── detail sub-components ─────────────────────────────────────────────────────
 
 function Detail({ label, value, mono }: { label: string; value: string; mono?: boolean }) {
   return (
@@ -314,7 +651,8 @@ function VerificationPill({
 }: {
   verification:
     | { status: "verifying" }
-    | { status: "verified"; result: ReceiptVerification }
+    | { status: "unknown-key" }
+    | { status: "verified"; result: ReceiptVerification; keyId: string; keySetSource: string }
     | { status: "error"; error: Error };
 }) {
   if (verification.status === "verifying") {
@@ -324,6 +662,16 @@ function VerificationPill({
         className="inline-flex items-center gap-1.5 rounded-full bg-surface-2 px-2.5 py-1 text-[10px] font-medium uppercase tracking-wide text-muted"
       >
         Verifying…
+      </span>
+    );
+  }
+  if (verification.status === "unknown-key") {
+    return (
+      <span
+        data-testid="receipt-verification-unknown-key"
+        className="inline-flex items-center gap-1.5 rounded-full bg-surface-2 px-2.5 py-1 text-[10px] font-medium uppercase tracking-wide text-muted"
+      >
+        Unknown signing key
       </span>
     );
   }
@@ -343,6 +691,7 @@ function VerificationPill({
       <span
         data-testid="receipt-verification-valid"
         className="inline-flex items-center gap-1.5 rounded-full bg-success/15 px-2.5 py-1 text-[10px] font-medium uppercase tracking-wide text-foreground"
+        title={`Verified against key ${verification.keyId} from ${verification.keySetSource}`}
       >
         Signature valid
       </span>
@@ -358,6 +707,8 @@ function VerificationPill({
     </span>
   );
 }
+
+// ── skeletons / errors ────────────────────────────────────────────────────────
 
 function ReceiptsTableSkeleton() {
   return (

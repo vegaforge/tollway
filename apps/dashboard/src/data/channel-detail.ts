@@ -80,7 +80,7 @@ export async function fetchChannelDetail(channelId: string): Promise<ChannelDeta
   if (!stub) return null;
 
   const commitments = buildStream(stub);
-  const receipts = (await fetchReceipts()).rows
+  const receipts = (await fetchReceipts({ limit: 100 })).page.rows
     .filter(
       (row) =>
         row.receipt.settlement.kind === "channel-commitment" &&
