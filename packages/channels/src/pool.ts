@@ -91,7 +91,10 @@ const AMOUNT_RE = /^[0-9]+$/;
 
 function units(value: string, field: string): bigint {
   if (!AMOUNT_RE.test(value)) {
-    throw new TollwayError("invalid-amount", `${field} "${value}" is not a valid non-negative integer string`);
+    throw new TollwayError(
+      "invalid-amount",
+      `${field} "${value}" is not a valid non-negative integer string`,
+    );
   }
   return BigInt(value);
 }

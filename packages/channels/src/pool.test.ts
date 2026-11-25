@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 import type { MppChannelAdapter, OpenAdapterInput, OpenAdapterResult } from "./adapter.js";
-import { ChannelPoolExhaustedError, createChannelPool, type PoolFailure } from "./pool.js";
 import { createChannelManager } from "./manager.js";
+import { ChannelPoolExhaustedError, createChannelPool, type PoolFailure } from "./pool.js";
 
 /**
  * A channel pool (#188) leases several channels per counterparty and asset,
@@ -23,6 +23,9 @@ function fakeAdapter(options: { failOpen?: boolean } = {}) {
     },
     async getChannelState() {
       return { balance: "1000000", currentLedger: 1 };
+    },
+    async getState() {
+      return { balance: "1000000", currentLedger: 1, refundWaitingPeriod: 100 };
     },
     async findChannelSettlement() {
       return null;

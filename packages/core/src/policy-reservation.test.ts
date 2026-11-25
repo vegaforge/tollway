@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import type { PaymentIntent, PolicyReservation } from "./policy.js";
+import type { PaymentIntent, PolicyEngine, PolicyReservation } from "./policy.js";
 import { createPolicyEngine, PolicyReservationError } from "./policy.js";
 
 /**
@@ -19,6 +19,12 @@ function intent(overrides: Partial<PaymentIntent> = {}): PaymentIntent {
   };
 }
 
+/** `reserve` is optional on the interface; the engine under test implements it. */
+function reserveOn(engine: PolicyEngine, payment: PaymentIntent) {
+  if (engine.reserve === undefined) throw new Error("expected the engine to implement reserve");
+  return engine.reserve(payment);
+}
+
 function reservedOf(value: PolicyReservation | undefined): PolicyReservation {
   if (value === undefined) throw new Error("expected a reservation");
   return value;
@@ -28,8 +34,8 @@ describe("PolicyEngine.reserve", () => {
   it("counts a held payment against the daily budget before it is committed", async () => {
     const engine = createPolicyEngine({ budgets: { daily: "150" } });
 
-    const first = await engine.reserve(intent({ amount: "100" }));
-    const second = await engine.reserve(intent({ amount: "100" }));
+    const first = await reserveOn(engine, intent({ amount: "100" }));
+    const second = await reserveOn(engine, intent({ amount: "100" }));
 
     expect(first.reservation).toBeDefined();
     expect(second.reservation).toBeUndefined();
@@ -39,29 +45,29 @@ describe("PolicyEngine.reserve", () => {
 
   it("gives the spend back at once when a held payment is released", async () => {
     const engine = createPolicyEngine({ budgets: { daily: "150" } });
-    const held = reservedOf((await engine.reserve(intent({ amount: "100" }))).reservation);
+    const held = reservedOf((await reserveOn(engine, intent({ amount: "100" }))).reservation);
 
     await engine.release?.(held);
 
-    const again = await engine.reserve(intent({ amount: "100" }));
+    const again = await reserveOn(engine, intent({ amount: "100" }));
     expect(again.reservation).toBeDefined();
   });
 
   it("keeps the spend when a held payment is committed", async () => {
     const engine = createPolicyEngine({ budgets: { daily: "150" } });
-    const held = reservedOf((await engine.reserve(intent({ amount: "100" }))).reservation);
+    const held = reservedOf((await reserveOn(engine, intent({ amount: "100" }))).reservation);
 
     await engine.commit?.(held);
 
-    const after = await engine.reserve(intent({ amount: "100" }));
+    const after = await reserveOn(engine, intent({ amount: "100" }));
     expect(after.reservation).toBeUndefined();
   });
 
   it("counts a held payment against a per-service cap", async () => {
     const engine = createPolicyEngine({ perService: { GPAYEE: { cap: "150" } } });
 
-    await engine.reserve(intent({ amount: "100" }));
-    const second = await engine.reserve(intent({ amount: "100" }));
+    await reserveOn(engine, intent({ amount: "100" }));
+    const second = await reserveOn(engine, intent({ amount: "100" }));
 
     expect(second.trace.allowed).toBe(false);
     expect(second.trace.blockedBy).toBe("per-service");
@@ -70,7 +76,7 @@ describe("PolicyEngine.reserve", () => {
   it("holds nothing for a payment the trace blocks", async () => {
     const engine = createPolicyEngine({ budgets: { daily: "50" } });
 
-    const blocked = await engine.reserve(intent({ amount: "100" }));
+    const blocked = await reserveOn(engine, intent({ amount: "100" }));
 
     expect(blocked.reservation).toBeUndefined();
     expect((await engine.check(intent({ amount: "50" }))).allowed).toBe(true);
@@ -80,20 +86,20 @@ describe("PolicyEngine.reserve", () => {
 describe("PolicyEngine.commit and release", () => {
   it("treats a repeated commit or release of the same state as a no-op", async () => {
     const engine = createPolicyEngine({ budgets: { daily: "150" } });
-    const held = reservedOf((await engine.reserve(intent())).reservation);
+    const held = reservedOf((await reserveOn(engine, intent())).reservation);
 
     await engine.release?.(held);
     await engine.release?.(held);
-    const committed = reservedOf((await engine.reserve(intent())).reservation);
+    const committed = reservedOf((await reserveOn(engine, intent())).reservation);
     await engine.commit?.(committed);
     await engine.commit?.(committed);
 
-    expect((await engine.reserve(intent())).reservation).toBeUndefined();
+    expect((await reserveOn(engine, intent())).reservation).toBeUndefined();
   });
 
   it("refuses to release a committed reservation", async () => {
     const engine = createPolicyEngine({ budgets: { daily: "150" } });
-    const held = reservedOf((await engine.reserve(intent())).reservation);
+    const held = reservedOf((await reserveOn(engine, intent())).reservation);
     await engine.commit?.(held);
 
     await expect(engine.release?.(held)).rejects.toBeInstanceOf(PolicyReservationError);
@@ -101,7 +107,7 @@ describe("PolicyEngine.commit and release", () => {
 
   it("refuses to commit a released reservation rather than doing nothing", async () => {
     const engine = createPolicyEngine({ budgets: { daily: "150" } });
-    const held = reservedOf((await engine.reserve(intent())).reservation);
+    const held = reservedOf((await reserveOn(engine, intent())).reservation);
     await engine.release?.(held);
 
     await expect(engine.commit?.(held)).rejects.toBeInstanceOf(PolicyReservationError);
@@ -110,7 +116,7 @@ describe("PolicyEngine.commit and release", () => {
   it("refuses a reservation issued by another engine", async () => {
     const first = createPolicyEngine({ budgets: { daily: "150" } });
     const second = createPolicyEngine({ budgets: { daily: "150" } });
-    const held = reservedOf((await first.reserve(intent())).reservation);
+    const held = reservedOf((await reserveOn(first, intent())).reservation);
 
     await expect(second.commit?.(held)).rejects.toBeInstanceOf(PolicyReservationError);
     await expect(second.release?.(held)).rejects.toBeInstanceOf(PolicyReservationError);
@@ -129,11 +135,11 @@ describe("reservation expiry", () => {
         onReservationExpired: (reservation) => expired.push(reservation.id),
       },
     );
-    const held = reservedOf((await engine.reserve(intent())).reservation);
+    const held = reservedOf((await reserveOn(engine, intent())).reservation);
 
     now += 1_001;
 
-    expect((await engine.reserve(intent())).reservation).toBeDefined();
+    expect((await reserveOn(engine, intent())).reservation).toBeDefined();
     expect(expired).toEqual([held.id]);
   });
 
@@ -144,12 +150,12 @@ describe("reservation expiry", () => {
       { budgets: { daily: "150" } },
       { clock: () => now, reservationTtlMs: 1_000 },
     );
-    const held = reservedOf((await engine.reserve(intent())).reservation);
+    const held = reservedOf((await reserveOn(engine, intent())).reservation);
 
     now += 1_001;
     await engine.check(intent());
     await engine.commit?.(held);
 
-    expect((await engine.reserve(intent())).trace.allowed).toBe(false);
+    expect((await reserveOn(engine, intent())).trace.allowed).toBe(false);
   });
 });

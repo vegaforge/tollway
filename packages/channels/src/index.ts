@@ -57,8 +57,8 @@ export { type CreateChannelManagerOptions, createChannelManager } from "./manage
 export {
   type ChannelLease,
   type ChannelPool,
-  type ChannelPoolOptions,
   ChannelPoolExhaustedError,
+  type ChannelPoolOptions,
   createChannelPool,
   type PoolAcquireRequest,
   type PoolFailure,

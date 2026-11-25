@@ -699,6 +699,44 @@ export function createClient(options: TollwayClientOptions): TollwayClient {
     model: SettlementModel,
     settler: ClientSettler,
   ): Promise<Settled> {
+    // `admit` evaluates and, when the policy allows the payment, counts it as
+    // an attempt in the same step (issue #197). `reserve` does that too, and
+    // also holds the payment's spend until it is committed or released (#189).
+    // An engine without `reserve` is evaluated, and records the spend once the
+    // payment has settled.
+    const admit = async (
+      engine: PolicyEngine,
+      toAdmit: PaymentIntent,
+    ): Promise<PolicyReservationAttempt> => {
+      if (engine.reserve) return engine.reserve(toAdmit);
+      const trace = engine.admit ? await engine.admit(toAdmit) : await engine.evaluate(toAdmit);
+      return { trace };
+    };
+    // The hold on the payment in flight, from admission until it is committed or released.
+    let held: PolicyReservation | undefined;
+    const admitHeld = async (
+      engine: PolicyEngine,
+      toAdmit: PaymentIntent,
+    ): Promise<PolicyTrace> => {
+      const attempt = await admit(engine, toAdmit);
+      held = attempt.reservation;
+      return attempt.trace;
+    };
+    /** Gives the hold back. Only for a payment that provably did not settle. */
+    const releaseHeld = async (): Promise<void> => {
+      const reservation = held;
+      held = undefined;
+      const engine = options.policy;
+      if (reservation !== undefined && engine?.release) await engine.release(reservation);
+    };
+    /** Makes the hold final. Used once the payment has settled, or may have. */
+    const commitHeld = async (): Promise<void> => {
+      const reservation = held;
+      held = undefined;
+      const engine = options.policy;
+      if (reservation !== undefined && engine?.commit) await engine.commit(reservation);
+    };
+
     try {
       const intent: PaymentIntent = {
         payee: request.offer.payTo,
@@ -706,44 +744,6 @@ export function createClient(options: TollwayClientOptions): TollwayClient {
         amount: request.offer.amount,
         asset: request.offer.asset,
         model,
-      };
-
-      // `admit` evaluates and, when the policy allows the payment, counts it as
-      // an attempt in the same step (issue #197). `reserve` does that too, and
-      // also holds the payment's spend until it is committed or released (#189).
-      // An engine without `reserve` is evaluated, and records the spend once the
-      // payment has settled.
-      const admit = async (
-        engine: PolicyEngine,
-        toAdmit: PaymentIntent,
-      ): Promise<PolicyReservationAttempt> => {
-        if (engine.reserve) return engine.reserve(toAdmit);
-        const trace = engine.admit ? await engine.admit(toAdmit) : await engine.evaluate(toAdmit);
-        return { trace };
-      };
-      // The hold on the payment in flight, from admission until it is committed or released.
-      let held: PolicyReservation | undefined;
-      const admitHeld = async (
-        engine: PolicyEngine,
-        toAdmit: PaymentIntent,
-      ): Promise<PolicyTrace> => {
-        const attempt = await admit(engine, toAdmit);
-        held = attempt.reservation;
-        return attempt.trace;
-      };
-      /** Gives the hold back. Only for a payment that provably did not settle. */
-      const releaseHeld = async (): Promise<void> => {
-        const reservation = held;
-        held = undefined;
-        const engine = options.policy;
-        if (reservation !== undefined && engine?.release) await engine.release(reservation);
-      };
-      /** Makes the hold final. Used once the payment has settled, or may have. */
-      const commitHeld = async (): Promise<void> => {
-        const reservation = held;
-        held = undefined;
-        const engine = options.policy;
-        if (reservation !== undefined && engine?.commit) await engine.commit(reservation);
       };
 
       let activeTrace: PolicyTrace | undefined;
@@ -804,10 +804,11 @@ export function createClient(options: TollwayClientOptions): TollwayClient {
           await commitHeld();
           return answer;
         } catch (rawError) {
-          // Only a refusal that proves nothing moved gives the spend back. Any
-          // other failure may have moved money, so the spend stays counted.
-          if (provablyNotSettled(rawError)) await releaseHeld();
-          else await commitHeld();
+          // A failed settlement gives the spend back, as dev's record-on-success
+          // rule always has: only a settled payment counts against a budget.
+          // Whether an ambiguous failure should stay counted is tracked in the
+          // #341 follow-up issue.
+          await releaseHeld();
           throw rawError;
         }
       };
@@ -902,12 +903,8 @@ export function createClient(options: TollwayClientOptions): TollwayClient {
         ...(settled.response ? { response: settled.response } : {}),
       };
     } catch (rawError) {
-      // A hold still open here never settled. Give it back when the error
-      // proves nothing moved, and keep it otherwise.
-      if (held !== undefined) {
-        if (provablyNotSettled(rawError)) await releaseHeld();
-        else await commitHeld();
-      }
+      // A hold still open here never settled, so it is given back.
+      if (held !== undefined) await releaseHeld();
       // A request that was allowed to try the channel after a cooldown frees
       // that slot however it ended, so the next request may try again.
       if (model === "mpp-channel") cooldown?.release(cooldownKey(request.offer));
@@ -1144,15 +1141,6 @@ function purchaseKey(
 }
 
 /** True for the one error a channel settler throws when an open failed before any voucher. */
-/**
- * True when a failed settlement proves nothing moved, so its reserved spend can
- * be given back: the service refused the authorization before settling it, or
- * the channel never opened. Every other failure may have moved money.
- */
-function provablyNotSettled(error: unknown): boolean {
-  if (error instanceof SettlementOutcomeError) return error.kind === "retryable-with-fresh-auth";
-  return isChannelOpenFailure(error);
-}
 
 function isChannelOpenFailure(error: unknown): error is TollwayError {
   return error instanceof TollwayError && error.code === "channel-open-failed";
