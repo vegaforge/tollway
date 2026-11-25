@@ -4,7 +4,13 @@ import type { SignedReceipt } from "@vegaforge/tollway-core";
 import { useCallback, useEffect, useRef, useState } from "react";
 
 import type { ReceiptCreatedData } from "@/lib/event-schemas";
-import { fetchReceipts, type ReceiptRow } from "./receipts";
+import {
+  fetchReceipts,
+  type KeySetInfo,
+  type ReceiptQuery,
+  type ReceiptRow,
+  type ReceiptsPage,
+} from "./receipts";
 import {
   createHandlerMap,
   registerSseHandler,
@@ -16,41 +22,46 @@ import {
 const MAX_LIVE_RECEIPTS = 500;
 
 /**
- * Discriminated state machine the receipts view renders against. Each
- * variant maps to one rendered surface, so the UI cannot accidentally
- * render rows while still loading or render the empty state while an
- * error is in flight. The trustedKeys travel with the ready snapshot so
- * the detail view can construct an Ed25519Verifier without a separate
- * key-directory request.
+ * Discriminated state machine the receipts view renders against. The key set
+ * travels separately from the rows so the detail view can verify signatures
+ * against an independently sourced key rather than one that travels with the
+ * receipts.
  */
 export type UseReceiptsState =
   | { status: "loading" }
   | { status: "error"; error: Error }
   | {
       status: "ready";
-      rows: ReceiptRow[];
-      trustedKeys: Record<string, Uint8Array>;
+      page: ReceiptsPage;
+      keySet: KeySetInfo;
       stream?: StreamStatus;
     };
 
 /**
- * Subscribes the receipts view to the data source. Loads a snapshot on
- * mount and merges live `receipt.created` events from the SSE stream.
- * New receipts are prepended (newest first) and deduplicated by id.
- * On a `reset` event the snapshot is refetched.
+ * Loads one page of receipts for `query`. Reloads when the query changes.
+ * Merges live `receipt.created` events from the SSE stream into the first
+ * page when no cursor is active. On a `reset` event the snapshot is
+ * refetched.
+ *
+ * The live-prepend behaviour only applies to the first page (cursor = null)
+ * so a user paging through history does not see rows jump.
  */
-export function useReceipts(): UseReceiptsState {
+export function useReceipts(query: ReceiptQuery = {}): UseReceiptsState {
   const [state, setState] = useState<UseReceiptsState>({ status: "loading" });
   const handlersRef = useRef(createHandlerMap());
 
+  // Stringify the query so the effect dependency array can be a single string.
+  const queryKey = JSON.stringify(query);
+
   const fetchAndSet = useCallback(() => {
     setState({ status: "loading" });
-    fetchReceipts()
-      .then((snapshot) => {
+    const q: ReceiptQuery = JSON.parse(queryKey) as ReceiptQuery;
+    fetchReceipts(q)
+      .then(({ page, keySet }) => {
         setState((prev) => ({
           status: "ready",
-          rows: snapshot.rows,
-          trustedKeys: snapshot.trustedKeys,
+          page,
+          keySet,
           stream: prev.status === "ready" ? prev.stream : "connecting",
         }));
       })
@@ -60,34 +71,40 @@ export function useReceipts(): UseReceiptsState {
           error: err instanceof Error ? err : new Error(String(err)),
         });
       });
-  }, []);
+  }, [queryKey]);
 
   useEffect(() => {
     fetchAndSet();
   }, [fetchAndSet]);
 
   useEffect(() => {
+    // Only prepend live events on the first page (no cursor).
+    const q: ReceiptQuery = JSON.parse(queryKey) as ReceiptQuery;
+    const isFirstPage = q.cursor === undefined || q.cursor === null;
+
     return registerSseHandler(handlersRef, "receipt.created", (event) => {
+      if (!isFirstPage) return;
       const data = event.data as ReceiptCreatedData;
-      // The event already carries a validated ReceiptBody; wrap it with the
-      // signature directly rather than rebuilding through buildReceipt.
       const newReceipt: SignedReceipt = {
         receipt: data.receipt,
         signature: data.signature,
       };
       setState((prev) => {
         if (prev.status !== "ready") return prev;
-        // Deduplicate by receipt id.
-        if (prev.rows.some((r) => r.receipt.id === newReceipt.receipt.id)) return prev;
-        const updated = [newReceipt, ...prev.rows];
+        const rows: ReceiptRow[] = prev.page.rows;
+        if (rows.some((r) => r.receipt.id === newReceipt.receipt.id)) return prev;
+        const updated = [newReceipt, ...rows];
         return {
           ...prev,
-          rows: updated.length > MAX_LIVE_RECEIPTS ? updated.slice(0, MAX_LIVE_RECEIPTS) : updated,
+          page: {
+            ...prev.page,
+            rows:
+              updated.length > MAX_LIVE_RECEIPTS ? updated.slice(0, MAX_LIVE_RECEIPTS) : updated,
+          },
         };
       });
     });
-    // handlersRef.current is mutated in place; the ref object itself is stable.
-  }, []);
+  }, [queryKey]);
 
   const streamStatus = useEventStream({
     handlersRef,

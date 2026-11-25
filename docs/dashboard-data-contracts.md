@@ -165,7 +165,7 @@ A view that does not yet have a data hook renders an `EmptyState` directly insid
 | `/services` | Per-service revenue | `useServiceRevenue` -> `fetchServiceRevenue` in `src/data/service-revenue.ts`, over a hub filled with stub payments | The live hub: `summarizeAsync({ payee, asset })` and `queryMetrics({ payee, asset, outcome: "settled" })` |
 | `/channels` | Open MPP channels | `useOpenChannels` -> `fetchOpenChannels` stub in `src/data/open-channels.ts` | Observability hub rollup over `channel.opened` / `channel.closed`, or a direct `ChannelManager.list` iteration |
 | `/channels/[channelId]` | One channel's commitment stream, drawdown and reconcile status | `useChannelDetail` -> `fetchChannelDetail` stub in `src/data/channel-detail.ts` | `ChannelManager.get` and `list`, served over HTTP by #227 |
-| `/receipts` | Signed receipt archive | `useReceipts` -> `fetchReceipts` stub in `src/data/receipts.ts`; `?payee=` limits it to one counterparty | Receipt archive backed by the observability hub's receipt stream |
+| `/receipts` | Signed receipt archive | `useReceipts(query)` -> `fetchReceipts(query)` stub in `src/data/receipts.ts`; full filter bar in URL query string; cursor pagination; `?payee=` locks the view to one counterparty | Receipt archive backed by the observability hub's receipt stream |
 | `/anomalies` | Anomaly feed | `useAnomalies` -> `fetchAnomalies` stub in `src/data/anomalies.ts`; `?agent=` limits it to one agent | Live `anomaly.detected`, `budget.warning`, policy-stop and drift events (#238) |
 | `/exports` | Exports and webhooks | `useMetricsExport` -> `fetchMetricsExport` stub in `src/data/metrics-export.ts` for Exports; `EmptyState` for Webhooks | `@vegaforge/tollway-observability` `export()` for JSON and CSV, and the `WebhookEvent` set for outgoing webhooks |
 
@@ -252,6 +252,53 @@ The table sorts by revenue (the default, descending) or by payment count. Only t
 `commitmentSteps` pairs each commitment with its change from the one before and flags a sequence gap or a falling total. The chart scales each amount with `scaleBasisPoints`, which divides in `bigint` and converts only the small ratio to a number, so amounts above `Number.MAX_SAFE_INTEGER` keep their place. The chart's accessible description and the stream table carry the same numbers as the drawing.
 
 The `DriftKind` list and `Drift` shape mirror `@vegaforge/tollway-reconcile`. The dashboard does not depend on that package, and adding the dependency changes `apps/dashboard/package.json`, which needs maintainer review. Keep the list in step with the reconcile package.
+
+## Receipts contract
+
+`/receipts` reads one page of `ReceiptRow`s from `src/data/receipts.ts` through `useReceipts(query)`, which reloads when the query changes. `fetchReceipts(query)` returns `{ page: ReceiptsPage, keySet: KeySetInfo }`.
+
+### Query shape
+
+`ReceiptQuery` carries all filters as optional fields:
+
+| Field | Meaning |
+| ----- | ------- |
+| `search` | Free-text match against `id`, `payer`, `payee`, `resource`, and the settlement reference |
+| `payer` | Exact payer address |
+| `payee` | Exact payee address |
+| `model` | `"x402"`, `"mpp-charge"`, or `"mpp-channel"` |
+| `asset` | Full asset string, e.g. `"USDC:GA5Z…"` |
+| `network` | `"testnet"` or `"mainnet"` |
+| `resourcePrefix` | Receipts whose `resource` starts with this string |
+| `from` | ISO-8601: receipts issued at or after this instant |
+| `to` | ISO-8601: receipts issued before this instant |
+| `txHash` | Exact settlement transaction hash (transaction settlements only) |
+| `channelId` | Exact channel id (channel-commitment settlements only) |
+| `cursor` | The id of the last receipt on the previous page; null or undefined for the first page |
+| `limit` | Page size; defaults to `DEFAULT_RECEIPT_PAGE_SIZE` (20), max 100 |
+
+Filters compose: all present fields must match. A `cursor` that is not in the filtered result set throws `RangeError` rather than restarting from the top. A filter change must reset the cursor to null before the next fetch.
+
+### Pagination
+
+Pagination is cursor-based, newest first. `ReceiptsPage.nextCursor` is the `id` of the last row on the page, or `null` when this is the last page. Pass it back as `cursor` to load the next page. Offset arithmetic is never used. The view's "Newer" button clears the cursor (returns to the first page); "Older" advances it.
+
+### Trust model
+
+`fetchReceipts` returns `{ page, keySet }` where `keySet: KeySetInfo` carries:
+
+- `source`: a string identifying where the keys came from (a well-known URL path in the stub; the service's public key endpoint in production, see #167, #225)
+- `keys`: `Record<string, Uint8Array>` mapping `keyId` to raw Ed25519 public-key bytes
+
+The key set is **not** derived from the receipts themselves. This separation means a compromised receipt source cannot manufacture a matching key and pass in-browser verification. The detail panel states the key set source and the keyId used. A receipt whose `keyId` is absent from the trusted set shows "Unknown signing key", which is distinct from "Signature invalid".
+
+### URL state
+
+All filter fields are reflected in the URL query string (`?search=`, `?model=`, `?payer=`, `?payee=`, `?asset=`, `?network=`, `?from=`, `?to=`, `?cursor=`). A filter change pushes to the router (Back/Forward navigate filter history) and resets `?cursor`. When the page is opened with `?payee=<address>` (from the anomaly feed), the filter bar is hidden and a "Paid to…" banner is shown instead.
+
+### Empty-state
+
+A filtered query that returns no rows shows an `EmptyState` naming the active filters (via `describeActiveFilters`) with a "Clear filters" action. With no filters and no rows the standard "No receipts yet" prose is shown.
 
 ## Anomalies contract
 

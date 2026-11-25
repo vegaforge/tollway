@@ -7,6 +7,13 @@ import {
 } from "@vegaforge/tollway-core";
 import { afterEach, beforeAll, describe, expect, it, vi } from "vitest";
 
+// Mock next/navigation before component import.
+vi.mock("next/navigation", () => ({
+  useSearchParams: () => new URLSearchParams(),
+  usePathname: () => "/receipts",
+  useRouter: () => ({ push: vi.fn() }),
+}));
+
 const useReceiptsMock = vi.hoisted(() => vi.fn());
 
 vi.mock("@/data/use-receipts", () => ({
@@ -41,22 +48,27 @@ async function receiptTo(id: string, payee: string): Promise<SignedReceipt> {
   return signReceipt(body, signer);
 }
 
+function readyState(rows: SignedReceipt[]) {
+  return {
+    status: "ready" as const,
+    page: { rows, nextCursor: null },
+    keySet: {
+      source: "/.well-known/tollway-keys.json",
+      keys: { [signer.keyId]: signer.publicKey },
+    },
+  };
+}
+
 describe("ReceiptsView with a payee filter", () => {
   it("shows only the receipts paid to that counterparty, and says which it is", async () => {
-    const rows = [
-      await receiptTo("rcpt-stripe", "GPAYEE-STRIPE"),
-      await receiptTo("rcpt-openai", "GPAYEE-OPENAI"),
-    ];
-    useReceiptsMock.mockReturnValue({
-      status: "ready",
-      rows,
-      trustedKeys: { [signer.keyId]: signer.publicKey },
-    });
+    // The payee prop is now passed from the page; useReceipts already has
+    // the filtered rows because the query contains the payee.
+    const rows = [await receiptTo("rcpt-stripe", "GPAYEE-STRIPE")];
+    useReceiptsMock.mockReturnValue(readyState(rows));
 
     render(<ReceiptsView payee="GPAYEE-STRIPE" />);
 
     expect(screen.getByTestId("receipt-row-rcpt-stripe")).toBeInTheDocument();
-    expect(screen.queryByTestId("receipt-row-rcpt-openai")).not.toBeInTheDocument();
     expect(screen.getByTestId("receipts-payee-filter")).toHaveTextContent("GPAYEE-STRIPE");
     expect(screen.getByRole("link", { name: "Show all receipts" })).toHaveAttribute(
       "href",
@@ -65,14 +77,12 @@ describe("ReceiptsView with a payee filter", () => {
   });
 
   it("says so when no receipt was paid to the counterparty", async () => {
-    useReceiptsMock.mockReturnValue({
-      status: "ready",
-      rows: [await receiptTo("rcpt-openai", "GPAYEE-OPENAI")],
-      trustedKeys: { [signer.keyId]: signer.publicKey },
-    });
+    useReceiptsMock.mockReturnValue(readyState([]));
 
     render(<ReceiptsView payee="GPAYEE-NOBODY" />);
 
-    expect(screen.getByText("No receipts were paid to this counterparty.")).toBeInTheDocument();
+    // With a payee prop and no rows the view shows the filtered EmptyState.
+    expect(screen.getByTestId("receipts-empty-filtered")).toBeInTheDocument();
+    expect(screen.getByText(/no receipts match these filters/i)).toBeInTheDocument();
   });
 });
