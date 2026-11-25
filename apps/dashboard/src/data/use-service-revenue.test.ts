@@ -7,7 +7,7 @@ const failure = vi.hoisted(() => ({ error: undefined as Error | undefined }));
 
 // The real source runs unless a test sets `failure.error`.
 vi.mock("./service-revenue", async (importOriginal) => {
-  const actual = await importOriginal<typeof import("./service-revenue")>();
+  const actual: typeof import("./service-revenue") = await importOriginal();
   return {
     ...actual,
     fetchServiceRevenue: () =>

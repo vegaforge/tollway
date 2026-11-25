@@ -46,7 +46,11 @@ export type GateErrorCode =
   /** Two-phase settlement: the route outlived the payment's validity window. */
   | "handler-timeout"
   /** Two-phase settlement: the route's response was larger than the gate holds. */
-  | "response-too-large";
+  | "response-too-large"
+  /** The MPP channel named in TOLLWAY-CHANNEL failed its on-chain checks or no longer takes vouchers (#173). */
+  | "channel-refused"
+  /** Too many channel registrations or channel closes; try again after Retry-After (#173, #174). */
+  | "channel-rate-limited";
 
 /** What a client may do after a rejection, and what the response carries. */
 export type GateErrorSpec = {
@@ -94,6 +98,8 @@ export const GATE_ERRORS: Readonly<Record<GateErrorCode, GateErrorSpec>> = {
   "payment-not-settled": { status: 503, retrySamePayment: true, headers: ["retry-after"] },
   "handler-timeout": { status: 504, retrySamePayment: false, headers: [] },
   "response-too-large": { status: 500, retrySamePayment: false, headers: [] },
+  "channel-refused": { status: 402, retrySamePayment: false, headers: [] },
+  "channel-rate-limited": { status: 429, retrySamePayment: true, headers: ["retry-after"] },
 };
 
 /** Every code, in the order the docs list them. */

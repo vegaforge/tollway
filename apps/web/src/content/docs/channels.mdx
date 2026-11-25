@@ -59,6 +59,15 @@ Per the design notes, channel mode is naturally idempotent: a repeated commitmen
 
 The lifecycle manager lives in `packages/channels/src/`. Open, commit, close, resume and recover are implemented against an injected `MppChannelAdapter`, and `createStellarMppChannelAdapter` backs it with `@stellar/mpp` 0.7.1. `@stellar/mpp/channel/server` exposes `close`, `getChannelState` and `watchChannel`; it has no `close_start` or `refund` helper. The Stellar adapter therefore reads recovery state with `getChannelState`, but its `startClose` and `refund` fail with a typed not-implemented error until the contract calls land in [#101](https://github.com/vegaforge/tollway/issues/101). A custom adapter can implement them today. The adapter finds a settlement in the channel contract's events: the transaction whose `close` event is effective at its own ledger, with its `withdraw` and `refund` amounts.
 
+## Receiving channel payments
+
+The phases above are the agent's side. A service that is paid through a channel runs the other half in `@vegaforge/tollway-server`:
+
+- `createMppChannelHandler` lets the gate accept vouchers. An agent names its channel in the `TOLLWAY-CHANNEL` header; the service checks the contract on chain (payout address, token, not closing, refund window) and reads the commitment key from the contract before it issues the MPP challenge. Each voucher must add exactly the price, and each receipt is anchored at `{ kind: "channel-commitment", channelId, sequence }`, with the sequence counting accepted vouchers.
+- `createChannelSettler` closes channels with the latest accepted voucher when a trigger fires (accrued amount, a fraction of the balance, idle time, channel age) or when asked. It freezes the channel before reading the voucher, so no voucher is lost during a close, and caps closes per fee payer.
+
+[docs/mpp-channels.md](https://github.com/vegaforge/tollway/blob/main/docs/mpp-channels.md) lists the rejection codes a client can act on, the store requirements for several processes, and what happens when a close fails.
+
 ## Lifecycle events
 
 Opening a channel locks funds and closing it releases them, so the manager reports both. Pass `onEvent` to `createChannelManager`:

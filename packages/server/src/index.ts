@@ -18,6 +18,30 @@ export {
   type SettlementLock,
 } from "./cache.js";
 export {
+  type ChannelEvaluationReport,
+  type ChannelResolveOutcome,
+  type ChannelSettleOutcome,
+  type ChannelSettler,
+  type ChannelSettlerOptions,
+  createChannelSettler,
+  type SettlementTriggers,
+  validateSettlementTriggers,
+} from "./channel-settlement.js";
+export {
+  type AcceptedVoucher,
+  acceptedVoucherSchema,
+  type ChannelRecord,
+  type ChannelSettlementRecord,
+  type ChannelStatus,
+  type ChannelStore,
+  type CloseRateGuard,
+  type CloseRateLimit,
+  channelRecordSchema,
+  channelStatuses,
+  createInMemoryChannelStore,
+  createInMemoryCloseRateGuard,
+} from "./channel-store.js";
+export {
   type ChannelDispute,
   type ChannelLoss,
   type ChannelWatchRegistry,
@@ -127,6 +151,7 @@ export {
   PAYMENT_SIGNATURE_HEADER,
   readHeader,
   readMppCredential,
+  TOLLWAY_CHANNEL_HEADER,
   TOLLWAY_QUOTE_HEADER,
   TOLLWAY_RECEIPT_HEADER,
 } from "./headers.js";
@@ -135,6 +160,20 @@ export {
   type KeySetResponseOptions,
   renderKeySetResponse,
 } from "./key-set-response.js";
+export {
+  createMppChannelHandler,
+  type MppChannelChallengeInput,
+  type MppChannelChallengeResult,
+  type MppChannelHandler,
+  type MppChannelOptions,
+  type MppChannelReconcileOutcome,
+  type MppChannelRefusal,
+  type MppChannelSettleInput,
+  type MppChannelSettleResult,
+  type MppChannelVerifyInput,
+  type MppChannelVerifyResult,
+  parseMppChannelCredential,
+} from "./mpp-channel.js";
 export {
   createMockMppChargeHandler,
   createMppChargeHandler,
@@ -148,6 +187,11 @@ export {
   type MppChargeVerifyInput,
   type MppChargeVerifyResult,
 } from "./mpp-charge.js";
+export {
+  createOfferReceiptJwsSigner,
+  didKeyFromEd25519PublicKey,
+  type OfferReceiptOptions,
+} from "./offer-receipt.js";
 export {
   createInMemoryPaymentReceiptArchive,
   createRedisPaymentReceiptArchive,
