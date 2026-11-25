@@ -20,6 +20,7 @@ import { MppChannelPayment } from '@vegaforge/tollway-core';
 import { MppChargePayment } from '@vegaforge/tollway-core';
 import { Network } from '@x402/core/types';
 import { PaymentOffer } from '@vegaforge/tollway-core';
+import { PaymentPayload } from '@x402/core/types';
 import { PaymentRequired } from '@x402/core/types';
 import { PaymentRequirements } from '@x402/core/types';
 import { ReceiptSigner } from '@vegaforge/tollway-core';
@@ -340,6 +341,9 @@ export function createMppChargeHandler(options: MppChargeOptions): MppChargeHand
 export function createOfferReceiptJwsSigner(signer: ReceiptSigner, kid?: string): JWSSigner;
 
 // @public
+export function createPaidCall(config: PaidCallConfig, deps: PaidCallDeps): PaidCall;
+
+// @public
 export function createPaywall(config: PaywallConfig, deps: PaywallDeps): Gate;
 
 // @public
@@ -564,6 +568,11 @@ export type GateErrorCode =
 | "handler-not-configured"
 /** The router chose a settlement model this gate does not implement. */
 | "model-not-supported"
+/**
+* A paid call's work (an MCP tool, say) failed after the payment was
+* verified, so the payment was not settled and may be sent again (#206).
+*/
+| "work-failed"
 /** The MPP channel named in TOLLWAY-CHANNEL failed its on-chain checks or no longer takes vouchers (#173). */
 | "channel-refused"
 /** Too many channel registrations or channel closes; try again after Retry-After (#173, #174). */
@@ -857,6 +866,40 @@ export type OfferReceiptOptions = {
     includeTxHash?: boolean;
     kid?: string;
     offerValiditySeconds?: number;
+};
+
+// @public
+export type PaidCall = {
+    readonly offer: PaymentOffer;
+    paymentRequired(error?: string): PaymentRequired;
+    settle(input: PaidCallSettleInput): Promise<GateOutcome>;
+};
+
+// @public
+export type PaidCallConfig = {
+    amount: string;
+    asset: string;
+    payTo: string;
+    network: StellarNetwork;
+    resource: string;
+    models?: SettlementModel[];
+    facilitatorUrl?: string;
+    maxTimeoutSeconds?: number;
+    extra?: Record<string, unknown>;
+    description?: string;
+    mimeType?: string;
+};
+
+// @public
+export type PaidCallDeps = Omit<PaywallDeps, "mppChargeHandler" | "router" | "onPriceError" | "facilitator" | "paymentPrevalidation"> & {
+    facilitator: FacilitatorClient;
+};
+
+// @public
+export type PaidCallSettleInput = {
+    payment: PaymentPayload;
+    method: string;
+    beforeSettle?: () => Promise<boolean>;
 };
 
 // @public
@@ -1382,8 +1425,8 @@ export type X402Terms = {
 
 // Warnings were encountered during analysis:
 //
-// dist/discovery-Dy0xE0Xt.d.ts:632:9 - (ae-forgotten-export) The symbol "StellarSigner$1" needs to be exported by the entry point index.d.ts
-// dist/discovery-Dy0xE0Xt.d.ts:803:9 - (ae-forgotten-export) The symbol "StellarSigner" needs to be exported by the entry point index.d.ts
+// dist/discovery-DBTwETBs.d.ts:637:9 - (ae-forgotten-export) The symbol "StellarSigner$1" needs to be exported by the entry point index.d.ts
+// dist/discovery-DBTwETBs.d.ts:808:9 - (ae-forgotten-export) The symbol "StellarSigner" needs to be exported by the entry point index.d.ts
 // dist/index.d.ts:50:9 - (ae-forgotten-export) The symbol "StellarSigner_2" needs to be exported by the entry point index.d.ts
 // dist/index.d.ts:172:9 - (ae-forgotten-export) The symbol "WatchtowerEvent" needs to be exported by the entry point index.d.ts
 // dist/index.d.ts:176:5 - (ae-forgotten-export) The symbol "ChannelState" needs to be exported by the entry point index.d.ts

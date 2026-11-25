@@ -32,6 +32,11 @@ export type GateErrorCode =
   | "handler-not-configured"
   /** The router chose a settlement model this gate does not implement. */
   | "model-not-supported"
+  /**
+   * A paid call's work (an MCP tool, say) failed after the payment was
+   * verified, so the payment was not settled and may be sent again (#206).
+   */
+  | "work-failed"
   /** The MPP channel named in TOLLWAY-CHANNEL failed its on-chain checks or no longer takes vouchers (#173). */
   | "channel-refused"
   /** Too many channel registrations or channel closes; try again after Retry-After (#173, #174). */
@@ -79,6 +84,7 @@ export const GATE_ERRORS: Readonly<Record<GateErrorCode, GateErrorSpec>> = {
   "price-unavailable": { status: 500, retrySamePayment: false, headers: [] },
   "handler-not-configured": { status: 500, retrySamePayment: false, headers: [] },
   "model-not-supported": { status: 501, retrySamePayment: false, headers: [] },
+  "work-failed": { status: 424, retrySamePayment: true, headers: [] },
   "channel-refused": { status: 402, retrySamePayment: false, headers: [] },
   "channel-rate-limited": { status: 429, retrySamePayment: true, headers: ["retry-after"] },
 };

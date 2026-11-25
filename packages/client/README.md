@@ -85,14 +85,164 @@ receipt by mistake, but anyone who can answer the request can forge one that
 passes them. Configure a verifier in production.
 
 
+## Pay with fetch
+
+`createPaidFetch` wraps a client in a function with the `fetch` signature. It
+sends the request once; anything but a 402 comes back untouched. On a 402 it
+reads the challenge into one offer, runs `client.pay()` (offer checks, policy,
+routing, receipt verification and events, exactly as for any payment), and
+the settler for the routed model answers that 402 and replays the request
+with the payment. A paid call is exactly two HTTP requests, and the response
+is the service's own `Response` with `receipt` and `model` added.
+
+```ts
+import { createDefaultRouter, createPolicyEngine, Ed25519Verifier } from "@vegaforge/tollway-core";
+import {
+  createClient,
+  createKeypairSigner,
+  createMppChargeSettler,
+  createPaidFetch,
+  createX402Settler,
+  signerModels,
+} from "@vegaforge/tollway-client";
+
+const signer = createKeypairSigner(process.env.AGENT_SECRET as string, "testnet");
+const client = createClient({
+  network: "testnet",
+  settlers: {
+    x402: createX402Settler({ signer, network: "testnet" }),
+    "mpp-charge": createMppChargeSettler({ signer, network: "testnet" }),
+  },
+  supportedModels: signerModels(signer),
+  router: createDefaultRouter(),
+  policy: createPolicyEngine({ budgets: { daily: "10000000" } }),
+  verifier: new Ed25519Verifier({ "service-key": servicePublicKey }),
+});
+
+const paidFetch = createPaidFetch({ client, network: "testnet" });
+const response = await paidFetch("https://api.example.com/quotes/latest");
+const quote = await response.json();
+console.log(response.model, response.receipt?.receipt.id);
+```
+
+How the 402 becomes an offer:
+
+- x402 V2: the `PAYMENT-REQUIRED` header is decoded with `@x402/core/http` and
+  validated; the first `exact` option for the agent's network sets the terms.
+- MPP: `WWW-Authenticate: Payment` challenges are parsed with `mppx`. A
+  Stellar `charge` challenge adds `mpp-charge`; a Stellar `channel` challenge
+  adds `mpp-channel` but cannot define an offer alone, because it names no
+  payee or asset.
+- A 402 that carries both lists every model on one offer, and the router
+  decides which settler runs. If the formats ask for different terms, the call
+  is refused rather than guessed at.
+- When the router picks a model that has no entry in `settlers`, `pay()`
+  rejects with `no-viable-model` naming it. It never falls through to another
+  model.
+
+Bodies:
+
+- The body is buffered before the first send, so the paid replay carries the
+  same bytes, method and headers. This covers strings, bytes, `Blob`,
+  `FormData`, `URLSearchParams` and `Request` objects.
+- A body passed as a `ReadableStream` cannot be replayed. It is sent once as
+  is; if the answer is a 402, the call rejects before any payment.
+- Two identical concurrent requests share one payment, and each caller gets
+  its own copy of the response. Requests that differ in method, URL or body
+  are separate purchases.
+
+The MPP replay sends the credential in `Authorization`, which replaces any
+`Authorization` header the request already had: the MPP protocol defines it
+that way. `createPaidFetch` never patches `globalThis.fetch`. The settlers make
+the paid request with their own `fetch` option, so pass the same transport to
+both when you inject one.
+
+A second 402 in answer to the signed payment (an expired authorization) is
+retried under the `retry` option with a fresh authorization for the same
+terms, answering the new challenge directly: the request is never sent unpaid
+twice.
+
 ## Settlers
 
 Two settlers ship with the package, one per per-request model:
 
 - `createX402Settler({ signer, network })` pays x402 V2 routes with `@x402/stellar`.
-- `createMppChargeSettler({ secretKey | keypair, network, mode? })` pays MPP charge routes with `@stellar/mpp`. It refuses a challenge unless the amount, recipient, token contract and network match the approved offer, and nothing is signed until they do. In `pull` mode (the default) the service submits the transaction and pays the fee; in `push` mode the agent submits it, so its account also needs XLM. It never patches `globalThis.fetch`.
+- `createMppChargeSettler({ signer | secretKey | keypair, network, mode? })` pays MPP charge routes with `@stellar/mpp`. It refuses a challenge unless the amount, recipient, token contract and network match the approved offer, and nothing is signed until they do. In `pull` mode (the default) the service submits the transaction and pays the fee; in `push` mode the agent submits it, so its account also needs XLM. It never patches `globalThis.fetch`.
 
-Both read the Tollway receipt from the `TOLLWAY-RECEIPT` header.
+Both read the Tollway receipt from the `TOLLWAY-RECEIPT` header, and both
+implement `settleExchange`, which `createPaidFetch` needs. A custom settler
+works with `pay()` through `settle` alone; to use it with `createPaidFetch`, it
+must also implement `settleExchange`.
+
+## Signers
+
+An `AgentSigner` is the agent's payment identity, configured once and passed
+to every settler. It lists what it can sign per protocol, because the
+protocols do not accept the same keys:
+
+| Signer | `x402` | `mppCharge` | `mppChannel` |
+| ------ | ------ | ----------- | ------------ |
+| `createKeypairSigner(secret, network)` | yes | yes | yes |
+| `createSmartAccountSigner({ contractId, network, signAuthEntry })` | yes | no | no |
+
+Why: x402 signs a Soroban authorization entry through `@x402/stellar`'s
+`ClientStellarSigner`, which works for classic (`G...`) and contract (`C...`)
+accounts. `@stellar/mpp@0.7.1` accepts only an Ed25519 key: `secretKey` or
+`keypair` for charge, `commitmentKey` or `commitmentSecret` for channel
+commitments. A contract account has no such key.
+
+A settler given a signer without its capability throws `SignerCapabilityError`
+(code `payment-failed`, with `capability` naming what is missing) when it is
+created, before any request. `signerModels(signer)` lists the models a signer
+can pay; pass it as `supportedModels` so the router only picks among them.
+
+### Keypair signer
+
+```ts
+import { createKeypairSigner, createX402Settler } from "@vegaforge/tollway-client";
+
+const signer = createKeypairSigner(process.env.AGENT_SECRET as string, "testnet");
+const settler = createX402Settler({ signer, network: "testnet" });
+```
+
+It also takes a `Keypair`. The secret is held in closures only: it is not on
+any property of the signer, `JSON.stringify(signer)` cannot print it, and an
+invalid secret is reported without echoing it.
+
+### Smart-account signer
+
+```ts
+import { createSmartAccountSigner, createX402Settler } from "@vegaforge/tollway-client";
+
+const signer = createSmartAccountSigner({
+  contractId: "C...", // the smart account
+  network: "testnet",
+  // Receives the base64 auth-entry preimage ExactStellarScheme passes, and
+  // returns the signature value the account's __check_auth decodes.
+  signAuthEntry: async (preimage) => ({ signedAuthEntry: await mySigningService(preimage) }),
+});
+const settler = createX402Settler({ signer, network: "testnet" });
+```
+
+Tollway does not build the smart-account signature. The callback returns what
+the account's `__check_auth` verifies. For an OpenZeppelin Stellar smart
+account (stellar-contracts v0.8.0) that is an `AuthPayload`: a map from each
+`Signer` to its signature bytes, plus the `context_rule_ids` aligned with the
+auth contexts, where external signers sign the SHA-256 digest of the
+`AuthDigestPreimage`. See
+[`packages/accounts/src/smart_account/storage.rs`](https://github.com/OpenZeppelin/stellar-contracts/blob/v0.8.0/packages/accounts/src/smart_account/storage.rs)
+and
+[`smart_account/mod.rs`](https://github.com/OpenZeppelin/stellar-contracts/blob/v0.8.0/packages/accounts/src/smart_account/mod.rs).
+Settling an x402 payment whose payer is a `C...` account also needs a
+facilitator that supports it; check yours before relying on it.
+
+### Remote and custom signers
+
+`AgentSigner` is a plain object type, so a signer whose key lives in a KMS or
+a remote service can provide the `x402` capability with async callbacks and
+never expose a key. The MPP capabilities hand over a `Keypair`, so they can
+only come from a key held in process.
+
 ## Paying for MCP tools
 
 `@vegaforge/tollway-client/mcp` wraps an MCP client so a paid tool call is

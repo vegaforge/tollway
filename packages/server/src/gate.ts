@@ -785,6 +785,19 @@ const DEFAULT_FACILITATOR_TIMEOUT_MS = 15_000;
  */
 const DEFAULT_AMBIGUOUS_HOLD_MS = 120_000;
 
+/**
+ * Runs the paid work before the payment settles and says whether it
+ * succeeded. Only the call that is about to settle a payment runs it; a
+ * replay or a call that shares another call's settlement does not.
+ */
+type BeforeSettle = () => Promise<boolean>;
+
+/** The paid work failed, so the verified payment was not settled (#206). */
+const WORK_FAILED: RejectedOutcome = gateRejection(
+  "work-failed",
+  "not settled: the paid work did not succeed",
+);
+
 const OFFER_MISMATCH: RejectedOutcome = gateRejection(
   "offer-mismatch",
   "payment already settled for a different offer",
@@ -1064,6 +1077,8 @@ type SettlementSteps = {
   replayOnly?: () => Promise<GateOutcome>;
   /** Local checks before `/verify`: a rejection, or undefined to go on. */
   prevalidate?: () => Promise<RejectedOutcome | undefined>;
+  /** The paid work, run just before `/settle`; see {@link BeforeSettle}. */
+  beforeSettle?: BeforeSettle;
   /** Told the outcome of the attempt this request owns, for the observer (#106). */
   report?: AttemptReporter;
 };
@@ -1077,7 +1092,7 @@ async function settleWithHandler<TPayment>(
   context: SettlementContext,
   steps: SettlementSteps,
 ): Promise<GateOutcome> {
-  const { freshChallengeHeaders, replayOnly, prevalidate, report } = steps;
+  const { freshChallengeHeaders, replayOnly, prevalidate, beforeSettle, report } = steps;
   // A payment that already settled is answered from the cache before it is
   // verified again: on chain its authorization nonce is spent, so a second
   // verify fails and the retry would get a 402 instead of its receipt (#284).
@@ -1190,6 +1205,7 @@ async function settleWithHandler<TPayment>(
     verification,
     key,
     context,
+    beforeSettle,
   );
   context.inFlight.set(key, attempt);
   // While the outcome of /settle is unknown the slot stays taken, so every
@@ -1237,10 +1253,13 @@ async function admitAndSettle<TPayment>(
   verification: { payer: string; nonce: string },
   key: string,
   context: SettlementContext,
+  beforeSettle?: BeforeSettle,
 ): Promise<SettlementResult> {
   const servicePolicy = context.servicePolicy;
+  const settle = (): Promise<SettlementResult> =>
+    settleOnce(payment, offer, model, method, handler, verification, key, context, beforeSettle);
   if (!servicePolicy) {
-    return settleOnce(payment, offer, model, method, handler, verification, key, context);
+    return settle();
   }
 
   const decision = await servicePolicy.store.admit({
@@ -1253,12 +1272,12 @@ async function admitAndSettle<TPayment>(
   if (!decision.allowed) return { ok: false, outcome: servicePolicyRejection(decision) };
   const reservation = decision.reservation;
   if (!reservation) {
-    return settleOnce(payment, offer, model, method, handler, verification, key, context);
+    return settle();
   }
 
   let result: SettlementResult;
   try {
-    result = await settleOnce(payment, offer, model, method, handler, verification, key, context);
+    result = await settle();
   } catch (error) {
     // The settlement error is what the caller needs; a release failure on
     // top of it goes to the hook so it neither replaces nor hides it.
@@ -1368,8 +1387,21 @@ async function settleOnce<TPayment>(
   verification: { payer: string; nonce: string },
   key: string,
   context: SettlementContext,
+  beforeSettle?: BeforeSettle,
 ): Promise<SettlementResult> {
   const { cache } = context;
+  const record = (): Promise<SettlementResult> =>
+    settleAndRecord(
+      payment,
+      offer,
+      model,
+      method,
+      handler,
+      verification,
+      key,
+      context,
+      beforeSettle,
+    );
 
   const cached = await cache?.get(key);
   if (cached) {
@@ -1377,7 +1409,7 @@ async function settleOnce<TPayment>(
   }
 
   if (!cache?.acquire || !cache.release || !cache.renew) {
-    return settleAndRecord(payment, offer, model, method, handler, verification, key, context);
+    return record();
   }
 
   const lock = await cache.acquire(key, context.lockTtlMs);
@@ -1402,7 +1434,7 @@ async function settleOnce<TPayment>(
           method: settledElsewhere.method,
           replayed: true,
         }
-      : await settleAndRecord(payment, offer, model, method, handler, verification, key, context);
+      : await record();
   } catch (error) {
     if (error instanceof AmbiguousSettlementFailure) {
       holdLock(error.hold, keeper, release, key, context);
@@ -1561,7 +1593,14 @@ async function settleAndRecord<TPayment>(
   verification: { payer: string; nonce: string },
   key: string,
   context: SettlementContext,
+  beforeSettle?: BeforeSettle,
 ): Promise<SettlementResult> {
+  // Settle-after-success (#206): the paid work runs here, once per payment,
+  // after verification, the service policy and the settlement lock, and
+  // before /settle. Work that fails leaves the payment unsettled and uncached.
+  if (beforeSettle && !(await beforeSettle())) {
+    return { ok: false, outcome: WORK_FAILED };
+  }
   // The hold starts with the call, so it bounds how long after sending the
   // payment can stay ambiguous. A definite answer in time ends it at once.
   const hold = startHold(context.ambiguousHoldMs);
@@ -1926,108 +1965,19 @@ function channelRefusal(
 }
 
 /**
- * Builds the gate from a paywall config. It settles x402 per-request,
- * mpp-charge, and mpp-channel vouchers. See docs/design.md, "Build plan",
- * Phases 1 and 2.
+ * The payment observer hooks (#106), shared by the HTTP gate and
+ * {@link createPaidCall} so both report a settlement the same way. Returns
+ * `settleObserved`, which runs one settlement with a reporter that measures
+ * its latency from `clock`.
  */
-export function createPaywall(config: PaywallConfig, deps: PaywallDeps): Gate {
-  return createPaywallWithInFlight(config, deps, new Map());
-}
-
-/** Reads an optional `Retry-After` setting: a positive whole number of seconds, default 1. */
-function positiveSeconds(value: number | undefined, name: string): number {
-  if (value === undefined) return 1;
-  if (!Number.isSafeInteger(value) || value < 1) {
-    throw new TypeError(`${name} must be a positive integer number of seconds`);
-  }
-  return value;
-}
-
-/** Internal constructor used by route tables to share duplicate coordination. */
-export function createPaywallWithInFlight(
-  config: PaywallConfig,
-  deps: PaywallDeps,
-  inFlight: Map<string, Promise<InFlightSettlementResult>>,
-): Gate {
-  validateDynamicPriceConfig(config);
-  assertCompleteLocking(deps.cache);
-  if (deps.servicePolicy) validateServicePolicy(deps.servicePolicy);
-  const facilitatorTimeoutMs = deps.facilitatorTimeoutMs ?? DEFAULT_FACILITATOR_TIMEOUT_MS;
-  if (!Number.isSafeInteger(facilitatorTimeoutMs) || facilitatorTimeoutMs <= 0) {
-    throw new TypeError("facilitatorTimeoutMs must be a positive integer number of milliseconds");
-  }
-  const ambiguousHoldMs = deps.ambiguousSettlementHoldMs ?? DEFAULT_AMBIGUOUS_HOLD_MS;
-  if (!Number.isSafeInteger(ambiguousHoldMs) || ambiguousHoldMs <= facilitatorTimeoutMs) {
-    throw new TypeError(
-      "ambiguousSettlementHoldMs must be an integer number of milliseconds longer than facilitatorTimeoutMs",
-    );
-  }
-  if (config.discovery) checkDiscoveryDeclaration(config.discovery);
-  const acceptedModels = config.models ?? ["x402"];
-  const options = resolvePaymentOptions(config, deps.facilitator, acceptedModels);
-  const clock = deps.clock ?? Date.now;
-  const servicePolicyStore =
-    deps.servicePolicy && (deps.servicePolicyStore ?? createInMemoryServicePolicyStore());
-  if (deps.receiptVersion !== undefined && deps.receiptVersion !== 1 && deps.receiptVersion !== 2) {
-    throw new TypeError(`receiptVersion must be 1 or 2, got ${String(deps.receiptVersion)}`);
-  }
-  const offerReceipt = config.offerReceipt
-    ? createOfferReceiptIssuer(
-        deps.signer,
-        config.offerReceipt === true ? {} : config.offerReceipt,
-        offerAcceptanceWindow(config),
-      )
-    : undefined;
-  const inProgressSeconds = positiveSeconds(
-    deps.retryAfterSeconds?.settlementInProgress,
-    "retryAfterSeconds.settlementInProgress",
-  );
-  const prevalidation = deps.paymentPrevalidation ?? {};
-  const maxSignatureLength =
-    prevalidation.maxPaymentSignatureLength ?? DEFAULT_MAX_PAYMENT_SIGNATURE_LENGTH;
-  if (!Number.isSafeInteger(maxSignatureLength) || maxSignatureLength < 1) {
-    throw new TypeError(
-      "paymentPrevalidation.maxPaymentSignatureLength must be a positive integer",
-    );
-  }
-  let rejectedTotal = 0;
-  const localRejection = async (
-    reason: PrevalidationReason,
-    resource: string,
-    challengeHeaders: () => Promise<Record<string, string>>,
-  ): Promise<RejectedOutcome> => {
-    rejectedTotal += 1;
-    prevalidation.onRejected?.({ reason, resource, rejectedTotal });
-    return gateRejection("payment-invalid", "the payment failed local validation", {
-      upstreamReason: reason,
-      headers: await challengeHeaders(),
-    });
-  };
-  const unavailableSeconds = positiveSeconds(
-    deps.retryAfterSeconds?.facilitatorUnavailable,
-    "retryAfterSeconds.facilitatorUnavailable",
-  );
-  const context: SettlementContext = {
-    signer: deps.signer,
-    receiptVersion: deps.receiptVersion ?? 1,
-    ...(offerReceipt ? { offerReceipt } : {}),
-    cache: deps.cache,
-    onCacheError: deps.onCacheError,
-    ...(deps.receiptArchive ? { archive: deps.receiptArchive } : {}),
-    ...(deps.onArchiveError ? { onArchiveError: deps.onArchiveError } : {}),
-    ...(deps.onServicePolicyError ? { onServicePolicyError: deps.onServicePolicyError } : {}),
-    inFlight,
-    lockTtlMs: deps.settlementLockTtlMs ?? DEFAULT_SETTLEMENT_LOCK_TTL_MS,
-    facilitatorTimeoutMs,
-    ambiguousHoldMs,
-    settlementInProgress: settlementInProgress(inProgressSeconds),
-    facilitatorRetryAfter: String(unavailableSeconds),
-    clock,
-    ...(deps.servicePolicy && servicePolicyStore
-      ? { servicePolicy: { policy: deps.servicePolicy, store: servicePolicyStore } }
-      : {}),
-  };
-
+function attemptObserver(
+  deps: Pick<PaywallDeps, "observer" | "onObserverError">,
+  clock: () => number,
+): (
+  settle: (report: AttemptReporter | undefined) => Promise<GateOutcome>,
+  offer: PaymentOffer,
+  model: SettlementModel,
+) => Promise<GateOutcome> {
   /** Observer hooks are diagnostic; neither they nor their errors change a payment. */
   function reportObserverError(error: unknown): void {
     try {
@@ -2126,6 +2076,273 @@ export function createPaywallWithInFlight(
     const startedAt = clock();
     return settle((outcome) => observeOutcome(outcome, offer, model, startedAt));
   }
+  return settleObserved;
+}
+
+/** The services a paid call that is not an HTTP request uses. */
+export type PaidCallDeps = Omit<
+  PaywallDeps,
+  "mppChargeHandler" | "router" | "onPriceError" | "facilitator" | "paymentPrevalidation"
+> & {
+  /** Verifies and settles the call's x402 payments. A paid call has one price, so one facilitator. */
+  facilitator: FacilitatorClient;
+};
+
+/**
+ * Checks the dependencies shared by the HTTP gate and {@link createPaidCall}
+ * and builds the settlement context both settle through, so replay, locking,
+ * receipt signing and offer binding have one implementation.
+ */
+function settlementContext(
+  deps: Omit<PaidCallDeps, "facilitator">,
+  inFlight: Map<string, Promise<SettlementResult>>,
+): SettlementContext {
+  assertCompleteLocking(deps.cache);
+  if (deps.servicePolicy) validateServicePolicy(deps.servicePolicy);
+  const facilitatorTimeoutMs = deps.facilitatorTimeoutMs ?? DEFAULT_FACILITATOR_TIMEOUT_MS;
+  if (!Number.isSafeInteger(facilitatorTimeoutMs) || facilitatorTimeoutMs <= 0) {
+    throw new TypeError("facilitatorTimeoutMs must be a positive integer number of milliseconds");
+  }
+  const ambiguousHoldMs = deps.ambiguousSettlementHoldMs ?? DEFAULT_AMBIGUOUS_HOLD_MS;
+  if (!Number.isSafeInteger(ambiguousHoldMs) || ambiguousHoldMs <= facilitatorTimeoutMs) {
+    throw new TypeError(
+      "ambiguousSettlementHoldMs must be an integer number of milliseconds longer than facilitatorTimeoutMs",
+    );
+  }
+  const clock = deps.clock ?? Date.now;
+  const servicePolicyStore =
+    deps.servicePolicy && (deps.servicePolicyStore ?? createInMemoryServicePolicyStore());
+  if (deps.receiptVersion !== undefined && deps.receiptVersion !== 1 && deps.receiptVersion !== 2) {
+    throw new TypeError(`receiptVersion must be 1 or 2, got ${String(deps.receiptVersion)}`);
+  }
+  const inProgressSeconds = positiveSeconds(
+    deps.retryAfterSeconds?.settlementInProgress,
+    "retryAfterSeconds.settlementInProgress",
+  );
+  const unavailableSeconds = positiveSeconds(
+    deps.retryAfterSeconds?.facilitatorUnavailable,
+    "retryAfterSeconds.facilitatorUnavailable",
+  );
+  return {
+    signer: deps.signer,
+    receiptVersion: deps.receiptVersion ?? 1,
+    cache: deps.cache,
+    onCacheError: deps.onCacheError,
+    ...(deps.receiptArchive ? { archive: deps.receiptArchive } : {}),
+    ...(deps.onArchiveError ? { onArchiveError: deps.onArchiveError } : {}),
+    ...(deps.onServicePolicyError ? { onServicePolicyError: deps.onServicePolicyError } : {}),
+    inFlight,
+    lockTtlMs: deps.settlementLockTtlMs ?? DEFAULT_SETTLEMENT_LOCK_TTL_MS,
+    facilitatorTimeoutMs,
+    ambiguousHoldMs,
+    settlementInProgress: settlementInProgress(inProgressSeconds),
+    facilitatorRetryAfter: String(unavailableSeconds),
+    clock,
+    ...(deps.servicePolicy && servicePolicyStore
+      ? { servicePolicy: { policy: deps.servicePolicy, store: servicePolicyStore } }
+      : {}),
+  };
+}
+
+/**
+ * What a paid call that is not an HTTP request charges, such as an MCP tool
+ * call (#206). The price is fixed: a dynamic price reads the HTTP request,
+ * and there is none here.
+ */
+export type PaidCallConfig = {
+  /** Price as an integer string in the asset's smallest unit. */
+  amount: string;
+  asset: string;
+  /** Stellar address the payment settles to. Tollway never sits in between. */
+  payTo: string;
+  network: StellarNetwork;
+  /**
+   * The stable resource id the receipt names, for example
+   * `mcp://tool/get-quote`. A receipt for one resource never unlocks another.
+   */
+  resource: string;
+  /** Accepted models. Only x402 can be paid on a paid call; defaults to x402. */
+  models?: SettlementModel[];
+  facilitatorUrl?: string;
+  /** x402: how long the payment stays valid, in seconds. Defaults to 60. */
+  maxTimeoutSeconds?: number;
+  /** x402: scheme-specific data, sent as `PaymentRequirements.extra`. */
+  extra?: Record<string, unknown>;
+  /** Published on the challenge's `resource`, as x402 allows. */
+  description?: string;
+  mimeType?: string;
+};
+
+/** One x402 payment for a paid call, and the work it pays for. */
+export type PaidCallSettleInput = {
+  /** The agent's x402 V2 `PaymentPayload`, already schema-checked by the transport. */
+  payment: X402Payload;
+  /**
+   * Names the operation in v2 receipts and binds cached receipts to it, the
+   * way the HTTP method does for a route. An MCP tool call uses `tools/call`.
+   */
+  method: string;
+  /**
+   * The paid work, run after the payment is verified and before it settles.
+   * Resolve `false` (or throw) and the payment is not settled. It runs only
+   * for the call that settles: a replay of a settled payment, or a call that
+   * shares a settlement already in progress, gets the receipt without it.
+   */
+  beforeSettle?: () => Promise<boolean>;
+};
+
+/** A payment gate for one paid operation that is not an HTTP route. */
+export type PaidCall = {
+  /** The offer every payment for this call is checked and bound against. */
+  readonly offer: PaymentOffer;
+  /** The x402 V2 `PaymentRequired` challenge, with an optional error message. */
+  paymentRequired(error?: string): PaymentRequired;
+  /**
+   * Verifies, runs `beforeSettle`, settles and signs the receipt through the
+   * same settlement path as the HTTP gate: one payment settles at most once,
+   * concurrent copies share one settlement, and a cached receipt is returned
+   * only for this offer and method.
+   */
+  settle(input: PaidCallSettleInput): Promise<GateOutcome>;
+};
+
+/**
+ * Builds a gate for a paid operation that has no HTTP request, such as an
+ * MCP tool call (#206). It shares the HTTP gate's settlement path and
+ * settlement cache format, and adds settle-after-success through
+ * `beforeSettle`.
+ */
+export function createPaidCall(config: PaidCallConfig, deps: PaidCallDeps): PaidCall {
+  parsePriceAmount(config.amount, "amount");
+  if (config.resource.length === 0) {
+    throw new TypeError("resource must be a non-empty string");
+  }
+  const models = config.models ?? ["x402"];
+  if (!models.includes("x402")) {
+    throw new TypeError("a paid call settles x402 payments, so models must include x402");
+  }
+  const context = settlementContext(deps, new Map());
+  const settleObserved = attemptObserver(deps, context.clock);
+  const offer: PaymentOffer = {
+    resource: config.resource,
+    amount: config.amount,
+    asset: config.asset,
+    payTo: config.payTo,
+    network: config.network,
+    models,
+    ...(config.facilitatorUrl === undefined ? {} : { facilitatorUrl: config.facilitatorUrl }),
+  };
+  const requirements = toPaymentRequirements(offer, {
+    maxTimeoutSeconds: config.maxTimeoutSeconds,
+    extra: config.extra,
+  });
+
+  const paymentRequired = (error?: string): PaymentRequired => ({
+    x402Version,
+    ...(error === undefined ? {} : { error }),
+    resource: {
+      url: config.resource,
+      ...(config.description === undefined ? {} : { description: config.description }),
+      ...(config.mimeType === undefined ? {} : { mimeType: config.mimeType }),
+    },
+    accepts: [requirements],
+  });
+
+  return {
+    offer,
+    paymentRequired,
+    async settle({ payment, method, beforeSettle }) {
+      if (payment.x402Version !== x402Version) {
+        return gateRejection(
+          "payment-malformed",
+          `unsupported x402Version ${String(payment.x402Version)}; this gate speaks x402 version ${x402Version}`,
+        );
+      }
+      const x402: X402Payment = { model: "x402", payload: payment };
+      // Reported to the observer like an HTTP payment. The latency includes
+      // the paid work, which runs between verify and settle.
+      return settleObserved(
+        (report) =>
+          settleWithHandler(x402, offer, "x402", method, deps.facilitator, context, {
+            // A refused payment carries a fresh challenge, as on an HTTP route.
+            freshChallengeHeaders: async () => ({
+              [PAYMENT_REQUIRED_HEADER]: encodePaymentRequiredHeader(paymentRequired()),
+            }),
+            ...(beforeSettle ? { beforeSettle } : {}),
+            ...(report ? { report } : {}),
+          }),
+        offer,
+        "x402",
+      );
+    },
+  };
+}
+
+/**
+ * Builds the gate from a paywall config. It settles x402 per-request,
+ * mpp-charge, and mpp-channel vouchers. See docs/design.md, "Build plan",
+ * Phases 1 and 2.
+ */
+export function createPaywall(config: PaywallConfig, deps: PaywallDeps): Gate {
+  return createPaywallWithInFlight(config, deps, new Map());
+}
+
+/** Reads an optional `Retry-After` setting: a positive whole number of seconds, default 1. */
+function positiveSeconds(value: number | undefined, name: string): number {
+  if (value === undefined) return 1;
+  if (!Number.isSafeInteger(value) || value < 1) {
+    throw new TypeError(`${name} must be a positive integer number of seconds`);
+  }
+  return value;
+}
+
+/** Internal constructor used by route tables to share duplicate coordination. */
+export function createPaywallWithInFlight(
+  config: PaywallConfig,
+  deps: PaywallDeps,
+  inFlight: Map<string, Promise<InFlightSettlementResult>>,
+): Gate {
+  validateDynamicPriceConfig(config);
+  if (config.discovery) checkDiscoveryDeclaration(config.discovery);
+  const acceptedModels = config.models ?? ["x402"];
+  // The offer-receipt extension (#172) answers an HTTP 402, so only the gate
+  // adds it to the shared settlement context.
+  const offerReceipt = config.offerReceipt
+    ? createOfferReceiptIssuer(
+        deps.signer,
+        config.offerReceipt === true ? {} : config.offerReceipt,
+        offerAcceptanceWindow(config),
+      )
+    : undefined;
+  const context: SettlementContext = {
+    ...settlementContext(deps, inFlight),
+    ...(offerReceipt ? { offerReceipt } : {}),
+  };
+  const clock = context.clock;
+  const options = resolvePaymentOptions(config, deps.facilitator, acceptedModels);
+  const prevalidation = deps.paymentPrevalidation ?? {};
+  const maxSignatureLength =
+    prevalidation.maxPaymentSignatureLength ?? DEFAULT_MAX_PAYMENT_SIGNATURE_LENGTH;
+  if (!Number.isSafeInteger(maxSignatureLength) || maxSignatureLength < 1) {
+    throw new TypeError(
+      "paymentPrevalidation.maxPaymentSignatureLength must be a positive integer",
+    );
+  }
+  let rejectedTotal = 0;
+  const localRejection = async (
+    reason: PrevalidationReason,
+    resource: string,
+    challengeHeaders: () => Promise<Record<string, string>>,
+  ): Promise<RejectedOutcome> => {
+    rejectedTotal += 1;
+    prevalidation.onRejected?.({ reason, resource, rejectedTotal });
+    return gateRejection("payment-invalid", "the payment failed local validation", {
+      upstreamReason: reason,
+      headers: await challengeHeaders(),
+    });
+  };
+
+  const settleObserved = attemptObserver(deps, clock);
 
   return async function gate(request): Promise<GateOutcome> {
     const method = request.method.toUpperCase();

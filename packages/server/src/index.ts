@@ -99,10 +99,15 @@ export {
   type SettlementPinStore,
 } from "./failover-facilitator.js";
 export {
+  createPaidCall,
   createPaywall,
   type DynamicPriceFunction,
   type Gate,
   type GateOutcome,
+  type PaidCall,
+  type PaidCallConfig,
+  type PaidCallDeps,
+  type PaidCallSettleInput,
   type PaymentObserver,
   type PaymentObserverEvent,
   type PaymentObserverMetric,

@@ -48,6 +48,7 @@ challenge, fixes its request, or stops.
 | `price-unavailable` | 500 | no | | The route's dynamic price function threw or returned an invalid price. Nothing was charged. |
 | `handler-not-configured` | 500 | no | | The route accepts a model whose handler is missing, or a route table is not ready. |
 | `model-not-supported` | 501 | no | | The router chose a settlement model this gate does not implement. |
+| `work-failed` | 424 | yes | | Only from `createPaidCall`, such as a paid MCP tool: the paid work failed after the payment was verified, so nothing was settled or cached. The same payment may be sent again. |
 | `channel-refused` | 402 | no | | The MPP channel named in `TOLLWAY-CHANNEL` failed its on-chain checks, or is settling or closed (#173). The message starts with a channel code from [mpp-channels.md](mpp-channels.md). |
 | `channel-rate-limited` | 429 | yes, after `Retry-After` | `Retry-After` | Too many channel registrations, or the fee payer's close budget is spent (#173, #174). |
 
