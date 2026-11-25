@@ -49,6 +49,8 @@ export type TollwayErrorCode =
   | "invalid-cursor"
   | "corrupt-receipt"
   | "receipt-conflict"
+  | "approval-timeout"
+  | "approval-denied"
   | "receipt-log-conflict"
   | "corrupt-receipt-log";
 

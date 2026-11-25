@@ -8,6 +8,7 @@ import { ClientStellarSigner } from '@x402/stellar';
 import { CounterpartyQuarantine } from '@vegaforge/tollway-core';
 import { Keypair } from '@stellar/stellar-sdk';
 import { ModelRouter } from '@vegaforge/tollway-core';
+import { PaymentIntent } from '@vegaforge/tollway-core';
 import { PaymentOffer } from '@vegaforge/tollway-core';
 import { Policy } from '@vegaforge/tollway-core';
 import { PolicyEngine } from '@vegaforge/tollway-core';
@@ -46,6 +47,62 @@ export class AmbiguousSettlementError extends TollwayError {
     readonly ambiguous: true;
     // (undocumented)
     readonly reason: string;
+}
+
+// @public
+export type ApprovalDecision = {
+    approved: true;
+} | {
+    approved: false;
+    reason?: string;
+};
+
+// @public
+export class ApprovalDeniedError extends TollwayError {
+    constructor(resource: string, amount: string, asset: string, reason?: string);
+    // (undocumented)
+    readonly amount: string;
+    // (undocumented)
+    readonly asset: string;
+    // (undocumented)
+    readonly reason?: string;
+    // (undocumented)
+    readonly resource: string;
+}
+
+// @public
+export type ApprovalOptions = {
+    thresholds?: Record<string, string>;
+    predicate?: (intent: PaymentIntent) => boolean;
+    approver: (request: ApprovalRequest, options: {
+        signal: AbortSignal;
+    }) => Promise<ApprovalDecision>;
+    timeoutMs?: number;
+};
+
+// @public
+export type ApprovalRequest = {
+    resource: string;
+    payee: string;
+    amount: string;
+    asset: string;
+    model: SettlementModel;
+    policyUsage?: {
+        dailySpent?: string;
+        totalSpent?: string;
+        serviceSpent?: string;
+    };
+};
+
+// @public
+export class ApprovalTimeoutError extends TollwayError {
+    constructor(resource: string, amount: string, asset: string);
+    // (undocumented)
+    readonly amount: string;
+    // (undocumented)
+    readonly asset: string;
+    // (undocumented)
+    readonly resource: string;
 }
 
 // @public
@@ -165,6 +222,28 @@ export type ClientEvent = {
     resource: string;
     reason: string;
     entry?: QuarantineEntry;
+}
+/**
+* A payment requires approval and the approver is being called (#199).
+* Emitted before the approver callback runs.
+*/
+| {
+    type: "approval:requested";
+    resource: string;
+    amount: string;
+    asset: string;
+    payee: string;
+}
+/**
+* The approver returned a decision (#199). `approved` is the decision,
+* `latencyMs` is how long the approver took.
+*/
+| {
+    type: "approval:resolved";
+    resource: string;
+    approved: boolean;
+    latencyMs: number;
+    reason?: string;
 };
 
 // @public (undocumented)
@@ -574,6 +653,7 @@ export type TollwayClientOptions = ClientSettlers & {
     onStoreError?: (error: Error, receipt: SignedReceipt) => void;
     retry?: RetryOptions;
     fallback?: ChannelFallbackOptions;
+    approval?: ApprovalOptions;
 };
 
 // @public (undocumented)
