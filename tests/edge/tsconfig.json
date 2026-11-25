@@ -1,0 +1,11 @@
+{
+  "extends": "../../tsconfig.base.json",
+  "compilerOptions": {
+    "lib": ["ES2022", "DOM", "DOM.Iterable"],
+    "types": ["node"],
+    "allowImportingTsExtensions": true
+  },
+  // run-deno.ts and run-bun.ts use the Deno and Bun globals; each runtime
+  // checks its own runner when it runs it.
+  "include": ["src/scenario.ts", "src/worker.ts", "src/minimal-worker.ts"]
+}

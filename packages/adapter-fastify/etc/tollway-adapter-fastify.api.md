@@ -6,10 +6,16 @@
 
 import { Gate } from '@vegaforge/tollway-server';
 import { preHandlerHookHandler } from 'fastify';
+import { preParsingHookHandler } from 'fastify';
 import { RouteTable } from '@vegaforge/tollway-server';
 
 // @public
 export function fastifyPaywall(gate: Gate): preHandlerHookHandler;
+
+// @public
+export function fastifyRawBody(options?: {
+    maxBytes?: number;
+}): preParsingHookHandler;
 
 // @public
 export function fastifyRouteTable(table: RouteTable): preHandlerHookHandler;

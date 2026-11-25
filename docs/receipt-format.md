@@ -77,6 +77,14 @@ The asset code, qualified for unambiguous identification. The canonical Stellar 
 
 The URL or stable identifier of what was paid for. For HTTP gates this is the request path the gate sees (`/quotes/latest`); for non-HTTP gates it can be any opaque resource id. The gate config can override the default (`req.url`) via `PaywallConfig.resource`.
 
+When the route binds the request body (`PaywallConfig.bindBody`, #164), the resource also records which body was paid for:
+
+```text
+/infer#body-sha256=ungWv48Bz-pBQUDeXa4iI7ADYaOWF3qctBD_YfIAFa0
+```
+
+The part after `#body-sha256=` is the SHA-256 of the exact request body bytes, base64url without padding. A receipt for one prompt therefore cannot be presented as payment for another, and it is evidence of exactly what was bought. `bindBodyToResource(resource, bytes)` from `@vegaforge/tollway-core` computes it, so a client or verifier can recompute the identity from the body it sent. Routes without `bindBody` keep the plain resource.
+
 ### `model: "x402" | "mpp-charge" | "mpp-channel"`
 
 Which settlement model produced this receipt. The schema enforces a coherence rule with the settlement reference (see below): an `x402` receipt with a `channel-commitment` reference is malformed no matter who signed it.
@@ -261,6 +269,8 @@ const receipt = await signReceipt(
 ### Swapping the signer
 
 Any object that satisfies the `ReceiptSigner` interface is a valid signer. A KMS-backed signer that delegates `sign` to AWS KMS, GCP KMS, or an HSM is a drop-in replacement; the rest of the system does not change. The only requirements are that `keyId` is stable for the lifetime of the key and `algorithm` matches what a downstream verifier knows.
+
+`@vegaforge/tollway-signer-vault` is one such signer: it keeps the Ed25519 key in HashiCorp Vault Transit and pins the key version, so a rotation in Vault never changes the key behind a `keyId`. See the "Vault Transit signer" docs page.
 
 ## Verifying
 

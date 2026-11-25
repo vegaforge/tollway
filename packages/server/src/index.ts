@@ -99,6 +99,7 @@ export {
   type SettlementPinStore,
 } from "./failover-facilitator.js";
 export {
+  type BodyBinding,
   createPaidCall,
   createPaywall,
   type DynamicPriceFunction,
@@ -194,6 +195,13 @@ export {
   type RedisArchiveClient,
   type RedisPaymentReceiptArchiveOptions,
 } from "./payment-receipt-archive.js";
+export {
+  BodyTooLargeError,
+  bytesBody,
+  concatChunks,
+  type RequestBodySource,
+  readBodyStream,
+} from "./request-body.js";
 export {
   createRouteTable,
   type RouteTable,

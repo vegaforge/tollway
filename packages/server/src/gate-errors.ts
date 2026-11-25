@@ -37,6 +37,12 @@ export type GateErrorCode =
    * verified, so the payment was not settled and may be sent again (#206).
    */
   | "work-failed"
+  /** The body is larger than the route's `bindBody.maxBytes` (#164). */
+  | "body-too-large"
+  /** The route binds the body and does not accept its content type or encoding. */
+  | "body-not-supported"
+  /** The route binds the body, but the adapter did not pass it to the gate. */
+  | "body-not-provided"
   /** The MPP channel named in TOLLWAY-CHANNEL failed its on-chain checks or no longer takes vouchers (#173). */
   | "channel-refused"
   /** Too many channel registrations or channel closes; try again after Retry-After (#173, #174). */
@@ -85,6 +91,9 @@ export const GATE_ERRORS: Readonly<Record<GateErrorCode, GateErrorSpec>> = {
   "handler-not-configured": { status: 500, retrySamePayment: false, headers: [] },
   "model-not-supported": { status: 501, retrySamePayment: false, headers: [] },
   "work-failed": { status: 424, retrySamePayment: true, headers: [] },
+  "body-too-large": { status: 413, retrySamePayment: false, headers: [] },
+  "body-not-supported": { status: 415, retrySamePayment: false, headers: [] },
+  "body-not-provided": { status: 500, retrySamePayment: false, headers: [] },
   "channel-refused": { status: 402, retrySamePayment: false, headers: [] },
   "channel-rate-limited": { status: 429, retrySamePayment: true, headers: ["retry-after"] },
 };
