@@ -7,21 +7,24 @@
  * docs/design.md, "The channel lifecycle manager".
  *
  * This release ships `open`, `commit`, `listChannels`, `shouldClose`, `close`,
- * `resume` and `resumeAll`, and `createStellarMppChannelAdapter`, the adapter
- * backed by @stellar/mpp.
- * `recover` is tracked under #38 and remains a typed stub.
+ * `resume`, `resumeAll` and `recover`, plus `createStellarMppChannelAdapter`,
+ * the adapter backed by @stellar/mpp. The funder-side contract calls behind
+ * `startClose` and `refund` are the adapter's follow-up (#101).
  */
 
 export type {
   ChannelChainState,
+  ChannelState,
   CloseAdapterInput,
   CloseAdapterResult,
   FoundChannelSettlement,
   MppChannelAdapter,
   OpenAdapterInput,
   OpenAdapterResult,
+  RefundResult,
   SignCommitmentInput,
   SignedCommitment,
+  StartCloseResult,
 } from "./adapter.js";
 export {
   ChannelAlreadyClosedError,
@@ -33,6 +36,7 @@ export {
   CounterpartyQuarantinedError,
   InvalidAmountError,
   MissingEventHistoryError,
+  RecoveryNotYetEffectiveError,
   SettlementMismatchError,
   SettlementNotFoundError,
 } from "./errors.js";
@@ -44,6 +48,8 @@ export {
   type ChannelEventSink,
   type ChannelLifecycleEvent,
   type ChannelOpenedEvent,
+  type ChannelRecoveredEvent,
+  type ChannelRecoveringEvent,
   type ObservabilityBridge,
   toObservabilitySink,
 } from "./events.js";

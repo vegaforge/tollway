@@ -52,6 +52,7 @@ the type `AfterHandlerPaidHandler`, whose `receipt` is optional.
 | throws | never called | the framework's error response; Next rethrows the error |
 | writes more than `maxResponseBytes` | never called | 500 `response-too-large`; the route's response is discarded |
 | outlives the payment's validity window | never called | 504 `handler-timeout` |
+| any, while the gate itself fails (authorize or settle throws) | not reached, or unknown | 502 with `{ "error": "payment backend unavailable" }`, the same answer every adapter gives a throwing gate (#107) |
 | holds the lock past a lost renewal | never called | 503 `payment-not-settled` (message starting `lock-lost`), `Retry-After: 1` |
 
 A request that duplicates a payment while its route is still running waits
@@ -72,6 +73,17 @@ there the throw is recognised by the status that handler writes. Their
 default handlers answer 500. An app whose error handler answers a thrown
 error with a non-failure status should widen `twoPhase.isFailureStatus` to
 cover it.
+
+The shared adapter conformance suite (`@vegaforge/tollway-server/testing`,
+`runAdapterConformance`) runs these cases through all four adapters, each
+driver mounting its adapter with `settlement: "after-handler"`, and asserts
+the `/settle` count in every case.
+
+A two-phase attempt reports to the gate's `observer` (#106) like a
+single-shot one: a settled payment records a `settled` metric and emits
+`receipt.created` once `settle()` succeeds; an abandoned one records
+`failed`. The recorded latency runs from authorization to the decision, so it
+includes the route's own time.
 
 ## Configuration
 

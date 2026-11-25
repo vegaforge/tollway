@@ -116,6 +116,12 @@ describe("observability hub with a metrics store", () => {
     expect(() => hub.record(metric({ amount: "12.5" }))).toThrow(InvalidMetricError);
   });
 
+  it("records a failed metric with no verified payer", () => {
+    const hub = hubWith(spyStore());
+    expect(() => hub.record(metric({ payer: "", outcome: "failed" }))).not.toThrow();
+    expect(() => hub.record(metric({ payer: "", outcome: "settled" }))).toThrow(InvalidMetricError);
+  });
+
   it("sends synchronous readers to their async counterparts", () => {
     const hub = hubWith(spyStore());
     expect(() => hub.summarize()).toThrow(/summarizeAsync/);

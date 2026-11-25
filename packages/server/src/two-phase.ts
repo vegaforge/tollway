@@ -141,6 +141,7 @@ type EncodingBuffer = { from(value: string, encoding: string): Uint8Array };
  */
 export function holdNodeResponse(res: HoldableNodeResponse, maxBytes: number): HeldNodeResponse {
   const original = {
+    write: res.write,
     end: res.end,
     writeHead: res.writeHead,
     flushHeaders: res.flushHeaders,
@@ -201,12 +202,23 @@ export function holdNodeResponse(res: HoldableNodeResponse, maxBytes: number): H
     if (!res.writableEnded) finish("closed");
   });
 
-  // Node's end() writes the head through this.writeHead, so the real one
-  // goes back first. write and end stay held, which drops late route writes.
+  // The real methods go back for the final write: Node's end() writes the
+  // head through this.writeHead, and some responses (Fastify's inject) end
+  // through this.write. Afterwards write and end drop whatever the route
+  // still sends, since its output has already been answered for.
   const send = (body: Uint8Array | string): void => {
     res.writeHead = original.writeHead;
     res.flushHeaders = original.flushHeaders;
+    res.write = original.write;
     Reflect.apply(original.end, res, [body]);
+    res.write = ((...args: unknown[]) => {
+      callback(args);
+      return true;
+    }) as HoldableNodeResponse["write"];
+    res.end = ((...args: unknown[]) => {
+      callback(args);
+      return res;
+    }) as HoldableNodeResponse["end"];
   };
 
   return {

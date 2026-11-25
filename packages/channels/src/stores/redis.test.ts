@@ -269,6 +269,56 @@ describe("createRedisCommitmentStore: reply handling", () => {
   });
 });
 
+describe("createRedisCommitmentStore: recovery fields (#38)", () => {
+  it("writes the recovery fields of a patch and deletes the ones set to undefined", async () => {
+    const { client, log } = fakeRedis(() => OK_CHANNEL_REPLY);
+    const store = createRedisCommitmentStore({ client });
+
+    await store.updateChannel("CR", {
+      status: "recovered",
+      closeEffectiveAtLedger: 1100,
+      recoveredAmount: "600",
+      refundTxHash: "tx-refund",
+    });
+    const sets = log.at(-1)?.args ?? [];
+    expect(sets).toEqual(
+      expect.arrayContaining(["closeEffectiveAtLedger", "1100", "recoveredAmount", "600"]),
+    );
+    expect(sets).toEqual(expect.arrayContaining(["refundTxHash", "tx-refund"]));
+
+    await store.transitionChannel("CR", "recovering", {
+      status: "open",
+      closeEffectiveAtLedger: undefined,
+    });
+    // ARGV: expected status, delete count, then the deleted field names.
+    expect(log.at(-1)?.args.slice(0, 3)).toEqual(["recovering", "1", "closeEffectiveAtLedger"]);
+  });
+
+  it("reads the recovery fields back, checked", async () => {
+    const { client, hashes } = fakeRedis();
+    const store = createRedisCommitmentStore({ client });
+    hashes.set("tollway:ch:{CR}:record", {
+      ...OK_CHANNEL_FIELDS,
+      status: "recovered",
+      closeEffectiveAtLedger: "1100",
+      recoveredAmount: "600",
+      refundTxHash: "tx-refund",
+    });
+
+    await expect(store.getChannel("CR")).resolves.toMatchObject({
+      status: "recovered",
+      closeEffectiveAtLedger: 1100,
+      recoveredAmount: "600",
+      refundTxHash: "tx-refund",
+    });
+
+    hashes.set("tollway:ch:{CR}:record", { ...OK_CHANNEL_FIELDS, recoveredAmount: "6.5" });
+    await expect(store.getChannel("CR")).rejects.toMatchObject({
+      code: "corrupt-channel-record",
+    });
+  });
+});
+
 describe("createRedisCommitmentStore: listings", () => {
   it("skips an indexed id whose record is gone, and pages the rest", async () => {
     const { client, hashes, sets } = fakeRedis();

@@ -17,6 +17,9 @@ import { createMockFacilitator, type FacilitatorClient } from "./facilitator.js"
 import {
   type AuthorizeOutcome,
   createPaywall,
+  type PaymentObserver,
+  type PaymentObserverEvent,
+  type PaymentObserverMetric,
   type PaywallConfig,
   type PaywallDeps,
   type TollwayRequest,
@@ -333,6 +336,44 @@ describe("gate.authorize", () => {
 
     expect(outcome.kind).toBe("settled");
     expect(calls.settle).toBe(1);
+  });
+});
+
+describe("gate.authorize and the payment observer (#106)", () => {
+  function observed() {
+    const metrics: PaymentObserverMetric[] = [];
+    const events: PaymentObserverEvent[] = [];
+    const observer: PaymentObserver = {
+      record: (metric) => {
+        metrics.push(metric);
+      },
+      emit: async (event) => {
+        events.push(event);
+      },
+    };
+    return { observer, metrics, events };
+  }
+
+  it("records a settled payment and emits its receipt once settle() succeeds", async () => {
+    const { observer, metrics, events } = observed();
+    const { gate } = makeGate({ deps: { observer } });
+
+    const authorization = authorized(await gate.authorize(paid()));
+    expect(metrics).toEqual([]);
+    await authorization.settle();
+
+    expect(metrics.map((metric) => metric.outcome)).toEqual(["settled"]);
+    expect(events.map((event) => event.type)).toEqual(["receipt.created"]);
+  });
+
+  it("records an abandoned payment as failed and emits no receipt", async () => {
+    const { observer, metrics, events } = observed();
+    const { gate } = makeGate({ deps: { observer } });
+
+    await authorized(await gate.authorize(paid())).abandon("handler-failed");
+
+    expect(metrics.map((metric) => metric.outcome)).toEqual(["failed"]);
+    expect(events).toEqual([]);
   });
 });
 

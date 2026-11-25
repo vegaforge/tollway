@@ -28,6 +28,9 @@ type SettledReceipt = Extract<GateOutcome, { kind: "settled" }>["receipt"];
 /** Where the verified receipt is stashed on the Fastify request for downstream handlers. */
 export const RECEIPT_REQUEST_KEY = "tollwayReceipt";
 
+/** The one body every adapter returns when the gate itself throws (#107). */
+const GATE_ERROR_BODY = { error: "payment backend unavailable" } as const;
+
 declare module "fastify" {
   interface FastifyRequest {
     tollwayReceipt?: SettledReceipt;
@@ -52,7 +55,11 @@ declare module "fastify" {
 export function fastifyPaywall(gate: Gate, options?: PaywallOptions): preHandlerHookHandler {
   const authorize = twoPhaseAuthorizer(gate, options);
   return async function preHandler(request: FastifyRequest, reply: FastifyReply): Promise<void> {
-    await runGate(gate, authorize !== undefined, request, reply);
+    try {
+      await runGate(gate, authorize !== undefined, request, reply);
+    } catch {
+      if (!reply.sent) await reply.status(502).send(GATE_ERROR_BODY);
+    }
   };
 }
 
@@ -65,7 +72,11 @@ export function fastifyRouteTable(
   return async function preHandler(request: FastifyRequest, reply: FastifyReply): Promise<void> {
     const match = table.match(request.method, request.url);
     if (!match) return;
-    await runGate(match.gate, afterHandler, request, reply);
+    try {
+      await runGate(match.gate, afterHandler, request, reply);
+    } catch {
+      if (!reply.sent) await reply.status(502).send(GATE_ERROR_BODY);
+    }
   };
 }
 
@@ -122,8 +133,9 @@ async function answer(
 /**
  * Holds the raw response while the route runs, then settles or abandons.
  * Fastify writes through `reply.raw`, so holding it holds serialized bodies
- * and streams alike. A failure here has no hook left to throw to, so it ends
- * the response with a 500 and goes to the request logger.
+ * and streams alike. A gate failure here has no hook left to throw to, so it
+ * is answered like any gate failure (#107), 502 with the fixed body, and goes
+ * to the request logger.
  */
 async function settleAfterHandler(
   payment: AuthorizedPayment,
@@ -157,7 +169,7 @@ async function settleAfterHandler(
     held.replace(rejection.status, rejection.body, rejection.headers);
   } catch (error) {
     request.log.error({ err: error }, "tollway: two-phase settlement failed");
-    held.replace(500, { error: "settlement-error" });
+    held.replace(502, GATE_ERROR_BODY);
   }
 }
 

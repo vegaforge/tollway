@@ -246,6 +246,15 @@ function hashToChannel(hash: Readonly<Record<string, string>>): Channel {
     }
     channel.settlementMismatch = { expectedAmount: expected, observedAmount: observed };
   }
+
+  const closeEffectiveAtLedger = optionalField(hash, "closeEffectiveAtLedger");
+  if (closeEffectiveAtLedger !== undefined) {
+    channel.closeEffectiveAtLedger = integerValue(closeEffectiveAtLedger, "closeEffectiveAtLedger");
+  }
+  const recoveredAmount = optionalAmountField(hash, "recoveredAmount");
+  if (recoveredAmount !== undefined) channel.recoveredAmount = recoveredAmount;
+  const refundTxHash = optionalField(hash, "refundTxHash");
+  if (refundTxHash !== undefined) channel.refundTxHash = refundTxHash;
   return channel;
 }
 
@@ -280,6 +289,11 @@ function patchFields(patch: Partial<Channel>): FieldPatch {
     put("settlementExpectedAmount", patch.settlementMismatch?.expectedAmount);
     put("settlementObservedAmount", patch.settlementMismatch?.observedAmount);
   }
+  if ("closeEffectiveAtLedger" in patch) {
+    put("closeEffectiveAtLedger", patch.closeEffectiveAtLedger);
+  }
+  if ("recoveredAmount" in patch) put("recoveredAmount", patch.recoveredAmount);
+  if ("refundTxHash" in patch) put("refundTxHash", patch.refundTxHash);
   return { deletes, sets };
 }
 

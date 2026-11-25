@@ -13,12 +13,14 @@
 import type { SignedReceipt } from "@vegaforge/tollway-core";
 import {
   type AuthorizedPayment,
+  type AuthorizeOutcome,
   type Gate,
   type PaywallOptions,
   type RouteTable,
   readBodyWithin,
   renderGateRejection,
   responseTooLarge,
+  type SettleOutcome,
   settlementTiming,
   type TollwayRequest,
   twoPhaseAuthorizer,
@@ -26,6 +28,9 @@ import {
 
 /** Extra argument a paid handler receives: the verified receipt. */
 export type PaidContext = { receipt: SignedReceipt };
+
+/** The one body every adapter returns when the gate itself throws (#107). */
+const GATE_ERROR_BODY = { error: "payment backend unavailable" } as const;
 
 /** A route handler that only runs after payment has settled. */
 export type PaidHandler = (request: Request, context: PaidContext) => Response | Promise<Response>;
@@ -91,7 +96,12 @@ export function withPaywall(
       url: requestUrl(request),
       headers: requestHeaders(request),
     };
-    const outcome = authorize ? await authorize(tollwayRequest) : await gate(tollwayRequest);
+    let outcome: AuthorizeOutcome;
+    try {
+      outcome = authorize ? await authorize(tollwayRequest) : await gate(tollwayRequest);
+    } catch {
+      return jsonResponse(GATE_ERROR_BODY, 502);
+    }
 
     if (outcome.kind === "authorized") {
       // The overloads only accept "after-handler" with a handler whose
@@ -132,7 +142,12 @@ export function withRouteTable(
   };
 }
 
-/** Runs the handler, then settles or abandons the authorized payment. */
+/**
+ * Runs the handler, then settles or abandons the authorized payment. A
+ * handler error, thrown or from its body stream, abandons the payment and is
+ * rethrown. A gate failure while settling is answered like any gate failure
+ * (#107): 502 with the fixed body.
+ */
 async function settleAfterHandler(
   payment: AuthorizedPayment,
   run: () => Response | Promise<Response>,
@@ -145,7 +160,13 @@ async function settleAfterHandler(
     throw error;
   }
 
-  const body = await readBodyWithin(response.body, payment.maxResponseBytes);
+  let body: Awaited<ReturnType<typeof readBodyWithin>>;
+  try {
+    body = await readBodyWithin(response.body, payment.maxResponseBytes);
+  } catch (error) {
+    await payment.abandon("handler-threw");
+    throw error;
+  }
   if (!body.ok) {
     await payment.abandon("response-too-large");
     const rejection = renderGateRejection(responseTooLarge(payment.maxResponseBytes));
@@ -155,7 +176,12 @@ async function settleAfterHandler(
     await payment.abandon("handler-failed");
     return rebuild(response, body.bytes, {});
   }
-  const settled = await payment.settle();
+  let settled: SettleOutcome;
+  try {
+    settled = await payment.settle();
+  } catch {
+    return jsonResponse(GATE_ERROR_BODY, 502);
+  }
   if (settled.kind === "settled") {
     return rebuild(response, body.bytes, settled.headers);
   }

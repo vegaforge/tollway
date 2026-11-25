@@ -25,6 +25,9 @@ import type { NextFunction, Request, RequestHandler, Response } from "express";
 /** Where the verified receipt is stashed on res.locals for downstream handlers. */
 export const RECEIPT_LOCALS_KEY = "tollwayReceipt";
 
+/** The one body every adapter returns when the gate itself throws (#107). */
+const GATE_ERROR_BODY = { error: "payment backend unavailable" } as const;
+
 /**
  * Wraps a gate as Express middleware. On a settled payment it sets the
  * PAYMENT-RESPONSE and TOLLWAY-RECEIPT headers, attaches the receipt to res.locals, and calls
@@ -39,23 +42,28 @@ export const RECEIPT_LOCALS_KEY = "tollwayReceipt";
  * gets the rejection instead. No receipt exists while the route runs, so
  * res.locals carries none in this mode, except for a replay of a payment
  * that already settled.
+ *
+ * Decision for #107: a gate that throws is answered here as 502 with a fixed
+ * body, not forwarded to `next(err)`. Fastify, Hono and Next have no
+ * equivalent error channel, and Express's default error page would leak the
+ * internal message and break the shared conformance suite. Error reporting is
+ * the gate's or an outer middleware's job; this adapter owns the response.
+ * The same holds for a gate failure while a two-phase payment settles.
  */
 export function expressPaywall(gate: Gate, options?: PaywallOptions): RequestHandler {
   const authorize = twoPhaseAuthorizer(gate, options);
   return (req: Request, res: Response, next: NextFunction): void => {
     const request = toTollwayRequest(req);
-    if (!authorize) {
-      void gate(request)
-        .then((outcome) => answer(outcome, res, next))
-        .catch(next);
-      return;
-    }
-    void authorize(request)
-      .then((outcome) => {
-        if (outcome.kind === "authorized") return settleAfterHandler(outcome, res, next);
-        answer(outcome, res, next);
-      })
-      .catch(next);
+    const answered = authorize
+      ? authorize(request).then((outcome) => {
+          if (outcome.kind === "authorized") return settleAfterHandler(outcome, res, next);
+          answer(outcome, res, next);
+        })
+      : gate(request).then((outcome) => answer(outcome, res, next));
+    void answered.catch(() => {
+      if (res.headersSent) return;
+      res.status(502).json(GATE_ERROR_BODY);
+    });
   };
 }
 
@@ -95,9 +103,9 @@ function answer(outcome: GateOutcome, res: Response, next: NextFunction): void {
 }
 
 /**
- * Runs the route with its response held, then settles or abandons. Errors
- * after next() cannot go back to Express (the chain has moved on), so they
- * end the held response with a 500 and are logged.
+ * Runs the route with its response held, then settles or abandons. A gate
+ * failure here is answered like any gate failure (#107): 502 with the fixed
+ * body. Express's chain has moved on, so it is also logged.
  */
 async function settleAfterHandler(
   payment: AuthorizedPayment,
@@ -132,6 +140,6 @@ async function settleAfterHandler(
     held.replace(rejection.status, rejection.body, rejection.headers);
   } catch (error) {
     console.error("tollway: two-phase settlement failed", error);
-    held.replace(500, { error: "settlement-error" });
+    held.replace(502, GATE_ERROR_BODY);
   }
 }

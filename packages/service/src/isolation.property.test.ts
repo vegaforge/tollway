@@ -161,6 +161,16 @@ describe("multi-tenant isolation property over random interleaved writes", () =>
         async findChannelSettlement() {
           return null;
         },
+        // Tenant isolation never recovers a channel; these fail loudly if it does.
+        async getState() {
+          throw new Error("the isolation tests do not read recovery state");
+        },
+        async startClose() {
+          throw new Error("the isolation tests do not start a funder close");
+        },
+        async refund() {
+          throw new Error("the isolation tests do not refund");
+        },
       };
     };
 

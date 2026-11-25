@@ -51,6 +51,16 @@ function fakeAdapter(
     async findChannelSettlement() {
       return null;
     },
+    // The service routes do not recover channels; these fail loudly if one does.
+    async getState() {
+      throw new Error("the service tests do not read recovery state");
+    },
+    async startClose() {
+      throw new Error("the service tests do not start a funder close");
+    },
+    async refund() {
+      throw new Error("the service tests do not refund");
+    },
   };
   return { adapter, closeChannel };
 }

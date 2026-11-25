@@ -9,6 +9,7 @@
 
 import {
   type AuthorizedPayment,
+  type AuthorizeOutcome,
   type Gate,
   type GateOutcome,
   type PaywallOptions,
@@ -24,6 +25,9 @@ import type { Context, MiddlewareHandler } from "hono";
 
 /** Where the verified receipt is stashed on the Hono context for downstream handlers. */
 export const RECEIPT_CONTEXT_KEY = "tollwayReceipt";
+
+/** The one body every adapter returns when the gate itself throws (#107). */
+const GATE_ERROR_BODY = { error: "payment backend unavailable" } as const;
 
 type SettledReceipt = Extract<GateOutcome, { kind: "settled" }>["receipt"];
 
@@ -58,7 +62,12 @@ export function honoPaywall(gate: Gate, options?: PaywallOptions): MiddlewareHan
       url: requestUrl(c),
       headers: requestHeaders(c),
     };
-    const outcome = authorize ? await authorize(request) : await gate(request);
+    let outcome: AuthorizeOutcome;
+    try {
+      outcome = authorize ? await authorize(request) : await gate(request);
+    } catch {
+      return c.json(GATE_ERROR_BODY, 502);
+    }
 
     if (outcome.kind === "authorized") {
       await settleAfterHandler(outcome, c, next);
@@ -96,7 +105,9 @@ async function answer(
  * Runs the route, then settles or abandons. A thrown route error reaches
  * this middleware as `c.error` (Hono has already turned it into a response),
  * or as a rejection when the app has no error handler; either way the
- * payment is abandoned and the route's error goes out as it is.
+ * payment is abandoned and the route's error goes out as it is. A gate
+ * failure after the route ran is answered like any gate failure (#107):
+ * 502 with the fixed body.
  */
 async function settleAfterHandler(
   payment: AuthorizedPayment,
@@ -114,32 +125,31 @@ async function settleAfterHandler(
     return;
   }
 
-  const response = c.res;
+  try {
+    replaceResponse(c, await decide(payment, c.res));
+  } catch {
+    replaceResponse(c, Response.json(GATE_ERROR_BODY, { status: 502 }));
+  }
+}
+
+/** The response to send once the route has answered: its own, or a rejection. */
+async function decide(payment: AuthorizedPayment, response: Response): Promise<Response> {
   const body = await readBodyWithin(response.body, payment.maxResponseBytes);
   if (!body.ok) {
     await payment.abandon("response-too-large");
     const rejection = renderGateRejection(responseTooLarge(payment.maxResponseBytes));
-    replaceResponse(
-      c,
-      Response.json(rejection.body, { status: rejection.status, headers: rejection.headers }),
-    );
-    return;
+    return Response.json(rejection.body, { status: rejection.status, headers: rejection.headers });
   }
   if (payment.isFailure(response.status)) {
     await payment.abandon("handler-failed");
-    replaceResponse(c, rebuild(response, body.bytes, {}));
-    return;
+    return rebuild(response, body.bytes, {});
   }
   const settled = await payment.settle();
   if (settled.kind === "settled") {
-    replaceResponse(c, rebuild(response, body.bytes, settled.headers));
-    return;
+    return rebuild(response, body.bytes, settled.headers);
   }
   const rejection = renderGateRejection(settled);
-  replaceResponse(
-    c,
-    Response.json(rejection.body, { status: rejection.status, headers: rejection.headers }),
-  );
+  return Response.json(rejection.body, { status: rejection.status, headers: rejection.headers });
 }
 
 /**

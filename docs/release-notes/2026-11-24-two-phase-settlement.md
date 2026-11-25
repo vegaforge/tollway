@@ -48,6 +48,15 @@ Three codes join the gate error table from #161 (docs/gate-errors.md):
 adapter renders them, like every other rejection, through
 `renderGateRejection`.
 
+The shared adapter conformance suite from #344 gains a two-phase section,
+which every adapter driver runs: a successful route, a 500, a throw, a
+refused settlement, an oversized response, a route past the validity window,
+a lock lost during the route, and a throwing `authorize`, each asserting the
+`/settle` count. A gate failure during two-phase settlement is answered like
+any throwing gate, 502 with the fixed body. Two-phase attempts report to the
+gate observer from #344 exactly as single-shot ones do; an abandoned payment
+is recorded as `failed`, and the latency includes the route's run.
+
 Technical shape: `createPaywall` and route tables return a `PaywallGate`
 (the single-shot function plus `authorize`). The payment logic stays in the
 server; the adapters only hold the response. Express and Fastify hold the

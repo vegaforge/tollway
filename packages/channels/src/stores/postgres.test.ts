@@ -69,6 +69,9 @@ function channelRow(overrides: Row = {}): Row {
     close_attempt_started_at: null,
     settlement_expected_amount: null,
     settlement_observed_amount: null,
+    close_effective_at_ledger: null,
+    recovered_amount: null,
+    refund_tx_hash: null,
     ...overrides,
   };
 }
@@ -353,6 +356,74 @@ describe("createPostgresCommitmentStore: other writes", () => {
     expect(() =>
       createPostgresCommitmentStore({ client: pool, schema: "x; DROP TABLE y" }),
     ).toThrow(TollwayError);
+  });
+});
+
+describe("createPostgresCommitmentStore: recovery fields (#38)", () => {
+  it("writes the recovery columns of a patch, and NULL for one set to undefined", async () => {
+    const { pool, calls } = scriptedPool((text) => {
+      if (text.startsWith("UPDATE")) return rows(channelRow({ status: "recovered" }));
+      return EMPTY;
+    });
+    const store = createPostgresCommitmentStore({ client: pool });
+
+    await store.updateChannel("CPG", {
+      status: "recovered",
+      closeEffectiveAtLedger: 1100,
+      recoveredAmount: "600",
+      refundTxHash: "tx-refund",
+    });
+    const update = calls.at(-1);
+    expect(update?.text).toContain("close_effective_at_ledger = $");
+    expect(update?.text).toContain("recovered_amount = $");
+    expect(update?.text).toContain("refund_tx_hash = $");
+    expect(update?.values).toEqual(["CPG", "recovered", 1100, "600", "tx-refund"]);
+
+    await store.transitionChannel("CPG", "recovering", {
+      status: "open",
+      closeEffectiveAtLedger: undefined,
+    });
+    expect(calls.at(-1)?.values).toEqual(["CPG", "recovering", "open", null]);
+  });
+
+  it("reads the recovery columns back, checked", async () => {
+    let row = channelRow({
+      status: "recovered",
+      close_effective_at_ledger: 1100,
+      recovered_amount: "600",
+      refund_tx_hash: "tx-refund",
+    });
+    const { pool, calls } = scriptedPool((text) => {
+      if (text.startsWith("SELECT")) return rows(row);
+      return EMPTY;
+    });
+    const store = createPostgresCommitmentStore({ client: pool });
+
+    await expect(store.getChannel("CPG")).resolves.toMatchObject({
+      status: "recovered",
+      closeEffectiveAtLedger: 1100,
+      recoveredAmount: "600",
+      refundTxHash: "tx-refund",
+    });
+    expect(calls.at(-1)?.text).toContain("recovered_amount::text AS recovered_amount");
+
+    row = channelRow({ recovered_amount: "6.5" });
+    await expect(store.getChannel("CPG")).rejects.toMatchObject({
+      code: "corrupt-channel-record",
+    });
+  });
+});
+
+describe("migration 0002_channel_recovery.sql", () => {
+  it("adds the recovery columns with an exact amount type", async () => {
+    const sql = await readFile(
+      new URL("../../migrations/0002_channel_recovery.sql", import.meta.url),
+      "utf8",
+    );
+
+    expect(sql).toContain("ADD COLUMN IF NOT EXISTS close_effective_at_ledger INTEGER");
+    expect(sql).toContain("ADD COLUMN IF NOT EXISTS recovered_amount NUMERIC(39, 0)");
+    expect(sql).toContain("ADD COLUMN IF NOT EXISTS refund_tx_hash TEXT");
   });
 });
 

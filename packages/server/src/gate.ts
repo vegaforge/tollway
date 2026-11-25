@@ -355,6 +355,39 @@ export type PaywallGate = Gate & {
 };
 
 /**
+ * The one payment measurement the gate reports to an observer. Structurally
+ * compatible with `PaymentMetric` from @vegaforge/tollway-observability,
+ * without the server package taking a dependency on it.
+ */
+export type PaymentObserverMetric = {
+  payer: string;
+  payee: string;
+  model: SettlementModel;
+  amount: string;
+  asset: string;
+  latencyMs: number;
+  outcome: "settled" | "failed" | "skipped";
+  at: string;
+};
+
+/** The `receipt.created` event the gate emits to an observer. */
+export type PaymentObserverEvent = {
+  id?: string;
+  type: "receipt.created";
+  at: string;
+  data: Record<string, unknown>;
+};
+
+/**
+ * Minimal sink for settled and failed payments. An `ObservabilityHub`
+ * satisfies it; delivery failures must not change the gate's outcome.
+ */
+export type PaymentObserver = {
+  record(metric: PaymentObserverMetric): void;
+  emit(event: PaymentObserverEvent): Promise<unknown>;
+};
+
+/**
  * The services a gate uses: the receipt signer, the facilitator, and the
  * optional MPP charge handler, router and settlement cache.
  */
@@ -469,6 +502,17 @@ export type PaywallDeps = {
   retryAfterSeconds?: { settlementInProgress?: number; facilitatorUnavailable?: number };
   /** Clock for quote expiry and service policy windows; injected tests can avoid waiting. */
   clock?: () => number;
+  /**
+   * Optional observability sink (#106). Called for a fresh settlement and for
+   * a rejected verification or settlement; a replayed cache hit is not
+   * reported again. The gate never awaits the event's delivery.
+   */
+  observer?: PaymentObserver;
+  /**
+   * Called when the observer throws or its event delivery rejects. The
+   * payment outcome is unchanged.
+   */
+  onObserverError?: (error: unknown) => void;
   /**
    * The receipt version this gate issues (Issue #166). Defaults to 1.
    *
@@ -983,6 +1027,19 @@ function asError(value: unknown, message: string): Error {
 }
 
 /**
+ * Told the outcome of a payment attempt this request owns (#106): its
+ * verification, or the settlement it started. `undefined` means the attempt
+ * threw. Requests that only share another request's in-flight settlement,
+ * or answer from the cache, never call it, so one payment is reported once.
+ */
+type AttemptReporter = (outcome: GateOutcome | undefined) => void;
+
+function reported(report: AttemptReporter | undefined, outcome: GateOutcome): GateOutcome {
+  report?.(outcome);
+  return outcome;
+}
+
+/**
  * Looks a payment up in the receipt archive. A failed read is reported and
  * treated as no entry: the payment then goes to `/verify`, which refuses a
  * spent authorization, so the failure can cost the payer a replay but never
@@ -1123,6 +1180,8 @@ type SettlementSteps = {
   paymentId?: string;
   /** Set for `gate.authorize`: settle only after the caller decides (#152). */
   twoPhase?: TwoPhaseStep;
+  /** Told the outcome of the attempt this request owns, for the observer (#106). */
+  report?: AttemptReporter;
 };
 
 async function settleWithHandler<TPayment>(
@@ -1134,7 +1193,7 @@ async function settleWithHandler<TPayment>(
   context: SettlementContext,
   steps: SettlementSteps,
 ): Promise<GateOutcome> {
-  const { freshChallengeHeaders, replayOnly, prevalidate, paymentId, twoPhase } = steps;
+  const { freshChallengeHeaders, replayOnly, prevalidate, report, paymentId, twoPhase } = steps;
   // A payment that already settled is answered from the cache before it is
   // verified again: on chain its authorization nonce is spent, so a second
   // verify fails and the retry would get a 402 instead of its receipt (#284).
@@ -1169,7 +1228,7 @@ async function settleWithHandler<TPayment>(
   // authorization has since expired still gets its receipt, and before
   // /verify, so a payment that cannot pass costs no facilitator call (#159).
   const refused = await prevalidate?.();
-  if (refused) return refused;
+  if (refused) return reported(report, refused);
 
   let verification:
     | { valid: true; payer: string; nonce: string }
@@ -1185,30 +1244,40 @@ async function settleWithHandler<TPayment>(
     // the facilitator client classified as unavailability become a 503; any
     // other error is a defect and propagates (Directive 4).
     if (error instanceof FacilitatorDeadlineError) {
-      return facilitatorUnavailable(
-        `facilitator /verify did not answer within ${error.timeoutMs}ms`,
-        context.facilitatorRetryAfter,
+      return reported(
+        report,
+        facilitatorUnavailable(
+          `facilitator /verify did not answer within ${error.timeoutMs}ms`,
+          context.facilitatorRetryAfter,
+        ),
       );
     }
     if (isFacilitatorUnavailable(error)) {
-      return facilitatorUnavailable(error.message, context.facilitatorRetryAfter);
+      return reported(report, facilitatorUnavailable(error.message, context.facilitatorRetryAfter));
     }
+    report?.(undefined);
     throw error;
   }
   if (!verification.valid) {
     // A fresh challenge rides along, so the agent can sign again without a
     // second unpaid request (#161, consistent with #43's 402).
-    return gateRejection("payment-invalid", "the payment was refused", {
-      upstreamReason: verification.reason,
-      headers: await freshChallengeHeaders(),
-    });
+    return reported(
+      report,
+      gateRejection("payment-invalid", "the payment was refused", {
+        upstreamReason: verification.reason,
+        headers: await freshChallengeHeaders(),
+      }),
+    );
   }
   // The cache lookup above used the derived nonce; a facilitator whose verify
   // disagrees with it would store under a key retries never look up.
   if (knownNonce !== undefined && verification.nonce !== knownNonce) {
-    return gateRejection(
-      "facilitator-invalid-response",
-      "facilitator verify returned a nonce that differs from its idempotency key",
+    return reported(
+      report,
+      gateRejection(
+        "facilitator-invalid-response",
+        "facilitator verify returned a nonce that differs from its idempotency key",
+      ),
     );
   }
 
@@ -1254,9 +1323,10 @@ async function settleWithHandler<TPayment>(
   try {
     const result = await attempt;
     if (!result.ok && result.hold) hold = result.hold;
-    return await toOutcome(result, offer, model, method, false);
+    return reported(report, await toOutcome(result, offer, model, method, false));
   } catch (error) {
     if (error instanceof AmbiguousSettlementFailure) hold = error.hold;
+    report?.(undefined);
     throw unwrapFailure(error);
   } finally {
     const clear = (): void => {
@@ -2118,6 +2188,105 @@ export function createPaywallWithInFlight(
       : {}),
   };
 
+  /** Observer hooks are diagnostic; neither they nor their errors change a payment. */
+  function reportObserverError(error: unknown): void {
+    try {
+      deps.onObserverError?.(error);
+    } catch (hookError) {
+      // A second failure in the error hook also ends here: the gate must
+      // still answer with the settlement it already decided.
+      void hookError;
+    }
+  }
+
+  function observeOutcome(
+    outcome: GateOutcome | undefined,
+    offer: PaymentOffer,
+    model: SettlementModel,
+    startedAt: number,
+  ): void {
+    const observer = deps.observer;
+    if (!observer) return;
+    const endedAt = clock();
+    const latencyMs = Math.max(0, endedAt - startedAt);
+    const at = new Date(endedAt).toISOString();
+
+    if (outcome?.kind === "settled" && !outcome.replayed) {
+      const receipt = outcome.receipt.receipt;
+      try {
+        observer.record({
+          payer: receipt.payer,
+          payee: receipt.payee,
+          model: receipt.model,
+          amount: receipt.amount,
+          asset: receipt.asset,
+          latencyMs,
+          outcome: "settled",
+          at,
+        });
+      } catch (error) {
+        reportObserverError(error);
+      }
+      try {
+        // Delivery is deliberately not awaited: webhook sends must not hold
+        // up the paid response. The rejection handler keeps it unobserved
+        // only in the sense of latency, never in the sense of error handling.
+        void Promise.resolve(
+          observer.emit({
+            id: receipt.id,
+            type: "receipt.created",
+            at,
+            data: {
+              receiptId: receipt.id,
+              resource: receipt.resource,
+              model: receipt.model,
+              amount: receipt.amount,
+            },
+          }),
+        ).catch(reportObserverError);
+      } catch (error) {
+        reportObserverError(error);
+      }
+      return;
+    }
+
+    if (outcome === undefined || outcome.kind === "rejected") {
+      // A thrown or rejected attempt has no settled receipt, and a failed
+      // verify has no verified payer. Keeping payer as an empty
+      // string rather than making it optional preserves PaymentMetric's
+      // shape for every consumer (see the justification in issue #106).
+      try {
+        observer.record({
+          payer: "",
+          payee: offer.payTo,
+          model,
+          amount: offer.amount,
+          asset: offer.asset,
+          latencyMs,
+          outcome: "failed",
+          at,
+        });
+      } catch (error) {
+        reportObserverError(error);
+      }
+    }
+  }
+
+  /**
+   * Runs one settlement with a reporter that measures latency (verify plus
+   * settle) from the injected clock. The attempt calls it at most once, and
+   * only when this request owns the outcome.
+   */
+  function settleObserved(
+    settle: (report: AttemptReporter | undefined) => Promise<GateOutcome>,
+    offer: PaymentOffer,
+    model: SettlementModel,
+  ): Promise<GateOutcome> {
+    if (!deps.observer) return settle(undefined);
+    const startedAt = clock();
+    return settle((outcome) => observeOutcome(outcome, offer, model, startedAt));
+  }
+
   const run = async (request: TollwayRequest, phase?: SettlementPhase): Promise<GateOutcome> => {
     const method = request.method.toUpperCase();
     const signatureHeader = readHeader(request.headers, PAYMENT_SIGNATURE_HEADER);
@@ -2221,17 +2390,16 @@ export function createPaywallWithInFlight(
         return gateRejection("handler-not-configured", "mpp-charge handler not configured");
       }
       const payment: MppChargePayment = { model: "mpp-charge", payload: mppCredential };
-      return settleWithHandler(
-        payment,
+      const handler = deps.mppChargeHandler;
+      return settleObserved(
+        (report) =>
+          settleWithHandler(payment, primary.offer, "mpp-charge", method, handler, context, {
+            freshChallengeHeaders: challengeHeaders,
+            ...(report ? { report } : {}),
+            ...(phase ? { twoPhase: { phase, validityMs: validityMs(primary.requirements) } } : {}),
+          }),
         primary.offer,
         "mpp-charge",
-        method,
-        deps.mppChargeHandler,
-        context,
-        {
-          freshChallengeHeaders: challengeHeaders,
-          ...(phase ? { twoPhase: { phase, validityMs: validityMs(primary.requirements) } } : {}),
-        },
       );
     }
 
@@ -2308,13 +2476,19 @@ export function createPaywallWithInFlight(
       };
       // The mock's payments are not Stellar envelopes; it says so explicitly.
       const prevalidates = facilitator.acceptsMockPayments !== true;
-      return settleWithHandler(payment, offer, "x402", method, facilitator, context, {
-        freshChallengeHeaders: challengeHeaders,
-        ...(quoteExpired ? { replayOnly: freshChallenge } : {}),
-        ...(prevalidates ? { prevalidate } : {}),
-        ...(paymentId === undefined ? {} : { paymentId }),
-        ...(phase ? { twoPhase: { phase, validityMs: validityMs(chosen.requirements) } } : {}),
-      });
+      return settleObserved(
+        (report) =>
+          settleWithHandler(payment, offer, "x402", method, facilitator, context, {
+            freshChallengeHeaders: challengeHeaders,
+            ...(quoteExpired ? { replayOnly: freshChallenge } : {}),
+            ...(prevalidates ? { prevalidate } : {}),
+            ...(report ? { report } : {}),
+            ...(paymentId === undefined ? {} : { paymentId }),
+            ...(phase ? { twoPhase: { phase, validityMs: validityMs(chosen.requirements) } } : {}),
+          }),
+        offer,
+        "x402",
+      );
     }
 
     if (decision.model === "mpp-charge") {
