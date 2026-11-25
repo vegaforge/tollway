@@ -7,6 +7,7 @@ import { useMemo } from "react";
 import { AssetTotals } from "@/components/ui/asset-totals";
 import { Panel } from "@/components/ui/panel";
 import { StatCard } from "@/components/ui/stat-card";
+import { StreamStatusBadge } from "@/components/ui/stream-status-badge";
 import type { OpenChannelRow } from "@/data/open-channels";
 import { useOpenChannels } from "@/data/use-open-channels";
 import { formatAmount, sumByAsset } from "@/lib/amount";
@@ -85,6 +86,11 @@ export function ChannelsView({
         title="Open channels"
         description="Sorted by drawdown. Nearing-close rows are highlighted."
         className="mt-6"
+        action={
+          state.status === "ready" && state.stream ? (
+            <StreamStatusBadge status={state.stream} />
+          ) : undefined
+        }
       >
         {state.status === "loading" ? <ChannelsTableSkeleton /> : null}
         {state.status === "error" ? <ChannelsTableError error={state.error} /> : null}
