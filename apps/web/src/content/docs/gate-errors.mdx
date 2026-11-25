@@ -36,6 +36,8 @@ Every rejection from a Tollway gate carries a stable `code`. Branch on the code,
 | `body-too-large` | 413 | no, send a smaller body | |
 | `body-not-supported` | 415 | no, fix the content type or send it uncompressed | |
 | `body-not-provided` | 500 | no | |
+| `channel-refused` | 402 | no | |
+| `channel-rate-limited` | 429 | yes, after `Retry-After` | `Retry-After` |
 
 The same table is exported as `GATE_ERRORS`, so code can read the status and retry guidance instead of copying them.
 

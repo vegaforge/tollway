@@ -4,6 +4,8 @@ Every settlement path in Tollway, regardless of model, ends in exactly one canon
 
 Source of truth: `packages/core/src/receipt/schema.ts` (the zod schemas), `packages/core/src/receipt/receipt.ts` (`buildReceipt`, `signReceipt`, `verifyReceipt`), and `packages/core/src/receipt/signer.ts` (the signer / verifier interfaces and the default Ed25519 implementation). See also `docs/design.md`, "One receipt format".
 
+To keep a tamper-evident record of many receipts, append them to a hash-chained receipt log with signed checkpoints: see [receipt-log.md](receipt-log.md).
+
 ## Shape at a glance
 
 A signed receipt is two parts: the receipt body and a detached signature over the body's canonical bytes.
@@ -179,6 +181,54 @@ A verifier in Go, Rust, Python, or anywhere else can check its canonicalisation 
 - `es256Vectors` carry an input, its canonical bytes, and an ES256 signature made with the published RFC 6979 appendix A.2.5 P-256 key. ECDSA signatures are randomised, so these are verify-only: check the signature, do not expect to reproduce it.
 
 Every non-ASCII character in the file is written as a `\u` escape. Read the file with a JSON parser, not as text: an editor that saves it as raw UTF-8 could normalise characters such as U+FB33, which is the case the key-ordering vector exists to test. Both keys are published and insecure on purpose: nothing in the file is a real signing secret. `packages/core/src/receipt/vectors.test.ts` keeps the vectors and the implementation in step.
+
+## x402 offer-receipt extension
+
+A route can also issue the x402 offer-receipt extension (`@x402/extensions/offer-receipt`, spec `extension-offer-and-receipt.md` v1.0), so a stock x402 client gets a signed offer and a signed receipt in the format it already reads. It is off by default, and with it off the 402 and the PAYMENT-RESPONSE header are exactly what they were before.
+
+```ts
+const gate = createPaywall(
+  { amount: "10000", asset, payTo, network: "testnet", offerReceipt: true },
+  { signer, facilitator },
+);
+```
+
+There are then two receipts for one x402 payment, and they are not equal:
+
+| | Tollway receipt | Extension receipt |
+| --- | --- | --- |
+| Header | `TOLLWAY-RECEIPT` | `PAYMENT-RESPONSE`, in `extensions["offer-receipt"].info.receipt` |
+| Fields | everything in this document: payer, payee, amount, asset, resource, model, settlement, network | `version`, `network` (CAIP-2), `resourceUrl`, `payer`, `issuedAt` (seconds), and `transaction` only when enabled |
+| Role | **authoritative**: the record for disputes, reconciliation and the archive | a delivery attestation for x402 clients, derived from the Tollway receipt |
+
+The extension receipt is a projection: the gate builds it from the signed Tollway receipt (its `resource`, `payer`, `network` mapped to `stellar:testnet` or `stellar:pubnet`, and `issuedAt` truncated to seconds), so the two always agree field by field. It carries no amount, asset or model. When they are needed, use the Tollway receipt.
+
+The 402 carries one signed offer per x402 entry in `accepts[]`, in `extensions["offer-receipt"].info.offers`, each `{ format: "jws", acceptIndex, signature }`. The offer payload is `{ version, resourceUrl, scheme, network, asset, payTo, amount, validUntil }`, copied from the requirement it signs. The gate signs offers only on routes that accept x402, and an offer never outlives the gate's own acceptance window: `validUntil` is at most `maxTimeoutSeconds` away, and for a dynamic price at most the quote lifetime. `createPaywall` refuses a longer `offerValiditySeconds`. Signed offers are cached per requirement and reused until less than half their validity remains, so a flood of unpaid requests costs one signature per requirement per half window rather than one per 402. The cache holds at most 256 entries.
+
+Both are compact JWS tokens signed with the gate's `ReceiptSigner`. The `kid` is a DID the client resolves to the key:
+
+- An `Ed25519Signer` gets `alg: "EdDSA"` and a `did:key` derived from its public key (`didKeyFromEd25519PublicKey`). It resolves offline.
+- An `EcdsaP256Signer` gets `alg: "ES256"` and a `did:jwk` of its public key.
+- Set `offerReceipt.kid` to a `did:web` URL when you publish keys (see "Publishing keys"). The client then fetches `/.well-known/did.json` from your domain; serving that document is your job.
+- Any other signer (a KMS signer, for example) must set `kid`, and an algorithm JWS has no name for is refused at `createPaywall`.
+
+### The transaction hash is private by default
+
+The extension receipt leaves out `transaction` unless `offerReceipt.includeTxHash` is `true`, as `@x402/extensions` does. A receipt with the hash links the payer's on-chain account to the resource for anyone the receipt is shown to. The settlement hash still travels in the `SettleResponse` itself (`transaction`), which is between the client and the service; `includeTxHash` decides only whether it is also inside the signed, shareable attestation.
+
+### Options
+
+| Option | Default | Meaning |
+| --- | --- | --- |
+| `includeTxHash` | `false` | Put the settlement hash in the extension receipt. |
+| `kid` | derived | The JWS `kid`, a DID. |
+| `offerValiditySeconds` | `maxTimeoutSeconds` | How long an offer is valid; never longer than the acceptance window. |
+
+Only an x402 settlement gets an extension receipt; an `mpp-charge` settlement answers an MPP challenge, not an x402 offer. If signing fails, the request fails the same way a Tollway receipt signing failure does; a settled payment is then replayed from the settlement cache on retry.
+
+`resourceUrl` is the gate's resource identifier: the request URL as the adapter passes it, or `PaywallConfig.resource`. Some adapters pass only the path, so set `resource` to the absolute URL when clients compare it with a full URL.
+
+`@x402/extensions` was already a dependency of `@vegaforge/tollway-server` for Bazaar discovery, so this adds no new package. The offer-receipt subpath loads `viem`, `jose`, `@noble/curves` and `@scure/base` when it is evaluated, so the gate imports it lazily, the first time an opted-in route signs something; a service that never opts in never loads it. Install size is unchanged either way: the package already installs `viem`, `jose`, `ajv` and the SIWE packages.
 
 ## Signing
 

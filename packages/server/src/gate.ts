@@ -10,6 +10,7 @@ import {
   type PaymentOffer,
   type ReceiptSigner,
   type SettlementModel,
+  type SettlementRef,
   type SignedReceipt,
   type StellarNetwork,
   signReceipt,
@@ -30,7 +31,12 @@ import {
   discoveryExtensions,
   discoveryResourceInfo,
 } from "./discovery.js";
-import { type FacilitatorClient, stellarCaip2, toPaymentRequirements } from "./facilitator.js";
+import {
+  DEFAULT_MAX_TIMEOUT_SECONDS,
+  type FacilitatorClient,
+  stellarCaip2,
+  toPaymentRequirements,
+} from "./facilitator.js";
 import {
   type GateRejection,
   gateRejection,
@@ -48,10 +54,22 @@ import {
   PAYMENT_SIGNATURE_HEADER,
   readHeader,
   readMppCredential,
+  TOLLWAY_CHANNEL_HEADER,
   TOLLWAY_QUOTE_HEADER,
   TOLLWAY_RECEIPT_HEADER,
 } from "./headers.js";
+import {
+  type MppChannelHandler,
+  type MppChannelRefusal,
+  parseMppChannelCredential,
+} from "./mpp-channel.js";
 import type { MppChargeHandler } from "./mpp-charge.js";
+import {
+  createOfferReceiptIssuer,
+  OFFER_RECEIPT_EXTENSION_KEY,
+  type OfferReceiptIssuer,
+  type OfferReceiptOptions,
+} from "./offer-receipt.js";
 import {
   matchAcceptedOption,
   type ResolvedPaymentOption,
@@ -174,6 +192,15 @@ type PaywallCommon = {
   discovery?: DiscoveryDeclaration;
   /** Bind the request body into the resource identity. See {@link BodyBinding}. */
   bindBody?: BodyBinding;
+  /**
+   * Issues the x402 offer-receipt extension (#172), signed with
+   * `PaywallDeps.signer`: a signed offer per x402 requirement in the 402's
+   * `extensions["offer-receipt"]`, and a signed receipt in the settled x402
+   * payment's PAYMENT-RESPONSE. Off by default, and responses are then
+   * unchanged. An unusable signer or validity fails at `createPaywall`.
+   * See `OfferReceiptOptions` and docs/receipt-format.md.
+   */
+  offerReceipt?: boolean | OfferReceiptOptions;
 };
 
 /** A paywall with one payment option, set with the top-level fields. */
@@ -342,6 +369,7 @@ export type PaywallDeps = {
    */
   facilitator?: FacilitatorClient;
   mppChargeHandler?: MppChargeHandler;
+  mppChannelHandler?: MppChannelHandler;
   router?: ModelRouter;
   cache?: SettlementCache;
   /**
@@ -470,6 +498,18 @@ export type PaywallDeps = {
   receiptVersion?: 1 | 2;
 };
 
+/**
+ * What a handler's settle returns. x402 and mpp-charge settle a transaction;
+ * mpp-channel anchors the receipt at a channel commitment instead. A
+ * rejection may name its status (a stale voucher is the payer's problem, a
+ * 402); without one it is a 502, the upstream refusing.
+ */
+type HandlerSettlement =
+  | { settled: true; txHash: string }
+  | { settled: true; settlement: SettlementRef; txHash?: string }
+  | { settled: false; reason: string }
+  | ({ settled: false } & MppChannelRefusal);
+
 type Handler<TPayment> = {
   idempotencyKey?(input: { payment: TPayment }): Promise<string | undefined>;
   verify(input: {
@@ -481,7 +521,7 @@ type Handler<TPayment> = {
     offer: PaymentOffer;
     payer: string;
     nonce: string;
-  }): Promise<{ settled: true; txHash: string } | { settled: false; reason: string }>;
+  }): Promise<HandlerSettlement>;
 };
 
 type RejectedOutcome = Extract<GateOutcome, { kind: "rejected" }>;
@@ -679,7 +719,10 @@ async function priceRequest(
  * PAYMENT-RESPONSE, and Tollway's signed receipt in TOLLWAY-RECEIPT. The
  * facilitator settled the payment, so `success` is always true here.
  */
-function settlementHeaders(signed: SignedReceipt): Record<string, string> {
+function settlementHeaders(
+  signed: SignedReceipt,
+  extensions?: Record<string, unknown>,
+): Record<string, string> {
   const { settlement, network } = signed.receipt;
   const headers: Record<string, string> = { [TOLLWAY_RECEIPT_HEADER]: encodeHeader(signed) };
   if (settlement.kind === "transaction") {
@@ -687,9 +730,28 @@ function settlementHeaders(signed: SignedReceipt): Record<string, string> {
       success: true,
       transaction: settlement.txHash,
       network: stellarCaip2(network),
+      ...(extensions ? { extensions } : {}),
     });
   }
   return headers;
+}
+
+/**
+ * The settled headers with the offer-receipt extension added (#172). The
+ * extension answers an x402 offer, so only an x402 settlement on a route
+ * that opted in gets one; every other settlement takes the synchronous path,
+ * so the extension costs nothing where it is off.
+ */
+async function settlementHeadersFor(
+  signed: SignedReceipt,
+  context: Pick<SettlementContext, "offerReceipt">,
+): Promise<Record<string, string>> {
+  if (!context.offerReceipt || signed.receipt.model !== "x402") {
+    return settlementHeaders(signed);
+  }
+  return settlementHeaders(signed, {
+    [OFFER_RECEIPT_EXTENSION_KEY]: await context.offerReceipt.receipt(signed),
+  });
 }
 
 /** The shared result of one settlement attempt, before it is checked against an offer. */
@@ -719,6 +781,8 @@ export type InFlightSettlementResult = SettlementResult;
 type SettlementContext = {
   signer: ReceiptSigner;
   receiptVersion: 1 | 2;
+  /** Present only for a route that opted in to the offer-receipt extension. */
+  offerReceipt?: OfferReceiptIssuer;
   cache?: SettlementCache;
   onCacheError?: (error: Error, key: string) => void;
   archive?: PaymentReceiptArchive;
@@ -1070,7 +1134,7 @@ async function settleWithHandler<TPayment>(
     const knownKey = `${model}:${knownNonce}`;
     const pending = context.inFlight.get(knownKey);
     if (pending) {
-      return toOutcome(await awaitPending(pending), offer, model, method, true);
+      return toOutcome(await awaitPending(pending), offer, model, method, true, context);
     }
     // The cache first, then the durable archive for a payment whose cache
     // entry has expired (#162). Either hit goes through toOutcome's offer
@@ -1083,7 +1147,7 @@ async function settleWithHandler<TPayment>(
         method: cached.method,
         replayed: true,
       };
-      return toOutcome(replay, offer, model, method, false);
+      return toOutcome(replay, offer, model, method, false, context);
     }
   }
   // The caller allows only a replay here (an expired quote): a payment that
@@ -1157,7 +1221,7 @@ async function settleWithHandler<TPayment>(
   // written with no await in between, so two requests cannot both miss it.
   const pending = context.inFlight.get(key);
   if (pending) {
-    return toOutcome(await awaitPending(pending), offer, model, method, true);
+    return toOutcome(await awaitPending(pending), offer, model, method, true, context);
   }
 
   // The in-flight slot is claimed before anything awaits, so a second copy
@@ -1182,7 +1246,14 @@ async function settleWithHandler<TPayment>(
   try {
     const result = await attempt;
     if (!result.ok && result.hold) hold = result.hold;
-    return reported(report, await toOutcome(result, offer, model, method, false));
+    const outcome = await toOutcome(result, offer, model, method, false, context);
+    // A handler that refuses at settle time (an mpp-channel voucher that lost
+    // a race, for example) gets the same fresh challenge a refusal at verify
+    // time carries.
+    if (outcome.kind === "rejected" && outcome.code === "payment-invalid" && !outcome.headers) {
+      return reported(report, { ...outcome, headers: await freshChallengeHeaders() });
+    }
+    return reported(report, outcome);
   } catch (error) {
     if (error instanceof AmbiguousSettlementFailure) hold = error.hold;
     report?.(undefined);
@@ -1296,6 +1367,7 @@ async function toOutcome(
   model: SettlementModel,
   method: string,
   waited: boolean,
+  context: Pick<SettlementContext, "offerReceipt">,
 ): Promise<GateOutcome> {
   if (!result.ok) {
     return result.outcome;
@@ -1320,7 +1392,10 @@ async function toOutcome(
   const outcome: GateOutcome = {
     kind: "settled",
     status: 200,
-    headers: settlementHeaders(result.receipt),
+    headers:
+      context.offerReceipt && result.receipt.receipt.model === "x402"
+        ? await settlementHeadersFor(result.receipt, context)
+        : settlementHeaders(result.receipt),
     receipt: result.receipt,
     replayed: waited || result.replayed,
   };
@@ -1561,7 +1636,7 @@ async function settleAndRecord<TPayment>(
   // The hold starts with the call, so it bounds how long after sending the
   // payment can stay ambiguous. A definite answer in time ends it at once.
   const hold = startHold(context.ambiguousHoldMs);
-  let settlement: { settled: true; txHash: string } | { settled: false; reason: string };
+  let settlement: HandlerSettlement;
   try {
     settlement = await withDeadline(
       handler.settle({
@@ -1615,13 +1690,23 @@ async function settleAndRecord<TPayment>(
   if (!settlement.settled) {
     return {
       ok: false,
-      outcome: gateRejection("settlement-failed", "the facilitator refused to settle the payment", {
-        upstreamReason: settlement.reason,
-      }),
+      outcome:
+        "code" in settlement
+          ? channelRefusal(settlement, context)
+          : gateRejection("settlement-failed", "the facilitator refused to settle the payment", {
+              upstreamReason: settlement.reason,
+            }),
     };
   }
 
-  const receipt = await receiptFor(settlement.txHash, offer, model, method, verification, context);
+  const receipt = await receiptFor(
+    settlementRef(settlement),
+    offer,
+    model,
+    method,
+    verification,
+    context,
+  );
 
   // The payment has settled, so a failed write must not cost the payer the
   // receipt. The error goes on the outcome and to onCacheError instead.
@@ -1629,6 +1714,12 @@ async function settleAndRecord<TPayment>(
   return cacheError
     ? { ok: true, receipt, method, replayed: false, cacheError }
     : { ok: true, receipt, method, replayed: false };
+}
+
+function settlementRef(settlement: Extract<HandlerSettlement, { settled: true }>): SettlementRef {
+  return "settlement" in settlement
+    ? settlement.settlement
+    : { kind: "transaction", txHash: settlement.txHash };
 }
 
 /**
@@ -1641,7 +1732,7 @@ async function settleAndRecord<TPayment>(
  * until the operator switches (see `PaywallDeps.receiptVersion`).
  */
 async function receiptFor(
-  txHash: string,
+  settlement: SettlementRef,
   offer: PaymentOffer,
   model: SettlementModel,
   method: string,
@@ -1658,7 +1749,7 @@ async function receiptFor(
       asset: offer.asset,
       resource: offer.resource,
       model,
-      settlement: { kind: "transaction", txHash },
+      settlement,
       network: offer.network,
       ...v2,
     }),
@@ -1675,7 +1766,7 @@ async function receiptFor(
  * throws: the request that timed out has already been answered.
  */
 async function settleLateAnswer(
-  late: LateAnswer<{ settled: true; txHash: string } | { settled: false; reason: string }>,
+  late: LateAnswer<HandlerSettlement>,
   hold: SettlementHold,
   offer: PaymentOffer,
   model: SettlementModel,
@@ -1691,7 +1782,14 @@ async function settleLateAnswer(
   if (late.value.settled && (context.cache || context.archive)) {
     let receipt: SignedReceipt;
     try {
-      receipt = await receiptFor(late.value.txHash, offer, model, method, verification, context);
+      receipt = await receiptFor(
+        settlementRef(late.value),
+        offer,
+        model,
+        method,
+        verification,
+        context,
+      );
     } catch (error) {
       report(context.onCacheError, asError(error, "late settlement receipt failed"), key);
       return;
@@ -1758,6 +1856,17 @@ function offerOptions(
 }
 
 /**
+ * How long, in seconds, the gate keeps honouring the terms of one 402: the
+ * route's `maxTimeoutSeconds`, and for a dynamic price no longer than the
+ * quote it priced. A signed offer may not outlive it.
+ */
+function offerAcceptanceWindow(config: PaywallConfig): number {
+  const timeout = config.maxTimeoutSeconds ?? DEFAULT_MAX_TIMEOUT_SECONDS;
+  if (typeof config.amount !== "function") return timeout;
+  return Math.min(timeout, config.quoteTtlSeconds ?? DEFAULT_QUOTE_TTL_SECONDS);
+}
+
+/**
  * The 402 for a request with no payment. It carries the x402 V2
  * `PaymentRequired` in the PAYMENT-REQUIRED header and as the JSON body.
  * When the route accepts mpp-charge, the MPP challenge `mppx` built (its
@@ -1771,6 +1880,7 @@ async function paymentRequired(
   mppChargeHandler: MppChargeHandler | undefined,
   config: PaywallConfig,
   quote: string | undefined,
+  context: Pick<SettlementContext, "offerReceipt" | "clock">,
 ): Promise<Extract<GateOutcome, { kind: "payment-required" }>> {
   const [primary] = offered;
   if (!primary) throw new TypeError("a paywall offers at least one payment option");
@@ -1784,9 +1894,20 @@ async function paymentRequired(
     // Every option, in the service's preference order (#158).
     accepts: offered.map((option) => option.requirements),
   };
-  // Only a route that opts in publishes anything (#154).
-  if (config.discovery) {
-    challenge.extensions = discoveryExtensions(config.discovery, request);
+  // Only a route that opts in publishes anything (#154, #172).
+  const extensions: Record<string, unknown> = {
+    ...(config.discovery ? discoveryExtensions(config.discovery, request) : {}),
+  };
+  // Offers are signed only for requirements the gate settles itself.
+  if (context.offerReceipt && acceptedModels.includes("x402")) {
+    extensions[OFFER_RECEIPT_EXTENSION_KEY] = await context.offerReceipt.offers(
+      challenge.resource?.url ?? offer.resource,
+      challenge.accepts,
+      context.clock(),
+    );
+  }
+  if (Object.keys(extensions).length > 0) {
+    challenge.extensions = extensions;
   }
   const headers: Record<string, string> = {
     [PAYMENT_REQUIRED_HEADER]: encodePaymentRequiredHeader(challenge),
@@ -1883,6 +2004,71 @@ function bodyTooLarge(maxBytes: number): GateOutcome {
     "body-too-large",
     `the request body is larger than this route's ${maxBytes} byte limit`,
   );
+}
+
+/**
+ * Adds the MPP channel challenge to a 402 (#173). A channel challenge names
+ * one channel contract, so it is only issued to an agent that says which
+ * channel it pays from, in TOLLWAY-CHANNEL. The handler checks the channel on
+ * chain first; a channel that fails is refused, not challenged.
+ */
+async function withChannelChallenge(
+  outcome: Extract<GateOutcome, { kind: "payment-required" }>,
+  offer: PaymentOffer,
+  request: TollwayRequest,
+  acceptedModels: SettlementModel[],
+  mppChannelHandler: MppChannelHandler | undefined,
+  context: Pick<SettlementContext, "facilitatorRetryAfter" | "settlementInProgress">,
+): Promise<GateOutcome> {
+  const channelId = readHeader(request.headers, TOLLWAY_CHANNEL_HEADER);
+  if (!channelId || !mppChannelHandler || !acceptedModels.includes("mpp-channel")) {
+    return outcome;
+  }
+  const mppChannel = await mppChannelHandler.challenge({
+    offer,
+    request: { method: request.method, url: request.url },
+    channelId: channelId.trim(),
+  });
+  if (!mppChannel.ok) return channelRefusal(mppChannel, context);
+  const headers = { ...outcome.headers };
+  for (const [name, value] of Object.entries(mppChannel.headers)) {
+    if (BODY_HEADERS.has(name.toLowerCase())) continue;
+    // Both MPP methods answer in WWW-Authenticate; HTTP allows several
+    // challenges in one header, separated by commas.
+    const existing = Object.keys(headers).find((key) => key.toLowerCase() === name.toLowerCase());
+    if (existing && name.toLowerCase() === "www-authenticate") {
+      headers[existing] = `${headers[existing]}, ${value}`;
+    } else {
+      headers[name] = value;
+    }
+  }
+  return { ...outcome, headers };
+}
+
+/**
+ * The rejection for an mpp-channel refusal. The handler names the gate code;
+ * the reason starts with the channel code listed in docs/mpp-channels.md.
+ */
+function channelRefusal(
+  refusal: MppChannelRefusal,
+  context: Pick<SettlementContext, "facilitatorRetryAfter" | "settlementInProgress">,
+): RejectedOutcome {
+  switch (refusal.code) {
+    case "payment-invalid":
+      return gateRejection("payment-invalid", "the payment was refused", {
+        upstreamReason: refusal.reason,
+      });
+    case "channel-refused":
+      return gateRejection("channel-refused", refusal.reason);
+    case "channel-rate-limited":
+      return gateRejection("channel-rate-limited", refusal.reason, {
+        headers: { "retry-after": retryAfterSeconds(refusal.retryAfterMs ?? 1000) },
+      });
+    case "settlement-in-progress":
+      return { ...context.settlementInProgress, reason: refusal.reason };
+    case "facilitator-unavailable":
+      return facilitatorUnavailable(refusal.reason, context.facilitatorRetryAfter);
+  }
 }
 
 /**
@@ -2200,9 +2386,9 @@ export function createPaidCall(config: PaidCallConfig, deps: PaidCallDeps): Paid
 }
 
 /**
- * Builds the gate from a paywall config. It settles x402 per-request and
- * mpp-charge; a routing decision for another model is rejected rather than
- * mishandled. See docs/design.md, "Build plan", Phase 1.
+ * Builds the gate from a paywall config. It settles x402 per-request,
+ * mpp-charge, and mpp-channel vouchers. See docs/design.md, "Build plan",
+ * Phases 1 and 2.
  */
 export function createPaywall(config: PaywallConfig, deps: PaywallDeps): Gate {
   return createPaywallWithInFlight(config, deps, new Map());
@@ -2227,7 +2413,19 @@ export function createPaywallWithInFlight(
   if (config.discovery) checkDiscoveryDeclaration(config.discovery);
   if (config.bindBody) checkBodyBinding(config.bindBody);
   const acceptedModels = config.models ?? ["x402"];
-  const context = settlementContext(deps, inFlight);
+  // The offer-receipt extension (#172) answers an HTTP 402, so only the gate
+  // adds it to the shared settlement context.
+  const offerReceipt = config.offerReceipt
+    ? createOfferReceiptIssuer(
+        deps.signer,
+        config.offerReceipt === true ? {} : config.offerReceipt,
+        offerAcceptanceWindow(config),
+      )
+    : undefined;
+  const context: SettlementContext = {
+    ...settlementContext(deps, inFlight),
+    ...(offerReceipt ? { offerReceipt } : {}),
+  };
   const clock = context.clock;
   const options = resolvePaymentOptions(config, deps.facilitator, acceptedModels);
   const prevalidation = deps.paymentPrevalidation ?? {};
@@ -2267,9 +2465,10 @@ export function createPaywallWithInFlight(
     }
 
     const signatureHeader = readHeader(request.headers, PAYMENT_SIGNATURE_HEADER);
-    const mppCredential = acceptedModels.includes("mpp-charge")
-      ? readMppCredential(request.headers)
-      : undefined;
+    const mppCredential =
+      acceptedModels.includes("mpp-charge") || acceptedModels.includes("mpp-channel")
+        ? readMppCredential(request.headers)
+        : undefined;
 
     // The x402 payment is decoded before pricing, because a dynamic-price
     // quote comes back inside it, in `accepted.extra.tollwayQuote`.
@@ -2336,7 +2535,26 @@ export function createPaywallWithInFlight(
     const primary = offered[0] as OfferedOption;
 
     const challenge = (): Promise<Extract<GateOutcome, { kind: "payment-required" }>> =>
-      paymentRequired(offered, request, acceptedModels, deps.mppChargeHandler, config, quote);
+      paymentRequired(
+        offered,
+        request,
+        acceptedModels,
+        deps.mppChargeHandler,
+        config,
+        quote,
+        context,
+      );
+    // The 402 for a request with no payment: the challenge, plus the channel
+    // challenge when the agent names its channel.
+    const channelChallenge = async (): Promise<GateOutcome> =>
+      withChannelChallenge(
+        await challenge(),
+        primary.offer,
+        request,
+        acceptedModels,
+        deps.mppChannelHandler,
+        context,
+      );
     // The challenge a refused payment carries, so the agent can pay again.
     const challengeHeaders = async (): Promise<Record<string, string>> =>
       (await challenge()).headers;
@@ -2348,12 +2566,37 @@ export function createPaywallWithInFlight(
     // A dynamic price is only paid against a quote this gate issued: a
     // missing, expired, tampered or mismatched one gets a fresh 402.
     if (typeof config.amount === "function" && candidateQuote !== quote) {
-      return challenge();
+      return channelChallenge();
     }
 
     // An MPP credential answers an MPP challenge, so the agent has already
-    // chosen the model; the router is not asked again.
+    // chosen the model; the router is not asked again. Only a route that
+    // accepts mpp-channel looks inside the credential to tell the methods
+    // apart; a charge-only route hands it straight to the charge handler,
+    // which decodes it once and rejects any other method.
     if (mppCredential) {
+      if (acceptedModels.includes("mpp-channel")) {
+        const parsed = parseMppChannelCredential(mppCredential);
+        const isChannel = parsed.ok || parsed.kind === "invalid-channel";
+        if (isChannel || !acceptedModels.includes("mpp-charge")) {
+          if (!parsed.ok) {
+            return gateRejection("payment-malformed", parsed.reason);
+          }
+          if (!deps.mppChannelHandler) {
+            return gateRejection("handler-not-configured", "mpp-channel handler not configured");
+          }
+          return settleWithHandler(
+            parsed.payment,
+            primary.offer,
+            "mpp-channel",
+            method,
+            deps.mppChannelHandler,
+            context,
+            { freshChallengeHeaders: challengeHeaders },
+          );
+        }
+      }
+
       if (!deps.mppChargeHandler) {
         return gateRejection("handler-not-configured", "mpp-charge handler not configured");
       }
@@ -2371,7 +2614,7 @@ export function createPaywallWithInFlight(
     }
 
     if (!x402Payment) {
-      return challenge();
+      return channelChallenge();
     }
 
     // The payer names the option it chose in `accepted`, which it controls,
@@ -2419,6 +2662,7 @@ export function createPaywallWithInFlight(
           deps.mppChargeHandler,
           config,
           fresh,
+          context,
         );
       };
       const payload = x402Payment;
@@ -2456,16 +2700,10 @@ export function createPaywallWithInFlight(
       );
     }
 
-    if (decision.model === "mpp-charge") {
-      return gateRejection(
-        "payment-malformed",
-        "mpp-charge payments carry an Authorization: Payment credential, not PAYMENT-SIGNATURE",
-      );
-    }
-
+    // Both MPP models answer with an Authorization: Payment credential.
     return gateRejection(
-      "model-not-supported",
-      `model "${decision.model}" routing is selected but settlement is not implemented yet`,
+      "payment-malformed",
+      `${decision.model} payments carry an Authorization: Payment credential, not PAYMENT-SIGNATURE`,
     );
   };
 }

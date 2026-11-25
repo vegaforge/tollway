@@ -82,13 +82,20 @@ export type MppChargePayment = {
  */
 export type MppChannelPayment = {
   model: "mpp-channel";
+  /** The channel contract (C...) the voucher draws on, named by the challenge. */
   channelId: string;
-  /** Position in the channel's cumulative commitment stream. */
-  sequence: number;
-  /** Total committed so far, as an integer string. Cumulative, not a delta. */
+  /** Total committed so far, as an integer string in base units. Cumulative, not a delta. */
   cumulativeAmount: string;
-  /** TODO: the funder-signed commitment, in @stellar/mpp's encoding. */
-  commitment: string;
+  /**
+   * The funder's Ed25519 signature over the channel's commitment bytes for
+   * `cumulativeAmount` (what the contract's `prepare_commitment` returns), as
+   * 128 lowercase hex characters, the encoding `@stellar/mpp` uses.
+   */
+  signature: string;
+  /** `voucher` pays for one request; `close` also asks the service to close the channel. */
+  action: "voucher" | "close";
+  /** The `Authorization: Payment ...` credential the agent sent, verbatim. */
+  credential: string;
 };
 
 /** The payment an agent submits, whichever model it settles through. Narrow on `model`. */

@@ -42,7 +42,11 @@ export type GateErrorCode =
   /** The route binds the body and does not accept its content type or encoding. */
   | "body-not-supported"
   /** The route binds the body, but the adapter did not pass it to the gate. */
-  | "body-not-provided";
+  | "body-not-provided"
+  /** The MPP channel named in TOLLWAY-CHANNEL failed its on-chain checks or no longer takes vouchers (#173). */
+  | "channel-refused"
+  /** Too many channel registrations or channel closes; try again after Retry-After (#173, #174). */
+  | "channel-rate-limited";
 
 /** What a client may do after a rejection, and what the response carries. */
 export type GateErrorSpec = {
@@ -90,6 +94,8 @@ export const GATE_ERRORS: Readonly<Record<GateErrorCode, GateErrorSpec>> = {
   "body-too-large": { status: 413, retrySamePayment: false, headers: [] },
   "body-not-supported": { status: 415, retrySamePayment: false, headers: [] },
   "body-not-provided": { status: 500, retrySamePayment: false, headers: [] },
+  "channel-refused": { status: 402, retrySamePayment: false, headers: [] },
+  "channel-rate-limited": { status: 429, retrySamePayment: true, headers: ["retry-after"] },
 };
 
 /** Every code, in the order the docs list them. */
