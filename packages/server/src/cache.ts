@@ -21,6 +21,13 @@ export interface SettlementCache {
   get(key: string): Promise<SettlementEntry | undefined>;
   set(key: string, entry: SettlementEntry): Promise<void>;
   /**
+   * Stores one entry under several keys, all or none. The gate uses it when
+   * a payment has both an envelope digest and a payment identifier (#153), so
+   * a lookup by either finds the same receipt. A cache without it gets one
+   * `set` per key, in order.
+   */
+  setMany?(keys: readonly string[], entry: SettlementEntry): Promise<void>;
+  /**
    * Takes an exclusive settlement lock on `key` for `ttlMs`. Resolves the
    * lock on success, or false if another holder has it.
    */
@@ -119,6 +126,16 @@ export function createInMemorySettlementCache(
     }
   }
 
+  // Synchronous, so setMany writes every key with no await in between.
+  function store(key: string, entry: SettlementEntry, at: number): void {
+    // Deleting first moves an overwritten key to the newest end, and keeps
+    // an overwrite from evicting some other entry at the cap.
+    entries.delete(key);
+    sweepExpired(at);
+    evictOldestWhileFull();
+    entries.set(key, { entry, expiresAt: at + ttlMs });
+  }
+
   return {
     async get(key) {
       const entry = entries.get(key);
@@ -132,13 +149,11 @@ export function createInMemorySettlementCache(
       return entry.entry;
     },
     async set(key, entry) {
+      store(key, entry, now());
+    },
+    async setMany(keys, entry) {
       const at = now();
-      // Deleting first moves an overwritten key to the newest end, and keeps
-      // an overwrite from evicting some other entry at the cap.
-      entries.delete(key);
-      sweepExpired(at);
-      evictOldestWhileFull();
-      entries.set(key, { entry, expiresAt: at + ttlMs });
+      for (const key of keys) store(key, entry, at);
     },
   };
 }
@@ -187,14 +202,23 @@ const RENEW_IF_HELD = `if redis.call("GET", KEYS[1]) == ARGV[1] then
 end
 return 0`;
 
+// Writes one value under every key with the same expiry, in one atomic step,
+// so no reader sees the payment under one key and not the other.
+const SET_ALL = `for _, key in ipairs(KEYS) do
+  redis.call("SET", key, ARGV[1], "EX", ARGV[2])
+end
+return #KEYS`;
+
 /**
- * Reads a stored settlement. The current shape is exactly
+ * Reads a stored settlement; the payment receipt archive reads with it too,
+ * so both shared stores validate at the boundary the same way. The current
+ * shape is exactly
  * `{ receipt, method }`. A bare receipt is what an older version stored; it
  * is returned with `method: null` so the gate refuses it rather than
  * treating it as a miss and settling the payment again. Anything else is a
  * miss.
  */
-function parseStoredEntry(candidate: unknown): SettlementEntry | undefined {
+export function parseStoredEntry(candidate: unknown): SettlementEntry | undefined {
   if (isRecord(candidate) && Object.keys(candidate).sort().join(",") === "method,receipt") {
     const receipt = signedReceiptSchema.safeParse(candidate.receipt);
     const { method } = candidate;
@@ -265,6 +289,16 @@ export function createRedisSettlementCache(
     },
     async set(key, entry) {
       await client.set(`${keyPrefix}${key}`, JSON.stringify(entry), "EX", ttlSeconds);
+    },
+    async setMany(keys, entry) {
+      if (keys.length === 0) return;
+      await client.eval(
+        SET_ALL,
+        keys.length,
+        ...keys.map((key) => `${keyPrefix}${key}`),
+        JSON.stringify(entry),
+        ttlSeconds,
+      );
     },
     async acquire(key, lockTtlMs) {
       const token = crypto.randomUUID();

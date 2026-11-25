@@ -737,6 +737,83 @@ describe("observability hub: durable webhook outbox", () => {
       }),
     ).resolves.toEqual({ valid: true });
   });
+
+  it("sends no signature header for a subscription without a secret", async () => {
+    const fetcher = vi.fn().mockResolvedValue(okResponse());
+    const hub = createObservabilityHub({
+      sleep: noSleep,
+      fetch: fetcher,
+      webhooks: [{ url: "https://a.test/hook" }],
+    });
+
+    await hub.emit(makeEvent("receipt.created"));
+
+    const [, init] = fetcher.mock.calls[0] ?? [];
+    const headers = (init?.headers ?? {}) as Record<string, string>;
+    expect(Object.keys(headers).map((name) => name.toLowerCase())).not.toContain(
+      "tollway-signature",
+    );
+  });
+
+  it("signs each inline retry with a fresh timestamp over the same body", async () => {
+    vi.useFakeTimers({ toFake: ["Date"] });
+    try {
+      vi.setSystemTime(1_800_000_000_000);
+      const fetcher = vi
+        .fn()
+        .mockResolvedValueOnce(new Response(null, { status: 500 }))
+        .mockResolvedValueOnce(okResponse());
+      const hub = createObservabilityHub({
+        // Each backoff moves the clock on by ten seconds.
+        sleep: async () => {
+          vi.setSystemTime(Date.now() + 10_000);
+        },
+        fetch: fetcher,
+        webhooks: [{ url: "https://a.test/hook", secret: "whsec_inline" }],
+      });
+
+      await hub.emit(makeEvent("receipt.created"));
+
+      expect(fetcher).toHaveBeenCalledTimes(2);
+      const sent = fetcher.mock.calls.map(([, init]) => ({
+        body: init?.body as string,
+        header: ((init?.headers ?? {}) as Record<string, string>)["Tollway-Signature"] ?? "",
+      }));
+      const stamps = sent.map(({ header }) => Number(/^t=(\d+),/.exec(header)?.[1]));
+      expect(stamps[1]).toBe((stamps[0] ?? 0) + 10);
+      expect(sent[1]?.body).toBe(sent[0]?.body);
+      for (const { body, header } of sent.slice(1)) {
+        await expect(
+          verifyWebhookSignature({ payload: body, header, secret: "whsec_inline" }),
+        ).resolves.toEqual({ valid: true });
+      }
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("keeps the secret out of a delivery failure", async () => {
+    const onDeliveryFailure = vi.fn();
+    const hub = createObservabilityHub({
+      sleep: noSleep,
+      fetch: vi.fn().mockResolvedValue(new Response("nope", { status: 500 })),
+      onDeliveryFailure,
+      webhooks: [{ url: "https://a.test/hook", secret: "whsec_never_logged" }],
+    });
+
+    const report = await hub.emit(makeEvent("receipt.created"));
+
+    expect(report.failures).toHaveLength(1);
+    expect(onDeliveryFailure).toHaveBeenCalledTimes(1);
+    const failure = report.failures[0];
+    const exposed = JSON.stringify({
+      failure,
+      message: failure?.error.message,
+      stack: failure?.error.stack,
+      reported: onDeliveryFailure.mock.calls,
+    });
+    expect(exposed).not.toContain("whsec_never_logged");
+  });
 });
 
 describe("observability hub: outbox failure handling", () => {

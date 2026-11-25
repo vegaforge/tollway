@@ -12,6 +12,9 @@ import { createMockFacilitator, type FacilitatorClient } from "./facilitator.js"
 import {
   createPaywall,
   type GateOutcome,
+  type PaymentObserver,
+  type PaymentObserverEvent,
+  type PaymentObserverMetric,
   type PaywallConfig,
   type TollwayRequest,
 } from "./gate.js";
@@ -320,6 +323,9 @@ describe("createPaywall", () => {
     let calls = 0;
     const seenAmounts: string[] = [];
     const facilitator: FacilitatorClient = {
+      // A stub that, like the mock, takes non-Stellar test payments, so the
+      // gate's local Stellar pre-validation (#159) is not what this tests.
+      acceptsMockPayments: true,
       async verify({ offer }) {
         seenAmounts.push(offer.amount);
         return { valid: true, payer: "GPAYER", nonce: "NONCE-DYNAMIC" };
@@ -429,7 +435,8 @@ describe("createPaywall", () => {
         const challenge = await gate(baseRequest);
         expect(challenge).toMatchObject({ kind: "rejected", status: 500 });
         if (challenge.kind !== "rejected") return;
-        expect(challenge.reason).toMatch(/^invalid-amount: dynamic price/);
+        expect(challenge.code).toBe("price-unavailable");
+        expect(challenge.reason).toMatch(/^dynamic price/);
 
         const paid = await gate({
           ...baseRequest,
@@ -771,6 +778,7 @@ describe("createPaywall", () => {
       expect(outcome).toEqual({
         kind: "rejected",
         status: 400,
+        code: "payment-malformed",
         reason:
           "mpp-charge payments carry an Authorization: Payment credential, not PAYMENT-SIGNATURE",
       });
@@ -781,7 +789,10 @@ describe("createPaywall", () => {
 describe("TM-02 cross-offer replay", () => {
   const headers = { [PAYMENT_SIGNATURE_HEADER]: paymentHeader() };
 
-  function gateFor(overrides: Partial<PaywallConfig>, cache: SettlementCache) {
+  function gateFor(
+    overrides: Partial<Extract<PaywallConfig, { amount: unknown }>>,
+    cache: SettlementCache,
+  ) {
     return createPaywall(
       { ...config, ...overrides },
       {
@@ -802,6 +813,7 @@ describe("TM-02 cross-offer replay", () => {
     expect(replay).toEqual({
       kind: "rejected",
       status: 409,
+      code: "offer-mismatch",
       reason: "payment already settled for a different offer",
     });
   });
@@ -811,16 +823,26 @@ describe("TM-02 cross-offer replay", () => {
     const first = await gateFor({ resource: "/a" }, cache)({ ...baseRequest, headers });
     expect(first.kind).toBe("settled");
 
-    const replay = await gateFor(
-      { resource: "/a", amount: "99999999" },
-      cache,
-    )({
+    const repriced = gateFor({ resource: "/a", amount: "99999999" }, cache);
+    // As paid, the payment's accepted terms name the old amount, which this
+    // offer does not list: refused before any lookup (#158).
+    expect(await repriced({ ...baseRequest, headers })).toMatchObject({
+      kind: "rejected",
+      status: 402,
+      code: "payment-invalid",
+    });
+    // With accepted rewritten to the new amount, the same signed payment
+    // reaches the cached receipt, whose binding refuses it.
+    const rewritten = decodePaymentSignatureHeader(headers[PAYMENT_SIGNATURE_HEADER]);
+    rewritten.accepted = { ...rewritten.accepted, amount: "99999999" };
+    const replay = await repriced({
       ...baseRequest,
-      headers,
+      headers: { [PAYMENT_SIGNATURE_HEADER]: encodePaymentSignatureHeader(rewritten) },
     });
     expect(replay).toEqual({
       kind: "rejected",
       status: 409,
+      code: "offer-mismatch",
       reason: "payment already settled for a different offer",
     });
   });
@@ -958,6 +980,7 @@ describe("TM-04 shared-lock duplicate settlement", () => {
     expect(outcome).toEqual({
       kind: "rejected",
       status: 409,
+      code: "settlement-in-progress",
       reason: "settlement in progress",
       // Issue #203: Retry-After is what tells a client this 409 is the same
       // payment still settling, safe to resend, unlike an offer mismatch.
@@ -1007,6 +1030,7 @@ describe("TM-04 shared-lock duplicate settlement", () => {
       expect(second).toEqual({
         kind: "rejected",
         status: 409,
+        code: "settlement-in-progress",
         reason: "settlement in progress",
         // Issue #203: Retry-After is what tells a client this 409 is the same
         // payment still settling, safe to resend, unlike an offer mismatch.
@@ -1138,6 +1162,7 @@ describe("method binding", () => {
     expect(write).toEqual({
       kind: "rejected",
       status: 409,
+      code: "offer-mismatch",
       reason: "payment already settled for a different offer",
     });
     expect(calls.settle).toBe(1);
@@ -1187,7 +1212,7 @@ describe("receipt v2 issuance and binding (#166)", () => {
   const headers = { [PAYMENT_SIGNATURE_HEADER]: paymentHeader() };
 
   function gateFor(
-    overrides: Partial<PaywallConfig>,
+    overrides: Partial<Extract<PaywallConfig, { amount: unknown }>>,
     cache: SettlementCache,
     receiptVersion?: 1 | 2,
   ) {
@@ -1246,6 +1271,7 @@ describe("receipt v2 issuance and binding (#166)", () => {
     expect(replay).toEqual({
       kind: "rejected",
       status: 409,
+      code: "offer-mismatch",
       reason: "payment already settled for a different offer",
     });
   });
@@ -1282,6 +1308,259 @@ describe("receipt v2 issuance and binding (#166)", () => {
         receiptVersion: 3 as unknown as 2,
       }),
     ).toThrow(/receiptVersion must be 1 or 2/);
+  });
+});
+
+describe("createPaywall observability (#106)", () => {
+  function recordingObserver() {
+    const metrics: PaymentObserverMetric[] = [];
+    const events: PaymentObserverEvent[] = [];
+    const observer: PaymentObserver = {
+      record(metric) {
+        metrics.push(metric);
+      },
+      async emit(event) {
+        events.push(event);
+        return undefined;
+      },
+    };
+    return { observer, metrics, events };
+  }
+
+  function observedGate(
+    observer: PaymentObserver,
+    overrides: Partial<ReturnType<typeof createMockFacilitator>> = {},
+  ) {
+    let now = 1_000;
+    return createPaywall(
+      { ...config, models: ["x402"] },
+      {
+        signer,
+        facilitator: { ...createMockFacilitator(), ...overrides },
+        cache: createInMemorySettlementCache(),
+        observer,
+        clock: () => now,
+        onObserverError: () => {
+          now += 25;
+        },
+      },
+    );
+  }
+
+  it("records a settled metric and emits receipt.created with the receipt fields", async () => {
+    const { observer, metrics, events } = recordingObserver();
+    const clockValue = 1_000;
+    const gate = createPaywall(
+      { ...config, models: ["x402"] },
+      {
+        signer,
+        facilitator: createMockFacilitator(),
+        cache: createInMemorySettlementCache(),
+        observer,
+        clock: () => clockValue,
+      },
+    );
+    const outcome = await gate({
+      ...baseRequest,
+      headers: { [PAYMENT_SIGNATURE_HEADER]: paymentHeader() },
+    });
+    expect(outcome.kind).toBe("settled");
+    expect(metrics).toHaveLength(1);
+    expect(metrics[0]).toMatchObject({
+      model: "x402",
+      amount: "10000",
+      asset: config.asset,
+      payee: config.payTo,
+      outcome: "settled",
+      at: "1970-01-01T00:00:01.000Z",
+    });
+    expect(metrics[0]?.payer).not.toBe("");
+    expect(events).toHaveLength(1);
+    expect(events[0]).toMatchObject({
+      type: "receipt.created",
+      data: { resource: "/quotes/latest", model: "x402", amount: "10000" },
+    });
+    if (outcome.kind === "settled") {
+      expect(metrics[0]?.payer).toBe(outcome.receipt.receipt.payer);
+      expect(events[0]?.data.receiptId).toBe(outcome.receipt.receipt.id);
+      expect(events[0]?.id).toBe(outcome.receipt.receipt.id);
+    }
+  });
+
+  it("measures latency from the injected clock", async () => {
+    const { observer, metrics } = recordingObserver();
+    const times = [1_000, 1_025];
+    const gate = createPaywall(
+      { ...config, models: ["x402"] },
+      {
+        signer,
+        facilitator: createMockFacilitator(),
+        observer,
+        clock: () => times.shift() ?? 1_025,
+      },
+    );
+    await gate({
+      ...baseRequest,
+      headers: { [PAYMENT_SIGNATURE_HEADER]: paymentHeader() },
+    });
+    expect(metrics[0]?.latencyMs).toBe(25);
+  });
+
+  it("records a failed metric for a rejected verify without an event", async () => {
+    const { observer, metrics, events } = recordingObserver();
+    const gate = observedGate(observer, {
+      async verify() {
+        return { valid: false, reason: "signature does not match" };
+      },
+    });
+    await gate({
+      ...baseRequest,
+      headers: { [PAYMENT_SIGNATURE_HEADER]: paymentHeader() },
+    });
+    expect(metrics).toHaveLength(1);
+    expect(metrics[0]).toMatchObject({
+      payer: "",
+      payee: config.payTo,
+      model: "x402",
+      amount: "10000",
+      outcome: "failed",
+    });
+    expect(events).toHaveLength(0);
+  });
+
+  it("records a failed metric for a failed settlement without an event", async () => {
+    const { observer, metrics, events } = recordingObserver();
+    const gate = observedGate(observer, {
+      async settle() {
+        return { settled: false, reason: "facilitator declined" };
+      },
+    });
+    const outcome = await gate({
+      ...baseRequest,
+      headers: { [PAYMENT_SIGNATURE_HEADER]: paymentHeader() },
+    });
+    expect(outcome.kind).toBe("rejected");
+    expect(metrics).toHaveLength(1);
+    expect(metrics[0]).toMatchObject({ outcome: "failed", amount: "10000" });
+    expect(events).toHaveLength(0);
+  });
+
+  it("does not record a replayed cache hit", async () => {
+    const { observer, metrics, events } = recordingObserver();
+    const gate = observedGate(observer);
+    const request = {
+      ...baseRequest,
+      headers: { [PAYMENT_SIGNATURE_HEADER]: paymentHeader() },
+    };
+    await gate(request);
+    const retry = await gate(request);
+    expect(retry.kind).toBe("settled");
+    expect(metrics).toHaveLength(1);
+    expect(events).toHaveLength(1);
+  });
+
+  it("keeps the settlement outcome when the observer throws and its event rejects", async () => {
+    const errors: unknown[] = [];
+    const gate = createPaywall(
+      { ...config, models: ["x402"] },
+      {
+        signer,
+        facilitator: createMockFacilitator(),
+        observer: {
+          record() {
+            throw new Error("metrics store down");
+          },
+          async emit() {
+            throw new Error("webhook down");
+          },
+        },
+        onObserverError: (error) => errors.push(error),
+      },
+    );
+    const outcome = await gate({
+      ...baseRequest,
+      headers: { [PAYMENT_SIGNATURE_HEADER]: paymentHeader() },
+    });
+    expect(outcome.kind).toBe("settled");
+    await vi.waitFor(() => expect(errors).toHaveLength(2));
+  });
+
+  it("records one metric and one event for concurrent copies of one payment", async () => {
+    const { observer, metrics, events } = recordingObserver();
+    const gate = observedGate(observer);
+    const request = {
+      ...baseRequest,
+      headers: { [PAYMENT_SIGNATURE_HEADER]: paymentHeader("mock-signed-auth-entry-observed") },
+    };
+    const outcomes = await Promise.all([gate(request), gate(request), gate(request)]);
+    expect(outcomes.map((outcome) => outcome.kind)).toEqual(["settled", "settled", "settled"]);
+    expect(metrics).toHaveLength(1);
+    expect(events).toHaveLength(1);
+  });
+
+  it("records one failed metric for concurrent copies of one failed settlement", async () => {
+    const { observer, metrics } = recordingObserver();
+    let release = () => {};
+    const held = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const gate = observedGate(observer, {
+      async settle() {
+        await held;
+        return { settled: false, reason: "facilitator declined" };
+      },
+    });
+    const request = {
+      ...baseRequest,
+      headers: { [PAYMENT_SIGNATURE_HEADER]: paymentHeader("mock-signed-auth-entry-declined") },
+    };
+    const runs = [gate(request), gate(request)];
+    release();
+    const outcomes = await Promise.all(runs);
+    expect(outcomes.map((outcome) => outcome.kind)).toEqual(["rejected", "rejected"]);
+    expect(metrics).toHaveLength(1);
+    expect(metrics[0]).toMatchObject({ outcome: "failed" });
+  });
+
+  it("records a failed metric when the facilitator throws, and still throws", async () => {
+    const { observer, metrics, events } = recordingObserver();
+    const gate = observedGate(observer, {
+      async settle() {
+        throw new Error("facilitator unreachable");
+      },
+    });
+    await expect(
+      gate({ ...baseRequest, headers: { [PAYMENT_SIGNATURE_HEADER]: paymentHeader() } }),
+    ).rejects.toThrow("facilitator unreachable");
+    expect(metrics).toHaveLength(1);
+    expect(metrics[0]).toMatchObject({ outcome: "failed", payer: "" });
+    expect(events).toHaveLength(0);
+  });
+
+  it("does not await event delivery", async () => {
+    let release: (() => void) | undefined;
+    const gate = createPaywall(
+      { ...config, models: ["x402"] },
+      {
+        signer,
+        facilitator: createMockFacilitator(),
+        observer: {
+          record() {},
+          emit() {
+            return new Promise<void>((resolve) => {
+              release = resolve;
+            });
+          },
+        },
+      },
+    );
+    const outcome = await gate({
+      ...baseRequest,
+      headers: { [PAYMENT_SIGNATURE_HEADER]: paymentHeader() },
+    });
+    expect(outcome.kind).toBe("settled");
+    expect(release).toBeDefined();
+    release?.();
   });
 });
 
@@ -1612,6 +1891,7 @@ describe("settlement lock edge cases (#247)", () => {
     expect(outcome).toEqual({
       kind: "rejected",
       status: 409,
+      code: "offer-mismatch",
       reason: "payment already settled for a different offer",
     });
   });

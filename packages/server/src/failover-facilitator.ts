@@ -324,7 +324,7 @@ export function createFailoverFacilitator(options: FailoverFacilitatorOptions): 
     const eligible = await membersEligibleFor(offer);
     if (eligible.length === 0) {
       throw new TollwayError(
-        "payment-failed",
+        "facilitator-unavailable",
         `no facilitator eligible for ${operation}: all unhealthy or incompatible`,
       );
     }
@@ -357,8 +357,9 @@ export function createFailoverFacilitator(options: FailoverFacilitatorOptions): 
       }
     }
     throw new TollwayError(
-      "payment-failed",
+      "facilitator-unavailable",
       `every eligible facilitator failed ${operation}: ${describe(lastError)}`,
+      { cause: lastError },
     );
   }
 
@@ -395,7 +396,7 @@ export function createFailoverFacilitator(options: FailoverFacilitatorOptions): 
       const eligible = await membersEligibleFor(input.offer);
       if (eligible.length === 0) {
         throw new TollwayError(
-          "payment-failed",
+          "facilitator-unavailable",
           "no facilitator eligible for settle: all unhealthy or incompatible",
         );
       }
@@ -463,9 +464,12 @@ export function createFailoverFacilitator(options: FailoverFacilitatorOptions): 
           );
         }
       }
+      // Every attempt failed before sending (anything else threw above), so
+      // nothing can land. The cause keeps that provable for the gate.
       throw new TollwayError(
-        "payment-failed",
+        "facilitator-unavailable",
         `every eligible facilitator failed settle: ${describe(lastError)}`,
+        { cause: lastError },
       );
     },
 

@@ -4,6 +4,7 @@
 
 ```ts
 
+import { close as close_2 } from '@stellar/mpp/channel/server';
 import { decodePaymentRequiredHeader } from '@x402/core/http';
 import { decodePaymentResponseHeader } from '@x402/core/http';
 import { decodePaymentSignatureHeader } from '@x402/core/http';
@@ -11,25 +12,73 @@ import { encodePaymentRequiredHeader } from '@x402/core/http';
 import { encodePaymentResponseHeader } from '@x402/core/http';
 import { encodePaymentSignatureHeader } from '@x402/core/http';
 import { FacilitatorConfig } from '@x402/core/http';
+import { JWSSigner } from '@x402/extensions/offer-receipt';
 import { KeySetDocument } from '@vegaforge/tollway-core';
 import { ListDiscoveryResourcesParams } from '@x402/extensions/bazaar';
 import { ModelRouter } from '@vegaforge/tollway-core';
+import { MppChannelPayment } from '@vegaforge/tollway-core';
 import { MppChargePayment } from '@vegaforge/tollway-core';
 import { Network } from '@x402/core/types';
 import { PaymentOffer } from '@vegaforge/tollway-core';
+import { PaymentPayload } from '@x402/core/types';
 import { PaymentRequired } from '@x402/core/types';
 import { PaymentRequirements } from '@x402/core/types';
 import { ReceiptSigner } from '@vegaforge/tollway-core';
 import { SettlementModel } from '@vegaforge/tollway-core';
+import { SettlementRef } from '@vegaforge/tollway-core';
 import { SignedReceipt } from '@vegaforge/tollway-core';
 import { SponsorBalanceReading } from '@vegaforge/tollway-core';
 import { SponsorLowBalanceEvent } from '@vegaforge/tollway-core';
-import { stellar } from '@stellar/mpp/charge/server';
+import { stellar } from '@stellar/mpp/channel/server';
+import { stellar as stellar_2 } from '@stellar/mpp/charge/server';
 import { StellarNetwork } from '@vegaforge/tollway-core';
-import { Store } from '@stellar/mpp/charge/server';
+import { Store } from '@stellar/mpp/channel/server';
+import { Store as Store_2 } from '@stellar/mpp/charge/server';
 import { TollwayError } from '@vegaforge/tollway-core';
+import * as _vegaforge_tollway_core from '@vegaforge/tollway-core';
 import { X402Payment } from '@vegaforge/tollway-core';
 import { z } from 'zod';
+
+// @public
+export type AbandonReason = "handler-threw" | "handler-failed" | "response-too-large" | "client-closed";
+
+// @public
+export type AcceptedVoucher = z.infer<typeof acceptedVoucherSchema>;
+
+// @public
+export const acceptedVoucherSchema: z.ZodObject<{
+    sequence: z.ZodNumber;
+    cumulativeAmount: z.ZodString;
+    signature: z.ZodString;
+    acceptedAt: z.ZodNumber;
+}, z.core.$strict>;
+
+// @public
+export type AuthorizedPayment = {
+    kind: "authorized";
+    maxResponseBytes: number;
+    isFailure(status: number): boolean;
+    settle(): Promise<SettleOutcome>;
+    abandon(reason: AbandonReason): Promise<void>;
+};
+
+// @public
+export type AuthorizeOutcome = GateOutcome | AuthorizedPayment;
+
+// @public
+export type BodyBinding = {
+    maxBytes: number;
+    contentTypes?: readonly string[];
+};
+
+// @public
+export class BodyTooLargeError extends TollwayError {
+    constructor(maxBytes: number);
+    readonly maxBytes: number;
+}
+
+// @public
+export function bytesBody(bytes: Uint8Array): RequestBodySource;
 
 // @public (undocumented)
 export type ChannelDispute = {
@@ -40,6 +89,18 @@ export type ChannelDispute = {
     txHash: string;
 };
 
+// @public
+export type ChannelEvaluationReport = {
+    results: Array<{
+        channelId: string;
+        outcome: ChannelSettleOutcome;
+    }>;
+    errors: Array<{
+        channelId: string;
+        error: string;
+    }>;
+};
+
 // @public (undocumented)
 export type ChannelLoss = {
     channelId: string;
@@ -48,6 +109,137 @@ export type ChannelLoss = {
     amountAtRisk: string;
     reason: "already-effective" | "settlement-failed";
 };
+
+// @public
+export type ChannelRecord = z.infer<typeof channelRecordSchema>;
+
+// @public
+export const channelRecordSchema: z.ZodObject<{
+    channelId: z.ZodString;
+    network: z.ZodEnum<_vegaforge_tollway_core.EnumShape<readonly ["testnet", "mainnet"]>>;
+    payer: z.ZodString;
+    payTo: z.ZodString;
+    asset: z.ZodString;
+    commitmentKey: z.ZodString;
+    refundWaitingPeriod: z.ZodNumber;
+    registeredAt: z.ZodNumber;
+    status: z.ZodEnum<_vegaforge_tollway_core.EnumShape<readonly ["open", "settling", "closed"]>>;
+    version: z.ZodNumber;
+    latest: z.ZodOptional<z.ZodObject<{
+        sequence: z.ZodNumber;
+        cumulativeAmount: z.ZodString;
+        signature: z.ZodString;
+        acceptedAt: z.ZodNumber;
+    }, z.core.$strict>>;
+    pending: z.ZodOptional<z.ZodObject<{
+        action: z.ZodEnum<_vegaforge_tollway_core.EnumShape<readonly ["voucher", "close"]>>;
+        sequence: z.ZodNumber;
+        cumulativeAmount: z.ZodString;
+        signature: z.ZodString;
+        acceptedAt: z.ZodNumber;
+    }, z.core.$strict>>;
+    settlement: z.ZodOptional<z.ZodObject<{
+        startedAt: z.ZodNumber;
+        trigger: z.ZodEnum<_vegaforge_tollway_core.EnumShape<readonly ["service", "agent"]>>;
+        balanceBefore: z.ZodOptional<z.ZodString>;
+        retryable: z.ZodBoolean;
+        lastError: z.ZodOptional<z.ZodString>;
+        record: z.ZodOptional<z.ZodObject<{
+            channelId: z.ZodString;
+            settledAmount: z.ZodString;
+            returnedRemainder: z.ZodString;
+            txHash: z.ZodString;
+        }, z.core.$strict>>;
+        closedAt: z.ZodOptional<z.ZodNumber>;
+    }, z.core.$strict>>;
+}, z.core.$strict>;
+
+// @public
+export type ChannelResolveOutcome = {
+    status: "not-settling";
+} | {
+    status: "closed";
+} | {
+    status: "retryable";
+    reason: "close-not-on-chain" | "funder-dispute";
+};
+
+// Warning: (ae-forgotten-export) The symbol "channelSettlementRecordSchema" needs to be exported by the entry point index.d.ts
+//
+// @public
+export type ChannelSettlementRecord = z.infer<typeof channelSettlementRecordSchema>;
+
+// @public
+export type ChannelSettleOutcome = {
+    status: "closed";
+    record: ChannelSettlementRecord;
+} | {
+    status: "already-closed";
+    record?: ChannelSettlementRecord;
+} | {
+    status: "skipped";
+    reason: "no-accepted-voucher" | "in-progress" | "pending-voucher" | "not-registered";
+} | {
+    status: "rate-limited";
+} | {
+    status: "failed";
+    error: string;
+};
+
+// @public
+export type ChannelSettler = {
+    settle(channelId: string): Promise<ChannelSettleOutcome>;
+    evaluate(): Promise<ChannelEvaluationReport>;
+    resolve(channelId: string): Promise<ChannelResolveOutcome>;
+    start(input: {
+        intervalMs: number;
+    }): void;
+    stop(): Promise<void>;
+};
+
+// @public
+export type ChannelSettlerOptions = {
+    channels: ChannelStore;
+    network: StellarNetwork;
+    rpcUrl?: string;
+    feePayer: {
+        envelopeSigner: StellarSigner_2;
+        feeBumpSigner?: StellarSigner_2;
+    };
+    feePayerKey: string;
+    closeRateGuard: CloseRateGuard;
+    maxFeeBumpStroops?: number;
+    pollMaxAttempts?: number;
+    pollDelayMs?: number;
+    pollTimeoutMs?: number;
+    triggers?: SettlementTriggers;
+    onClosed?: (record: ChannelSettlementRecord) => void;
+    onCloseFailed?: (info: {
+        channelId: string;
+        error: Error;
+    }) => void;
+    onCloseAnomaly?: (info: {
+        channelId: string;
+        detail: string;
+    }) => void;
+    onEvaluateError?: (error: Error) => void;
+    clock?: () => number;
+};
+
+// @public
+export type ChannelStatus = (typeof channelStatuses)[number];
+
+// @public
+export const channelStatuses: readonly ["open", "settling", "closed"];
+
+// @public
+export interface ChannelStore {
+    compareAndSet(channelId: string, expectedVersion: number, next: ChannelRecord): Promise<boolean>;
+    // (undocumented)
+    get(channelId: string): Promise<ChannelRecord | undefined>;
+    // (undocumented)
+    list(): Promise<readonly ChannelRecord[]>;
+}
 
 // @public (undocumented)
 export type ChannelWatchRegistry = {
@@ -91,6 +283,26 @@ export type ChannelWatchtower = {
     stop(): Promise<void>;
 };
 
+// @public
+export function checkStellarExactPayment(transaction: string, terms: StellarExactTerms, options?: StellarExactCheckOptions): PrevalidationResult;
+
+// @public
+export interface CloseRateGuard {
+    tryAcquire(feePayer: string, nowMs: number): Promise<boolean>;
+}
+
+// @public
+export type CloseRateLimit = {
+    maxCloses: number;
+    windowMs: number;
+};
+
+// @public
+export function concatChunks(chunks: readonly Uint8Array[], total: number): Uint8Array;
+
+// @public
+export function createChannelSettler(options: ChannelSettlerOptions): ChannelSettler;
+
 // @public (undocumented)
 export function createChannelWatchtower(options: CreateChannelWatchtowerOptions): ChannelWatchtower;
 
@@ -126,10 +338,22 @@ export function createHorizonSponsorBalanceReader(clientForNetwork?: (network: S
 export function createHttpFacilitator(baseUrl: string, options?: HttpFacilitatorOptions): FacilitatorClient;
 
 // @public
+export function createInMemoryChannelStore(): ChannelStore;
+
+// @public
+export function createInMemoryCloseRateGuard(limit: CloseRateLimit): CloseRateGuard;
+
+// @public
+export function createInMemoryPaymentReceiptArchive(options?: InMemoryPaymentReceiptArchiveOptions): PaymentReceiptArchive;
+
+// @public
 export function createInMemoryServicePolicyStore(options?: InMemoryServicePolicyStoreOptions): ServicePolicyStore;
 
 // @public
 export function createInMemorySettlementCache(ttlMs?: number, options?: InMemorySettlementCacheOptions): SettlementCache;
+
+// @public
+export function createLatestLedgerSource(options: LatestLedgerSourceOptions): LatestLedgerSource;
 
 // @public
 export function createMemoryPinStore(clock?: () => number): SettlementPinStore;
@@ -141,10 +365,22 @@ export function createMockFacilitator(): FacilitatorClient;
 export function createMockMppChargeHandler(): MppChargeHandler;
 
 // @public
+export function createMppChannelHandler(options: MppChannelOptions): MppChannelHandler;
+
+// @public
 export function createMppChargeHandler(options: MppChargeOptions): MppChargeHandler;
 
 // @public
-export function createPaywall(config: PaywallConfig, deps: PaywallDeps): Gate;
+export function createOfferReceiptJwsSigner(signer: ReceiptSigner, kid?: string): JWSSigner;
+
+// @public
+export function createPaidCall(config: PaidCallConfig, deps: PaidCallDeps): PaidCall;
+
+// @public
+export function createPaywall(config: PaywallConfig, deps: PaywallDeps): PaywallGate;
+
+// @public
+export function createRedisPaymentReceiptArchive(options: RedisPaymentReceiptArchiveOptions): PaymentReceiptArchive;
 
 // @public
 export function createRedisSettlementCache(options: RedisSettlementCacheOptions): LockingSettlementCache;
@@ -168,6 +404,9 @@ export { decodePaymentResponseHeader }
 export { decodePaymentSignatureHeader }
 
 // @public
+export const DEFAULT_MAX_PAYMENT_SIGNATURE_LENGTH: number;
+
+// @public
 export const DEFAULT_MAX_TIMEOUT_SECONDS = 60;
 
 // @public
@@ -175,6 +414,9 @@ export function deriveMppChargeNonce(payload: string): Promise<string>;
 
 // @public
 export function describeMismatches(mismatches: readonly PaywallMismatch[]): string;
+
+// @public
+export function didKeyFromEd25519PublicKey(publicKey: Uint8Array): string;
 
 // Warning: (ae-forgotten-export) The symbol "catalogueSchema" needs to be exported by the entry point index.d.ts
 //
@@ -233,6 +475,7 @@ export type FacilitatorCheckReport = {
 
 // @public
 export interface FacilitatorClient {
+    readonly acceptsMockPayments?: true;
     idempotencyKey?(input: {
         payment: X402Payment;
     }): Promise<string | undefined>;
@@ -318,6 +561,80 @@ export function findMatchingKind(capabilities: FacilitatorCapabilities, network:
 export type Gate = (request: TollwayRequest) => Promise<GateOutcome>;
 
 // @public
+export const GATE_ERROR_CODES: GateErrorCode[];
+
+// @public
+export const GATE_ERRORS: Readonly<Record<GateErrorCode, GateErrorSpec>>;
+
+// @public
+export type GateErrorBody = {
+    error: {
+        code: GateErrorCode;
+        message: string;
+        upstreamReason?: string;
+    };
+};
+
+// @public
+export type GateErrorCode =
+/** The PAYMENT-SIGNATURE header could not be read as an x402 V2 payment. */
+"payment-malformed"
+/** The payment was checked and refused, locally or by the facilitator. */
+| "payment-invalid"
+/** The service policy refused this payer (#160). */
+| (typeof SERVICE_POLICY_DENIALS)[keyof typeof SERVICE_POLICY_DENIALS]
+/** This payment already settled for another offer, route or method. */
+| "offer-mismatch"
+/** The same payment is being settled right now by another request. */
+| "settlement-in-progress"
+/** The facilitator refused to settle the payment. */
+| "settlement-failed"
+/** The facilitator could not be reached, or did not answer `/verify` in time. */
+| "facilitator-unavailable"
+/** `/settle` may or may not have landed; the payment is held until it is known. */
+| "settlement-unknown"
+/** The facilitator answered with something the gate cannot trust. */
+| "facilitator-invalid-response"
+/** The route's dynamic price function failed or returned an invalid price. */
+| "price-unavailable"
+/** The gate is missing a handler or is not ready to take payments. */
+| "handler-not-configured"
+/** The router chose a settlement model this gate does not implement. */
+| "model-not-supported"
+/**
+* A paid call's work (an MCP tool, say) failed after the payment was
+* verified, so the payment was not settled and may be sent again (#206).
+*/
+| "work-failed"
+/**
+* Two-phase settlement (#152): the payment was verified but deliberately
+* not settled (the route failed, or the lock lapsed while it ran). It is
+* still unspent, so the same payment may be sent again.
+*/
+| "payment-not-settled"
+/** Two-phase settlement: the route outlived the payment's validity window. */
+| "handler-timeout"
+/** Two-phase settlement: the route's response was larger than the gate holds. */
+| "response-too-large"
+/** The body is larger than the route's `bindBody.maxBytes` (#164). */
+| "body-too-large"
+/** The route binds the body and does not accept its content type or encoding. */
+| "body-not-supported"
+/** The route binds the body, but the adapter did not pass it to the gate. */
+| "body-not-provided"
+/** The MPP channel named in TOLLWAY-CHANNEL failed its on-chain checks or no longer takes vouchers (#173). */
+| "channel-refused"
+/** Too many channel registrations or channel closes; try again after Retry-After (#173, #174). */
+| "channel-rate-limited";
+
+// @public
+export type GateErrorSpec = {
+    status: number;
+    retrySamePayment: boolean;
+    headers: readonly string[];
+};
+
+// @public
 export type GateOutcome = {
     kind: "payment-required";
     status: 402;
@@ -331,11 +648,56 @@ export type GateOutcome = {
     replayed: boolean;
     cacheError?: Error;
     lockLost?: true;
-} | {
+}
+/**
+* A refusal with a machine-readable `code` (#161). Adapters render it with
+* `renderGateRejection`, so every framework sends the same body.
+*/
+| GateRejection;
+
+// @public
+export type GateRejection = {
     kind: "rejected";
     status: number;
+    code: GateErrorCode;
     reason: string;
+    upstreamReason?: string;
     headers?: Record<string, string>;
+};
+
+// @public
+export type HeldNodeResponse = {
+    done: Promise<HoldResult>;
+    status(): number;
+    release(headers?: Record<string, string>): void;
+    replace(status: number, body: unknown, headers?: Record<string, string>): void;
+};
+
+// @public
+export type HoldableNodeResponse = {
+    statusCode: number;
+    write: (...args: never[]) => unknown;
+    end: (...args: never[]) => unknown;
+    writeHead: (...args: never[]) => unknown;
+    flushHeaders: (...args: never[]) => unknown;
+    setHeader(name: string, value: string | number | readonly string[]): unknown;
+    getHeaderNames(): string[];
+    removeHeader(name: string): void;
+    once(event: "close", listener: () => void): unknown;
+    readonly writableEnded: boolean;
+};
+
+// @public
+export function holdNodeResponse(res: HoldableNodeResponse, maxBytes: number): HeldNodeResponse;
+
+// @public
+export type HoldResult = "ended" | "too-large" | "closed";
+
+// @public (undocumented)
+export type InMemoryPaymentReceiptArchiveOptions = {
+    retentionMs?: number;
+    maxEntries?: number;
+    now?: () => number;
 };
 
 // @public (undocumented)
@@ -365,6 +727,20 @@ export type KeySetResponseOptions = {
 };
 
 // @public
+export interface LatestLedgerSource {
+    latest(): Promise<number | undefined>;
+}
+
+// @public (undocumented)
+export type LatestLedgerSourceOptions = {
+    rpcUrl?: string;
+    getLatestLedger?: () => Promise<number>;
+    ttlMs?: number;
+    onError?: (error: Error) => void;
+    now?: () => number;
+};
+
+// @public
 export function listDiscoveryResources(facilitatorUrl: string, options?: {
     params?: ListDiscoveryResourcesParams;
     createAuthHeaders?: HttpFacilitatorOptions["createAuthHeaders"];
@@ -375,6 +751,118 @@ export type LockingSettlementCache = SettlementCache & Required<Pick<SettlementC
 
 // @public
 export const MPP_AUTHORIZATION_HEADER = "Authorization";
+
+// @public (undocumented)
+export type MppChannelChallengeInput = {
+    offer: PaymentOffer;
+    request: {
+        method: string;
+        url: string;
+    };
+    channelId: string;
+};
+
+// @public
+export type MppChannelChallengeResult = {
+    ok: true;
+    headers: Record<string, string>;
+} | ({
+    ok: false;
+} & MppChannelRefusal);
+
+// @public
+export interface MppChannelHandler {
+    challenge(input: MppChannelChallengeInput): Promise<MppChannelChallengeResult>;
+    idempotencyKey(input: {
+        payment: MppChannelPayment;
+    }): Promise<string>;
+    reconcile(channelId: string): Promise<MppChannelReconcileOutcome>;
+    settle(input: MppChannelSettleInput): Promise<MppChannelSettleResult>;
+    verify(input: MppChannelVerifyInput): Promise<MppChannelVerifyResult>;
+}
+
+// @public
+export type MppChannelOptions = {
+    recipient: string;
+    currency: string;
+    network: StellarNetwork;
+    secretKey: string;
+    store: Store.AtomicStore;
+    channels: ChannelStore;
+    minRefundWaitingPeriod?: number;
+    feePayer?: {
+        envelopeSigner: StellarSigner$1;
+        feeBumpSigner?: StellarSigner$1;
+    };
+    feePayerKey?: string;
+    closeRateGuard?: CloseRateGuard;
+    maxFeeBumpStroops?: number;
+    rpcUrl?: string;
+    realm?: string;
+    maxActiveChannels?: number;
+    channelIdleMs?: number;
+    registrationLimit?: {
+        max: number;
+        windowMs: number;
+    };
+    onStoreError?: (error: Error, channelId: string) => void;
+    onCloseAnomaly?: (info: {
+        channelId: string;
+        detail: string;
+    }) => void;
+    clock?: () => number;
+};
+
+// @public
+export type MppChannelReconcileOutcome = {
+    outcome: "nothing-pending";
+} | {
+    outcome: "committed";
+    sequence: number;
+} | {
+    outcome: "discarded";
+    sequence: number;
+};
+
+// @public
+export type MppChannelRefusal = {
+    code: "payment-invalid" | "channel-refused" | "channel-rate-limited" | "settlement-in-progress" | "facilitator-unavailable";
+    reason: string;
+    retryAfterMs?: number;
+};
+
+// @public (undocumented)
+export type MppChannelSettleInput = {
+    payment: MppChannelPayment;
+    offer: PaymentOffer;
+    payer: string;
+    nonce: string;
+};
+
+// @public
+export type MppChannelSettleResult = {
+    settled: true;
+    settlement: SettlementRef;
+    txHash?: string;
+} | ({
+    settled: false;
+} & MppChannelRefusal);
+
+// @public (undocumented)
+export type MppChannelVerifyInput = {
+    payment: MppChannelPayment;
+    offer: PaymentOffer;
+};
+
+// @public (undocumented)
+export type MppChannelVerifyResult = {
+    valid: true;
+    payer: string;
+    nonce: string;
+} | {
+    valid: false;
+    reason: string;
+};
 
 // @public
 export type MppChargeChallenge = {
@@ -395,6 +883,9 @@ export type MppChargeChallengeInput = {
 // @public
 export interface MppChargeHandler {
     challenge?(input: MppChargeChallengeInput): Promise<MppChargeChallenge>;
+    idempotencyKey?(input: {
+        payment: MppChargeVerifyInput["payment"];
+    }): Promise<string | undefined>;
     settle(input: MppChargeSettleInput): Promise<MppChargeSettleResult>;
     verify(input: MppChargeVerifyInput): Promise<MppChargeVerifyResult>;
 }
@@ -405,7 +896,7 @@ export type MppChargeOptions = {
     currency: string;
     network: StellarNetwork;
     secretKey: string;
-    store: Store.AtomicStore;
+    store: Store_2.AtomicStore;
     feePayer?: {
         envelopeSigner: StellarSigner;
         feeBumpSigner?: StellarSigner;
@@ -448,7 +939,58 @@ export type MppChargeVerifyResult = {
 };
 
 // @public
+export type OfferReceiptOptions = {
+    includeTxHash?: boolean;
+    kid?: string;
+    offerValiditySeconds?: number;
+};
+
+// @public
+export type PaidCall = {
+    readonly offer: PaymentOffer;
+    paymentRequired(error?: string): PaymentRequired;
+    settle(input: PaidCallSettleInput): Promise<GateOutcome>;
+};
+
+// @public
+export type PaidCallConfig = {
+    amount: string;
+    asset: string;
+    payTo: string;
+    network: StellarNetwork;
+    resource: string;
+    models?: SettlementModel[];
+    facilitatorUrl?: string;
+    maxTimeoutSeconds?: number;
+    extra?: Record<string, unknown>;
+    description?: string;
+    mimeType?: string;
+};
+
+// @public
+export type PaidCallDeps = Omit<PaywallDeps, "mppChargeHandler" | "router" | "onPriceError" | "facilitator" | "paymentPrevalidation"> & {
+    facilitator: FacilitatorClient;
+};
+
+// @public
+export type PaidCallSettleInput = {
+    payment: PaymentPayload;
+    method: string;
+    beforeSettle?: () => Promise<boolean>;
+};
+
+// @public
 export function parseFacilitatorCapabilities(raw: unknown): FacilitatorCapabilities;
+
+// @public
+export function parseMppChannelCredential(credential: string): {
+    ok: true;
+    payment: MppChannelPayment;
+} | {
+    ok: false;
+    kind: "not-channel" | "invalid-channel";
+    reason: string;
+};
 
 // @public
 export const PAYMENT_REQUIRED_HEADER = "PAYMENT-REQUIRED";
@@ -460,41 +1002,108 @@ export const PAYMENT_RESPONSE_HEADER = "PAYMENT-RESPONSE";
 export const PAYMENT_SIGNATURE_HEADER = "PAYMENT-SIGNATURE";
 
 // @public
-export type PaywallConfig = {
-    amount: string | DynamicPriceFunction;
-    minAmount?: string;
-    maxAmount?: string;
-    quoteSecret?: string;
-    previousQuoteSecrets?: readonly string[];
-    quoteTtlSeconds?: number;
+export type PaymentObserver = {
+    record(metric: PaymentObserverMetric): void;
+    emit(event: PaymentObserverEvent): Promise<unknown>;
+};
+
+// @public
+export type PaymentObserverEvent = {
+    id?: string;
+    type: "receipt.created";
+    at: string;
+    data: Record<string, unknown>;
+};
+
+// @public
+export type PaymentObserverMetric = {
+    payer: string;
+    payee: string;
+    model: SettlementModel;
+    amount: string;
+    asset: string;
+    latencyMs: number;
+    outcome: "settled" | "failed" | "skipped";
+    at: string;
+};
+
+// @public
+export type PaymentOption = {
+    amount: string;
     asset: string;
     payTo: string;
     network: StellarNetwork;
-    models?: SettlementModel[];
-    resource?: string;
+    facilitator?: FacilitatorClient;
     facilitatorUrl?: string;
     maxTimeoutSeconds?: number;
     extra?: Record<string, unknown>;
-    discovery?: DiscoveryDeclaration;
 };
+
+// @public
+export type PaymentOptionsConfig = {
+    accepts: readonly PaymentOption[];
+    amount?: never;
+    asset?: never;
+    payTo?: never;
+    network?: never;
+    facilitatorUrl?: never;
+    maxTimeoutSeconds?: never;
+    extra?: never;
+};
+
+// @public
+export type PaymentPrevalidationOptions = {
+    maxPaymentSignatureLength?: number;
+    latestLedger?: LatestLedgerSource;
+    onRejected?: (event: PrevalidationRejection) => void;
+};
+
+// @public
+export interface PaymentReceiptArchive {
+    findByPaymentKey(key: string): Promise<SettlementEntry | undefined>;
+    put(key: string, entry: SettlementEntry): Promise<void>;
+}
+
+// @public
+export function paymentTargets(config: PaywallConfig): PaywallTarget[];
+
+// Warning: (ae-forgotten-export) The symbol "PaywallCommon" needs to be exported by the entry point index.d.ts
+//
+// @public
+export type PaywallConfig = PaywallCommon & (SinglePaymentOptionConfig | PaymentOptionsConfig);
 
 // @public
 export type PaywallDeps = {
     signer: ReceiptSigner;
-    facilitator: FacilitatorClient;
+    facilitator?: FacilitatorClient;
     mppChargeHandler?: MppChargeHandler;
+    mppChannelHandler?: MppChannelHandler;
     router?: ModelRouter;
     cache?: SettlementCache;
     servicePolicy?: ServicePolicy;
     servicePolicyStore?: ServicePolicyStore;
     onServicePolicyError?: (error: Error, payer: string) => void;
     onCacheError?: (error: Error, key: string) => void;
+    receiptArchive?: PaymentReceiptArchive;
+    onArchiveError?: (error: Error, key: string) => void;
     onPriceError?: (error: unknown, request: TollwayRequest) => void;
     settlementLockTtlMs?: number;
     facilitatorTimeoutMs?: number;
     ambiguousSettlementHoldMs?: number;
+    paymentPrevalidation?: PaymentPrevalidationOptions;
+    retryAfterSeconds?: {
+        settlementInProgress?: number;
+        facilitatorUnavailable?: number;
+    };
     clock?: () => number;
+    observer?: PaymentObserver;
+    onObserverError?: (error: unknown) => void;
     receiptVersion?: 1 | 2;
+};
+
+// @public
+export type PaywallGate = Gate & {
+    authorize(request: TollwayRequest): Promise<AuthorizeOutcome>;
 };
 
 // @public
@@ -506,7 +1115,18 @@ export type PaywallMismatch = {
 };
 
 // @public
-export type PaywallTarget = Pick<PaywallConfig, "asset" | "payTo" | "network" | "models" | "extra">;
+export type PaywallOptions = {
+    settlement?: SettlementTiming;
+};
+
+// @public
+export type PaywallTarget = {
+    asset: string;
+    payTo: string;
+    network: StellarNetwork;
+    models?: SettlementModel[];
+    extra?: Record<string, unknown>;
+};
 
 // @public
 export type PaywallValidation = {
@@ -520,10 +1140,49 @@ export type PaywallValidation = {
 };
 
 // @public
+export type PrevalidationReason = "payment_signature_too_large" | "unsupported_scheme" | "network_mismatch" | "invalid_network" | "invalid_exact_stellar_payload_malformed" | "invalid_exact_stellar_payload_wrong_operation" | "invalid_exact_stellar_payload_wrong_asset" | "invalid_exact_stellar_payload_wrong_function_name" | "invalid_exact_stellar_payload_wrong_recipient" | "invalid_exact_stellar_payload_wrong_amount" | "invalid_exact_stellar_payload_no_auth_entries" | "invalid_exact_stellar_payload_unsupported_credential_type" | "invalid_exact_stellar_signature_expired";
+
+// @public
+export type PrevalidationRejection = {
+    reason: PrevalidationReason;
+    resource: string;
+    rejectedTotal: number;
+};
+
+// @public (undocumented)
+export type PrevalidationResult = {
+    valid: true;
+} | {
+    valid: false;
+    reason: PrevalidationReason;
+};
+
+// @public
+export function readBodyStream(stream: ReadableStream<Uint8Array> | null, maxBytes: number): Promise<Uint8Array>;
+
+// @public
+export function readBodyWithin(body: ReadableStream<Uint8Array> | null, maxBytes: number): Promise<{
+    ok: true;
+    bytes: Uint8Array<ArrayBuffer>;
+} | {
+    ok: false;
+}>;
+
+// @public
 export function readHeader(headers: Record<string, string | string[] | undefined>, name: string): string | undefined;
 
 // @public
 export function readMppCredential(headers: Record<string, string | string[] | undefined>): string | undefined;
+
+// @public
+export interface RedisArchiveClient {
+    // (undocumented)
+    get(key: string): Promise<string | null>;
+    // (undocumented)
+    set(key: string, value: string): Promise<unknown>;
+    // (undocumented)
+    set(key: string, value: string, mode: "PX", ttlMs: number): Promise<unknown>;
+}
 
 // @public
 export interface RedisLikeClient {
@@ -538,6 +1197,13 @@ export interface RedisLikeClient {
 }
 
 // @public (undocumented)
+export type RedisPaymentReceiptArchiveOptions = {
+    client: RedisArchiveClient;
+    keyPrefix?: string;
+    retentionMs?: number;
+};
+
+// @public (undocumented)
 export type RedisSettlementCacheOptions = {
     client: RedisLikeClient;
     ttlMs?: number;
@@ -545,7 +1211,25 @@ export type RedisSettlementCacheOptions = {
 };
 
 // @public
+export type RenderedGateRejection = {
+    status: number;
+    headers: Record<string, string>;
+    body: GateErrorBody;
+};
+
+// @public
+export function renderGateRejection(rejection: GateRejection): RenderedGateRejection;
+
+// @public
 export function renderKeySetResponse(document: KeySetDocument, options?: KeySetResponseOptions): KeySetResponse;
+
+// @public
+export type RequestBodySource = {
+    read(maxBytes: number): Promise<Uint8Array>;
+};
+
+// @public
+export function responseTooLarge(maxBytes: number): GateRejection;
 
 // @public
 export interface RouteTable {
@@ -557,6 +1241,7 @@ export interface RouteTable {
 
 // @public
 export interface RouteTableEntry {
+    accepts: readonly RouteTableOption[];
     // (undocumented)
     amount: string | DynamicPriceFunction;
     // (undocumented)
@@ -566,7 +1251,7 @@ export interface RouteTableEntry {
     // (undocumented)
     method: string;
     // (undocumented)
-    network: PaywallConfig["network"];
+    network: StellarNetwork;
     // (undocumented)
     pattern: string;
     // (undocumented)
@@ -578,8 +1263,20 @@ export interface RouteTableEntry {
 // @public
 export interface RouteTableMatch {
     // (undocumented)
-    gate: Gate;
+    gate: PaywallGate;
     resource: string;
+}
+
+// @public
+export interface RouteTableOption {
+    // (undocumented)
+    amount: string | DynamicPriceFunction;
+    // (undocumented)
+    asset: string;
+    // (undocumented)
+    network: StellarNetwork;
+    // (undocumented)
+    payTo: string;
 }
 
 // @public
@@ -658,6 +1355,7 @@ export interface SettlementCache {
     renew?(key: string, lock: SettlementLock, ttlMs: number): Promise<boolean>;
     // (undocumented)
     set(key: string, entry: SettlementEntry): Promise<void>;
+    setMany?(keys: readonly string[], entry: SettlementEntry): Promise<void>;
 }
 
 // @public
@@ -680,12 +1378,46 @@ export interface SettlementPinStore {
 }
 
 // @public
+export type SettlementTiming = "before-handler" | "after-handler";
+
+// @public
+export function settlementTiming(options: PaywallOptions | undefined): SettlementTiming;
+
+// @public
+export type SettlementTriggers = {
+    minCumulative?: string;
+    balanceFraction?: {
+        numerator: number;
+        denominator: number;
+    };
+    idleMs?: number;
+    maxChannelAgeMs?: number;
+};
+
+// @public
+export type SettleOutcome = Extract<GateOutcome, {
+    kind: "settled" | "rejected";
+}>;
+
+// @public
 export type SettleResult = {
     settled: true;
     txHash: string;
 } | {
     settled: false;
     reason: string;
+};
+
+// @public
+export type SinglePaymentOptionConfig = {
+    amount: string | DynamicPriceFunction;
+    asset: string;
+    payTo: string;
+    network: StellarNetwork;
+    facilitatorUrl?: string;
+    maxTimeoutSeconds?: number;
+    extra?: Record<string, unknown>;
+    accepts?: never;
 };
 
 // @public
@@ -729,6 +1461,25 @@ export const STELLAR_EXACT_SCHEME = "exact";
 // @public
 export function stellarCaip2(network: StellarNetwork): Network;
 
+// @public (undocumented)
+export type StellarExactCheckOptions = {
+    accepted?: Pick<StellarExactTerms, "scheme" | "network">;
+    latestLedger?: number;
+    maxTransactionLength?: number;
+};
+
+// @public
+export type StellarExactTerms = {
+    scheme: string;
+    network: string;
+    asset: string;
+    payTo: string;
+    amount: string;
+};
+
+// @public
+export const TOLLWAY_CHANNEL_HEADER = "TOLLWAY-CHANNEL";
+
 // @public
 export const TOLLWAY_QUOTE_HEADER = "TOLLWAY-QUOTE";
 
@@ -740,16 +1491,29 @@ export type TollwayRequest = {
     method: string;
     url: string;
     headers: Record<string, string | string[] | undefined>;
+    body?: RequestBodySource;
 };
 
 // @public
 export function toPaymentRequirements(offer: PaymentOffer, terms?: X402Terms): PaymentRequirements;
 
 // @public
+export function twoPhaseAuthorizer(gate: Gate, options: PaywallOptions | undefined): ((request: TollwayRequest) => Promise<AuthorizeOutcome>) | undefined;
+
+// @public
+export type TwoPhaseConfig = {
+    isFailureStatus?: (status: number) => boolean;
+    maxResponseBytes?: number;
+};
+
+// @public
 export function validatePaywall(route: string, paywall: PaywallTarget, capabilities: FacilitatorCapabilities): PaywallValidation;
 
 // @public
 export function validateServicePolicy(policy: ServicePolicy): void;
+
+// @public
+export function validateSettlementTriggers(triggers: SettlementTriggers): void;
 
 // @public
 export type ValidationMode = "fail" | "warn" | "off";
@@ -789,10 +1553,12 @@ export type X402Terms = {
 
 // Warnings were encountered during analysis:
 //
-// dist/index.d.ts:176:9 - (ae-forgotten-export) The symbol "WatchtowerEvent" needs to be exported by the entry point index.d.ts
-// dist/index.d.ts:180:5 - (ae-forgotten-export) The symbol "ChannelState" needs to be exported by the entry point index.d.ts
-// dist/index.d.ts:218:5 - (ae-forgotten-export) The symbol "WatchtowerCursorStore" needs to be exported by the entry point index.d.ts
-// dist/index.d.ts:351:9 - (ae-forgotten-export) The symbol "StellarSigner" needs to be exported by the entry point index.d.ts
+// dist/discovery-QVLZWt7Q.d.ts:660:9 - (ae-forgotten-export) The symbol "StellarSigner$1" needs to be exported by the entry point index.d.ts
+// dist/discovery-QVLZWt7Q.d.ts:831:9 - (ae-forgotten-export) The symbol "StellarSigner" needs to be exported by the entry point index.d.ts
+// dist/index.d.ts:50:9 - (ae-forgotten-export) The symbol "StellarSigner_2" needs to be exported by the entry point index.d.ts
+// dist/index.d.ts:172:9 - (ae-forgotten-export) The symbol "WatchtowerEvent" needs to be exported by the entry point index.d.ts
+// dist/index.d.ts:176:5 - (ae-forgotten-export) The symbol "ChannelState" needs to be exported by the entry point index.d.ts
+// dist/index.d.ts:214:5 - (ae-forgotten-export) The symbol "WatchtowerCursorStore" needs to be exported by the entry point index.d.ts
 
 // (No @packageDocumentation comment for this package)
 

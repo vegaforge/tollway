@@ -705,16 +705,17 @@ describe("createClient retry (#203)", () => {
 
   it("records the payment exactly once, however many attempts it took", async () => {
     const { settler } = scripted(expired());
-    const inner = createPolicyEngine({ budgets: { daily: "1000000" } });
-    const record = vi.fn(inner.record);
+    // The engine reserves (#189), so the spend is made final by `commit`.
+    const policy = createPolicyEngine({ budgets: { daily: "1000000" } });
+    const commit = vi.spyOn(policy, "commit");
     const client = createClient({
       network: "testnet",
       settler,
-      policy: { ...inner, record },
+      policy,
       retry: { maxAttempts: 3 },
     });
     await client.pay({ resource: OFFER.resource, offer: OFFER });
-    expect(record).toHaveBeenCalledTimes(1);
+    expect(commit).toHaveBeenCalledTimes(1);
   });
 
   it("checks the policy again before a fresh authorization and stops if it now blocks", async () => {
@@ -785,9 +786,9 @@ describe("createClient retry (#203)", () => {
       const resend = vi.fn(async () => baselineReceipt);
       const sleep = vi.fn(async (_ms: number) => {});
       const { settler, requests } = scripted(inProgress(250, resend));
-      const record = vi.fn(async () => {});
+      // The engine reserves (#189), so the spend is made final by `commit`.
       const policy = createPolicyEngine({ budgets: { daily: "1000000" } });
-      const spy = vi.spyOn(policy, "record").mockImplementation(record);
+      const spy = vi.spyOn(policy, "commit");
       const client = createClient({ network: "testnet", settler, policy, retry: { sleep } });
 
       const [a, b] = await Promise.all([
@@ -1503,5 +1504,151 @@ describe("createClient concurrent payments", () => {
     await Promise.all([first, second]);
 
     expect(held.settle).toHaveBeenCalledTimes(2);
+  });
+});
+
+describe("settlers per model and supported models (#201, #205)", () => {
+  const both: PaymentOffer = { ...OFFER, models: ["x402", "mpp-charge"] };
+
+  it("requires exactly one of settler or settlers", () => {
+    expect(() =>
+      createClient({ network: "testnet", settler: mockSettler(), settlers: {} } as never),
+    ).toThrow(/exactly one of settler or settlers/);
+    expect(() => createClient({ network: "testnet" } as never)).toThrow(
+      /exactly one of settler or settlers/,
+    );
+  });
+
+  it("pays through the settler registered for the routed model", async () => {
+    const x402 = mockSettler();
+    const mpp = mockSettler(mppChargeReceipt);
+    const client = createClient({
+      network: "testnet",
+      settlers: { x402, "mpp-charge": mpp },
+      router: { decide: async () => ({ model: "mpp-charge", reason: "offer" }) },
+      verifier,
+    });
+
+    const result = await client.pay({ resource: OFFER.resource, offer: both });
+
+    expect(result.model).toBe("mpp-charge");
+    expect(mpp.settle).toHaveBeenCalledTimes(1);
+    expect(x402.settle).not.toHaveBeenCalled();
+  });
+
+  it("refuses a routed model with no settler instead of falling through", async () => {
+    const x402 = mockSettler();
+    const client = createClient({
+      network: "testnet",
+      settlers: { x402 },
+      router: { decide: async () => ({ model: "mpp-charge", reason: "offer" }) },
+    });
+
+    const error = await client.pay({ resource: OFFER.resource, offer: both }).catch((e) => e);
+
+    expect(error).toBeInstanceOf(TollwayError);
+    expect(error.code).toBe("no-viable-model");
+    expect(error.message).toContain("no settler is configured for mpp-charge");
+    expect(x402.settle).not.toHaveBeenCalled();
+  });
+
+  it("passes supportedModels to the router as the allowed models", async () => {
+    const decide = vi.fn(async () => ({ model: "mpp-charge" as const, reason: "offer" as const }));
+    const client = createClient({
+      network: "testnet",
+      settler: mockSettler(mppChargeReceipt),
+      supportedModels: ["mpp-charge"],
+      router: { decide },
+    });
+
+    await client.pay({ resource: OFFER.resource, offer: both });
+
+    expect(decide).toHaveBeenCalledWith(expect.objectContaining({ allowedModels: ["mpp-charge"] }));
+  });
+
+  it("refuses an explicit model the agent cannot pay", async () => {
+    const settler = mockSettler();
+    const client = createClient({ network: "testnet", settler, supportedModels: ["x402"] });
+
+    const error = await client
+      .pay({ resource: OFFER.resource, offer: both, model: "mpp-charge" })
+      .catch((e) => e);
+
+    expect(error.code).toBe("no-viable-model");
+    expect(settler.settle).not.toHaveBeenCalled();
+  });
+
+  it("does not default to x402 without a router when the agent cannot pay x402", async () => {
+    const settler = mockSettler();
+    const client = createClient({ network: "testnet", settler, supportedModels: ["mpp-charge"] });
+
+    const error = await client.pay({ resource: OFFER.resource, offer: both }).catch((e) => e);
+
+    expect(error.code).toBe("no-viable-model");
+    expect(settler.settle).not.toHaveBeenCalled();
+  });
+
+  it("refuses an empty supportedModels list", () => {
+    expect(() =>
+      createClient({ network: "testnet", settler: mockSettler(), supportedModels: [] }),
+    ).toThrow(/at least one model/);
+  });
+});
+
+// Regression lock for #189: a budget is reserved before the settler is called,
+// so payments in flight at the same time cannot all pass the same budget.
+describe("createClient policy reservations (#189)", () => {
+  it("lets only as many concurrent payments settle as the daily budget fits", async () => {
+    // Ten payments of 10000 against a 20000 budget: exactly two may settle.
+    const policy = createPolicyEngine({ budgets: { daily: "20000" } });
+    const settle = vi.fn(async (input: SettleRequest) => {
+      await inFlight();
+      return receiptForSettlement(input);
+    });
+    const client = createClient({ network: "testnet", settler: { settle }, policy });
+
+    // Distinct resources, so the client's dedup of identical purchases does
+    // not fold the ten payments into one.
+    const results = await Promise.allSettled(
+      Array.from({ length: 10 }, (_, index) => {
+        const resource = `${OFFER.resource}?n=${index}`;
+        return client.pay({ resource, offer: { ...OFFER, resource } });
+      }),
+    );
+
+    expect(settle).toHaveBeenCalledTimes(2);
+    const rejected = results.filter((result) => result.status === "rejected");
+    expect(rejected).toHaveLength(8);
+    for (const result of rejected) {
+      expect(result.reason).toBeInstanceOf(PolicyBlockedError);
+    }
+  });
+
+  it("still counts a payment whose receipt then fails verification", async () => {
+    // The service settled the payment, so its spend counts even though the
+    // receipt is refused. Without it the budget would look unspent.
+    const policy = createPolicyEngine({ budgets: { daily: "15000" } });
+    const otherVerifier = Ed25519Verifier.forSigner(
+      await Ed25519Signer.generate("other-client-key"),
+    );
+    const client = createClient({
+      network: "testnet",
+      settler: mockSettler(),
+      policy,
+      verifier: otherVerifier,
+    });
+
+    await expect(client.pay({ resource: OFFER.resource, offer: OFFER })).rejects.toBeInstanceOf(
+      ReceiptVerificationError,
+    );
+
+    const next = await policy.check({
+      payee: OFFER.payTo,
+      resource: OFFER.resource,
+      amount: OFFER.amount,
+      asset: OFFER.asset,
+      model: "x402",
+    });
+    expect(next.allowed).toBe(false);
   });
 });

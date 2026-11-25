@@ -61,6 +61,26 @@ describe("verifyWebhookSignature", () => {
     ).resolves.toEqual({ valid: false, reason: "signature-mismatch" });
   });
 
+  it("rejects a delivery signed with another secret", async () => {
+    const payload = '{"type":"receipt.created"}';
+    const header = await signWebhookPayload({ secret: "whsec_attacker", payload, now: NOW });
+
+    await expect(
+      verifyWebhookSignature({ payload, header, secret: SECRET, now: NOW }),
+    ).resolves.toEqual({ valid: false, reason: "signature-mismatch" });
+  });
+
+  it("rejects a captured header replayed with its timestamp rewritten", async () => {
+    const payload = "{}";
+    const captured = await signWebhookPayload({ secret: SECRET, payload, now: NOW });
+    // Moving t= forward to pass the tolerance breaks the HMAC, which covers it.
+    const rewritten = captured.replace(/^t=\d+/, `t=${Math.floor((NOW + 600_000) / 1000)}`);
+
+    await expect(
+      verifyWebhookSignature({ payload, header: rewritten, secret: SECRET, now: NOW + 600_000 }),
+    ).resolves.toEqual({ valid: false, reason: "signature-mismatch" });
+  });
+
   it("rejects a replayed delivery outside the tolerance", async () => {
     const payload = "{}";
     const header = await signWebhookPayload({ secret: SECRET, payload, now: NOW });

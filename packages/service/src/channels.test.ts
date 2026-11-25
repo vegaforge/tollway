@@ -1,16 +1,18 @@
-import {
-  type CloseAdapterInput,
-  type CloseAdapterResult,
-  type CommitmentStore,
-  createChannelManager,
-  createMemoryCommitmentStore,
-  type MppChannelAdapter,
+import type {
+  CloseAdapterInput,
+  CloseAdapterResult,
+  MppChannelAdapter,
 } from "@vegaforge/tollway-channels";
 import type { TollwayEventInput } from "@vegaforge/tollway-observability";
 import { describe, expect, it, vi } from "vitest";
 import { createChannelsModule } from "./channels.js";
 import type { OpenApiDocument } from "./openapi.js";
-import { bearer, KEYS, testService } from "./test-support.js";
+import {
+  bindTenantChannelStore,
+  createMemoryChannelStore,
+  createTenantChannelManagers,
+} from "./stores.js";
+import { bearer, DEFAULT_TENANT, KEYS, testService } from "./test-support.js";
 
 const ASSET = "CUSDCXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX";
 
@@ -49,6 +51,16 @@ function fakeAdapter(
     async findChannelSettlement() {
       return null;
     },
+    // The service routes do not recover channels; these fail loudly if one does.
+    async getState() {
+      throw new Error("the service tests do not read recovery state");
+    },
+    async startClose() {
+      throw new Error("the service tests do not start a funder close");
+    },
+    async refund() {
+      throw new Error("the service tests do not refund");
+    },
   };
   return { adapter, closeChannel };
 }
@@ -59,18 +71,21 @@ async function setup(options?: {
   chainRead?: () => Promise<void>;
   emit?: (event: TollwayEventInput) => Promise<unknown>;
 }) {
-  const store: CommitmentStore = createMemoryCommitmentStore();
+  const channelStore = createMemoryChannelStore();
   const { adapter, closeChannel } = fakeAdapter(options?.close, options?.chainRead);
   let tick = 0;
-  const manager = createChannelManager({
+  const channelManagers = createTenantChannelManagers({
+    store: channelStore,
     adapter,
-    store,
     // A distinct openedAt per channel, so newest-first order is defined.
     now: () => new Date(Date.UTC(2026, 10, 24, 0, 0, tick++)).toISOString(),
   });
+  const manager = channelManagers(DEFAULT_TENANT);
+  const store = bindTenantChannelStore(channelStore, DEFAULT_TENANT);
   const emit = vi.fn(options?.emit ?? (async () => ({ deliveries: [], failures: [] })));
   const { app, logger } = await testService({
-    channelManager: manager,
+    stores: { channels: channelStore },
+    channelManagers,
     observability: { emit: emit as never },
     modules: [createChannelsModule({ now: () => "2026-11-24T12:00:00.000Z" })],
   });
@@ -248,7 +263,7 @@ describe("GET /v1/channels/{id} and its commitments", () => {
 });
 
 describe("POST /v1/channels/{id}/close", () => {
-  it("closes an open channel, records who asked, and emits channel.closed", async () => {
+  it("closes an open channel, records who asked, and emits tenant-scoped channel.closed", async () => {
     const { app, manager, emit } = await setup();
     const a = await manager.open({
       counterparty: "GP",
@@ -273,7 +288,13 @@ describe("POST /v1/channels/{id}/close", () => {
     expect(emit).toHaveBeenCalledTimes(1);
     expect(emit.mock.calls[0]?.[0]).toMatchObject({
       type: "channel.closed",
-      data: { channelId: a.id, returnedRemainder: "60", requestedBy: "admin" },
+      data: {
+        orgId: DEFAULT_TENANT.orgId,
+        projectId: DEFAULT_TENANT.projectId,
+        channelId: a.id,
+        returnedRemainder: "60",
+        requestedBy: "admin",
+      },
     });
   });
 
@@ -403,9 +424,9 @@ describe("POST /v1/channels/{id}/close", () => {
 });
 
 describe("channels module wiring", () => {
-  it("refuses to build without a channel manager", async () => {
+  it("refuses to build without channelManagers", async () => {
     await expect(testService({ modules: [createChannelsModule()] })).rejects.toThrow(
-      /channelManager/,
+      /channelManagers/,
     );
   });
 

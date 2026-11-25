@@ -14,8 +14,23 @@ export type AdaptiveAnomalyEvent = {
     detail: string;
 };
 
+// @public
+export function assertExtendsHead(head: ReceiptLogHead, entry: ReceiptLogEntry): void;
+
+// @public
+export function assertReadRange(fromSeq: number, limit: number): void;
+
 // @public (undocumented)
 export function base64UrlToBytes(text: string): Uint8Array;
+
+// @public
+export function bindBodyToResource(resource: string, body: Uint8Array): Promise<string>;
+
+// @public
+export const BODY_DIGEST_SEPARATOR = "#body-sha256=";
+
+// @public
+export function bodyDigest(bytes: Uint8Array): Promise<string>;
 
 // @public
 export function buildReceipt(input: BuildReceiptInput): ReceiptBody;
@@ -74,16 +89,25 @@ export type ChannelOpenIntent = {
 };
 
 // @public
-export type ChannelOpenRule = "min-channel-deposit" | "budget-daily" | "budget-total" | "per-service" | "per-service-daily" | "per-service-window";
+export type ChannelOpenRule = "min-channel-deposit" | "budget-daily" | "budget-weekly" | "budget-monthly" | "budget-rolling" | "budget-total" | "per-service" | "per-service-daily" | "per-service-window";
 
 // @public
 export type ChannelOpenSubmission = "not-submitted" | "failed" | "ambiguous";
+
+// @public
+export type ChannelThreshold = {
+    requestsPerMinute: number;
+    minWindowSeconds: number;
+};
 
 // @public (undocumented)
 export function checkSmartAccountPolicy(plan: SmartAccountPlan, reader: SmartAccountPolicyReader): Promise<readonly SmartAccountCheck[]>;
 
 // @public
 export function comparePolicyTraces(active: PolicyTrace, candidate: PolicyTrace): PolicyTraceComparison;
+
+// @public
+export function computeReceiptLogEntryHash(entry: Omit<ReceiptLogEntry, "entryHash">): Promise<string>;
 
 // @public
 export interface CounterpartyQuarantine {
@@ -111,10 +135,18 @@ export type CreateMemoryQuarantineOptions = {
 };
 
 // @public
+export function createMemoryReceiptLogStore(): ReceiptLogStore;
+
+// @public
 export function createPolicyEngine(input: PolicyInput, opts?: {
     clock?: () => number;
     onAnomalyDetected?: (event: AdaptiveAnomalyEvent) => void | Promise<void>;
+    reservationTtlMs?: number;
+    onReservationExpired?: (reservation: PolicyReservation, intent: PaymentIntent) => void;
 }): PolicyEngine;
+
+// @public
+export function createReceiptLog(options: ReceiptLogOptions): ReceiptLog;
 
 // @public
 export function decisionFromTrace(trace: PolicyTrace): PolicyDecision;
@@ -122,6 +154,7 @@ export function decisionFromTrace(trace: PolicyTrace): PolicyDecision;
 // @public (undocumented)
 export type DefaultRouterOptions = {
     quarantine?: CounterpartyQuarantine;
+    channelThreshold?: ChannelThreshold;
 };
 
 // @public
@@ -203,6 +236,14 @@ export class Ed25519Verifier implements ReceiptVerifier {
     // (undocumented)
     verify(input: SignatureInput): Promise<boolean>;
 }
+
+// @public
+export function enumSchema<const Values extends readonly string[]>(values: Values): z.ZodEnum<EnumShape<Values>>;
+
+// @public
+export type EnumShape<Values extends readonly string[]> = {
+    [Key in Values[number]]: Key;
+};
 
 // @public
 export function formatPolicyIssues(issues: readonly PolicyIssue[]): string;
@@ -343,9 +384,10 @@ export interface ModelRouter {
 export type MppChannelPayment = {
     model: "mpp-channel";
     channelId: string;
-    sequence: number;
     cumulativeAmount: string;
-    commitment: string;
+    signature: string;
+    action: "voucher" | "close";
+    credential: string;
 };
 
 // @public
@@ -457,12 +499,15 @@ export type PolicyDecision = {
 export interface PolicyEngine {
     admit?(intent: PaymentIntent): Promise<PolicyTrace>;
     check(intent: PaymentIntent): Promise<PolicyDecision>;
+    commit?(reservation: PolicyReservation): Promise<void>;
     evaluate(intent: PaymentIntent): Promise<PolicyTrace>;
     evaluateChannelOpen?(open: ChannelOpenIntent): Promise<ChannelOpenDecision>;
     headroom?(asset: string, payee: string): Promise<PolicyHeadroom>;
     readonly mode: PolicyMode;
     record(intent: PaymentIntent): Promise<void>;
     recordAttempt?(intent: PaymentIntent): Promise<void>;
+    release?(reservation: PolicyReservation): Promise<void>;
+    reserve?(intent: PaymentIntent): Promise<PolicyReservationAttempt>;
 }
 
 // @public
@@ -510,10 +555,29 @@ export type PolicyParseResult = {
 };
 
 // @public
+export type PolicyReservation = {
+    readonly id: string;
+    readonly expiresAt: string;
+};
+
+// @public
+export type PolicyReservationAttempt = {
+    trace: PolicyTrace;
+    reservation?: PolicyReservation;
+};
+
+// @public
+export class PolicyReservationError extends TollwayError {
+    constructor(reservationId: string, detail: string);
+    // (undocumented)
+    readonly reservationId: string;
+}
+
+// @public
 export type PolicyRuleId = (typeof policyRuleIds)[number];
 
 // @public
-export const policyRuleIds: readonly ["per-model-disabled", "min-channel-deposit", "budget-daily", "budget-total", "per-service", "per-service-daily", "per-service-window", "per-resource", "per-resource-daily", "per-resource-window", "rate-limit", "anomaly", "anomaly-adaptive"];
+export const policyRuleIds: readonly ["per-model-disabled", "min-channel-deposit", "budget-daily", "budget-weekly", "budget-monthly", "budget-rolling", "budget-total", "per-service", "per-service-daily", "per-service-window", "per-resource", "per-resource-daily", "per-resource-window", "rate-limit", "anomaly", "anomaly-adaptive"];
 
 // @public
 export type PolicyRuleName = (typeof policyRuleNames)[number];
@@ -525,12 +589,17 @@ export const policyRuleNames: readonly ["per-model-disabled", "min-channel-depos
 export const policySchema: z.ZodObject<{
     $schema: z.ZodOptional<z.ZodString>;
     policyVersion: z.ZodLiteral<1>;
-    mode: z.ZodOptional<z.ZodEnum<{
-        enforce: "enforce";
-        "dry-run": "dry-run";
-    }>>;
+    mode: z.ZodOptional<z.ZodEnum<EnumShape<readonly ["enforce", "dry-run"]>>>;
     budgets: z.ZodOptional<z.ZodObject<{
         daily: z.ZodOptional<z.ZodString>;
+        weekly: z.ZodOptional<z.ZodString>;
+        monthly: z.ZodOptional<z.ZodString>;
+        rolling: z.ZodOptional<z.ZodObject<{
+            windowSeconds: z.ZodNumber;
+            cap: z.ZodString;
+        }, z.core.$strict>>;
+        timezone: z.ZodOptional<z.ZodString>;
+        weekStartsOn: z.ZodOptional<z.ZodEnum<EnumShape<readonly ["monday", "sunday"]>>>;
         total: z.ZodOptional<z.ZodString>;
     }, z.core.$strict>>;
     perService: z.ZodOptional<z.ZodRecord<z.ZodString, z.ZodObject<{
@@ -542,10 +611,7 @@ export const policySchema: z.ZodObject<{
         }, z.core.$strict>>;
     }, z.core.$strict>>>;
     perResource: z.ZodOptional<z.ZodRecord<z.ZodString, z.ZodObject<{
-        match: z.ZodOptional<z.ZodEnum<{
-            exact: "exact";
-            prefix: "prefix";
-        }>>;
+        match: z.ZodOptional<z.ZodEnum<EnumShape<readonly ["exact", "prefix"]>>>;
         cap: z.ZodOptional<z.ZodString>;
         dailyCap: z.ZodOptional<z.ZodString>;
         window: z.ZodOptional<z.ZodObject<{
@@ -553,11 +619,7 @@ export const policySchema: z.ZodObject<{
             cap: z.ZodString;
         }, z.core.$strict>>;
     }, z.core.$strict>>>;
-    perModel: z.ZodOptional<z.ZodRecord<z.ZodEnum<{
-        x402: "x402";
-        "mpp-charge": "mpp-charge";
-        "mpp-channel": "mpp-channel";
-    }> & z.core.$partial, z.ZodObject<{
+    perModel: z.ZodOptional<z.ZodRecord<z.ZodEnum<EnumShape<readonly ["x402", "mpp-charge", "mpp-channel"]>> & z.core.$partial, z.ZodObject<{
         enabled: z.ZodOptional<z.ZodBoolean>;
         minChannelDeposit: z.ZodOptional<z.ZodString>;
     }, z.core.$strict>>>;
@@ -567,14 +629,8 @@ export const policySchema: z.ZodObject<{
             windowSeconds: z.ZodNumber;
             limit: z.ZodNumber;
         }, z.core.$strict>>>;
-        count: z.ZodOptional<z.ZodEnum<{
-            settlements: "settlements";
-            attempts: "attempts";
-        }>>;
-        scope: z.ZodOptional<z.ZodEnum<{
-            global: "global";
-            "per-counterparty": "per-counterparty";
-        }>>;
+        count: z.ZodOptional<z.ZodEnum<EnumShape<readonly ["settlements", "attempts"]>>>;
+        scope: z.ZodOptional<z.ZodEnum<EnumShape<readonly ["global", "per-counterparty"]>>>;
         perCounterpartyKeyLimit: z.ZodOptional<z.ZodNumber>;
     }, z.core.$strict>>;
     anomaly: z.ZodOptional<z.ZodObject<{
@@ -590,10 +646,7 @@ export const policySchema: z.ZodObject<{
                 denominator: z.ZodString;
             }, z.core.$strict>;
             warmupPeriods: z.ZodNumber;
-            scope: z.ZodOptional<z.ZodEnum<{
-                asset: "asset";
-                "asset-payee": "asset-payee";
-            }>>;
+            scope: z.ZodOptional<z.ZodEnum<EnumShape<readonly ["asset", "asset-payee"]>>>;
             maxBaselineGrowthPerMinute: z.ZodOptional<z.ZodString>;
         }, z.core.$strict>>;
     }, z.core.$strict>>;
@@ -622,47 +675,28 @@ export type PolicyTraceEntry = z.infer<typeof policyTraceEntrySchema>;
 
 // @public
 export const policyTraceEntrySchema: z.ZodObject<{
-    id: z.ZodEnum<{
-        anomaly: "anomaly";
-        "per-model-disabled": "per-model-disabled";
-        "min-channel-deposit": "min-channel-deposit";
-        "budget-daily": "budget-daily";
-        "budget-total": "budget-total";
-        "per-service": "per-service";
-        "per-service-daily": "per-service-daily";
-        "per-service-window": "per-service-window";
-        "per-resource": "per-resource";
-        "per-resource-daily": "per-resource-daily";
-        "per-resource-window": "per-resource-window";
-        "rate-limit": "rate-limit";
-        "anomaly-adaptive": "anomaly-adaptive";
-    }>;
-    rule: z.ZodEnum<{
-        anomaly: "anomaly";
-        "per-model-disabled": "per-model-disabled";
-        "min-channel-deposit": "min-channel-deposit";
-        "per-service": "per-service";
-        "per-service-daily": "per-service-daily";
-        "per-service-window": "per-service-window";
-        "per-resource": "per-resource";
-        "per-resource-daily": "per-resource-daily";
-        "per-resource-window": "per-resource-window";
-        "rate-limit": "rate-limit";
-        "anomaly-adaptive": "anomaly-adaptive";
-        budget: "budget";
-    }>;
+    id: z.ZodEnum<EnumShape<readonly ["per-model-disabled", "min-channel-deposit", "budget-daily", "budget-weekly", "budget-monthly", "budget-rolling", "budget-total", "per-service", "per-service-daily", "per-service-window", "per-resource", "per-resource-daily", "per-resource-window", "rate-limit", "anomaly", "anomaly-adaptive"]>>;
+    rule: z.ZodEnum<EnumShape<readonly ["per-model-disabled", "min-channel-deposit", "budget", "per-service", "per-service-daily", "per-service-window", "per-resource", "per-resource-daily", "per-resource-window", "rate-limit", "anomaly", "anomaly-adaptive"]>>;
     configured: z.ZodBoolean;
-    outcome: z.ZodEnum<{
-        pass: "pass";
-        fail: "fail";
-        "not-applicable": "not-applicable";
-    }>;
+    outcome: z.ZodEnum<EnumShape<readonly ["pass", "fail", "not-applicable"]>>;
     limit: z.ZodNullable<z.ZodString>;
     current: z.ZodNullable<z.ZodString>;
     projected: z.ZodNullable<z.ZodString>;
     window: z.ZodNullable<z.ZodDiscriminatedUnion<[z.ZodObject<{
         kind: z.ZodLiteral<"utc-day">;
         day: z.ZodISODate;
+    }, z.core.$strict>, z.ZodObject<{
+        kind: z.ZodLiteral<"calendar-day">;
+        day: z.ZodISODate;
+        timezone: z.ZodString;
+    }, z.core.$strict>, z.ZodObject<{
+        kind: z.ZodLiteral<"calendar-week">;
+        weekStart: z.ZodISODate;
+        timezone: z.ZodString;
+    }, z.core.$strict>, z.ZodObject<{
+        kind: z.ZodLiteral<"calendar-month">;
+        month: z.ZodString;
+        timezone: z.ZodString;
     }, z.core.$strict>, z.ZodObject<{
         kind: z.ZodLiteral<"lifetime">;
     }, z.core.$strict>, z.ZodObject<{
@@ -675,81 +709,41 @@ export const policyTraceEntrySchema: z.ZodObject<{
 // @public
 export const policyTraceSchema: z.ZodObject<{
     version: z.ZodLiteral<1>;
-    mode: z.ZodEnum<{
-        enforce: "enforce";
-        "dry-run": "dry-run";
-    }>;
+    mode: z.ZodEnum<EnumShape<readonly ["enforce", "dry-run"]>>;
     evaluatedAt: z.ZodISODateTime;
     intent: z.ZodObject<{
         payee: z.ZodString;
         resource: z.ZodString;
         amount: z.ZodString;
         asset: z.ZodString;
-        model: z.ZodEnum<{
-            x402: "x402";
-            "mpp-charge": "mpp-charge";
-            "mpp-channel": "mpp-channel";
-        }>;
+        model: z.ZodEnum<EnumShape<readonly ["x402", "mpp-charge", "mpp-channel"]>>;
     }, z.core.$strict>;
     allowed: z.ZodBoolean;
     wouldBlock: z.ZodBoolean;
-    blockedBy: z.ZodNullable<z.ZodEnum<{
-        anomaly: "anomaly";
-        "per-model-disabled": "per-model-disabled";
-        "min-channel-deposit": "min-channel-deposit";
-        "budget-daily": "budget-daily";
-        "budget-total": "budget-total";
-        "per-service": "per-service";
-        "per-service-daily": "per-service-daily";
-        "per-service-window": "per-service-window";
-        "per-resource": "per-resource";
-        "per-resource-daily": "per-resource-daily";
-        "per-resource-window": "per-resource-window";
-        "rate-limit": "rate-limit";
-        "anomaly-adaptive": "anomaly-adaptive";
-    }>>;
+    blockedBy: z.ZodNullable<z.ZodEnum<EnumShape<readonly ["per-model-disabled", "min-channel-deposit", "budget-daily", "budget-weekly", "budget-monthly", "budget-rolling", "budget-total", "per-service", "per-service-daily", "per-service-window", "per-resource", "per-resource-daily", "per-resource-window", "rate-limit", "anomaly", "anomaly-adaptive"]>>>;
     entries: z.ZodArray<z.ZodObject<{
-        id: z.ZodEnum<{
-            anomaly: "anomaly";
-            "per-model-disabled": "per-model-disabled";
-            "min-channel-deposit": "min-channel-deposit";
-            "budget-daily": "budget-daily";
-            "budget-total": "budget-total";
-            "per-service": "per-service";
-            "per-service-daily": "per-service-daily";
-            "per-service-window": "per-service-window";
-            "per-resource": "per-resource";
-            "per-resource-daily": "per-resource-daily";
-            "per-resource-window": "per-resource-window";
-            "rate-limit": "rate-limit";
-            "anomaly-adaptive": "anomaly-adaptive";
-        }>;
-        rule: z.ZodEnum<{
-            anomaly: "anomaly";
-            "per-model-disabled": "per-model-disabled";
-            "min-channel-deposit": "min-channel-deposit";
-            "per-service": "per-service";
-            "per-service-daily": "per-service-daily";
-            "per-service-window": "per-service-window";
-            "per-resource": "per-resource";
-            "per-resource-daily": "per-resource-daily";
-            "per-resource-window": "per-resource-window";
-            "rate-limit": "rate-limit";
-            "anomaly-adaptive": "anomaly-adaptive";
-            budget: "budget";
-        }>;
+        id: z.ZodEnum<EnumShape<readonly ["per-model-disabled", "min-channel-deposit", "budget-daily", "budget-weekly", "budget-monthly", "budget-rolling", "budget-total", "per-service", "per-service-daily", "per-service-window", "per-resource", "per-resource-daily", "per-resource-window", "rate-limit", "anomaly", "anomaly-adaptive"]>>;
+        rule: z.ZodEnum<EnumShape<readonly ["per-model-disabled", "min-channel-deposit", "budget", "per-service", "per-service-daily", "per-service-window", "per-resource", "per-resource-daily", "per-resource-window", "rate-limit", "anomaly", "anomaly-adaptive"]>>;
         configured: z.ZodBoolean;
-        outcome: z.ZodEnum<{
-            pass: "pass";
-            fail: "fail";
-            "not-applicable": "not-applicable";
-        }>;
+        outcome: z.ZodEnum<EnumShape<readonly ["pass", "fail", "not-applicable"]>>;
         limit: z.ZodNullable<z.ZodString>;
         current: z.ZodNullable<z.ZodString>;
         projected: z.ZodNullable<z.ZodString>;
         window: z.ZodNullable<z.ZodDiscriminatedUnion<[z.ZodObject<{
             kind: z.ZodLiteral<"utc-day">;
             day: z.ZodISODate;
+        }, z.core.$strict>, z.ZodObject<{
+            kind: z.ZodLiteral<"calendar-day">;
+            day: z.ZodISODate;
+            timezone: z.ZodString;
+        }, z.core.$strict>, z.ZodObject<{
+            kind: z.ZodLiteral<"calendar-week">;
+            weekStart: z.ZodISODate;
+            timezone: z.ZodString;
+        }, z.core.$strict>, z.ZodObject<{
+            kind: z.ZodLiteral<"calendar-month">;
+            month: z.ZodString;
+            timezone: z.ZodString;
         }, z.core.$strict>, z.ZodObject<{
             kind: z.ZodLiteral<"lifetime">;
         }, z.core.$strict>, z.ZodObject<{
@@ -774,6 +768,18 @@ export type PolicyWindow = z.infer<typeof policyWindowSchema>;
 export const policyWindowSchema: z.ZodDiscriminatedUnion<[z.ZodObject<{
     kind: z.ZodLiteral<"utc-day">;
     day: z.ZodISODate;
+}, z.core.$strict>, z.ZodObject<{
+    kind: z.ZodLiteral<"calendar-day">;
+    day: z.ZodISODate;
+    timezone: z.ZodString;
+}, z.core.$strict>, z.ZodObject<{
+    kind: z.ZodLiteral<"calendar-week">;
+    weekStart: z.ZodISODate;
+    timezone: z.ZodString;
+}, z.core.$strict>, z.ZodObject<{
+    kind: z.ZodLiteral<"calendar-month">;
+    month: z.ZodString;
+    timezone: z.ZodString;
 }, z.core.$strict>, z.ZodObject<{
     kind: z.ZodLiteral<"lifetime">;
 }, z.core.$strict>, z.ZodObject<{
@@ -819,6 +825,12 @@ export type QuarantineInput = {
 export const RECEIPT_ALGORITHMS: readonly ["Ed25519", "EdDSA", "ES256"];
 
 // @public
+export const RECEIPT_LOG_CHECKPOINT_TYPE = "tollway-receipt-log-checkpoint";
+
+// @public
+export const RECEIPT_LOG_GENESIS_HASH: string;
+
+// @public
 export type ReceiptAlgorithm = (typeof RECEIPT_ALGORITHMS)[number];
 
 // @public
@@ -832,11 +844,7 @@ export const receiptBodySchema: z.ZodDiscriminatedUnion<[z.ZodObject<{
     amount: z.ZodString;
     asset: z.ZodString;
     resource: z.ZodString;
-    model: z.ZodEnum<{
-        x402: "x402";
-        "mpp-charge": "mpp-charge";
-        "mpp-channel": "mpp-channel";
-    }>;
+    model: z.ZodEnum<EnumShape<readonly ["x402", "mpp-charge", "mpp-channel"]>>;
     settlement: z.ZodDiscriminatedUnion<[z.ZodObject<{
         kind: z.ZodLiteral<"transaction">;
         txHash: z.ZodString;
@@ -845,10 +853,7 @@ export const receiptBodySchema: z.ZodDiscriminatedUnion<[z.ZodObject<{
         channelId: z.ZodString;
         sequence: z.ZodNumber;
     }, z.core.$strict>], "kind">;
-    network: z.ZodEnum<{
-        testnet: "testnet";
-        mainnet: "mainnet";
-    }>;
+    network: z.ZodEnum<EnumShape<readonly ["testnet", "mainnet"]>>;
     issuedAt: z.ZodISODateTime;
     version: z.ZodLiteral<1>;
 }, z.core.$strict>, z.ZodObject<{
@@ -861,11 +866,7 @@ export const receiptBodySchema: z.ZodDiscriminatedUnion<[z.ZodObject<{
     amount: z.ZodString;
     asset: z.ZodString;
     resource: z.ZodString;
-    model: z.ZodEnum<{
-        x402: "x402";
-        "mpp-charge": "mpp-charge";
-        "mpp-channel": "mpp-channel";
-    }>;
+    model: z.ZodEnum<EnumShape<readonly ["x402", "mpp-charge", "mpp-channel"]>>;
     settlement: z.ZodDiscriminatedUnion<[z.ZodObject<{
         kind: z.ZodLiteral<"transaction">;
         txHash: z.ZodString;
@@ -874,10 +875,7 @@ export const receiptBodySchema: z.ZodDiscriminatedUnion<[z.ZodObject<{
         channelId: z.ZodString;
         sequence: z.ZodNumber;
     }, z.core.$strict>], "kind">;
-    network: z.ZodEnum<{
-        testnet: "testnet";
-        mainnet: "mainnet";
-    }>;
+    network: z.ZodEnum<EnumShape<readonly ["testnet", "mainnet"]>>;
     issuedAt: z.ZodISODateTime;
     version: z.ZodLiteral<2>;
 }, z.core.$strict>], "version">;
@@ -893,11 +891,7 @@ export const receiptBodyV1Schema: z.ZodObject<{
     amount: z.ZodString;
     asset: z.ZodString;
     resource: z.ZodString;
-    model: z.ZodEnum<{
-        x402: "x402";
-        "mpp-charge": "mpp-charge";
-        "mpp-channel": "mpp-channel";
-    }>;
+    model: z.ZodEnum<EnumShape<readonly ["x402", "mpp-charge", "mpp-channel"]>>;
     settlement: z.ZodDiscriminatedUnion<[z.ZodObject<{
         kind: z.ZodLiteral<"transaction">;
         txHash: z.ZodString;
@@ -906,10 +900,7 @@ export const receiptBodyV1Schema: z.ZodObject<{
         channelId: z.ZodString;
         sequence: z.ZodNumber;
     }, z.core.$strict>], "kind">;
-    network: z.ZodEnum<{
-        testnet: "testnet";
-        mainnet: "mainnet";
-    }>;
+    network: z.ZodEnum<EnumShape<readonly ["testnet", "mainnet"]>>;
     issuedAt: z.ZodISODateTime;
     version: z.ZodLiteral<1>;
 }, z.core.$strict>;
@@ -928,11 +919,7 @@ export const receiptBodyV2Schema: z.ZodObject<{
     amount: z.ZodString;
     asset: z.ZodString;
     resource: z.ZodString;
-    model: z.ZodEnum<{
-        x402: "x402";
-        "mpp-charge": "mpp-charge";
-        "mpp-channel": "mpp-channel";
-    }>;
+    model: z.ZodEnum<EnumShape<readonly ["x402", "mpp-charge", "mpp-channel"]>>;
     settlement: z.ZodDiscriminatedUnion<[z.ZodObject<{
         kind: z.ZodLiteral<"transaction">;
         txHash: z.ZodString;
@@ -941,13 +928,152 @@ export const receiptBodyV2Schema: z.ZodObject<{
         channelId: z.ZodString;
         sequence: z.ZodNumber;
     }, z.core.$strict>], "kind">;
-    network: z.ZodEnum<{
-        testnet: "testnet";
-        mainnet: "mainnet";
-    }>;
+    network: z.ZodEnum<EnumShape<readonly ["testnet", "mainnet"]>>;
     issuedAt: z.ZodISODateTime;
     version: z.ZodLiteral<2>;
 }, z.core.$strict>;
+
+// @public
+export interface ReceiptLog {
+    append(receipt: unknown): Promise<ReceiptLogEntry>;
+    checkpoint(): Promise<SignedReceiptLogCheckpoint>;
+    // (undocumented)
+    head(): Promise<ReceiptLogHead>;
+    latestCheckpoint(): SignedReceiptLogCheckpoint | undefined;
+    // (undocumented)
+    readonly logId: string;
+    read(fromSeq: number, limit: number): Promise<ReceiptLogEntry[]>;
+}
+
+// @public (undocumented)
+export type ReceiptLogCheckpoint = z.infer<typeof receiptLogCheckpointSchema>;
+
+// @public
+export type ReceiptLogCheckpointSchedule = {
+    checkpointEvery?: undefined;
+    onCheckpointError?: undefined;
+} | {
+    checkpointEvery: number;
+    onCheckpointError: (error: unknown, size: number) => void;
+};
+
+// @public
+export const receiptLogCheckpointSchema: z.ZodObject<{
+    type: z.ZodLiteral<"tollway-receipt-log-checkpoint">;
+    version: z.ZodLiteral<1>;
+    logId: z.ZodString;
+    size: z.ZodNumber;
+    headHash: z.ZodString;
+    issuedAt: z.ZodISODateTime;
+}, z.core.$strict>;
+
+// @public
+export type ReceiptLogCheckpointVerification = {
+    valid: true;
+    checkpoint: SignedReceiptLogCheckpoint;
+} | {
+    valid: false;
+    reason: string;
+};
+
+// @public (undocumented)
+export type ReceiptLogEntry = z.infer<typeof receiptLogEntrySchema>;
+
+// @public
+export const receiptLogEntrySchema: z.ZodObject<{
+    seq: z.ZodNumber;
+    prevHash: z.ZodString;
+    receipt: z.ZodObject<{
+        receipt: z.ZodDiscriminatedUnion<[z.ZodObject<{
+            id: z.ZodString;
+            payer: z.ZodString;
+            payee: z.ZodString;
+            amount: z.ZodString;
+            asset: z.ZodString;
+            resource: z.ZodString;
+            model: z.ZodEnum<EnumShape<readonly ["x402", "mpp-charge", "mpp-channel"]>>;
+            settlement: z.ZodDiscriminatedUnion<[z.ZodObject<{
+                kind: z.ZodLiteral<"transaction">;
+                txHash: z.ZodString;
+            }, z.core.$strict>, z.ZodObject<{
+                kind: z.ZodLiteral<"channel-commitment">;
+                channelId: z.ZodString;
+                sequence: z.ZodNumber;
+            }, z.core.$strict>], "kind">;
+            network: z.ZodEnum<EnumShape<readonly ["testnet", "mainnet"]>>;
+            issuedAt: z.ZodISODateTime;
+            version: z.ZodLiteral<1>;
+        }, z.core.$strict>, z.ZodObject<{
+            offerHash: z.ZodString;
+            method: z.ZodString;
+            expiresAt: z.ZodOptional<z.ZodISODateTime>;
+            id: z.ZodString;
+            payer: z.ZodString;
+            payee: z.ZodString;
+            amount: z.ZodString;
+            asset: z.ZodString;
+            resource: z.ZodString;
+            model: z.ZodEnum<EnumShape<readonly ["x402", "mpp-charge", "mpp-channel"]>>;
+            settlement: z.ZodDiscriminatedUnion<[z.ZodObject<{
+                kind: z.ZodLiteral<"transaction">;
+                txHash: z.ZodString;
+            }, z.core.$strict>, z.ZodObject<{
+                kind: z.ZodLiteral<"channel-commitment">;
+                channelId: z.ZodString;
+                sequence: z.ZodNumber;
+            }, z.core.$strict>], "kind">;
+            network: z.ZodEnum<EnumShape<readonly ["testnet", "mainnet"]>>;
+            issuedAt: z.ZodISODateTime;
+            version: z.ZodLiteral<2>;
+        }, z.core.$strict>], "version">;
+        signature: z.ZodObject<{
+            keyId: z.ZodString;
+            algorithm: z.ZodString;
+            value: z.ZodString;
+        }, z.core.$strict>;
+    }, z.core.$strict>;
+    appendedAt: z.ZodISODateTime;
+    entryHash: z.ZodString;
+}, z.core.$strict>;
+
+// @public
+export type ReceiptLogFailureKind = "malformed-entry" | "gap-or-reorder" | "broken-link" | "modified-entry" | "receipt-signature" | "truncated" | "checkpoint-mismatch" | "invalid-checkpoint";
+
+// @public
+export type ReceiptLogHead = {
+    size: number;
+    headHash: string;
+};
+
+// @public
+export type ReceiptLogOptions = {
+    store: ReceiptLogStore;
+    logId: string;
+    verifier: ReceiptVerifier;
+    signer?: ReceiptSigner;
+    onCheckpoint?: (checkpoint: SignedReceiptLogCheckpoint) => void | Promise<void>;
+    now?: () => number;
+} & ReceiptLogCheckpointSchedule;
+
+// @public
+export interface ReceiptLogStore {
+    append(entry: ReceiptLogEntry): Promise<void>;
+    // (undocumented)
+    head(): Promise<ReceiptLogHead>;
+    read(fromSeq: number, limit: number): Promise<ReceiptLogEntry[]>;
+}
+
+// @public
+export type ReceiptLogVerification = {
+    valid: true;
+    size: number;
+    headHash: string;
+} | {
+    valid: false;
+    kind: ReceiptLogFailureKind;
+    seq: number | null;
+    reason: string;
+};
 
 // @public
 export type ReceiptSignature = z.infer<typeof receiptSignatureSchema>;
@@ -1070,6 +1196,26 @@ export type SignatureInput = {
 // @public
 export type SignedReceipt = z.infer<typeof signedReceiptSchema>;
 
+// @public (undocumented)
+export type SignedReceiptLogCheckpoint = z.infer<typeof signedReceiptLogCheckpointSchema>;
+
+// @public
+export const signedReceiptLogCheckpointSchema: z.ZodObject<{
+    checkpoint: z.ZodObject<{
+        type: z.ZodLiteral<"tollway-receipt-log-checkpoint">;
+        version: z.ZodLiteral<1>;
+        logId: z.ZodString;
+        size: z.ZodNumber;
+        headHash: z.ZodString;
+        issuedAt: z.ZodISODateTime;
+    }, z.core.$strict>;
+    signature: z.ZodObject<{
+        keyId: z.ZodString;
+        algorithm: z.ZodString;
+        value: z.ZodString;
+    }, z.core.$strict>;
+}, z.core.$strict>;
+
 // @public
 export const signedReceiptSchema: z.ZodObject<{
     receipt: z.ZodDiscriminatedUnion<[z.ZodObject<{
@@ -1079,11 +1225,7 @@ export const signedReceiptSchema: z.ZodObject<{
         amount: z.ZodString;
         asset: z.ZodString;
         resource: z.ZodString;
-        model: z.ZodEnum<{
-            x402: "x402";
-            "mpp-charge": "mpp-charge";
-            "mpp-channel": "mpp-channel";
-        }>;
+        model: z.ZodEnum<EnumShape<readonly ["x402", "mpp-charge", "mpp-channel"]>>;
         settlement: z.ZodDiscriminatedUnion<[z.ZodObject<{
             kind: z.ZodLiteral<"transaction">;
             txHash: z.ZodString;
@@ -1092,10 +1234,7 @@ export const signedReceiptSchema: z.ZodObject<{
             channelId: z.ZodString;
             sequence: z.ZodNumber;
         }, z.core.$strict>], "kind">;
-        network: z.ZodEnum<{
-            testnet: "testnet";
-            mainnet: "mainnet";
-        }>;
+        network: z.ZodEnum<EnumShape<readonly ["testnet", "mainnet"]>>;
         issuedAt: z.ZodISODateTime;
         version: z.ZodLiteral<1>;
     }, z.core.$strict>, z.ZodObject<{
@@ -1108,11 +1247,7 @@ export const signedReceiptSchema: z.ZodObject<{
         amount: z.ZodString;
         asset: z.ZodString;
         resource: z.ZodString;
-        model: z.ZodEnum<{
-            x402: "x402";
-            "mpp-charge": "mpp-charge";
-            "mpp-channel": "mpp-channel";
-        }>;
+        model: z.ZodEnum<EnumShape<readonly ["x402", "mpp-charge", "mpp-channel"]>>;
         settlement: z.ZodDiscriminatedUnion<[z.ZodObject<{
             kind: z.ZodLiteral<"transaction">;
             txHash: z.ZodString;
@@ -1121,10 +1256,7 @@ export const signedReceiptSchema: z.ZodObject<{
             channelId: z.ZodString;
             sequence: z.ZodNumber;
         }, z.core.$strict>], "kind">;
-        network: z.ZodEnum<{
-            testnet: "testnet";
-            mainnet: "mainnet";
-        }>;
+        network: z.ZodEnum<EnumShape<readonly ["testnet", "mainnet"]>>;
         issuedAt: z.ZodISODateTime;
         version: z.ZodLiteral<2>;
     }, z.core.$strict>], "version">;
@@ -1137,6 +1269,9 @@ export const signedReceiptSchema: z.ZodObject<{
 
 // @public
 export function signReceipt(body: ReceiptBody, signer: ReceiptSigner): Promise<SignedReceipt>;
+
+// @public
+export function signReceiptLogCheckpoint(checkpoint: ReceiptLogCheckpoint, signer: ReceiptSigner): Promise<SignedReceiptLogCheckpoint>;
 
 // @public (undocumented)
 export type SmartAccountCheck = {
@@ -1229,7 +1364,7 @@ export class TollwayError extends Error {
 }
 
 // @public
-export type TollwayErrorCode = "not-implemented" | "no-viable-model" | "invalid-receipt" | "invalid-signing-key" | "invalid-amount" | "invalid-quote" | "invalid-discovery" | "invalid-policy" | "canonicalization-failed" | "invalid-signature-encoding" | "invalid-key-set" | "key-set-unavailable" | "budget-exceeded" | "payment-failed" | "outcome-unknown" | "facilitator-unsupported" | "facilitator-unavailable" | "facilitator-invalid-response" | "policy-blocked" | "offer-rejected" | "receipt-verification-failed" | "receipt-offer-mismatch" | "offer-network-mismatch" | "channel-not-found" | "channel-not-open" | "channel-already-closed" | "commitment-conflict" | "invalid-store-config" | "corrupt-channel-record" | "commitment-exceeds-deposit" | "settlement-mismatch" | "counterparty-quarantined" | "channel-open-failed" | "invalid-metrics-query" | "invalid-metric" | "metrics-query-too-large" | "invalid-receipt-query" | "invalid-cursor" | "corrupt-receipt" | "receipt-conflict";
+export type TollwayErrorCode = "not-implemented" | "no-viable-model" | "invalid-receipt" | "invalid-signing-key" | "signer-failed" | "body-too-large" | "invalid-amount" | "invalid-quote" | "invalid-discovery" | "invalid-policy" | "canonicalization-failed" | "invalid-signature-encoding" | "invalid-key-set" | "key-set-unavailable" | "budget-exceeded" | "payment-failed" | "outcome-unknown" | "facilitator-unsupported" | "facilitator-unavailable" | "facilitator-invalid-response" | "policy-blocked" | "offer-rejected" | "receipt-verification-failed" | "receipt-offer-mismatch" | "offer-network-mismatch" | "channel-not-found" | "channel-not-open" | "channel-already-closed" | "commitment-conflict" | "policy-reservation" | "channel-pool-exhausted" | "invalid-store-config" | "corrupt-channel-record" | "commitment-exceeds-deposit" | "settlement-mismatch" | "recovery-not-effective" | "counterparty-quarantined" | "channel-open-failed" | "invalid-metrics-query" | "invalid-metric" | "metrics-query-too-large" | "invalid-receipt-query" | "invalid-cursor" | "corrupt-receipt" | "receipt-conflict" | "approval-timeout" | "approval-denied" | "receipt-log-conflict" | "corrupt-receipt-log";
 
 // @public
 export type TrafficSnapshot = {
@@ -1242,6 +1377,22 @@ export function utf8Bytes(text: string): Uint8Array;
 
 // @public
 export function verifyReceipt(candidate: unknown, verifier: ReceiptVerifier, options?: VerifyReceiptOptions): Promise<ReceiptVerification>;
+
+// @public
+export function verifyReceiptLog(entries: readonly unknown[], options?: VerifyReceiptLogOptions): Promise<ReceiptLogVerification>;
+
+// @public
+export function verifyReceiptLogCheckpoint(candidate: unknown, verifier: ReceiptVerifier, options?: {
+    logId?: string;
+}): Promise<ReceiptLogCheckpointVerification>;
+
+// @public
+export type VerifyReceiptLogOptions = {
+    verifier?: ReceiptVerifier;
+    checkpoint?: unknown;
+    checkpointVerifier?: ReceiptVerifier;
+    logId?: string;
+};
 
 // @public
 export type VerifyReceiptOptions = {

@@ -46,7 +46,7 @@ The placeholder a widget shows when its data is unavailable. Every unwired widge
 
 ## The data-layer seam
 
-Wired views (Overview, Agents, Channels, Channel detail, Receipts, Anomalies and Exports) follow one pattern, and unwired views (Overview spend over time, Services, Webhooks) follow another.
+Wired views (Overview, Agents, Services, Channels, Channel detail, Receipts, Anomalies and Exports) follow one pattern, and unwired views (Overview spend over time, Webhooks) follow another.
 
 ### Wired views: the `useXxx` / `fetchXxx` seam
 
@@ -81,7 +81,7 @@ A view that does not yet have a data hook renders an `EmptyState` directly insid
 | `/` | Overview | `useOverview` -> `fetchOverview` in `src/data/overview.ts`, with the anomalies strip from `useAnomalies` | `@vegaforge/tollway-observability` (`createObservabilityHub`, `record`, `summarize`); spend over time stays an `EmptyState` naming `timeseries()` |
 | `/agents` | Per-agent spend | `useAgentSpend` -> `fetchAgentSpend` stub in `src/data/agent-spend.ts` | `summarize({ payer })` per agent, or a future `byPayer` rollup on the hub |
 | `/agents/[agentId]` | One agent's spend, budget, and policy stops | `useAgentDetail` -> `fetchAgentDetail` stub in `src/data/agent-detail.ts` | #226 series filtered by payer, plus the #228 policy store per agent id |
-| `/services` | Per-service revenue | `EmptyState` with `summarize({ payee })` as the named source | `summarize({ payee })`, plus `timeseries({ payee, ... })` for the latency-per-model breakdown |
+| `/services` | Per-service revenue | `useServiceRevenue` -> `fetchServiceRevenue` in `src/data/service-revenue.ts`, over a hub filled with stub payments | The live hub: `summarizeAsync({ payee, asset })` and `queryMetrics({ payee, asset, outcome: "settled" })` |
 | `/channels` | Open MPP channels | `useOpenChannels` -> `fetchOpenChannels` stub in `src/data/open-channels.ts` | Observability hub rollup over `channel.opened` / `channel.closed`, or a direct `ChannelManager.list` iteration |
 | `/channels/[channelId]` | One channel's commitment stream, drawdown and reconcile status | `useChannelDetail` -> `fetchChannelDetail` stub in `src/data/channel-detail.ts` | `ChannelManager.get` and `list`, served over HTTP by #227 |
 | `/receipts` | Signed receipt archive | `useReceipts` -> `fetchReceipts` stub in `src/data/receipts.ts`; `?payee=` limits it to one counterparty | Receipt archive backed by the observability hub's receipt stream |
@@ -140,6 +140,22 @@ A `PolicyStop` is a stored `PolicyTrace` from `@vegaforge/tollway-core`. `stopFr
 | Failure rate | `failed / (settled + failed)` in basis points. A skipped payment was never sent, so it is outside the denominator. With nothing attempted the card says "No payments", never 0% or NaN. |
 | Open channels | Count of rows with status `open`, and remaining budget (`deposit - committed`) per asset. |
 | Model mix | Each model's share of that asset's settled spend. A model with no spend shows 0.00%. |
+
+## Services contract
+
+`/services` reads `ServiceRevenueSnapshot` from `src/data/service-revenue.ts` through `useServiceRevenue()`. A service is a payee, the Stellar address a paid route settles to. `serviceRevenueFrom(hub, period, labels)` builds the snapshot from any object with the hub's `summarizeAsync` and `queryMetrics`; `fetchServiceRevenue()` calls it with a hub filled from deterministic stub payments. Wiring the live hub changes `fetchServiceRevenue` and nothing downstream.
+
+There is one row per payee and asset, from the hub's `byPayeeAsset`. A payee paid in two assets has two rows, because amounts in different assets are never added.
+
+| Figure | Rule |
+| ------ | ---- |
+| Revenue | Settled amount for the payee in the row's asset, an integer base-unit string. The view sorts and totals it as `BigInt` and formats it only for display. |
+| Payments | Settled payments behind the revenue. Failed and skipped payments are not counted. |
+| Model mix | Each model's share of the row's settled payments, in basis points. A model with no settled payment is left out of the chips. |
+| Avg latency per model | Mean `latencyMs` of the row's settled payments through each model, in whole milliseconds, read from `queryMetrics` page by page. A spend summary carries no latency. A model with none is left out. |
+| Headline cards | Total revenue per asset, settled payment count, and the number of distinct payees. |
+
+The table sorts by revenue (the default, descending) or by payment count. Only the active column carries `aria-sort`. With no rows the panel shows the shared `EmptyState`, naming `summarize({ payee })` as its source.
 
 ## Channel detail contract
 

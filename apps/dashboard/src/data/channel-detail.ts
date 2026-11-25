@@ -29,6 +29,21 @@ export const DRIFT_KINDS = [
   "non-monotonic-cumulative",
   "foreign-commitment",
   "duplicate-sequence",
+  // Live checks of an open channel against its contract state (#212).
+  "closed-on-chain",
+  "recipient-mismatch",
+  "funder-mismatch",
+  "token-mismatch",
+  "balance-mismatch",
+  // On-chain confirmation of x402 and MPP charge receipts (#211).
+  "tx-failed",
+  "tx-not-found",
+  "transfer-missing",
+  "amount-mismatch",
+  "payee-mismatch",
+  "payer-mismatch",
+  "asset-mismatch",
+  "network-mismatch",
 ] as const;
 
 export type DriftKind = (typeof DRIFT_KINDS)[number];

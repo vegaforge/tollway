@@ -1,7 +1,6 @@
 import type { Context, Hono } from "hono";
 import type { z } from "zod";
-import { requireScope } from "./auth.js";
-import type { ApiKeyScope } from "./config.js";
+import { type RouteScope, requireScope } from "./auth.js";
 import { errorBody } from "./errors.js";
 import type { ServiceEnv } from "./types.js";
 
@@ -13,11 +12,14 @@ import type { ServiceEnv } from "./types.js";
  * drift from what the code accepts.
  */
 
+/** HTTP verbs supported by {@link defineRoute}. */
 export type HttpMethod = "get" | "post" | "put" | "patch" | "delete";
 
-type AnyObjectSchema = z.ZodObject<z.ZodRawShape>;
+/** Any `zod` object schema accepted for route path or query validation. */
+export type AnyObjectSchema = z.ZodObject<z.ZodRawShape>;
 
-type Output<T> = T extends z.ZodType ? z.output<T> : undefined;
+/** Inferred output type for an optional route input schema. */
+export type RouteOutput<T> = T extends z.ZodType ? z.output<T> : undefined;
 
 /** The validated request a handler receives. */
 export type RouteInput<
@@ -25,17 +27,19 @@ export type RouteInput<
   Q extends AnyObjectSchema | undefined,
   B extends z.ZodType | undefined,
 > = {
-  params: Output<P>;
-  query: Output<Q>;
-  body: Output<B>;
+  params: RouteOutput<P>;
+  query: RouteOutput<Q>;
+  body: RouteOutput<B>;
 };
 
+/** Response metadata and optional body schema for one HTTP status code. */
 export type RouteResponse = {
   description: string;
   /** JSON body schema. Omit for a response with no body. */
   schema?: z.ZodType;
 };
 
+/** Declarative specification passed to {@link defineRoute}. */
 export type RouteDefinition<
   P extends AnyObjectSchema | undefined,
   Q extends AnyObjectSchema | undefined,
@@ -48,10 +52,11 @@ export type RouteDefinition<
   description?: string;
   tags?: readonly string[];
   /**
-   * The scope a `/v1/*` route requires. `null` accepts any valid key. Routes
-   * outside `/v1/` are public and must leave this undefined.
+   * The scope a `/v1/*` route requires. `null` accepts any valid tenant key;
+   * `"operator"` accepts only a configured operator key. Routes outside `/v1/`
+   * are public and must leave this undefined.
    */
-  scope?: ApiKeyScope | null;
+  scope?: RouteScope;
   request?: { params?: P; query?: Q; body?: B };
   responses: Readonly<Record<number, RouteResponse>>;
   handler: (c: Context<ServiceEnv>, input: RouteInput<P, Q, B>) => Response | Promise<Response>;
@@ -168,7 +173,7 @@ export function mountRoutes(app: Hono<ServiceEnv>, routes: readonly ServiceRoute
       return route.handler(c, { params, query, body });
     };
 
-    if (typeof route.scope === "string") {
+    if (route.scope !== undefined) {
       app.on(route.method.toUpperCase(), path, requireScope(route.scope), handler);
     } else {
       app.on(route.method.toUpperCase(), path, handler);

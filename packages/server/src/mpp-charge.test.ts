@@ -475,7 +475,7 @@ describe("createMppChargeHandler", () => {
       });
     });
 
-    it("turns a transport failure into a payment-failed TollwayError", async () => {
+    it("turns a transport failure into a facilitator-unavailable TollwayError", async () => {
       stub.mppx.verifyCredential.mockRejectedValue(new TypeError("fetch failed"));
       const handler = createMppChargeHandler(options());
       const settling = handler.settle({
@@ -486,9 +486,40 @@ describe("createMppChargeHandler", () => {
       });
       await expect(settling).rejects.toBeInstanceOf(TollwayError);
       await expect(settling).rejects.toMatchObject({
-        code: "payment-failed",
+        code: "facilitator-unavailable",
         message: "mpp charge settlement failed: fetch failed",
       });
+    });
+  });
+
+  describe("deriveMppChargeNonce", () => {
+    it("is unchanged: base64url SHA-256 of the credential text (#163 regression)", async () => {
+      // Computed independently with node:crypto. The nonce keys replay
+      // protection, so an edge-runtime change must never alter it.
+      expect(await deriveMppChargeNonce("Payment eyJjaGFsbGVuZ2UiOiJ0b2xsd2F5LWVkZ2UifQ")).toBe(
+        "uga1r6Fo8en3zSP3dsTRHtse9H9AOj5mKv8mFlMLdl4",
+      );
+    });
+  });
+
+  describe("settle transport failures on edge runtimes (#163)", () => {
+    // A lost answer says nothing about the payment, which may have landed,
+    // so it must surface as a failure, never as a rejection that frees the
+    // payment for another settle.
+    it.each([
+      [
+        "Bun",
+        Object.assign(new Error("Unable to connect. Is the computer able to access the url?"), {
+          code: "ConnectionRefused",
+        }),
+      ],
+      ["workerd", new Error("Network connection lost.")],
+    ])("throws facilitator-unavailable on %s instead of rejecting", async (_runtime, error) => {
+      stub.mppx.verifyCredential.mockRejectedValue(error);
+      const handler = createMppChargeHandler(options());
+      await expect(
+        handler.settle({ payment: payment(credential()), offer, payer: PAYER, nonce: "n" }),
+      ).rejects.toMatchObject({ code: "facilitator-unavailable" });
     });
   });
 
@@ -513,8 +544,8 @@ describe("createMppChargeHandler", () => {
       ["an axios error", Object.assign(new Error("socket hang up"), { isAxiosError: true })],
       ["an abort", Object.assign(new Error("aborted"), { name: "AbortError" })],
       ["a refused connection", Object.assign(new Error("connect"), { code: "ECONNREFUSED" })],
-    ])("throws payment-failed on %s", async (_name, error) => {
-      await expect(settleWith(error)).rejects.toMatchObject({ code: "payment-failed" });
+    ])("throws facilitator-unavailable on %s", async (_name, error) => {
+      await expect(settleWith(error)).rejects.toMatchObject({ code: "facilitator-unavailable" });
     });
   });
 
@@ -614,7 +645,10 @@ describe("createMppChargeHandler", () => {
       expect(failed).toEqual({
         kind: "rejected",
         status: 502,
-        reason: "mpp charge rejected: [stellar:charge] simulation failed",
+        code: "settlement-failed",
+        reason: "the facilitator refused to settle the payment",
+        // The handler's own words travel apart from the code (#161).
+        upstreamReason: "mpp charge rejected: [stellar:charge] simulation failed",
       });
       const retried = await paywall(request);
       expect(retried.kind).toBe("settled");

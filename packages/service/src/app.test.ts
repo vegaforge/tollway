@@ -70,6 +70,8 @@ describe("health and readiness", () => {
         metrics: { status: "ok" },
         channels: { status: "ok" },
         policies: { status: "ok" },
+        audit: { status: "ok" },
+        admin: { status: "ok" },
       },
     });
   });
@@ -97,6 +99,8 @@ describe("health and readiness", () => {
             metrics: { status: "ok" },
             channels: { status: "ok" },
             policies: { status: "ok" },
+            audit: { status: "ok" },
+            admin: { status: "ok" },
           },
         },
       },

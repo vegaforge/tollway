@@ -10,12 +10,22 @@ export const serviceErrorCodes = [
   "unauthorized",
   /** The key is valid but lacks the scope the route requires. */
   "forbidden",
+  /** An ingest batch or item claimed a different org or project from the calling key. */
+  "tenant-mismatch",
   /** The path, query or body failed its schema, or the body is not JSON. */
   "invalid-request",
+  /** The policy body failed validation against the core policy schema. */
+  "invalid-policy",
+  /** An optimistic concurrency check (`If-Match`) failed against the current version. */
+  "precondition-failed",
   /** No route matches the method and path. */
   "not-found",
   /** The request body is larger than `maxBodyBytes`. */
   "payload-too-large",
+  /** The tenant exceeded its per-minute ingest rate quota. */
+  "rate-limited",
+  /** The tenant reached its maximum stored record quota. */
+  "quota-exceeded",
   /** A backing store failed its readiness check. */
   "not-ready",
   /** The resource is in a state the request cannot act on, such as closing a recovering channel. */
@@ -26,6 +36,7 @@ export const serviceErrorCodes = [
   "internal-error",
 ] as const;
 
+/** Machine-readable error code returned by built-in service routes. */
 export type ServiceErrorCode = (typeof serviceErrorCodes)[number];
 
 /**
@@ -41,6 +52,7 @@ export const errorBodySchema = z.object({
   }),
 });
 
+/** Parsed JSON error envelope returned by the service. */
 export type ErrorBody = z.infer<typeof errorBodySchema>;
 
 /** Builds an {@link ErrorBody}. */

@@ -26,6 +26,7 @@
 
 import type { SignedReceipt } from "@vegaforge/tollway-core";
 import { TollwayError } from "@vegaforge/tollway-core";
+import type { PaidExchange } from "./exchange.js";
 
 export type SettlementOutcomeKind =
   | "retryable-with-fresh-auth"
@@ -40,14 +41,24 @@ export type SettlementOutcomeKind =
 export type SignedTerms = { amount: string; asset: string; payTo: string };
 
 type OutcomeOptions =
-  | { kind: "retryable-with-fresh-auth"; reason: string; signedTerms: SignedTerms }
+  | {
+      kind: "retryable-with-fresh-auth";
+      reason: string;
+      signedTerms: SignedTerms;
+      /**
+       * The 402 that refused the signed payment. A settler finishing an HTTP
+       * exchange (#201) sets it, and the retry answers this challenge rather
+       * than the expired one, without sending the request unpaid again.
+       */
+      challenge?: Response;
+    }
   | {
       kind: "settlement-in-progress";
       reason: string;
       /** The service's `Retry-After`, in milliseconds. */
       retryAfterMs: number;
       /** Resends the identical payment header. Never signs anything new. */
-      resend: () => Promise<SignedReceipt>;
+      resend: () => Promise<SignedReceipt | PaidExchange>;
     }
   | { kind: "ambiguous" | "fatal"; reason: string; cause?: unknown };
 
@@ -61,7 +72,8 @@ export class SettlementOutcomeError extends TollwayError {
   readonly reason: string;
   readonly retryAfterMs: number | undefined;
   readonly signedTerms: SignedTerms | undefined;
-  readonly resend: (() => Promise<SignedReceipt>) | undefined;
+  readonly resend: (() => Promise<SignedReceipt | PaidExchange>) | undefined;
+  readonly challenge: Response | undefined;
 
   constructor(options: OutcomeOptions) {
     super(
@@ -77,6 +89,7 @@ export class SettlementOutcomeError extends TollwayError {
     this.signedTerms =
       options.kind === "retryable-with-fresh-auth" ? options.signedTerms : undefined;
     this.resend = options.kind === "settlement-in-progress" ? options.resend : undefined;
+    this.challenge = options.kind === "retryable-with-fresh-auth" ? options.challenge : undefined;
   }
 }
 

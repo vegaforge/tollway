@@ -27,13 +27,17 @@ PUBLISHABLE=(
   packages/adapter-fastify
   packages/adapter-hono
   packages/adapter-next
+  packages/ai-sdk
   packages/channels
+  packages/cli
   packages/client
+  packages/mcp
   packages/core
   packages/observability
   packages/reconcile
   packages/server
   packages/service
+  packages/signer-vault
   packages/theme
 )
 
@@ -45,16 +49,23 @@ ENTRY_POINTS=(
   @vegaforge/tollway-adapter-hono
   @vegaforge/tollway-adapter-next
   @vegaforge/tollway-adapter-next/proxy
+  @vegaforge/tollway-ai-sdk
   @vegaforge/tollway-channels
+  @vegaforge/tollway-cli
   @vegaforge/tollway-client
+  @vegaforge/tollway-client/mcp
   @vegaforge/tollway-client/sqlite
   @vegaforge/tollway-core
   @vegaforge/tollway-core/policy-loader
+  @vegaforge/tollway-mcp
   @vegaforge/tollway-observability
   @vegaforge/tollway-observability/sqlite
   @vegaforge/tollway-reconcile
+  @vegaforge/tollway-reconcile/stellar
   @vegaforge/tollway-server
+  @vegaforge/tollway-server/testing
   @vegaforge/tollway-service
+  @vegaforge/tollway-signer-vault
   @vegaforge/tollway-theme
   @vegaforge/tollway-theme/preset
 )
@@ -92,6 +103,11 @@ PEERS=()
 for framework in express fastify hono next; do
   spec=$(pinned "$ROOT/packages/adapter-$framework/package.json" devDependencies "$framework")
   PEERS+=("$framework@$spec")
+done
+# The AI SDK integration's peers, at the versions its tests run against.
+for dependency in ai zod; do
+  spec=$(pinned "$ROOT/packages/ai-sdk/package.json" devDependencies "$dependency")
+  PEERS+=("$dependency@$spec")
 done
 TYPESCRIPT=$(pinned "$ROOT/package.json" devDependencies typescript)
 TYPES_NODE=$(pinned "$ROOT/packages/core/package.json" devDependencies @types/node)

@@ -6,7 +6,9 @@
  * schema. The architecture this implements is described in docs/design.md.
  */
 
+export { BODY_DIGEST_SEPARATOR, bindBodyToResource, bodyDigest } from "./body-binding.js";
 export { base64UrlToBytes, bytesToBase64Url, utf8Bytes } from "./encoding.js";
+export { type EnumShape, enumSchema } from "./enum-shape.js";
 export {
   ChannelOpenFailedError,
   type ChannelOpenSubmission,
@@ -23,6 +25,9 @@ export {
   type PaymentIntent,
   type PolicyEngine,
   type PolicyHeadroom,
+  type PolicyReservation,
+  type PolicyReservationAttempt,
+  PolicyReservationError,
 } from "./policy.js";
 export {
   formatPolicyIssues,
@@ -103,6 +108,33 @@ export {
   verifyReceipt,
 } from "./receipt/receipt.js";
 export {
+  assertExtendsHead,
+  assertReadRange,
+  computeReceiptLogEntryHash,
+  createMemoryReceiptLogStore,
+  createReceiptLog,
+  RECEIPT_LOG_CHECKPOINT_TYPE,
+  RECEIPT_LOG_GENESIS_HASH,
+  type ReceiptLog,
+  type ReceiptLogCheckpoint,
+  type ReceiptLogCheckpointSchedule,
+  type ReceiptLogCheckpointVerification,
+  type ReceiptLogEntry,
+  type ReceiptLogFailureKind,
+  type ReceiptLogHead,
+  type ReceiptLogOptions,
+  type ReceiptLogStore,
+  type ReceiptLogVerification,
+  receiptLogCheckpointSchema,
+  receiptLogEntrySchema,
+  type SignedReceiptLogCheckpoint,
+  signedReceiptLogCheckpointSchema,
+  signReceiptLogCheckpoint,
+  type VerifyReceiptLogOptions,
+  verifyReceiptLog,
+  verifyReceiptLogCheckpoint,
+} from "./receipt/receipt-log.js";
+export {
   type ReceiptBody,
   type ReceiptBodyV1,
   type ReceiptBodyV2,
@@ -127,6 +159,7 @@ export {
 } from "./receipt/signer.js";
 export { RollingSum, type RollingSumOptions } from "./rolling-sum.js";
 export {
+  type ChannelThreshold,
   createDefaultRouter,
   type DefaultRouterOptions,
   type ModelRouter,

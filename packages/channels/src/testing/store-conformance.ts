@@ -98,6 +98,16 @@ async function caseRoundTrip(makeStore: CommitmentStoreFactory): Promise<void> {
   await store.putChannel(channel);
   assert.deepEqual(await store.getChannel("CROUND"), channel);
   assert.equal(await store.getChannel("CUNKNOWN"), undefined);
+
+  // The fields recover writes (#38) survive the store too.
+  const recovered = makeChannel("CRECOVER", {
+    status: "recovered",
+    closeEffectiveAtLedger: 1100,
+    recoveredAmount: "600",
+    refundTxHash: "tx-refund",
+  });
+  await store.putChannel(recovered);
+  assert.deepEqual(await store.getChannel("CRECOVER"), recovered);
 }
 
 async function caseUpdateMerges(makeStore: CommitmentStoreFactory): Promise<void> {

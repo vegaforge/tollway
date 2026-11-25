@@ -29,7 +29,7 @@ Run at least two processes behind a load balancer that keeps a client on the sam
 
 ## Settlement cache and locks
 
-The cache is the duplicate-payment defence. The gate derives an idempotency key from the signed payment (`<model>:<nonce>`), looks it up before verification, and returns the cached receipt for the same offer instead of settling again.
+The cache is the duplicate-payment defence. The gate derives an idempotency key from the signed payment (`<model>:<nonce>`), looks it up before verification, and returns the cached receipt for the same offer instead of settling again. When a payment carries an x402 `payment-identifier` id, the entry is also stored under `<model>:payment-id:<payer>:<id>`, written together with the digest key (one Lua script on Redis), so a client that re-signs the same payment gets its first receipt back.
 
 ### The in-memory cache is single-process only
 
@@ -73,7 +73,7 @@ A Redis failure before settlement fails the request and nothing is charged: a ca
 
 - The cross-process lock TTL defaults to 30 000 ms and is configurable with `PaywallDeps.settlementLockTtlMs`. It matches the default cache TTL.
 - While a settlement runs, the gate renews the lock every third of its TTL. The timer is `unref`'d, so it never keeps the process alive.
-- If another process holds the lock, the request is rejected with `409` and `{"error": "settlement in progress"}`. That is normal under concurrency; see monitoring for when it is not.
+- If another process holds the lock, the request is rejected with `409` and code `settlement-in-progress`, with `Retry-After`. That is normal under concurrency; see monitoring for when it is not. Every code is listed in [Gate error codes](/docs/gate-errors).
 - If renewal or release fails, or the lock is found to belong to someone else, the payer still gets the receipt and the outcome carries `lockLost: true` and `cacheError`. `onCacheError(error, key)` is called. Treat `lockLost` as a possible duplicate settlement and alert: detection of duplicates across processes is tracked in [#216](https://github.com/vegaforge/tollway/issues/216).
 - A successful settlement whose cache write fails returns the receipt with `cacheError` set and calls `onCacheError`. The retry no longer replays from cache, so a client that retries gets `402` after its nonce is spent.
 
@@ -173,19 +173,26 @@ x402 `/supported` does not advertise assets. It lists versions, schemes and netw
 - Each facilitator HTTP request has its own timeout of 90 seconds from `@x402/core`. Tollway's `createHttpFacilitator` does not expose a knob for it today.
 - A settlement lock lives 30 seconds by default and is renewed while the request runs, so a facilitator call slower than that does not lose its lock; it keeps renewing.
 
+### Local payment pre-validation
+
+Before calling `/verify`, the gate decodes the Stellar transaction in an x402 payment and runs the static checks the facilitator would run first: one `transfer` call on the offer's asset contract, to the offer's payee, for the offer's amount, with address-credential auth entries. A payment that fails is refused with `402 payment-invalid` and the reason in `upstreamReason`, at no facilitator cost. A payment that passes still goes to `/verify`. Headers longer than 16 384 characters are refused before decoding.
+
+This is on for every facilitator client except `createMockFacilitator`. Tune it with `paymentPrevalidation`: `maxPaymentSignatureLength`, an optional `latestLedger` source (`createLatestLedgerSource({ rpcUrl })`) that refuses authorizations already past their expiry ledger, and `onRejected` to count refusals. A ledger lookup that fails skips the expiry check; it never refuses payments.
+
 ### What the gate returns when the facilitator fails
 
 | Situation | Gate outcome |
 | --------- | ------------ |
-| `/verify` returns `isValid: false` or a structured rejection | `402` with the reason |
-| `/verify` transport error or timeout | thrown `TollwayError` with code `payment-failed` |
-| `/settle` returns `success: false` or a structured rejection | `502` with the reason |
-| `/settle` transport error or timeout | thrown `TollwayError` with code `payment-failed` |
-| A `PAYMENT-SIGNATURE` header that is not a base64 x402 payload, or the wrong x402 version | `400` |
-| Same payment replayed against a different offer | `409` `payment already settled for a different offer` |
-| Another process holds this payment's lock | `409` `settlement in progress` |
+| `/verify` returns `isValid: false` or a structured rejection | `402` `payment-invalid`, the facilitator's reason in `upstreamReason`, a fresh `PAYMENT-REQUIRED` |
+| `/verify` transport error or timeout | `503` `facilitator-unavailable` with `Retry-After` |
+| `/settle` returns `success: false` or a structured rejection | `502` `settlement-failed`, the facilitator's reason in `upstreamReason` |
+| `/settle` transport error or timeout after sending | `503` `settlement-unknown` with `Retry-After` equal to the hold |
+| `/settle` connection refused before sending | `503` `facilitator-unavailable` with `Retry-After` |
+| A `PAYMENT-SIGNATURE` header that is not a base64 x402 payload, or the wrong x402 version | `400` `payment-malformed` |
+| Same payment replayed against a different offer | `409` `offer-mismatch` |
+| Another process holds this payment's lock | `409` `settlement-in-progress` with `Retry-After` |
 
-The adapters turn a thrown error into the framework's error path: Express calls `next(error)`, Hono propagates it, and the default response is a `500`. Install your framework's error handler if you want a different status or body.
+All four adapters render these the same way: `{ "error": { "code", "message" } }`. Only errors the gate cannot classify (a bug in a custom facilitator client, a store that is down) still reach your framework's error handler. See [Gate error codes](/docs/gate-errors).
 
 A `/settle` timeout is an indeterminate outcome: the facilitator may still have settled the payment. Tollway then has no receipt and the nonce is spent, so a retry cannot verify. Reconcile from chain state; confirming a receipt on chain with Stellar RPC is tracked in [#211](https://github.com/vegaforge/tollway/issues/211). A multi-facilitator client with health checks and failover is tracked in [#156](https://github.com/vegaforge/tollway/issues/156).
 
@@ -197,10 +204,11 @@ The gate returns a `GateOutcome`; it does not emit metrics itself yet. Feed the 
 | ------ | ---------------- | -------------- |
 | `cacheError` | settled outcome, and `onCacheError(error, key)` | A settled payment could not be cached or its lock could not be released. The retry stops replaying from cache. Alert. |
 | `lockLost` | settled outcome, and `onCacheError` | The cross-process lock was not held for the whole settlement. A second process may have settled the same payment too. Page. |
-| `409 settlement in progress` | rejection with that reason | Expected while another process settles the same payment. Alert on a sustained rate or a client retry loop: it suggests a stuck or expired lock holder, or a lock TTL shorter than the facilitator call. |
-| `409 payment already settled for a different offer` | rejection with that reason | A receipt is being replayed for a different resource or price. Investigate; do not widen the binding check. |
-| `502` | rejection with a facilitator reason | `/settle` declined. Alert on rate, per reason. |
-| thrown `payment-failed` | framework error path, usually `500` | Facilitator transport failure or timeout. Alert; for settle, treat the payment as indeterminate. |
+| `409 settlement-in-progress` | rejection with that code | Expected while another process settles the same payment. Alert on a sustained rate or a client retry loop: it suggests a stuck or expired lock holder, or a lock TTL shorter than the facilitator call. |
+| `409 offer-mismatch` | rejection with that code | A receipt is being replayed for a different resource or price. Investigate; do not widen the binding check. |
+| `502 settlement-failed` | rejection with the facilitator's reason in `upstreamReason` | `/settle` declined. Alert on rate, per reason. |
+| `503 facilitator-unavailable` | rejection with that code | Facilitator transport failure or timeout; nothing settled. Alert on rate. |
+| `503 settlement-unknown` | rejection with that code | `/settle` may have landed and the payment is held. Alert; reconcile the nonce if the hold ends without an answer. |
 | `402` rate | normal challenge traffic | It is the honest "not paid yet" answer; a jump means agents are failing to pay or reusing spent nonces. |
 | Redis latency and errors | your Redis metrics | A pre-settlement failure refuses the request; a post-settlement one becomes `cacheError`. |
 
@@ -255,7 +263,7 @@ For the deployed processes, check three things:
 
 1. An unpaid request to a paid route returns `402` with a `PAYMENT-REQUIRED` header and no receipt.
 2. A paid request returns `200`, a `PAYMENT-RESPONSE` header and the `TOLLWAY-RECEIPT` header, and the receipt verifies against the public key your agents trust.
-3. Two processes replaying the same payment at once make exactly one `/settle` call: one request settles, the other gets `409 settlement in progress` or a replayed receipt, and no double debit appears in the recipient account. Run it a few times; this is the property Redis is there for.
+3. Two processes replaying the same payment at once make exactly one `/settle` call: one request settles, the other gets `409 settlement-in-progress` or a replayed receipt, and no double debit appears in the recipient account. Run it a few times; this is the property Redis is there for.
 
 ## Known gaps
 

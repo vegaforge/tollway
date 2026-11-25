@@ -6,6 +6,7 @@
     "../../packages/core/src/index.ts",
     "../../packages/server/src/index.ts",
     "../../packages/client/src/index.ts",
+    "../../packages/ai-sdk/src/index.ts",
     "../../packages/adapter-express/src/index.ts",
     "../../packages/adapter-fastify/src/index.ts",
     "../../packages/adapter-next/src/index.ts",
@@ -14,6 +15,7 @@
     "../../packages/channels/src/index.ts",
     "../../packages/reconcile/src/index.ts",
     "../../packages/observability/src/index.ts",
+    "../../packages/signer-vault/src/index.ts",
     "../../packages/theme/src/index.ts",
     "../../packages/theme/src/preset.ts"
   ],

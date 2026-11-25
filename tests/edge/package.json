@@ -1,0 +1,25 @@
+{
+  "name": "@vegaforge/tollway-edge-tests",
+  "version": "0.0.0",
+  "private": true,
+  "description": "Runs the Tollway gate, the Hono adapter and a Next-style handler on workerd, Deno and Bun",
+  "license": "Apache-2.0",
+  "type": "module",
+  "scripts": {
+    "edge:bundle": "node src/bundle.mjs",
+    "edge:workerd": "node src/bundle.mjs && node src/run-workerd.mjs",
+    "edge:size": "node src/bundle.mjs --size-check",
+    "typecheck": "tsc --noEmit"
+  },
+  "devDependencies": {
+    "@types/node": "^22.20.5",
+    "@vegaforge/tollway-adapter-hono": "workspace:*",
+    "@vegaforge/tollway-adapter-next": "workspace:*",
+    "@vegaforge/tollway-core": "workspace:*",
+    "@vegaforge/tollway-server": "workspace:*",
+    "esbuild": "^0.28.2",
+    "hono": "^4.13.19",
+    "miniflare": "4.20260730.0",
+    "typescript": "^5.9.3"
+  }
+}

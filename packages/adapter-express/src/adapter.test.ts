@@ -6,9 +6,13 @@ import {
   createPaywall,
   createRouteTable,
   decodePaymentRequiredHeader,
+  decodePaymentResponseHeader,
+  didKeyFromEd25519PublicKey,
   encodePaymentSignatureHeader,
+  type MppChannelHandler,
   type MppChargeHandler,
   PAYMENT_REQUIRED_HEADER,
+  PAYMENT_RESPONSE_HEADER,
   PAYMENT_SIGNATURE_HEADER,
   type PaywallConfig,
 } from "@vegaforge/tollway-server";
@@ -122,6 +126,63 @@ describe("expressPaywall", () => {
   });
 });
 
+/** Decodes one part of a compact JWS, for checking what reached the wire. */
+function jwsPart(token: unknown, index: 0 | 1): Record<string, unknown> {
+  if (typeof token !== "string") throw new Error("expected a compact JWS string");
+  const part = token.split(".")[index] ?? "";
+  return JSON.parse(Buffer.from(part, "base64url").toString("utf8")) as Record<string, unknown>;
+}
+
+describe("expressPaywall with the x402 offer-receipt extension (#172)", () => {
+  it("sends the signed offer on the 402 and the signed receipt on the paid response", async () => {
+    const signer = await Ed25519Signer.generate("offer-receipt-express");
+    const gate = createPaywall(
+      { ...config, offerReceipt: true },
+      { signer, facilitator: createMockFacilitator() },
+    );
+    const app = express();
+    app.get("/quotes/latest", expressPaywall(gate), (_req, res) => res.json({ quote: 42 }));
+    const server = app.listen(0);
+    await new Promise((resolve) => server.once("listening", resolve));
+    const address = server.address();
+    if (!address || typeof address === "string") throw new Error("expected a TCP address");
+    const url = `http://127.0.0.1:${address.port}/quotes/latest`;
+    try {
+      const unpaid = await fetch(url);
+      expect(unpaid.status).toBe(402);
+      const required = unpaid.headers.get(PAYMENT_REQUIRED_HEADER);
+      const challenge = decodePaymentRequiredHeader(required ?? "");
+      const extension = challenge.extensions?.["offer-receipt"] as {
+        info: { offers: Array<{ format: string; signature: string }> };
+      };
+      const offer = extension.info.offers[0];
+      expect(offer?.format).toBe("jws");
+      expect(jwsPart(offer?.signature, 0)).toEqual({
+        alg: "EdDSA",
+        kid: didKeyFromEd25519PublicKey(signer.publicKey),
+      });
+      expect(jwsPart(offer?.signature, 1)).toMatchObject({ amount: "10000", payTo: "GSERVICE" });
+
+      const paid = await fetch(url, {
+        headers: { [PAYMENT_SIGNATURE_HEADER]: payFrom(required, "offer-receipt-express") },
+      });
+      expect(paid.status).toBe(200);
+      const settle = decodePaymentResponseHeader(paid.headers.get(PAYMENT_RESPONSE_HEADER) ?? "");
+      const receipt = (
+        settle.extensions?.["offer-receipt"] as { info: { receipt: { signature: string } } }
+      ).info.receipt;
+      expect(jwsPart(receipt.signature, 1)).toMatchObject({
+        network: "stellar:testnet",
+        // The same resource identifier the offer named.
+        resourceUrl: jwsPart(offer?.signature, 1).resourceUrl,
+      });
+      expect(challenge.resource.url).toBe(jwsPart(offer?.signature, 1).resourceUrl);
+    } finally {
+      await new Promise((resolve) => server.close(resolve));
+    }
+  });
+});
+
 describe("expressRouteTable", () => {
   it("gates paid paths and passes free paths through", async () => {
     const signer = await Ed25519Signer.generate("route-table-express");
@@ -182,7 +243,7 @@ describe("expressPaywall with a shared settlement cache", () => {
       const replay = await fetch(`${base}/quotes/history`, { headers });
       expect(replay.status).toBe(409);
       expect(await replay.json()).toEqual({
-        error: "payment already settled for a different offer",
+        error: { code: "offer-mismatch", message: "payment already settled for a different offer" },
       });
       expect(served).toEqual(["latest"]);
     } finally {
@@ -295,7 +356,11 @@ describe("expressPaywall with mpp-charge", () => {
       const response = await fetch(app.url, { headers: { authorization: "Payment refused" } });
       expect(response.status).toBe(402);
       expect(await response.json()).toEqual({
-        error: "mpp challenge was not issued by this server",
+        error: {
+          code: "payment-invalid",
+          message: "the payment was refused",
+          upstreamReason: "mpp challenge was not issued by this server",
+        },
       });
     } finally {
       await app.close();
@@ -380,9 +445,147 @@ describe("expressPaywall with a service policy", () => {
       });
       expect(response.status).toBe(429);
       expect(response.headers.get("retry-after")).toBe("60");
-      expect(await response.json()).toEqual({ error: "service-policy:spend-exceeded" });
+      expect(await response.json()).toEqual({
+        error: { code: "service-policy:spend-exceeded", message: "service-policy:spend-exceeded" },
+      });
     } finally {
       await new Promise((resolve) => server.close(resolve));
+    }
+  });
+});
+
+// MPP channel through the adapter: a request naming its channel gets the
+// channel challenge on the 402, a refused channel and a refused voucher come
+// back as 402 rejections, and a valid voucher settles with a receipt.
+const CHANNEL = "CDLZFC3SYJYDZT7K67VZ75HPJVIEUVNIXF47ZG2FB2RMQQVU2HHGCYSC";
+
+/** An mppx-format channel credential, built by hand so the adapter needs no mppx dependency. */
+function channelCredential(amount: string): string {
+  const b64 = (value: unknown) => Buffer.from(JSON.stringify(value)).toString("base64url");
+  const challenge = {
+    id: "chan",
+    realm: "tollway",
+    method: "stellar",
+    intent: "channel",
+    request: b64({ amount: config.amount, channel: CHANNEL }),
+  };
+  return `Payment ${b64({ challenge, payload: { action: "voucher", amount, signature: "ab".repeat(64) } })}`;
+}
+
+async function channelGate() {
+  const signer = await Ed25519Signer.generate("test-key-channel");
+  const handler: MppChannelHandler = {
+    async idempotencyKey({ payment }) {
+      return `${payment.channelId}:${payment.cumulativeAmount}`;
+    },
+    async challenge({ channelId }) {
+      return channelId === CHANNEL
+        ? { ok: true, headers: { "www-authenticate": 'Payment id="chan", intent="channel"' } }
+        : {
+            ok: false,
+            code: "channel-refused",
+            reason: "channel-recipient-mismatch: wrong payout address",
+          };
+    },
+    async verify({ payment }) {
+      return payment.cumulativeAmount === config.amount
+        ? {
+            valid: true,
+            payer: "GFUNDER",
+            nonce: `${payment.channelId}:${payment.cumulativeAmount}`,
+          }
+        : { valid: false, reason: "wrong-increment: the voucher adds 5, the offer costs 10000" };
+    },
+    async settle({ payment }) {
+      return {
+        settled: true,
+        settlement: { kind: "channel-commitment", channelId: payment.channelId, sequence: 1 },
+      };
+    },
+    async reconcile() {
+      return { outcome: "nothing-pending" };
+    },
+  };
+  return createPaywall(
+    { ...config, models: ["x402", "mpp-channel"] },
+    { signer, facilitator: createMockFacilitator(), mppChannelHandler: handler },
+  );
+}
+
+describe("expressPaywall with mpp-channel", () => {
+  async function start() {
+    const gate = await channelGate();
+    const app = express();
+    app.get("/quotes/latest", expressPaywall(gate), (_req, res) => {
+      res.json({ settlement: res.locals[RECEIPT_LOCALS_KEY].receipt.settlement });
+    });
+    const server = app.listen(0);
+    await new Promise((resolve) => server.once("listening", resolve));
+    const address = server.address();
+    if (!address || typeof address === "string") throw new Error("expected a TCP address");
+    return {
+      url: `http://127.0.0.1:${address.port}/quotes/latest`,
+      close: () => new Promise((resolve) => server.close(resolve)),
+    };
+  }
+
+  it("sends the channel challenge when the request names its channel", async () => {
+    const app = await start();
+    try {
+      const response = await fetch(app.url, { headers: { "tollway-channel": CHANNEL } });
+      expect(response.status).toBe(402);
+      expect(response.headers.get("www-authenticate")).toContain('intent="channel"');
+    } finally {
+      await app.close();
+    }
+  });
+
+  it("refuses a channel that fails its on-chain checks", async () => {
+    const app = await start();
+    try {
+      const response = await fetch(app.url, { headers: { "tollway-channel": "COTHER" } });
+      expect(response.status).toBe(402);
+      expect(await response.json()).toEqual({
+        error: {
+          code: "channel-refused",
+          message: "channel-recipient-mismatch: wrong payout address",
+        },
+      });
+    } finally {
+      await app.close();
+    }
+  });
+
+  it("settles a voucher with a channel-commitment receipt", async () => {
+    const app = await start();
+    try {
+      const response = await fetch(app.url, {
+        headers: { authorization: channelCredential("10000") },
+      });
+      expect(response.status).toBe(200);
+      expect(response.headers.get("tollway-receipt")).toBeTruthy();
+      expect(await response.json()).toEqual({
+        settlement: { kind: "channel-commitment", channelId: CHANNEL, sequence: 1 },
+      });
+    } finally {
+      await app.close();
+    }
+  });
+
+  it("answers a refused voucher with 402", async () => {
+    const app = await start();
+    try {
+      const response = await fetch(app.url, { headers: { authorization: channelCredential("5") } });
+      expect(response.status).toBe(402);
+      expect(await response.json()).toEqual({
+        error: {
+          code: "payment-invalid",
+          message: "the payment was refused",
+          upstreamReason: "wrong-increment: the voucher adds 5, the offer costs 10000",
+        },
+      });
+    } finally {
+      await app.close();
     }
   });
 });

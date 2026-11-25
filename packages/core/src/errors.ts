@@ -8,6 +8,8 @@ export type TollwayErrorCode =
   | "no-viable-model"
   | "invalid-receipt"
   | "invalid-signing-key"
+  | "signer-failed"
+  | "body-too-large"
   | "invalid-amount"
   | "invalid-quote"
   | "invalid-discovery"
@@ -31,10 +33,13 @@ export type TollwayErrorCode =
   | "channel-not-open"
   | "channel-already-closed"
   | "commitment-conflict"
+  | "policy-reservation"
+  | "channel-pool-exhausted"
   | "invalid-store-config"
   | "corrupt-channel-record"
   | "commitment-exceeds-deposit"
   | "settlement-mismatch"
+  | "recovery-not-effective"
   | "counterparty-quarantined"
   | "channel-open-failed"
   | "invalid-metrics-query"
@@ -45,7 +50,9 @@ export type TollwayErrorCode =
   | "corrupt-receipt"
   | "receipt-conflict"
   | "approval-timeout"
-  | "approval-denied";
+  | "approval-denied"
+  | "receipt-log-conflict"
+  | "corrupt-receipt-log";
 
 /** An error Tollway throws on purpose. Branch on `code`, which is stable across releases. */
 export class TollwayError extends Error {

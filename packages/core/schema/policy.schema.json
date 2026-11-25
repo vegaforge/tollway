@@ -25,7 +25,46 @@
         "daily": {
           "type": "string",
           "pattern": "^[0-9]+$",
-          "description": "Spend ceiling per UTC day."
+          "description": "Spend ceiling per calendar day."
+        },
+        "weekly": {
+          "type": "string",
+          "pattern": "^[0-9]+$",
+          "description": "Spend ceiling per calendar week."
+        },
+        "monthly": {
+          "type": "string",
+          "pattern": "^[0-9]+$",
+          "description": "Spend ceiling per calendar month."
+        },
+        "rolling": {
+          "type": "object",
+          "properties": {
+            "windowSeconds": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 9007199254740991,
+              "description": "Length of the sliding window, in whole seconds (at least 1)."
+            },
+            "cap": {
+              "type": "string",
+              "pattern": "^[0-9]+$",
+              "description": "Most spend allowed inside any one window."
+            }
+          },
+          "required": ["windowSeconds", "cap"],
+          "additionalProperties": false,
+          "description": "Rolling-window spend ceiling."
+        },
+        "timezone": {
+          "type": "string",
+          "minLength": 1,
+          "description": "IANA time zone for calendar budget periods (daily, weekly, monthly). Defaults to UTC."
+        },
+        "weekStartsOn": {
+          "type": "string",
+          "enum": ["monday", "sunday"],
+          "description": "First day of the week for weekly budgets. Defaults to monday."
         },
         "total": {
           "type": "string",

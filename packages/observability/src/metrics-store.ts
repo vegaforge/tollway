@@ -59,10 +59,21 @@ const OUTCOMES: readonly PaymentMetric["outcome"][] = ["settled", "failed", "ski
  * rollup never has to skip a row it cannot sum.
  */
 export function assertValidMetric(metric: PaymentMetric): void {
-  for (const field of ["payer", "payee", "asset"] as const) {
+  for (const field of ["payee", "asset"] as const) {
     if (typeof metric[field] !== "string" || metric[field].length === 0) {
       throw new InvalidMetricError(field, "must be a non-empty string");
     }
+  }
+  // A failed payment can stop before any payer is verified, so its payer is
+  // "" (see PaymentMetric). Every other outcome names the payer.
+  if (
+    typeof metric.payer !== "string" ||
+    (metric.payer.length === 0 && metric.outcome !== "failed")
+  ) {
+    throw new InvalidMetricError(
+      "payer",
+      "must be a non-empty string unless the outcome is failed",
+    );
   }
   if (typeof metric.amount !== "string" || !AMOUNT.test(metric.amount)) {
     throw new InvalidMetricError(

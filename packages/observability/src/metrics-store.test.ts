@@ -202,6 +202,13 @@ describe.each(factories)("MetricsStore conformance: $name", (factory) => {
     expect((await store.query()).metrics).toEqual([]);
   });
 
+  it("accepts an empty payer on a failed metric, where no payer was verified", async () => {
+    // The payment gate records a failed verification with payer "" (#106).
+    const failed = metric({ payer: "", outcome: "failed" });
+    const store = await seeded(factory, [failed]);
+    expect((await store.query({ outcome: "failed" })).metrics).toEqual([failed]);
+  });
+
   it("rejects every call once closed", async () => {
     const store = await factory.open();
     await store.close();

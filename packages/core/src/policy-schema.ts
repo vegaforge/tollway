@@ -1,4 +1,6 @@
 import { z } from "zod";
+import { isValidTimeZone } from "./budget-period.js";
+import { enumSchema } from "./enum-shape.js";
 import { TollwayError } from "./errors.js";
 import { policyModes } from "./policy-trace.js";
 import { settlementModels } from "./types.js";
@@ -80,8 +82,7 @@ const perResourceEntrySchema = z.strictObject({
    * carries it, query string included. `prefix` matches every resource that
    * starts with the key, character by character. No regex or glob.
    */
-  match: z
-    .enum(["exact", "prefix"])
+  match: enumSchema(["exact", "prefix"])
     .meta({
       description:
         "exact (the default) matches the resource string, query string included. prefix matches every resource starting with the key, character by character.",
@@ -107,8 +108,7 @@ const adaptiveAnomalySchema = z
       .positive()
       .meta({ description: "Completed minute buckets before this rule can block." }),
     /** Whether one baseline covers an asset, or each asset and payee pair. */
-    scope: z
-      .enum(["asset", "asset-payee"])
+    scope: enumSchema(["asset", "asset-payee"])
       .meta({ description: "One baseline per asset (the default), or per asset and payee." })
       .optional(),
     /** Maximum increase allowed when a completed bucket trains the baseline. */
@@ -174,16 +174,14 @@ const rateLimitSchema = z
      * settle. `attempts` counts every payment the client sends, when it
      * sends it, including ones that then fail.
      */
-    count: z
-      .enum(["settlements", "attempts"])
+    count: enumSchema(["settlements", "attempts"])
       .meta({
         description:
           "settlements (the default) counts settled payments. attempts counts every payment the client sends, including failed ones.",
       })
       .optional(),
     /** `global` (the default) shares one count; `per-counterparty` keeps one per payee. */
-    scope: z
-      .enum(["global", "per-counterparty"])
+    scope: enumSchema(["global", "per-counterparty"])
       .meta({
         description:
           "global (the default) shares one count across every payee. per-counterparty keeps a count per payee address.",
@@ -246,8 +244,7 @@ export const policySchema = z.strictObject({
    * allows it and only marks the would-be block in the trace. Spend is
    * recorded the same way in both modes, so budgets stay real.
    */
-  mode: z
-    .enum(policyModes)
+  mode: enumSchema(policyModes)
     .meta({
       description:
         "enforce (the default) blocks a payment when a rule fails. dry-run allows it and marks the would-be block in the trace.",
@@ -255,8 +252,30 @@ export const policySchema = z.strictObject({
     .optional(),
   budgets: z
     .strictObject({
-      /** Spend ceiling per UTC day. */
-      daily: integerString.meta({ description: "Spend ceiling per UTC day." }).optional(),
+      /** Spend ceiling per calendar day (UTC by default, or in `timezone`). */
+      daily: integerString.meta({ description: "Spend ceiling per calendar day." }).optional(),
+      /** Spend ceiling per calendar week (UTC by default, or in `timezone`). */
+      weekly: integerString.meta({ description: "Spend ceiling per calendar week." }).optional(),
+      /** Spend ceiling per calendar month (UTC by default, or in `timezone`). */
+      monthly: integerString.meta({ description: "Spend ceiling per calendar month." }).optional(),
+      /** Rolling-window spend ceiling, e.g. 24 hours (86400s). */
+      rolling: windowCapSchema.meta({ description: "Rolling-window spend ceiling." }).optional(),
+      /** IANA time zone for calendar periods (daily, weekly, monthly). Defaults to "UTC". */
+      timezone: z
+        .string()
+        .min(1)
+        .refine(isValidTimeZone, "expected a valid IANA time zone")
+        .meta({
+          description:
+            "IANA time zone for calendar budget periods (daily, weekly, monthly). Defaults to UTC.",
+        })
+        .optional(),
+      /** First day of the week for `weekly` budgets. Defaults to "monday". */
+      weekStartsOn: enumSchema(["monday", "sunday"])
+        .meta({
+          description: "First day of the week for weekly budgets. Defaults to monday.",
+        })
+        .optional(),
       /** Lifetime ceiling for this policy. */
       total: integerString.meta({ description: "Lifetime ceiling for this policy." }).optional(),
     })
@@ -280,7 +299,7 @@ export const policySchema = z.strictObject({
     .optional(),
   /** Rules per settlement model. */
   perModel: z
-    .partialRecord(z.enum(settlementModels), perModelSchema)
+    .partialRecord(enumSchema(settlementModels), perModelSchema)
     .meta({ description: "Rules per settlement model." })
     .optional(),
   rateLimit: rateLimitSchema

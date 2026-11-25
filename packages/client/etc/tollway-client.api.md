@@ -8,7 +8,9 @@ import { ClientStellarSigner } from '@x402/stellar';
 import { CounterpartyQuarantine } from '@vegaforge/tollway-core';
 import { Keypair } from '@stellar/stellar-sdk';
 import { ModelRouter } from '@vegaforge/tollway-core';
+import { PaymentIntent } from '@vegaforge/tollway-core';
 import { PaymentOffer } from '@vegaforge/tollway-core';
+import { Policy } from '@vegaforge/tollway-core';
 import { PolicyEngine } from '@vegaforge/tollway-core';
 import { PolicyTrace } from '@vegaforge/tollway-core';
 import { PolicyTraceComparison } from '@vegaforge/tollway-core';
@@ -20,6 +22,23 @@ import { StellarNetwork } from '@vegaforge/tollway-core';
 import { TollwayError } from '@vegaforge/tollway-core';
 
 // @public
+export type AgentSigner = {
+    readonly address: string;
+    readonly network: StellarNetwork;
+    readonly capabilities: AgentSignerCapabilities;
+};
+
+// @public
+export type AgentSignerCapabilities = {
+    readonly x402?: ClientStellarSigner;
+    readonly mppCharge?: MppKeyCapability;
+    readonly mppChannel?: MppKeyCapability;
+};
+
+// @public
+export type AgentSignerCapability = keyof AgentSignerCapabilities;
+
+// @public
 export class AmbiguousSettlementError extends TollwayError {
     constructor(reason: string, options?: {
         cause?: unknown;
@@ -29,6 +48,71 @@ export class AmbiguousSettlementError extends TollwayError {
     // (undocumented)
     readonly reason: string;
 }
+
+// @public
+export type ApprovalDecision = {
+    approved: true;
+} | {
+    approved: false;
+    reason?: string;
+};
+
+// @public
+export class ApprovalDeniedError extends TollwayError {
+    constructor(resource: string, amount: string, asset: string, reason?: string);
+    // (undocumented)
+    readonly amount: string;
+    // (undocumented)
+    readonly asset: string;
+    // (undocumented)
+    readonly reason?: string;
+    // (undocumented)
+    readonly resource: string;
+}
+
+// @public
+export type ApprovalOptions = {
+    thresholds?: Record<string, string>;
+    predicate?: (intent: PaymentIntent) => boolean;
+    approver: (request: ApprovalRequest, options: {
+        signal: AbortSignal;
+    }) => Promise<ApprovalDecision>;
+    timeoutMs?: number;
+};
+
+// @public
+export type ApprovalRequest = {
+    resource: string;
+    payee: string;
+    amount: string;
+    asset: string;
+    model: SettlementModel;
+    policyUsage?: {
+        dailySpent?: string;
+        totalSpent?: string;
+        serviceSpent?: string;
+    };
+};
+
+// @public
+export class ApprovalTimeoutError extends TollwayError {
+    constructor(resource: string, amount: string, asset: string);
+    // (undocumented)
+    readonly amount: string;
+    // (undocumented)
+    readonly asset: string;
+    // (undocumented)
+    readonly resource: string;
+}
+
+// @public
+export type CachedPolicyEntry = {
+    agentId: string;
+    version: number;
+    etag: string;
+    policy: Policy;
+    createdAt: string;
+};
 
 // @public
 export type ChannelFallbackOptions = {
@@ -138,6 +222,28 @@ export type ClientEvent = {
     resource: string;
     reason: string;
     entry?: QuarantineEntry;
+}
+/**
+* A payment requires approval and the approver is being called (#199).
+* Emitted before the approver callback runs.
+*/
+| {
+    type: "approval:requested";
+    resource: string;
+    amount: string;
+    asset: string;
+    payee: string;
+}
+/**
+* The approver returned a decision (#199). `approved` is the decision,
+* `latencyMs` is how long the approver took.
+*/
+| {
+    type: "approval:resolved";
+    resource: string;
+    approved: boolean;
+    latencyMs: number;
+    reason?: string;
 };
 
 // @public (undocumented)
@@ -148,17 +254,39 @@ export interface ClientSettler {
     readonly payer?: string;
     // (undocumented)
     settle(input: SettleRequest): Promise<SignedReceipt>;
+    settleExchange?(input: ExchangeSettleRequest): Promise<PaidExchange>;
     subscribe?(emit: (event: SettlerEvent) => void): void;
 }
 
 // @public
+export type ClientSettlers = {
+    settler: ClientSettler;
+    settlers?: undefined;
+} | {
+    settler?: undefined;
+    settlers: Partial<Record<SettlementModel, ClientSettler>>;
+};
+
+// @public
 export function createClient(options: TollwayClientOptions): TollwayClient;
+
+// @public
+export function createKeypairSigner(secret: string | Keypair, network: StellarNetwork): AgentSigner;
+
+// @public
+export function createMemoryPolicyCache(): PolicyCache;
 
 // @public
 export function createMemoryReceiptStore(): ReceiptHistory;
 
 // @public
 export function createMppChargeSettler(options: MppChargeSettlerOptions): ClientSettler;
+
+// @public
+export function createPaidFetch(options: PaidFetchOptions): PaidFetch;
+
+// @public
+export function createSmartAccountSigner(options: SmartAccountSignerOptions): AgentSigner;
 
 // @public
 export function createX402Settler(options: X402SettlerOptions): ClientSettler;
@@ -168,6 +296,31 @@ export const DEFAULT_RECEIPT_MAX_SKEW_MS: number;
 
 // @public
 export const DEFAULT_RECEIPT_PAGE_SIZE = 100;
+
+// @public
+export type ExchangeSettleRequest = SettleRequest & {
+    exchange: HttpExchange;
+};
+
+// @public
+export type FetchedPolicy = CachedPolicyEntry & {
+    fromCache: boolean;
+};
+
+// @public
+export function fetchPolicy(serviceUrl: string, agentId: string, apiKey: string, options?: FetchPolicyOptions): Promise<FetchedPolicy>;
+
+// @public
+export type FetchPolicyOptions = {
+    fetch?: typeof globalThis.fetch;
+    cache?: PolicyCache;
+};
+
+// @public
+export type HttpExchange = {
+    readonly request: ReplayableRequest;
+    readonly challenge: Response;
+};
 
 // @public
 export const MAX_RECEIPT_PAGE_SIZE = 1000;
@@ -196,6 +349,11 @@ export type MppChargeSettlerOptions = SignerOption & {
     fetch?: typeof globalThis.fetch;
     receiptHeader?: string;
     method?: string;
+};
+
+// @public
+export type MppKeyCapability = {
+    keypair(): Keypair;
 };
 
 // @public
@@ -235,6 +393,30 @@ export type OrphanedChannel = {
 };
 
 // @public
+export type PaidExchange = {
+    receipt: SignedReceipt;
+    response: Response;
+};
+
+// Warning: (ae-forgotten-export) The symbol "FetchInput" needs to be exported by the entry point index.d.ts
+//
+// @public
+export type PaidFetch = (input: FetchInput, init?: RequestInit) => Promise<PaidResponse>;
+
+// @public (undocumented)
+export type PaidFetchOptions = {
+    client: TollwayClient;
+    network: StellarNetwork;
+    fetch?: typeof globalThis.fetch;
+};
+
+// @public
+export type PaidResponse = Response & {
+    receipt?: SignedReceipt;
+    model?: SettlementModel;
+};
+
+// @public
 export type PayeeSpendTotal = SpendTotal & {
     payee: string;
 };
@@ -251,6 +433,7 @@ export type PayRequest = {
     offer: PaymentOffer;
     model?: SettlementModel;
     idempotencyKey?: string;
+    exchange?: HttpExchange;
 };
 
 // @public (undocumented)
@@ -259,6 +442,7 @@ export type PayResult = {
     model: SettlementModel;
     deduplicated: boolean;
     storeError?: Error;
+    response?: Response;
 };
 
 // @public
@@ -268,6 +452,19 @@ export class PolicyBlockedError extends TollwayError {
     readonly detail: string;
     // (undocumented)
     readonly rule: string;
+}
+
+// @public
+export interface PolicyCache {
+    delete(key: string): void;
+    get(key: string): CachedPolicyEntry | undefined;
+    set(key: string, entry: CachedPolicyEntry): void;
+}
+
+// @public
+export class PolicyFetchError extends TollwayError {
+    constructor(status: number, message: string);
+    readonly status: number;
 }
 
 // @public
@@ -318,6 +515,18 @@ export class ReceiptVerificationError extends TollwayError {
 }
 
 // @public
+export type ReplayableRequest = {
+    readonly url: string;
+    readonly method: string;
+    readonly headers: Headers;
+    readonly body?: Uint8Array<ArrayBuffer>;
+    readonly options?: ReplayOptions;
+};
+
+// @public
+export type ReplayOptions = Omit<RequestInit, "method" | "headers" | "body">;
+
+// @public
 export function resourceIdentity(resource: string): string;
 
 // @public
@@ -331,11 +540,13 @@ export class SettlementOutcomeError extends TollwayError {
     // Warning: (ae-forgotten-export) The symbol "OutcomeOptions" needs to be exported by the entry point index.d.ts
     constructor(options: OutcomeOptions);
     // (undocumented)
+    readonly challenge: Response | undefined;
+    // (undocumented)
     readonly kind: SettlementOutcomeKind;
     // (undocumented)
     readonly reason: string;
     // (undocumented)
-    readonly resend: (() => Promise<SignedReceipt>) | undefined;
+    readonly resend: (() => Promise<SignedReceipt | PaidExchange>) | undefined;
     // (undocumented)
     readonly retryAfterMs: number | undefined;
     // (undocumented)
@@ -363,6 +574,24 @@ export type SignedTerms = {
     amount: string;
     asset: string;
     payTo: string;
+};
+
+// @public
+export class SignerCapabilityError extends TollwayError {
+    constructor(capability: AgentSignerCapability, model: SettlementModel, address: string);
+    // (undocumented)
+    readonly capability: AgentSignerCapability;
+}
+
+// @public
+export function signerModels(signer: AgentSigner): SettlementModel[];
+
+// @public (undocumented)
+export type SmartAccountSignerOptions = {
+    contractId: string;
+    network: StellarNetwork;
+    signAuthEntry: ClientStellarSigner["signAuthEntry"];
+    signTransaction?: ClientStellarSigner["signTransaction"];
 };
 
 // @public
@@ -405,9 +634,9 @@ export interface TollwayClient {
 }
 
 // @public (undocumented)
-export type TollwayClientOptions = {
+export type TollwayClientOptions = ClientSettlers & {
     network: StellarNetwork;
-    settler: ClientSettler;
+    supportedModels?: SettlementModel[];
     policy?: PolicyEngine;
     shadow?: PolicyEngine;
     logger?: {
@@ -424,11 +653,12 @@ export type TollwayClientOptions = {
     onStoreError?: (error: Error, receipt: SignedReceipt) => void;
     retry?: RetryOptions;
     fallback?: ChannelFallbackOptions;
+    approval?: ApprovalOptions;
 };
 
 // @public (undocumented)
 export type X402SettlerOptions = {
-    signer: ClientStellarSigner;
+    signer: AgentSigner | ClientStellarSigner;
     network: StellarNetwork;
     fetch?: typeof globalThis.fetch;
     rpcUrl?: string;

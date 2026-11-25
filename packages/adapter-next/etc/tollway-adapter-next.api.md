@@ -5,8 +5,14 @@
 ```ts
 
 import { Gate } from '@vegaforge/tollway-server';
+import { PaywallOptions } from '@vegaforge/tollway-server';
 import { RouteTable } from '@vegaforge/tollway-server';
 import { SignedReceipt } from '@vegaforge/tollway-core';
+
+// @public
+export type AfterHandlerPaidHandler = (request: Request, context: {
+    receipt?: SignedReceipt;
+}) => Response | Promise<Response>;
 
 // @public
 export type PaidContext = {
@@ -17,12 +23,17 @@ export type PaidContext = {
 export type PaidHandler = (request: Request, context: PaidContext) => Response | Promise<Response>;
 
 // @public
-export function withPaywall(gate: Gate, handler: PaidHandler): (request: Request) => Promise<Response>;
+export function withPaywall(gate: Gate, handler: PaidHandler, options?: PaywallOptions & {
+    settlement?: "before-handler";
+}): (request: Request) => Promise<Response>;
+
+// @public
+export function withPaywall(gate: Gate, handler: AfterHandlerPaidHandler, options?: PaywallOptions): (request: Request) => Promise<Response>;
 
 // @public
 export function withRouteTable(table: RouteTable, handler: (request: Request, context: {
     receipt?: SignedReceipt;
-}) => Response | Promise<Response>): (request: Request) => Promise<Response>;
+}) => Response | Promise<Response>, options?: PaywallOptions): (request: Request) => Promise<Response>;
 
 // (No @packageDocumentation comment for this package)
 

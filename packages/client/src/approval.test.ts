@@ -2,17 +2,22 @@
  * Tests for payment approval (#199).
  */
 
-import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import {
+  buildReceipt,
+  Ed25519Signer,
+  type PaymentOffer,
+  type SignedReceipt,
+  signReceipt,
+} from "@vegaforge/tollway-core";
+import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
+import {
+  type ApprovalDecision,
   ApprovalDeniedError,
   ApprovalTimeoutError,
-  createClient,
-  type ApprovalDecision,
-  type ApprovalRequest,
   type ClientEvent,
-  type SignedReceipt,
+  createClient,
+  type SettleRequest,
 } from "./index.js";
-import type { PaymentOffer } from "@vegaforge/tollway-core";
 
 const OFFER: PaymentOffer = {
   amount: "10000",
@@ -23,22 +28,30 @@ const OFFER: PaymentOffer = {
   models: ["x402"],
 };
 
+let signer: Ed25519Signer;
+
+beforeAll(async () => {
+  signer = await Ed25519Signer.generate("approval-test-key");
+});
+
+/** A settler that signs a receipt for exactly the offer it was asked to pay. */
 function mockSettler() {
-  const settle = vi.fn(async () => ({
-    receipt: {
-      payer: "GTESTPAYER",
-      payee: OFFER.payTo,
-      amount: OFFER.amount,
-      asset: OFFER.asset,
-      resource: OFFER.resource,
-      network: "testnet",
-      model: "x402" as const,
-      settlementRef: "tx123",
-      issuedAt: new Date().toISOString(),
-    },
-    signature: "mocksig",
-    publicKey: "mockkey",
-  } as SignedReceipt));
+  const settle = vi.fn(
+    async (input: SettleRequest): Promise<SignedReceipt> =>
+      signReceipt(
+        buildReceipt({
+          payer: "GPAYERXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX",
+          payee: input.offer.payTo,
+          amount: input.offer.amount,
+          asset: input.offer.asset,
+          resource: input.offer.resource,
+          model: input.model,
+          settlement: { kind: "transaction", txHash: "tx123" },
+          network: input.offer.network,
+        }),
+        signer,
+      ),
+  );
   return { settle };
 }
 
@@ -79,10 +92,13 @@ describe("Payment approval", () => {
   });
 
   it("throws ApprovalDeniedError when approver denies", async () => {
-    const approver = vi.fn(async () => ({
-      approved: false,
-      reason: "too expensive",
-    }) as ApprovalDecision);
+    const approver = vi.fn(
+      async () =>
+        ({
+          approved: false,
+          reason: "too expensive",
+        }) as ApprovalDecision,
+    );
     const settler = mockSettler();
     const client = createClient({
       network: "testnet",
@@ -105,7 +121,7 @@ describe("Payment approval", () => {
   it("throws ApprovalTimeoutError when approver times out", async () => {
     const approver = vi.fn(
       async () =>
-        new Promise((resolve) => {
+        new Promise<ApprovalDecision>((resolve) => {
           setTimeout(() => resolve({ approved: true }), 70000);
         }),
     );
@@ -121,12 +137,13 @@ describe("Payment approval", () => {
     });
 
     const promise = client.pay({ resource: OFFER.resource, offer: OFFER });
+    // Attach the expectation before the timeout fires, so the rejection is
+    // always handled.
+    const rejected = expect(promise).rejects.toMatchObject({ code: "approval-timeout" });
     await vi.advanceTimersByTimeAsync(60000);
 
+    await rejected;
     await expect(promise).rejects.toThrow(ApprovalTimeoutError);
-    await expect(promise).rejects.toMatchObject({
-      code: "approval-timeout",
-    });
   });
 
   it("treats approver throw as denial", async () => {
@@ -172,13 +189,16 @@ describe("Payment approval", () => {
       asset: OFFER.asset,
     });
 
-    const resolved = events.find((e) => e.type === "approval:resolved");
+    const resolved = events.find(
+      (e): e is Extract<ClientEvent, { type: "approval:resolved" }> =>
+        e.type === "approval:resolved",
+    );
     expect(resolved).toMatchObject({
       type: "approval:resolved",
       resource: OFFER.resource,
       approved: true,
     });
-    expect((resolved as any).latencyMs).toBeGreaterThanOrEqual(0);
+    expect(resolved?.latencyMs).toBeGreaterThanOrEqual(0);
   });
 
   it("skips approval when amount is below threshold", async () => {
@@ -240,9 +260,10 @@ describe("Payment approval", () => {
     });
 
     const promise = client.pay({ resource: OFFER.resource, offer: OFFER });
+    const rejected = expect(promise).rejects.toThrow(ApprovalTimeoutError);
     await vi.advanceTimersByTimeAsync(60000);
 
-    await expect(promise).rejects.toThrow(ApprovalTimeoutError);
+    await rejected;
     expect(signalAborted).toBe(true);
   });
 });

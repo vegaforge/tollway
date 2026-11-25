@@ -25,6 +25,7 @@ import {
   PAYMENT_REQUIRED_HEADER,
   PAYMENT_SIGNATURE_HEADER,
 } from "./headers.js";
+import { envelope, PAY_TO } from "./testing/stellar-envelopes.js";
 
 const STELLAR_USDC = "CBIELTK6YBZJU5UP2WWQEUCYKLPU6AUNZ2BQ4WWFEIE3USCIHMXQDAMA";
 const PAYEE = "GCKFBEIYTKP5RDBQMUTAPDCAIVMOLKZYNYKRJHAEWHJDYUGSA3FDQQ3V";
@@ -42,7 +43,9 @@ afterEach(() => {
   vi.unstubAllGlobals();
 });
 
-function config(overrides: Partial<PaywallConfig> = {}): PaywallConfig {
+function config(
+  overrides: Partial<Extract<PaywallConfig, { amount: unknown }>> = {},
+): PaywallConfig {
   return { amount: "10000", asset: STELLAR_USDC, payTo: PAYEE, network: "testnet", ...overrides };
 }
 
@@ -78,7 +81,9 @@ async function challengeFor(
 describe("publishing a route through Bazaar discovery", () => {
   it("publishes nothing for a route without a discovery block", async () => {
     const challenge = await challengeFor(undefined, request("GET", "https://api.example.com/q"));
-    expect(challenge.extensions).toBeUndefined();
+    // Every 402 declares payment-identifier (#153); nothing is published to bazaar.
+    expect(Object.keys(challenge.extensions ?? {})).toEqual(["payment-identifier"]);
+    expect(challenge.extensions?.bazaar).toBeUndefined();
     expect(challenge.resource).toEqual({ url: "https://api.example.com/q" });
   });
 
@@ -176,7 +181,11 @@ describe("publishing a route through Bazaar discovery", () => {
       }),
     );
     const facilitator = createHttpFacilitator(FACILITATOR);
-    const gate = createPaywall(config({ discovery: weather }), { signer, facilitator });
+    // A payee with a valid key, so a real envelope can name it.
+    const gate = createPaywall(config({ discovery: weather, payTo: PAY_TO }), {
+      signer,
+      facilitator,
+    });
     const url = "https://api.example.com/weather/paris";
 
     const unpaid = await gate(request("GET", url));
@@ -190,7 +199,9 @@ describe("publishing a route through Bazaar discovery", () => {
           client: {
             scheme: "exact",
             async createPaymentPayload(x402Version: number) {
-              return { x402Version, payload: { transaction: "signed-transaction" } };
+              // A real envelope to the payee, so the gate's local
+              // pre-validation (#159) lets it reach /verify.
+              return { x402Version, payload: { transaction: envelope() } };
             },
           },
         },

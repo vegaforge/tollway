@@ -31,6 +31,8 @@ import {
   type PaymentIntent,
   type PaymentOffer,
   type PolicyEngine,
+  type PolicyReservation,
+  type PolicyReservationAttempt,
   type PolicyTrace,
   type PolicyTraceComparison,
   type QuarantineEntry,
@@ -43,6 +45,7 @@ import {
   TollwayError,
   verifyReceipt,
 } from "@vegaforge/tollway-core";
+import type { HttpExchange, PaidExchange } from "./exchange.js";
 import {
   type OfferChecks,
   OfferRejectedError,
@@ -65,6 +68,27 @@ import {
   type SignedTerms,
 } from "./retry.js";
 
+export type {
+  HttpExchange,
+  PaidExchange,
+  ReplayableRequest,
+  ReplayOptions,
+} from "./exchange.js";
+export {
+  createPaidFetch,
+  type PaidFetch,
+  type PaidFetchOptions,
+  type PaidResponse,
+} from "./paid-fetch.js";
+export {
+  type CachedPolicyEntry,
+  createMemoryPolicyCache,
+  type FetchedPolicy,
+  type FetchPolicyOptions,
+  fetchPolicy,
+  type PolicyCache,
+  PolicyFetchError,
+} from "./policy-fetcher.js";
 export {
   AmbiguousSettlementError,
   MAX_RETRY_AFTER_MS,
@@ -73,16 +97,17 @@ export {
   type SettlementOutcomeKind,
   type SignedTerms,
 } from "./retry.js";
-
 export {
-  ApprovalDeniedError,
-  ApprovalTimeoutError,
-  PolicyBlockedError,
-  ReceiptVerificationError,
-  type ApprovalDecision,
-  type ApprovalOptions,
-  type ApprovalRequest,
-};
+  type AgentSigner,
+  type AgentSignerCapabilities,
+  type AgentSignerCapability,
+  createKeypairSigner,
+  createSmartAccountSigner,
+  type MppKeyCapability,
+  SignerCapabilityError,
+  type SmartAccountSignerOptions,
+  signerModels,
+} from "./signer.js";
 
 /** Events the client emits so callers and observability can follow along. */
 export type ClientEvent =
@@ -193,6 +218,14 @@ export type SettlerEvent = Extract<ClientEvent, { type: "channel:opened" | "chan
 export interface ClientSettler {
   settle(input: SettleRequest): Promise<SignedReceipt>;
   /**
+   * Finishes an HTTP exchange the caller already started (#201): answers the
+   * 402 in `input.exchange.challenge` and replays `input.exchange.request`
+   * with the payment, without sending the unpaid request again. Returns the
+   * receipt and the paid response. A settler without it cannot be used by
+   * `createPaidFetch`.
+   */
+  settleExchange?(input: ExchangeSettleRequest): Promise<PaidExchange>;
+  /**
    * The Stellar address this settler pays from, when it knows it. The
    * client then requires `receipt.payer` to equal it.
    */
@@ -292,15 +325,42 @@ export type ApprovalOptions = {
    * The approver callback. Called with the approval request and an AbortSignal
    * that fires on timeout. Must return a decision or throw (treated as denial).
    */
-  approver: (request: ApprovalRequest, options: { signal: AbortSignal }) => Promise<ApprovalDecision>;
+  approver: (
+    request: ApprovalRequest,
+    options: { signal: AbortSignal },
+  ) => Promise<ApprovalDecision>;
   /** Approval timeout in milliseconds. Defaults to 5 minutes. */
   timeoutMs?: number;
 };
 
-export type TollwayClientOptions = {
+/** A settlement that finishes an exchange the caller started; see `ClientSettler.settleExchange`. */
+export type ExchangeSettleRequest = SettleRequest & { exchange: HttpExchange };
+
+/**
+ * Where payments go: one settler for every model, or one per model (#201).
+ * With `settlers`, a payment routed to a model that has no settler is refused
+ * with `no-viable-model`; it never falls through to another model.
+ */
+export type ClientSettlers =
+  | {
+      /** The protocol-specific signer / submitter for an offer. */
+      settler: ClientSettler;
+      settlers?: undefined;
+    }
+  | {
+      settler?: undefined;
+      /** One settler per settlement model the agent can pay. */
+      settlers: Partial<Record<SettlementModel, ClientSettler>>;
+    };
+
+export type TollwayClientOptions = ClientSettlers & {
   network: StellarNetwork;
-  /** The protocol-specific signer / submitter for an offer. */
-  settler: ClientSettler;
+  /**
+   * The models this agent can pay, for example `signerModels(signer)` (#205).
+   * The router only picks among them, and an explicit `model` outside them is
+   * refused. When omitted, every model is allowed.
+   */
+  supportedModels?: SettlementModel[];
   /** Optional policy engine. When omitted, every payment is allowed. */
   policy?: PolicyEngine;
   /**
@@ -404,6 +464,14 @@ export type PayRequest = {
    * the routed model, and the offer's amount, asset, payTo and network.
    */
   idempotencyKey?: string;
+  /**
+   * The request the agent sent and the 402 it got back, when the caller
+   * already made the first request (#201). The settler answers that 402 and
+   * replays the request, and `PayResult.response` carries the paid response.
+   * Concurrent calls share a settlement only when their method, URL and body
+   * are identical too.
+   */
+  exchange?: HttpExchange;
 };
 
 export type PayResult = {
@@ -420,6 +488,12 @@ export type PayResult = {
    * a hole, so treat this as an operational alert.
    */
   storeError?: Error;
+  /**
+   * The paid response, when the request carried an `exchange`. Each call
+   * gets its own copy, so a call that shared the settlement can read the
+   * body too.
+   */
+  response?: Response;
 };
 
 export interface TollwayClient {
@@ -442,6 +516,12 @@ export function createClient(options: TollwayClientOptions): TollwayClient {
     throw new TypeError(
       `receiptMaxSkewMs must be a non-negative finite number, got ${options.receiptMaxSkewMs}`,
     );
+  }
+  if ((options.settler === undefined) === (options.settlers === undefined)) {
+    throw new TypeError("createClient: provide exactly one of settler or settlers");
+  }
+  if (options.supportedModels !== undefined && options.supportedModels.length === 0) {
+    throw new TypeError("createClient: supportedModels must name at least one model");
   }
   const fallback = options.fallback;
   const cooldown = fallback ? createChannelCooldown(fallback) : undefined;
@@ -478,9 +558,30 @@ export function createClient(options: TollwayClientOptions): TollwayClient {
     }
   }
 
-  // A settler reports channel lifecycle on the same stream as payments.
-  options.settler.subscribe?.(emit);
-  fallback?.x402.subscribe?.(emit);
+  // A settler reports channel lifecycle on the same stream as payments. A
+  // settler registered for several models subscribes once.
+  const subscribed = new Set<ClientSettler>();
+  for (const settler of [
+    ...(options.settler ? [options.settler] : Object.values(options.settlers ?? {})),
+    ...(fallback ? [fallback.x402] : []),
+  ]) {
+    if (subscribed.has(settler)) continue;
+    subscribed.add(settler);
+    settler.subscribe?.(emit);
+  }
+
+  /** The settler for a routed model. With `settlers`, a missing one is an error, never a fallthrough. */
+  function settlerFor(model: SettlementModel): ClientSettler {
+    if (options.settler) return options.settler;
+    const settler = options.settlers?.[model];
+    if (!settler) {
+      throw new TollwayError(
+        "no-viable-model",
+        `the router chose ${model}, but no settler is configured for ${model}`,
+      );
+    }
+    return settler;
+  }
 
   /**
    * Tells the funder side about an open that may have landed on chain, so a
@@ -602,7 +703,17 @@ export function createClient(options: TollwayClientOptions): TollwayClient {
         // TODO: Add policyUsage when #189 (budget reservation) lands
       };
 
-      const decision = await approval.approver(approvalRequest, { signal: controller.signal });
+      // The timeout ends the wait even if the approver ignores the signal;
+      // an approver that never answers must not hold the payment open.
+      const timedOut = new Promise<never>((_, reject) => {
+        controller.signal.addEventListener("abort", () => reject(controller.signal.reason), {
+          once: true,
+        });
+      });
+      const decision = await Promise.race([
+        approval.approver(approvalRequest, { signal: controller.signal }),
+        timedOut,
+      ]);
       const latencyMs = clientNow() - startTime;
 
       emit({
@@ -618,7 +729,7 @@ export function createClient(options: TollwayClientOptions): TollwayClient {
       }
     } catch (rawError) {
       const latencyMs = clientNow() - startTime;
-      
+
       if (rawError instanceof ApprovalDeniedError) {
         throw rawError;
       }
@@ -663,13 +774,35 @@ export function createClient(options: TollwayClientOptions): TollwayClient {
     model: SettlementModel;
     settler: ClientSettler;
     freshAttempt: () => Promise<void>;
-  }): Promise<SignedReceipt> {
+  }): Promise<SettlerAnswer> {
     const { retry, request, model, settler } = args;
     let pinned: SignedTerms | undefined;
-    let next = () => settler.settle({ resource: request.resource, offer: request.offer, model });
+    let challenge = request.exchange?.challenge;
+    // One settler call with the current pin and, for an exchange, the
+    // current challenge.
+    const call = (): Promise<SignedReceipt | PaidExchange> => {
+      const base: SettleRequest = {
+        resource: request.resource,
+        offer: request.offer,
+        model,
+        ...(pinned === undefined ? {} : { pinned }),
+      };
+      if (request.exchange === undefined || challenge === undefined) return settler.settle(base);
+      if (!settler.settleExchange) {
+        throw new TollwayError(
+          "payment-failed",
+          `the ${model} settler cannot finish an HTTP exchange: it has no settleExchange`,
+        );
+      }
+      return settler.settleExchange({
+        ...base,
+        exchange: { request: request.exchange.request, challenge },
+      });
+    };
+    let next = call;
     for (let attempt = 1; ; attempt += 1) {
       try {
-        return await next();
+        return settlerAnswer(await next(), request.exchange !== undefined, model);
       } catch (rawError) {
         if (!(rawError instanceof SettlementOutcomeError)) throw rawError;
         if (rawError.kind === "ambiguous") {
@@ -707,6 +840,12 @@ export function createClient(options: TollwayClientOptions): TollwayClient {
         // retryable-with-fresh-auth
         if (attempt >= retry.maxAttempts) throw rawError;
         pinned = rawError.signedTerms ?? pinned;
+        if (request.exchange !== undefined) {
+          // The expired challenge cannot be answered again. Without the new
+          // one, retrying would mean sending the agent's request unpaid.
+          if (rawError.challenge === undefined) throw rawError;
+          challenge = rawError.challenge;
+        }
         await args.freshAttempt();
         emit({
           type: "retry",
@@ -714,14 +853,7 @@ export function createClient(options: TollwayClientOptions): TollwayClient {
           attempt: attempt + 1,
           reason: rawError.reason,
         });
-        const terms = pinned;
-        next = () =>
-          settler.settle({
-            resource: request.resource,
-            offer: request.offer,
-            model,
-            ...(terms === undefined ? {} : { pinned: terms }),
-          });
+        next = call;
       }
     }
   }
@@ -749,6 +881,44 @@ export function createClient(options: TollwayClientOptions): TollwayClient {
     model: SettlementModel,
     settler: ClientSettler,
   ): Promise<Settled> {
+    // `admit` evaluates and, when the policy allows the payment, counts it as
+    // an attempt in the same step (issue #197). `reserve` does that too, and
+    // also holds the payment's spend until it is committed or released (#189).
+    // An engine without `reserve` is evaluated, and records the spend once the
+    // payment has settled.
+    const admit = async (
+      engine: PolicyEngine,
+      toAdmit: PaymentIntent,
+    ): Promise<PolicyReservationAttempt> => {
+      if (engine.reserve) return engine.reserve(toAdmit);
+      const trace = engine.admit ? await engine.admit(toAdmit) : await engine.evaluate(toAdmit);
+      return { trace };
+    };
+    // The hold on the payment in flight, from admission until it is committed or released.
+    let held: PolicyReservation | undefined;
+    const admitHeld = async (
+      engine: PolicyEngine,
+      toAdmit: PaymentIntent,
+    ): Promise<PolicyTrace> => {
+      const attempt = await admit(engine, toAdmit);
+      held = attempt.reservation;
+      return attempt.trace;
+    };
+    /** Gives the hold back. Only for a payment that provably did not settle. */
+    const releaseHeld = async (): Promise<void> => {
+      const reservation = held;
+      held = undefined;
+      const engine = options.policy;
+      if (reservation !== undefined && engine?.release) await engine.release(reservation);
+    };
+    /** Makes the hold final. Used once the payment has settled, or may have. */
+    const commitHeld = async (): Promise<void> => {
+      const reservation = held;
+      held = undefined;
+      const engine = options.policy;
+      if (reservation !== undefined && engine?.commit) await engine.commit(reservation);
+    };
+
     try {
       const intent: PaymentIntent = {
         payee: request.offer.payTo,
@@ -758,15 +928,9 @@ export function createClient(options: TollwayClientOptions): TollwayClient {
         model,
       };
 
-      // `admit` evaluates and, when the policy allows the payment, counts
-      // it as an attempt in the same step (issue #197). An engine written
-      // before `admit` existed is evaluated instead.
-      const admit = async (engine: PolicyEngine, toAdmit: PaymentIntent): Promise<PolicyTrace> =>
-        engine.admit ? engine.admit(toAdmit) : engine.evaluate(toAdmit);
-
       let activeTrace: PolicyTrace | undefined;
       if (options.policy) {
-        activeTrace = await admit(options.policy, intent);
+        activeTrace = await admitHeld(options.policy, intent);
         // No handler, no event object: the quiet path stays as cheap as a
         // plain check().
         if (handlers.length > 0) {
@@ -810,24 +974,41 @@ export function createClient(options: TollwayClientOptions): TollwayClient {
        * inside the shared settlement (issue #210), so calls waiting on this
        * purchase share one retried payment.
        */
-      const pay = (settler: ClientSettler, paying: PaymentIntent) =>
-        settleWithRetry({
-          retry: normaliseRetryOptions(options.retry),
-          request,
-          model: paying.model,
-          settler,
-          freshAttempt: async () => {
-            // A new authorization is a new payment attempt: the policy is
-            // checked again, and a budget that now bites stops the retry.
-            if (options.policy) blockIfDenied(await admit(options.policy, paying));
-            if (options.shadow) await shadowAttempt(options.shadow, paying, request.resource);
-          },
-        });
+      const pay = async (settler: ClientSettler, paying: PaymentIntent): Promise<SettlerAnswer> => {
+        try {
+          const answer = await settleWithRetry({
+            retry: normaliseRetryOptions(options.retry),
+            request,
+            model: paying.model,
+            settler,
+            freshAttempt: async () => {
+              // A new authorization is a new payment attempt: the policy is
+              // checked again, and a budget that now bites stops the retry. The
+              // service refused the last authorization before settling it, so
+              // that attempt's hold is given back first.
+              await releaseHeld();
+              if (options.policy) blockIfDenied(await admitHeld(options.policy, paying));
+              if (options.shadow) await shadowAttempt(options.shadow, paying, request.resource);
+            },
+          });
+          // Settled, so the spend is final. This comes before the receipt is
+          // checked: a receipt that then fails verification still paid.
+          await commitHeld();
+          return answer;
+        } catch (rawError) {
+          // A failed settlement gives the spend back, as dev's record-on-success
+          // rule always has: only a settled payment counts against a budget.
+          // Whether an ambiguous failure should stay counted is tracked in the
+          // #341 follow-up issue.
+          await releaseHeld();
+          throw rawError;
+        }
+      };
 
       // What actually paid. A fallback (#183) changes all three.
       let paidIntent = intent;
       let paidBy = settler;
-      let settled: SignedReceipt;
+      let settled: SettlerAnswer;
       const channelKey = cooldownKey(request.offer);
       try {
         settled = await pay(settler, intent);
@@ -853,7 +1034,7 @@ export function createClient(options: TollwayClientOptions): TollwayClient {
           reason: rawError.message,
         });
         if (options.policy) {
-          const fallbackTrace = await admit(options.policy, paidIntent);
+          const fallbackTrace = await admitHeld(options.policy, paidIntent);
           if (handlers.length > 0) {
             emit({ type: "policy:decision", resource: request.resource, trace: fallbackTrace });
           }
@@ -866,7 +1047,7 @@ export function createClient(options: TollwayClientOptions): TollwayClient {
 
       // Only the parsed receipt leaves pay(), never the settler's object,
       // so a field the signature does not cover cannot reach the caller.
-      const receipt = await checkedReceipt(settled, options.verifier);
+      const receipt = await checkedReceipt(settled.signed, options.verifier);
 
       // A valid signature proves only that the service signed something.
       // The receipt must describe this payment before it is stored,
@@ -897,8 +1078,9 @@ export function createClient(options: TollwayClientOptions): TollwayClient {
         }
       }
 
-      // Budgets advance once, for the model that actually paid.
-      if (options.policy) {
+      // Budgets advance once, for the model that actually paid. An engine that
+      // reserves has already made that payment's spend final in `pay`.
+      if (options.policy && options.policy.reserve === undefined) {
         await options.policy.record(paidIntent);
       }
       if (options.shadow) {
@@ -906,8 +1088,15 @@ export function createClient(options: TollwayClientOptions): TollwayClient {
       }
 
       emit({ type: "payment", resource: request.resource, model: paidModel, receipt });
-      return storeError ? { receipt, model: paidModel, storeError } : { receipt, model: paidModel };
+      return {
+        receipt,
+        model: paidModel,
+        ...(storeError ? { storeError } : {}),
+        ...(settled.response ? { response: settled.response } : {}),
+      };
     } catch (rawError) {
+      // A hold still open here never settled, so it is given back.
+      if (held !== undefined) await releaseHeld();
       // A request that was allowed to try the channel after a cooldown frees
       // that slot however it ended, so the next request may try again.
       if (model === "mpp-channel") cooldown?.release(cooldownKey(request.offer));
@@ -924,8 +1113,9 @@ export function createClient(options: TollwayClientOptions): TollwayClient {
     async pay(request): Promise<PayResult> {
       let model: SettlementModel;
       // The cooldown below sends a channel payment to the fallback's settler.
-      let settler = options.settler;
+      let settler: ClientSettler;
       let emittedQuarantine = false;
+      let fingerprint: string | undefined;
       try {
         // Refused before any policy check or signature: paying on the wrong
         // network is never what the agent configured.
@@ -969,7 +1159,12 @@ export function createClient(options: TollwayClientOptions): TollwayClient {
           }
         }
 
-        const decision = await decideModel(options.router, request, quarantined);
+        const decision = await decideModel(
+          options.router,
+          request,
+          quarantined,
+          options.supportedModels,
+        );
         if (decision.reason === "quarantined" && !emittedQuarantine) {
           emittedQuarantine = true;
           emit({
@@ -980,6 +1175,7 @@ export function createClient(options: TollwayClientOptions): TollwayClient {
           });
         }
         model = decision.model;
+        settler = settlerFor(model);
 
         // After a failed open the counterparty's channel path rests (#183):
         // requests go straight to x402 until the cooldown ends, and then one
@@ -991,7 +1187,7 @@ export function createClient(options: TollwayClientOptions): TollwayClient {
           cooldown.admit(cooldownKey(request.offer), clientNow()) === "cooling"
         ) {
           model = "x402";
-          settler = fallback?.x402 ?? settler;
+          settler = fallback?.x402 ?? settlerFor("x402");
           emit({
             type: "fallback",
             resource: request.resource,
@@ -999,6 +1195,15 @@ export function createClient(options: TollwayClientOptions): TollwayClient {
             to: "x402",
             reason: "the channel path is cooling down after a failed open",
           });
+        }
+        if (request.exchange) {
+          if (!settler.settleExchange) {
+            throw new TollwayError(
+              "payment-failed",
+              `the ${model} settler cannot finish an HTTP exchange: it has no settleExchange`,
+            );
+          }
+          fingerprint = await exchangeFingerprint(request.exchange);
         }
       } catch (rawError) {
         const error = normalizeError(rawError);
@@ -1021,7 +1226,7 @@ export function createClient(options: TollwayClientOptions): TollwayClient {
       // A call that arrives while the same purchase is being settled waits
       // for that settlement instead of paying again. The map is read and
       // written with no await in between, so two calls cannot both miss it.
-      const key = purchaseKey(request, model);
+      const key = purchaseKey(request, model, fingerprint);
       const pending = inFlight.get(key);
       if (pending) {
         // A shared failure rejects here with the error the settling call
@@ -1033,13 +1238,13 @@ export function createClient(options: TollwayClientOptions): TollwayClient {
           model: shared.model,
           receipt: shared.receipt,
         });
-        return { ...shared, deduplicated: true };
+        return ownResult(shared, true);
       }
 
       const attempt = settleOnce(request, model, settler);
       inFlight.set(key, attempt);
       try {
-        return { ...(await attempt), deduplicated: false };
+        return ownResult(await attempt, false);
       } finally {
         // Completed receipts are not kept: a later call is a new purchase.
         inFlight.delete(key);
@@ -1049,14 +1254,70 @@ export function createClient(options: TollwayClientOptions): TollwayClient {
 }
 
 /** What one settlement produced, before a call marks it as its own or shared. */
-type Settled = { receipt: SignedReceipt; model: SettlementModel; storeError?: Error };
+type Settled = {
+  receipt: SignedReceipt;
+  model: SettlementModel;
+  storeError?: Error;
+  /** Never handed out itself: every call gets a clone, so each can read the body. */
+  response?: Response;
+};
+
+/** A settler's answer, before the receipt in it is checked. */
+type SettlerAnswer = { signed: unknown; response?: Response };
+
+/**
+ * Reads what a settler returned. For an exchange it must be the receipt and
+ * the paid response; anything else is a settler bug, refused before the
+ * receipt is trusted.
+ */
+function settlerAnswer(
+  value: SignedReceipt | PaidExchange,
+  exchange: boolean,
+  model: SettlementModel,
+): SettlerAnswer {
+  if (!exchange) return { signed: value };
+  if (!("response" in value) || !(value.response instanceof Response)) {
+    throw new TollwayError(
+      "payment-failed",
+      `the ${model} settler finished an HTTP exchange without returning the paid response`,
+    );
+  }
+  return { signed: value.receipt, response: value.response };
+}
+
+/** One call's result. The paid response is cloned per call, never shared. */
+function ownResult(settled: Settled, deduplicated: boolean): PayResult {
+  const { response, ...rest } = settled;
+  return { ...rest, deduplicated, ...(response ? { response: response.clone() } : {}) };
+}
+
+/**
+ * What makes two exchanges the same request: method, URL and a SHA-256 of
+ * the body. Two POSTs with different bodies are different purchases even
+ * when the offer is the same.
+ */
+async function exchangeFingerprint(exchange: HttpExchange): Promise<string> {
+  const { method, url, body } = exchange.request;
+  const digest = body
+    ? bytesToHex(new Uint8Array(await crypto.subtle.digest("SHA-256", body)))
+    : "";
+  return canonicalJson({ method: method.toUpperCase(), url, body: digest });
+}
+
+function bytesToHex(bytes: Uint8Array): string {
+  return Array.from(bytes, (byte) => byte.toString(16).padStart(2, "0")).join("");
+}
 
 /**
  * The key two calls must share to count as the same purchase. A caller's
  * `idempotencyKey` and a derived key carry different prefixes, so a caller's
  * string can never equal a derived key.
  */
-function purchaseKey(request: PayRequest, model: SettlementModel): string {
+function purchaseKey(
+  request: PayRequest,
+  model: SettlementModel,
+  fingerprint: string | undefined,
+): string {
   if (request.idempotencyKey !== undefined) {
     return `key:${request.idempotencyKey}`;
   }
@@ -1067,10 +1328,12 @@ function purchaseKey(request: PayRequest, model: SettlementModel): string {
     asset: request.offer.asset,
     payTo: request.offer.payTo,
     network: request.offer.network,
+    ...(fingerprint === undefined ? {} : { exchange: fingerprint }),
   })}`;
 }
 
 /** True for the one error a channel settler throws when an open failed before any voucher. */
+
 function isChannelOpenFailure(error: unknown): error is TollwayError {
   return error instanceof TollwayError && error.code === "channel-open-failed";
 }
@@ -1195,10 +1458,7 @@ export class ApprovalTimeoutError extends TollwayError {
   readonly amount: string;
   readonly asset: string;
   constructor(resource: string, amount: string, asset: string) {
-    super(
-      "approval-timeout",
-      `approval timed out for ${resource}: ${amount} ${asset}`,
-    );
+    super("approval-timeout", `approval timed out for ${resource}: ${amount} ${asset}`);
     this.name = "ApprovalTimeoutError";
     this.resource = resource;
     this.amount = amount;
@@ -1257,7 +1517,14 @@ async function decideModel(
   router: ModelRouter | undefined,
   request: PayRequest,
   quarantined: boolean,
+  supported: SettlementModel[] | undefined,
 ): Promise<RouteDecision> {
+  if (request.model && supported && !supported.includes(request.model)) {
+    throw new TollwayError(
+      "no-viable-model",
+      `the request asks for ${request.model}, but this agent can only pay [${supported.join(", ")}]`,
+    );
+  }
   if (request.model) {
     // An explicit model skips the router, so the quarantine rule the router
     // applies has to be applied here too: a quarantined counterparty never
@@ -1270,12 +1537,19 @@ async function decideModel(
     }
     return { model: request.model, reason: "override" };
   }
-  if (!router) return { model: "x402", reason: "default" };
+  if (!router) {
+    if (!supported || supported.includes("x402")) return { model: "x402", reason: "default" };
+    throw new TollwayError(
+      "no-viable-model",
+      `without a router the client pays x402, which this agent cannot pay; configure a router`,
+    );
+  }
   return router.decide({
     counterparty: request.offer.payTo,
     resource: request.resource,
     offer: request.offer,
     ...(quarantined ? { quarantined: true } : {}),
+    ...(supported ? { allowedModels: supported } : {}),
   });
 }
 
