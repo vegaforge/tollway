@@ -31,6 +31,8 @@ import {
   type PaymentIntent,
   type PaymentOffer,
   type PolicyEngine,
+  type PolicyReservation,
+  type PolicyReservationAttempt,
   type PolicyTrace,
   type PolicyTraceComparison,
   type QuarantineEntry,
@@ -697,6 +699,44 @@ export function createClient(options: TollwayClientOptions): TollwayClient {
     model: SettlementModel,
     settler: ClientSettler,
   ): Promise<Settled> {
+    // `admit` evaluates and, when the policy allows the payment, counts it as
+    // an attempt in the same step (issue #197). `reserve` does that too, and
+    // also holds the payment's spend until it is committed or released (#189).
+    // An engine without `reserve` is evaluated, and records the spend once the
+    // payment has settled.
+    const admit = async (
+      engine: PolicyEngine,
+      toAdmit: PaymentIntent,
+    ): Promise<PolicyReservationAttempt> => {
+      if (engine.reserve) return engine.reserve(toAdmit);
+      const trace = engine.admit ? await engine.admit(toAdmit) : await engine.evaluate(toAdmit);
+      return { trace };
+    };
+    // The hold on the payment in flight, from admission until it is committed or released.
+    let held: PolicyReservation | undefined;
+    const admitHeld = async (
+      engine: PolicyEngine,
+      toAdmit: PaymentIntent,
+    ): Promise<PolicyTrace> => {
+      const attempt = await admit(engine, toAdmit);
+      held = attempt.reservation;
+      return attempt.trace;
+    };
+    /** Gives the hold back. Only for a payment that provably did not settle. */
+    const releaseHeld = async (): Promise<void> => {
+      const reservation = held;
+      held = undefined;
+      const engine = options.policy;
+      if (reservation !== undefined && engine?.release) await engine.release(reservation);
+    };
+    /** Makes the hold final. Used once the payment has settled, or may have. */
+    const commitHeld = async (): Promise<void> => {
+      const reservation = held;
+      held = undefined;
+      const engine = options.policy;
+      if (reservation !== undefined && engine?.commit) await engine.commit(reservation);
+    };
+
     try {
       const intent: PaymentIntent = {
         payee: request.offer.payTo,
@@ -706,15 +746,9 @@ export function createClient(options: TollwayClientOptions): TollwayClient {
         model,
       };
 
-      // `admit` evaluates and, when the policy allows the payment, counts
-      // it as an attempt in the same step (issue #197). An engine written
-      // before `admit` existed is evaluated instead.
-      const admit = async (engine: PolicyEngine, toAdmit: PaymentIntent): Promise<PolicyTrace> =>
-        engine.admit ? engine.admit(toAdmit) : engine.evaluate(toAdmit);
-
       let activeTrace: PolicyTrace | undefined;
       if (options.policy) {
-        activeTrace = await admit(options.policy, intent);
+        activeTrace = await admitHeld(options.policy, intent);
         // No handler, no event object: the quiet path stays as cheap as a
         // plain check().
         if (handlers.length > 0) {
@@ -748,19 +782,36 @@ export function createClient(options: TollwayClientOptions): TollwayClient {
        * inside the shared settlement (issue #210), so calls waiting on this
        * purchase share one retried payment.
        */
-      const pay = (settler: ClientSettler, paying: PaymentIntent) =>
-        settleWithRetry({
-          retry: normaliseRetryOptions(options.retry),
-          request,
-          model: paying.model,
-          settler,
-          freshAttempt: async () => {
-            // A new authorization is a new payment attempt: the policy is
-            // checked again, and a budget that now bites stops the retry.
-            if (options.policy) blockIfDenied(await admit(options.policy, paying));
-            if (options.shadow) await shadowAttempt(options.shadow, paying, request.resource);
-          },
-        });
+      const pay = async (settler: ClientSettler, paying: PaymentIntent): Promise<SettlerAnswer> => {
+        try {
+          const answer = await settleWithRetry({
+            retry: normaliseRetryOptions(options.retry),
+            request,
+            model: paying.model,
+            settler,
+            freshAttempt: async () => {
+              // A new authorization is a new payment attempt: the policy is
+              // checked again, and a budget that now bites stops the retry. The
+              // service refused the last authorization before settling it, so
+              // that attempt's hold is given back first.
+              await releaseHeld();
+              if (options.policy) blockIfDenied(await admitHeld(options.policy, paying));
+              if (options.shadow) await shadowAttempt(options.shadow, paying, request.resource);
+            },
+          });
+          // Settled, so the spend is final. This comes before the receipt is
+          // checked: a receipt that then fails verification still paid.
+          await commitHeld();
+          return answer;
+        } catch (rawError) {
+          // A failed settlement gives the spend back, as dev's record-on-success
+          // rule always has: only a settled payment counts against a budget.
+          // Whether an ambiguous failure should stay counted is tracked in the
+          // #341 follow-up issue.
+          await releaseHeld();
+          throw rawError;
+        }
+      };
 
       // What actually paid. A fallback (#183) changes all three.
       let paidIntent = intent;
@@ -791,7 +842,7 @@ export function createClient(options: TollwayClientOptions): TollwayClient {
           reason: rawError.message,
         });
         if (options.policy) {
-          const fallbackTrace = await admit(options.policy, paidIntent);
+          const fallbackTrace = await admitHeld(options.policy, paidIntent);
           if (handlers.length > 0) {
             emit({ type: "policy:decision", resource: request.resource, trace: fallbackTrace });
           }
@@ -835,8 +886,9 @@ export function createClient(options: TollwayClientOptions): TollwayClient {
         }
       }
 
-      // Budgets advance once, for the model that actually paid.
-      if (options.policy) {
+      // Budgets advance once, for the model that actually paid. An engine that
+      // reserves has already made that payment's spend final in `pay`.
+      if (options.policy && options.policy.reserve === undefined) {
         await options.policy.record(paidIntent);
       }
       if (options.shadow) {
@@ -851,6 +903,8 @@ export function createClient(options: TollwayClientOptions): TollwayClient {
         ...(settled.response ? { response: settled.response } : {}),
       };
     } catch (rawError) {
+      // A hold still open here never settled, so it is given back.
+      if (held !== undefined) await releaseHeld();
       // A request that was allowed to try the channel after a cooldown frees
       // that slot however it ended, so the next request may try again.
       if (model === "mpp-channel") cooldown?.release(cooldownKey(request.offer));
@@ -1087,6 +1141,7 @@ function purchaseKey(
 }
 
 /** True for the one error a channel settler throws when an open failed before any voucher. */
+
 function isChannelOpenFailure(error: unknown): error is TollwayError {
   return error instanceof TollwayError && error.code === "channel-open-failed";
 }

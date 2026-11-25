@@ -11,6 +11,7 @@ import {
   PAYMENT_REQUIRED_HEADER,
   PAYMENT_SIGNATURE_HEADER,
 } from "./headers.js";
+import { paymentIdentifierExtensions } from "./payment-identifier.js";
 
 /**
  * Issue #158: one route, several payment options. The challenge lists them
@@ -104,11 +105,22 @@ describe("single-option routes", () => {
       if (outcome.kind !== "payment-required") throw new Error("expected a 402");
       return outcome.headers[PAYMENT_REQUIRED_HEADER];
     };
+    // The pre-#158 bytes, with only the payment-identifier declaration that
+    // every 402 has carried since #153 appended at the end.
+    const beforeOptions = (golden: string) => {
+      const json = Buffer.from(golden, "base64").toString("utf8");
+      const declared = JSON.stringify({ extensions: paymentIdentifierExtensions(false) });
+      return Buffer.from(`${json.slice(0, -1)},${declared.slice(1)}`, "utf8").toString("base64");
+    };
     expect(await header(plain)).toBe(
-      "eyJ4NDAyVmVyc2lvbiI6MiwicmVzb3VyY2UiOnsidXJsIjoiL3F1b3Rlcy9sYXRlc3QifSwiYWNjZXB0cyI6W3sic2NoZW1lIjoiZXhhY3QiLCJuZXR3b3JrIjoic3RlbGxhcjp0ZXN0bmV0IiwiYXNzZXQiOiJDQklFTFRLNllCWkpVNVVQMldXUUVVQ1lLTFBVNkFVTloyQlE0V1dGRUlFM1VTQ0lITVhRREFNQSIsImFtb3VudCI6IjEwMDAwIiwicGF5VG8iOiJHQ0tGQkVJWVRLUDVSREJRTVVUQVBEQ0FJVk1PTEtaWU5ZS1JKSEFFV0hKRFlVR1NBM0ZEUVEzViIsIm1heFRpbWVvdXRTZWNvbmRzIjo2MCwiZXh0cmEiOnt9fV19",
+      beforeOptions(
+        "eyJ4NDAyVmVyc2lvbiI6MiwicmVzb3VyY2UiOnsidXJsIjoiL3F1b3Rlcy9sYXRlc3QifSwiYWNjZXB0cyI6W3sic2NoZW1lIjoiZXhhY3QiLCJuZXR3b3JrIjoic3RlbGxhcjp0ZXN0bmV0IiwiYXNzZXQiOiJDQklFTFRLNllCWkpVNVVQMldXUUVVQ1lLTFBVNkFVTloyQlE0V1dGRUlFM1VTQ0lITVhRREFNQSIsImFtb3VudCI6IjEwMDAwIiwicGF5VG8iOiJHQ0tGQkVJWVRLUDVSREJRTVVUQVBEQ0FJVk1PTEtaWU5ZS1JKSEFFV0hKRFlVR1NBM0ZEUVEzViIsIm1heFRpbWVvdXRTZWNvbmRzIjo2MCwiZXh0cmEiOnt9fV19",
+      ),
     );
     expect(await header(tuned)).toBe(
-      "eyJ4NDAyVmVyc2lvbiI6MiwicmVzb3VyY2UiOnsidXJsIjoiL2ZpeGVkIn0sImFjY2VwdHMiOlt7InNjaGVtZSI6ImV4YWN0IiwibmV0d29yayI6InN0ZWxsYXI6cHVibmV0IiwiYXNzZXQiOiJDQklFTFRLNllCWkpVNVVQMldXUUVVQ1lLTFBVNkFVTloyQlE0V1dGRUlFM1VTQ0lITVhRREFNQSIsImFtb3VudCI6IjI1MCIsInBheVRvIjoiR0NLRkJFSVlUS1A1UkRCUU1VVEFQRENBSVZNT0xLWllOWUtSSkhBRVdISkRZVUdTQTNGRFFRM1YiLCJtYXhUaW1lb3V0U2Vjb25kcyI6MzAsImV4dHJhIjp7ImFyZUZlZXNTcG9uc29yZWQiOnRydWV9fV19",
+      beforeOptions(
+        "eyJ4NDAyVmVyc2lvbiI6MiwicmVzb3VyY2UiOnsidXJsIjoiL2ZpeGVkIn0sImFjY2VwdHMiOlt7InNjaGVtZSI6ImV4YWN0IiwibmV0d29yayI6InN0ZWxsYXI6cHVibmV0IiwiYXNzZXQiOiJDQklFTFRLNllCWkpVNVVQMldXUUVVQ1lLTFBVNkFVTloyQlE0V1dGRUlFM1VTQ0lITVhRREFNQSIsImFtb3VudCI6IjI1MCIsInBheVRvIjoiR0NLRkJFSVlUS1A1UkRCUU1VVEFQRENBSVZNT0xLWllOWUtSSkhBRVdISkRZVUdTQTNGRFFRM1YiLCJtYXhUaW1lb3V0U2Vjb25kcyI6MzAsImV4dHJhIjp7ImFyZUZlZXNTcG9uc29yZWQiOnRydWV9fV19",
+      ),
     );
   });
 

@@ -99,6 +99,9 @@ export {
   type SettlementPinStore,
 } from "./failover-facilitator.js";
 export {
+  type AbandonReason,
+  type AuthorizedPayment,
+  type AuthorizeOutcome,
   type BodyBinding,
   createPaidCall,
   createPaywall,
@@ -117,9 +120,12 @@ export {
   type PaymentPrevalidationOptions,
   type PaywallConfig,
   type PaywallDeps,
+  type PaywallGate,
   type PrevalidationRejection,
+  type SettleOutcome,
   type SinglePaymentOptionConfig,
   type TollwayRequest,
+  type TwoPhaseConfig,
 } from "./gate.js";
 export {
   GATE_ERROR_CODES,
@@ -241,3 +247,15 @@ export {
   type StellarExactCheckOptions,
   type StellarExactTerms,
 } from "./stellar-static-validation.js";
+export {
+  type HeldNodeResponse,
+  type HoldableNodeResponse,
+  type HoldResult,
+  holdNodeResponse,
+  type PaywallOptions,
+  readBodyWithin,
+  responseTooLarge,
+  type SettlementTiming,
+  settlementTiming,
+  twoPhaseAuthorizer,
+} from "./two-phase.js";

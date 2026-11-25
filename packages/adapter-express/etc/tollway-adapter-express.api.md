@@ -5,14 +5,15 @@
 ```ts
 
 import { Gate } from '@vegaforge/tollway-server';
+import { PaywallOptions } from '@vegaforge/tollway-server';
 import { RequestHandler } from 'express';
 import { RouteTable } from '@vegaforge/tollway-server';
 
 // @public
-export function expressPaywall(gate: Gate): RequestHandler;
+export function expressPaywall(gate: Gate, options?: PaywallOptions): RequestHandler;
 
 // @public
-export function expressRouteTable(table: RouteTable): RequestHandler;
+export function expressRouteTable(table: RouteTable, options?: PaywallOptions): RequestHandler;
 
 // @public
 export const RECEIPT_LOCALS_KEY = "tollwayReceipt";

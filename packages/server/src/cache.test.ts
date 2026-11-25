@@ -139,6 +139,49 @@ describe("createInMemorySettlementCache", () => {
   });
 });
 
+describe("setMany", () => {
+  it("stores one entry under every key in memory", async () => {
+    const cache = createInMemorySettlementCache();
+
+    await cache.setMany?.(["x402:digest", "x402:payment-id:GPAYER:pay_0123456789abcdef"], entry);
+
+    await expect(cache.get("x402:digest")).resolves.toBe(entry);
+    await expect(cache.get("x402:payment-id:GPAYER:pay_0123456789abcdef")).resolves.toBe(entry);
+  });
+
+  it("writes every key in Redis in one script call, each with the cache TTL", async () => {
+    const client = new RedisMock() as unknown as RedisLikeClient & {
+      ttl(key: string): Promise<number>;
+    };
+    const keyPrefix = "cache-test:set-many:";
+    const evalSpy = vi.spyOn(client, "eval");
+    const setSpy = vi.spyOn(client, "set");
+    const cache = createRedisSettlementCache({ client, keyPrefix, ttlMs: 45_000 });
+
+    await cache.setMany?.(["a", "b"], entry);
+
+    // One atomic call, so no reader can see one key without the other.
+    expect(evalSpy).toHaveBeenCalledTimes(1);
+    expect(setSpy).not.toHaveBeenCalled();
+    await expect(cache.get("a")).resolves.toEqual(entry);
+    await expect(cache.get("b")).resolves.toEqual(entry);
+    for (const key of ["a", "b"]) {
+      const ttl = await client.ttl(`${keyPrefix}${key}`);
+      expect(ttl).toBeGreaterThan(40);
+      expect(ttl).toBeLessThanOrEqual(45);
+    }
+  });
+
+  it("does nothing in Redis for no keys", async () => {
+    const client = new RedisMock() as unknown as RedisLikeClient;
+    const evalSpy = vi.spyOn(client, "eval");
+
+    await createRedisSettlementCache({ client }).setMany?.([], entry);
+
+    expect(evalSpy).not.toHaveBeenCalled();
+  });
+});
+
 describe("createRedisSettlementCache", () => {
   it("returns undefined on a miss and the stored receipt on a hit", async () => {
     const client = new RedisMock() as unknown as RedisLikeClient;

@@ -705,16 +705,17 @@ describe("createClient retry (#203)", () => {
 
   it("records the payment exactly once, however many attempts it took", async () => {
     const { settler } = scripted(expired());
-    const inner = createPolicyEngine({ budgets: { daily: "1000000" } });
-    const record = vi.fn(inner.record);
+    // The engine reserves (#189), so the spend is made final by `commit`.
+    const policy = createPolicyEngine({ budgets: { daily: "1000000" } });
+    const commit = vi.spyOn(policy, "commit");
     const client = createClient({
       network: "testnet",
       settler,
-      policy: { ...inner, record },
+      policy,
       retry: { maxAttempts: 3 },
     });
     await client.pay({ resource: OFFER.resource, offer: OFFER });
-    expect(record).toHaveBeenCalledTimes(1);
+    expect(commit).toHaveBeenCalledTimes(1);
   });
 
   it("checks the policy again before a fresh authorization and stops if it now blocks", async () => {
@@ -785,9 +786,9 @@ describe("createClient retry (#203)", () => {
       const resend = vi.fn(async () => baselineReceipt);
       const sleep = vi.fn(async (_ms: number) => {});
       const { settler, requests } = scripted(inProgress(250, resend));
-      const record = vi.fn(async () => {});
+      // The engine reserves (#189), so the spend is made final by `commit`.
       const policy = createPolicyEngine({ budgets: { daily: "1000000" } });
-      const spy = vi.spyOn(policy, "record").mockImplementation(record);
+      const spy = vi.spyOn(policy, "commit");
       const client = createClient({ network: "testnet", settler, policy, retry: { sleep } });
 
       const [a, b] = await Promise.all([
@@ -1591,5 +1592,63 @@ describe("settlers per model and supported models (#201, #205)", () => {
     expect(() =>
       createClient({ network: "testnet", settler: mockSettler(), supportedModels: [] }),
     ).toThrow(/at least one model/);
+  });
+});
+
+// Regression lock for #189: a budget is reserved before the settler is called,
+// so payments in flight at the same time cannot all pass the same budget.
+describe("createClient policy reservations (#189)", () => {
+  it("lets only as many concurrent payments settle as the daily budget fits", async () => {
+    // Ten payments of 10000 against a 20000 budget: exactly two may settle.
+    const policy = createPolicyEngine({ budgets: { daily: "20000" } });
+    const settle = vi.fn(async (input: SettleRequest) => {
+      await inFlight();
+      return receiptForSettlement(input);
+    });
+    const client = createClient({ network: "testnet", settler: { settle }, policy });
+
+    // Distinct resources, so the client's dedup of identical purchases does
+    // not fold the ten payments into one.
+    const results = await Promise.allSettled(
+      Array.from({ length: 10 }, (_, index) => {
+        const resource = `${OFFER.resource}?n=${index}`;
+        return client.pay({ resource, offer: { ...OFFER, resource } });
+      }),
+    );
+
+    expect(settle).toHaveBeenCalledTimes(2);
+    const rejected = results.filter((result) => result.status === "rejected");
+    expect(rejected).toHaveLength(8);
+    for (const result of rejected) {
+      expect(result.reason).toBeInstanceOf(PolicyBlockedError);
+    }
+  });
+
+  it("still counts a payment whose receipt then fails verification", async () => {
+    // The service settled the payment, so its spend counts even though the
+    // receipt is refused. Without it the budget would look unspent.
+    const policy = createPolicyEngine({ budgets: { daily: "15000" } });
+    const otherVerifier = Ed25519Verifier.forSigner(
+      await Ed25519Signer.generate("other-client-key"),
+    );
+    const client = createClient({
+      network: "testnet",
+      settler: mockSettler(),
+      policy,
+      verifier: otherVerifier,
+    });
+
+    await expect(client.pay({ resource: OFFER.resource, offer: OFFER })).rejects.toBeInstanceOf(
+      ReceiptVerificationError,
+    );
+
+    const next = await policy.check({
+      payee: OFFER.payTo,
+      resource: OFFER.resource,
+      amount: OFFER.amount,
+      asset: OFFER.asset,
+      model: "x402",
+    });
+    expect(next.allowed).toBe(false);
   });
 });

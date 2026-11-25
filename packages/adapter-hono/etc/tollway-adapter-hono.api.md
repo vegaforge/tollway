@@ -6,13 +6,14 @@
 
 import { Gate } from '@vegaforge/tollway-server';
 import { MiddlewareHandler } from 'hono';
+import { PaywallOptions } from '@vegaforge/tollway-server';
 import { RouteTable } from '@vegaforge/tollway-server';
 
 // @public
-export function honoPaywall(gate: Gate): MiddlewareHandler;
+export function honoPaywall(gate: Gate, options?: PaywallOptions): MiddlewareHandler;
 
 // @public
-export function honoRouteTable(table: RouteTable): MiddlewareHandler;
+export function honoRouteTable(table: RouteTable, options?: PaywallOptions): MiddlewareHandler;
 
 // @public
 export const RECEIPT_CONTEXT_KEY = "tollwayReceipt";

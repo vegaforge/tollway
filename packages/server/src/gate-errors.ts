@@ -37,6 +37,16 @@ export type GateErrorCode =
    * verified, so the payment was not settled and may be sent again (#206).
    */
   | "work-failed"
+  /**
+   * Two-phase settlement (#152): the payment was verified but deliberately
+   * not settled (the route failed, or the lock lapsed while it ran). It is
+   * still unspent, so the same payment may be sent again.
+   */
+  | "payment-not-settled"
+  /** Two-phase settlement: the route outlived the payment's validity window. */
+  | "handler-timeout"
+  /** Two-phase settlement: the route's response was larger than the gate holds. */
+  | "response-too-large"
   /** The body is larger than the route's `bindBody.maxBytes` (#164). */
   | "body-too-large"
   /** The route binds the body and does not accept its content type or encoding. */
@@ -91,6 +101,9 @@ export const GATE_ERRORS: Readonly<Record<GateErrorCode, GateErrorSpec>> = {
   "handler-not-configured": { status: 500, retrySamePayment: false, headers: [] },
   "model-not-supported": { status: 501, retrySamePayment: false, headers: [] },
   "work-failed": { status: 424, retrySamePayment: true, headers: [] },
+  "payment-not-settled": { status: 503, retrySamePayment: true, headers: ["retry-after"] },
+  "handler-timeout": { status: 504, retrySamePayment: false, headers: [] },
+  "response-too-large": { status: 500, retrySamePayment: false, headers: [] },
   "body-too-large": { status: 413, retrySamePayment: false, headers: [] },
   "body-not-supported": { status: 415, retrySamePayment: false, headers: [] },
   "body-not-provided": { status: 500, retrySamePayment: false, headers: [] },

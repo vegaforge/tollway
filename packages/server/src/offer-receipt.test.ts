@@ -156,7 +156,8 @@ describe("gate offer-receipt extension (#172)", () => {
     const disabled = await gateWith(false, { signer: plain.signer });
 
     const challenge = await challengeOf(plain.gate);
-    expect(challenge.extensions).toBeUndefined();
+    // Every 402 declares payment-identifier (#153); nothing else is added.
+    expect(Object.keys(challenge.extensions ?? {})).toEqual(["payment-identifier"]);
     expect(challenge).toEqual(await challengeOf(disabled.gate));
 
     const paid = await plain.gate({
@@ -203,13 +204,18 @@ describe("gate offer-receipt extension (#172)", () => {
       { discovery: { kind: "query", description: "weather" } },
     );
     const challenge = await challengeOf(gate);
-    expect(Object.keys(challenge.extensions ?? {}).sort()).toEqual(["bazaar", "offer-receipt"]);
+    expect(Object.keys(challenge.extensions ?? {}).sort()).toEqual([
+      "bazaar",
+      "offer-receipt",
+      "payment-identifier",
+    ]);
   });
 
   it("signs no offer when the route does not take x402 payments", async () => {
     const { gate } = await gateWith(true, {}, { models: ["mpp-charge"] });
     const challenge = await challengeOf(gate);
-    expect(challenge.extensions).toBeUndefined();
+    // Every 402 declares payment-identifier (#153); nothing else is added.
+    expect(Object.keys(challenge.extensions ?? {})).toEqual(["payment-identifier"]);
   });
 
   it("reuses a signed offer until half its window is gone, then signs a fresh one", async () => {

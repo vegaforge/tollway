@@ -49,6 +49,9 @@ function send(port: number, request: ConformanceRequest): Promise<ConformanceRes
   });
 }
 
+/** Waits `ms` milliseconds; the two-phase routes use it to run long. */
+const delay = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
+
 /** Express driver: a real HTTP server on an ephemeral port, as #107 asks. */
 const driver: AdapterDriver = {
   async create({ gate, onPaid }) {
@@ -58,6 +61,27 @@ const driver: AdapterDriver = {
       onPaid(receipt);
       res.json({ ok: true, receiptId: receipt.receipt.id });
     });
+
+    const server = app.listen(0);
+    await new Promise((resolve) => server.once("listening", resolve));
+    const { port } = server.address() as AddressInfo;
+
+    return {
+      send: (request = {}) => send(port, request),
+      close: () => new Promise<void>((resolve) => server.close(() => resolve())),
+    };
+  },
+  async createAfterHandler({ gate, route }) {
+    const app = express();
+    app.get(
+      "/quotes/latest",
+      expressPaywall(gate, { settlement: "after-handler" }),
+      async (_req, res) => {
+        if ("throws" in route) throw new Error("route failed");
+        await delay(route.delayMs ?? 0);
+        res.status(route.status).type("text/plain").send(route.body);
+      },
+    );
 
     const server = app.listen(0);
     await new Promise((resolve) => server.once("listening", resolve));

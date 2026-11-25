@@ -30,6 +30,9 @@ function asConformanceResponse(response: InjectedResponse): ConformanceResponse 
 }
 
 /** Fastify driver: `inject` keeps the test in-process without a TCP server. */
+/** Waits `ms` milliseconds; the two-phase routes use it to run long. */
+const delay = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
+
 const driver: AdapterDriver = {
   async create({ gate, onPaid }) {
     const app = Fastify();
@@ -44,6 +47,31 @@ const driver: AdapterDriver = {
     return {
       async send(request = {}) {
         // inject passes an array value through as a repeated header.
+        const injected = await app.inject({
+          method: (request.method ?? "GET") as "GET",
+          url: request.path ?? "/quotes/latest",
+          headers: request.headers ?? {},
+        });
+        return asConformanceResponse(injected);
+      },
+      close: () => app.close(),
+    };
+  },
+  async createAfterHandler({ gate, route }) {
+    const app = Fastify();
+    app.get(
+      "/quotes/latest",
+      { preHandler: fastifyPaywall(gate, { settlement: "after-handler" }) },
+      async (_request, reply) => {
+        if ("throws" in route) throw new Error("route failed");
+        await delay(route.delayMs ?? 0);
+        return reply.code(route.status).type("text/plain").send(route.body);
+      },
+    );
+    await app.ready();
+
+    return {
+      async send(request = {}) {
         const injected = await app.inject({
           method: (request.method ?? "GET") as "GET",
           url: request.path ?? "/quotes/latest",

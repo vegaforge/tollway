@@ -76,3 +76,25 @@ test("a policy stop links to the anomalies view filtered to the agent", async ({
   await expect(page).toHaveURL(/\/anomalies\?agent=agent-research-01$/);
   await expect(page.getByTestId("anomalies-agent-filter")).toContainText("agent-research-01");
 });
+
+test("sorts the services table by revenue and by payment count", async ({ page }) => {
+  await page.goto("/services");
+  const firstService = page.getByRole("rowheader").first();
+  const revenueHeader = page.getByRole("columnheader", { name: /revenue/i });
+  const paymentsHeader = page.getByRole("columnheader", { name: /payments/i });
+
+  await expect(revenueHeader).toHaveAttribute("aria-sort", "descending");
+  await expect(firstService).toContainText("Inference gateway");
+  await expect(
+    page.getByTestId("model-mix-GCWEATHERXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX:USDC"),
+  ).toContainText("x402 per-request 50.00%");
+
+  await revenueHeader.getByRole("button").click();
+  await expect(revenueHeader).toHaveAttribute("aria-sort", "ascending");
+  await expect(firstService).toContainText("Geocoding");
+
+  await paymentsHeader.getByRole("button").click();
+  await expect(paymentsHeader).toHaveAttribute("aria-sort", "descending");
+  await expect(revenueHeader).not.toHaveAttribute("aria-sort");
+  await expect(firstService).toContainText("Weather API");
+});

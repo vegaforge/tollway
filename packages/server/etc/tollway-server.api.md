@@ -40,6 +40,9 @@ import { X402Payment } from '@vegaforge/tollway-core';
 import { z } from 'zod';
 
 // @public
+export type AbandonReason = "handler-threw" | "handler-failed" | "response-too-large" | "client-closed";
+
+// @public
 export type AcceptedVoucher = z.infer<typeof acceptedVoucherSchema>;
 
 // @public
@@ -49,6 +52,18 @@ export const acceptedVoucherSchema: z.ZodObject<{
     signature: z.ZodString;
     acceptedAt: z.ZodNumber;
 }, z.core.$strict>;
+
+// @public
+export type AuthorizedPayment = {
+    kind: "authorized";
+    maxResponseBytes: number;
+    isFailure(status: number): boolean;
+    settle(): Promise<SettleOutcome>;
+    abandon(reason: AbandonReason): Promise<void>;
+};
+
+// @public
+export type AuthorizeOutcome = GateOutcome | AuthorizedPayment;
 
 // @public
 export type BodyBinding = {
@@ -362,7 +377,7 @@ export function createOfferReceiptJwsSigner(signer: ReceiptSigner, kid?: string)
 export function createPaidCall(config: PaidCallConfig, deps: PaidCallDeps): PaidCall;
 
 // @public
-export function createPaywall(config: PaywallConfig, deps: PaywallDeps): Gate;
+export function createPaywall(config: PaywallConfig, deps: PaywallDeps): PaywallGate;
 
 // @public
 export function createRedisPaymentReceiptArchive(options: RedisPaymentReceiptArchiveOptions): PaymentReceiptArchive;
@@ -591,6 +606,16 @@ export type GateErrorCode =
 * verified, so the payment was not settled and may be sent again (#206).
 */
 | "work-failed"
+/**
+* Two-phase settlement (#152): the payment was verified but deliberately
+* not settled (the route failed, or the lock lapsed while it ran). It is
+* still unspent, so the same payment may be sent again.
+*/
+| "payment-not-settled"
+/** Two-phase settlement: the route outlived the payment's validity window. */
+| "handler-timeout"
+/** Two-phase settlement: the route's response was larger than the gate holds. */
+| "response-too-large"
 /** The body is larger than the route's `bindBody.maxBytes` (#164). */
 | "body-too-large"
 /** The route binds the body and does not accept its content type or encoding. */
@@ -639,6 +664,34 @@ export type GateRejection = {
     upstreamReason?: string;
     headers?: Record<string, string>;
 };
+
+// @public
+export type HeldNodeResponse = {
+    done: Promise<HoldResult>;
+    status(): number;
+    release(headers?: Record<string, string>): void;
+    replace(status: number, body: unknown, headers?: Record<string, string>): void;
+};
+
+// @public
+export type HoldableNodeResponse = {
+    statusCode: number;
+    write: (...args: never[]) => unknown;
+    end: (...args: never[]) => unknown;
+    writeHead: (...args: never[]) => unknown;
+    flushHeaders: (...args: never[]) => unknown;
+    setHeader(name: string, value: string | number | readonly string[]): unknown;
+    getHeaderNames(): string[];
+    removeHeader(name: string): void;
+    once(event: "close", listener: () => void): unknown;
+    readonly writableEnded: boolean;
+};
+
+// @public
+export function holdNodeResponse(res: HoldableNodeResponse, maxBytes: number): HeldNodeResponse;
+
+// @public
+export type HoldResult = "ended" | "too-large" | "closed";
 
 // @public (undocumented)
 export type InMemoryPaymentReceiptArchiveOptions = {
@@ -1049,11 +1102,21 @@ export type PaywallDeps = {
 };
 
 // @public
+export type PaywallGate = Gate & {
+    authorize(request: TollwayRequest): Promise<AuthorizeOutcome>;
+};
+
+// @public
 export type PaywallMismatch = {
     route: string;
     field: "x402Version" | "scheme" | "network" | "extra.areFeesSponsored" | "asset" | "payTo";
     expected: string;
     advertised: string;
+};
+
+// @public
+export type PaywallOptions = {
+    settlement?: SettlementTiming;
 };
 
 // @public
@@ -1096,6 +1159,14 @@ export type PrevalidationResult = {
 
 // @public
 export function readBodyStream(stream: ReadableStream<Uint8Array> | null, maxBytes: number): Promise<Uint8Array>;
+
+// @public
+export function readBodyWithin(body: ReadableStream<Uint8Array> | null, maxBytes: number): Promise<{
+    ok: true;
+    bytes: Uint8Array<ArrayBuffer>;
+} | {
+    ok: false;
+}>;
 
 // @public
 export function readHeader(headers: Record<string, string | string[] | undefined>, name: string): string | undefined;
@@ -1158,6 +1229,9 @@ export type RequestBodySource = {
 };
 
 // @public
+export function responseTooLarge(maxBytes: number): GateRejection;
+
+// @public
 export interface RouteTable {
     // (undocumented)
     list(): RouteTableEntry[];
@@ -1189,7 +1263,7 @@ export interface RouteTableEntry {
 // @public
 export interface RouteTableMatch {
     // (undocumented)
-    gate: Gate;
+    gate: PaywallGate;
     resource: string;
 }
 
@@ -1281,6 +1355,7 @@ export interface SettlementCache {
     renew?(key: string, lock: SettlementLock, ttlMs: number): Promise<boolean>;
     // (undocumented)
     set(key: string, entry: SettlementEntry): Promise<void>;
+    setMany?(keys: readonly string[], entry: SettlementEntry): Promise<void>;
 }
 
 // @public
@@ -1303,6 +1378,12 @@ export interface SettlementPinStore {
 }
 
 // @public
+export type SettlementTiming = "before-handler" | "after-handler";
+
+// @public
+export function settlementTiming(options: PaywallOptions | undefined): SettlementTiming;
+
+// @public
 export type SettlementTriggers = {
     minCumulative?: string;
     balanceFraction?: {
@@ -1312,6 +1393,11 @@ export type SettlementTriggers = {
     idleMs?: number;
     maxChannelAgeMs?: number;
 };
+
+// @public
+export type SettleOutcome = Extract<GateOutcome, {
+    kind: "settled" | "rejected";
+}>;
 
 // @public
 export type SettleResult = {
@@ -1412,6 +1498,15 @@ export type TollwayRequest = {
 export function toPaymentRequirements(offer: PaymentOffer, terms?: X402Terms): PaymentRequirements;
 
 // @public
+export function twoPhaseAuthorizer(gate: Gate, options: PaywallOptions | undefined): ((request: TollwayRequest) => Promise<AuthorizeOutcome>) | undefined;
+
+// @public
+export type TwoPhaseConfig = {
+    isFailureStatus?: (status: number) => boolean;
+    maxResponseBytes?: number;
+};
+
+// @public
 export function validatePaywall(route: string, paywall: PaywallTarget, capabilities: FacilitatorCapabilities): PaywallValidation;
 
 // @public
@@ -1458,8 +1553,8 @@ export type X402Terms = {
 
 // Warnings were encountered during analysis:
 //
-// dist/discovery-eM7GbCIO.d.ts:643:9 - (ae-forgotten-export) The symbol "StellarSigner$1" needs to be exported by the entry point index.d.ts
-// dist/discovery-eM7GbCIO.d.ts:814:9 - (ae-forgotten-export) The symbol "StellarSigner" needs to be exported by the entry point index.d.ts
+// dist/discovery-QVLZWt7Q.d.ts:660:9 - (ae-forgotten-export) The symbol "StellarSigner$1" needs to be exported by the entry point index.d.ts
+// dist/discovery-QVLZWt7Q.d.ts:831:9 - (ae-forgotten-export) The symbol "StellarSigner" needs to be exported by the entry point index.d.ts
 // dist/index.d.ts:50:9 - (ae-forgotten-export) The symbol "StellarSigner_2" needs to be exported by the entry point index.d.ts
 // dist/index.d.ts:172:9 - (ae-forgotten-export) The symbol "WatchtowerEvent" needs to be exported by the entry point index.d.ts
 // dist/index.d.ts:176:5 - (ae-forgotten-export) The symbol "ChannelState" needs to be exported by the entry point index.d.ts
