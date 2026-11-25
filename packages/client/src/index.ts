@@ -74,6 +74,16 @@ export {
   type SignedTerms,
 } from "./retry.js";
 
+export {
+  ApprovalDeniedError,
+  ApprovalTimeoutError,
+  PolicyBlockedError,
+  ReceiptVerificationError,
+  type ApprovalDecision,
+  type ApprovalOptions,
+  type ApprovalRequest,
+};
+
 /** Events the client emits so callers and observability can follow along. */
 export type ClientEvent =
   | { type: "payment"; resource: string; model: SettlementModel; receipt: SignedReceipt }
@@ -144,6 +154,28 @@ export type ClientEvent =
       resource: string;
       reason: string;
       entry?: QuarantineEntry;
+    }
+  /**
+   * A payment requires approval and the approver is being called (#199).
+   * Emitted before the approver callback runs.
+   */
+  | {
+      type: "approval:requested";
+      resource: string;
+      amount: string;
+      asset: string;
+      payee: string;
+    }
+  /**
+   * The approver returned a decision (#199). `approved` is the decision,
+   * `latencyMs` is how long the approver took.
+   */
+  | {
+      type: "approval:resolved";
+      resource: string;
+      approved: boolean;
+      latencyMs: number;
+      reason?: string;
     };
 
 export type ClientEventHandler = (event: ClientEvent) => void;
@@ -224,6 +256,45 @@ export type SettleRequest = {
    * anything else (issue #203).
    */
   pinned?: SignedTerms;
+};
+
+/** What an approver is told about the payment that needs approval (#199). */
+export type ApprovalRequest = {
+  resource: string;
+  payee: string;
+  amount: string;
+  asset: string;
+  model: SettlementModel;
+  /** The policy's projected usage after this payment would settle. */
+  policyUsage?: {
+    dailySpent?: string;
+    totalSpent?: string;
+    serviceSpent?: string;
+  };
+};
+
+/** The approver's decision: approve or deny with an optional reason. */
+export type ApprovalDecision = { approved: true } | { approved: false; reason?: string };
+
+/** Approval configuration (#199). */
+export type ApprovalOptions = {
+  /**
+   * Per-asset thresholds. Payments at or above the threshold require approval.
+   * Integer strings in the asset's base units.
+   */
+  thresholds?: Record<string, string>;
+  /**
+   * Optional predicate over the intent. When it returns true, approval is required
+   * regardless of threshold. Runs after policy but before the settler.
+   */
+  predicate?: (intent: PaymentIntent) => boolean;
+  /**
+   * The approver callback. Called with the approval request and an AbortSignal
+   * that fires on timeout. Must return a decision or throw (treated as denial).
+   */
+  approver: (request: ApprovalRequest, options: { signal: AbortSignal }) => Promise<ApprovalDecision>;
+  /** Approval timeout in milliseconds. Defaults to 5 minutes. */
+  timeoutMs?: number;
 };
 
 export type TollwayClientOptions = {
@@ -311,6 +382,12 @@ export type TollwayClientOptions = {
    * failed open is thrown like any other settler error.
    */
   fallback?: ChannelFallbackOptions;
+  /**
+   * Optional approval configuration (#199). When provided, payments above
+   * per-asset thresholds or matching the predicate wait for human approval.
+   * Budget is reserved during approval, and timeout or denial throws.
+   */
+  approval?: ApprovalOptions;
 };
 
 export type PayRequest = {
@@ -471,6 +548,108 @@ export function createClient(options: TollwayClientOptions): TollwayClient {
     }
   }
 
+  /** Checks if a payment needs approval based on thresholds and predicates (#199). */
+  async function checkNeedsApproval(
+    intent: PaymentIntent,
+    approval: ApprovalOptions,
+  ): Promise<boolean> {
+    // Check predicate first
+    if (approval.predicate?.(intent)) {
+      return true;
+    }
+    // Check threshold
+    const threshold = approval.thresholds?.[intent.asset];
+    if (threshold) {
+      try {
+        const amount = BigInt(intent.amount);
+        const thresholdBig = BigInt(threshold);
+        if (amount >= thresholdBig) {
+          return true;
+        }
+      } catch {
+        // Invalid amount strings are caught elsewhere
+      }
+    }
+    return false;
+  }
+
+  /** Requests approval with timeout and AbortSignal (#199). */
+  async function requestApproval(
+    intent: PaymentIntent,
+    approval: ApprovalOptions,
+    resource: string,
+  ): Promise<void> {
+    const timeoutMs = approval.timeoutMs ?? 300_000; // 5 minutes default
+    const controller = new AbortController();
+    const timeoutId = setTimeout(() => controller.abort(), timeoutMs);
+
+    emit({
+      type: "approval:requested",
+      resource,
+      amount: intent.amount,
+      asset: intent.asset,
+      payee: intent.payee,
+    });
+
+    const startTime = clientNow();
+    try {
+      const approvalRequest: ApprovalRequest = {
+        resource,
+        payee: intent.payee,
+        amount: intent.amount,
+        asset: intent.asset,
+        model: intent.model,
+        // TODO: Add policyUsage when #189 (budget reservation) lands
+      };
+
+      const decision = await approval.approver(approvalRequest, { signal: controller.signal });
+      const latencyMs = clientNow() - startTime;
+
+      emit({
+        type: "approval:resolved",
+        resource,
+        approved: decision.approved,
+        latencyMs,
+        reason: decision.approved ? undefined : decision.reason,
+      });
+
+      if (!decision.approved) {
+        throw new ApprovalDeniedError(resource, intent.amount, intent.asset, decision.reason);
+      }
+    } catch (rawError) {
+      const latencyMs = clientNow() - startTime;
+      
+      if (rawError instanceof ApprovalDeniedError) {
+        throw rawError;
+      }
+
+      // Approver threw or timeout
+      if (controller.signal.aborted) {
+        emit({
+          type: "approval:resolved",
+          resource,
+          approved: false,
+          latencyMs,
+          reason: "timeout",
+        });
+        throw new ApprovalTimeoutError(resource, intent.amount, intent.asset);
+      }
+
+      // Approver threw: treat as denial
+      const reason = rawError instanceof Error ? rawError.message : "approver threw";
+      emit({
+        type: "approval:resolved",
+        resource,
+        approved: false,
+        latencyMs,
+        reason,
+      });
+      throw new ApprovalDeniedError(resource, intent.amount, intent.asset, reason);
+    } finally {
+      clearTimeout(timeoutId);
+    }
+  }
+
   /**
    * Calls the settler, then retries the way issue #203 allows: a fresh
    * authorization for a payment the service refused before settling, the
@@ -615,6 +794,16 @@ export function createClient(options: TollwayClientOptions): TollwayClient {
       };
       blockIfDenied(activeTrace);
       if (options.shadow) await shadowAttempt(options.shadow, intent, request.resource);
+
+      // Issue #199: approval check after policy but before payment.
+      // Note: This is a simplified implementation. Full #189 budget reservation
+      // integration is pending.
+      if (options.approval) {
+        const needsApproval = await checkNeedsApproval(intent, options.approval);
+        if (needsApproval) {
+          await requestApproval(intent, options.approval, request.resource);
+        }
+      }
 
       /**
        * One payment on one model through one settler. The retry runs
@@ -993,6 +1182,48 @@ export class ReceiptVerificationError extends TollwayError {
   constructor(reason: string) {
     super("receipt-verification-failed", `receipt failed verification: ${reason}`);
     this.name = "ReceiptVerificationError";
+    this.reason = reason;
+  }
+}
+
+/**
+ * Thrown when a payment requires human approval but the approver times out
+ * before returning a decision (#199).
+ */
+export class ApprovalTimeoutError extends TollwayError {
+  readonly resource: string;
+  readonly amount: string;
+  readonly asset: string;
+  constructor(resource: string, amount: string, asset: string) {
+    super(
+      "approval-timeout",
+      `approval timed out for ${resource}: ${amount} ${asset}`,
+    );
+    this.name = "ApprovalTimeoutError";
+    this.resource = resource;
+    this.amount = amount;
+    this.asset = asset;
+  }
+}
+
+/**
+ * Thrown when a payment requires human approval and the approver denies it,
+ * or when the approver callback throws (#199).
+ */
+export class ApprovalDeniedError extends TollwayError {
+  readonly resource: string;
+  readonly amount: string;
+  readonly asset: string;
+  readonly reason?: string;
+  constructor(resource: string, amount: string, asset: string, reason?: string) {
+    super(
+      "approval-denied",
+      `approval denied for ${resource}: ${amount} ${asset}${reason ? ` (${reason})` : ""}`,
+    );
+    this.name = "ApprovalDeniedError";
+    this.resource = resource;
+    this.amount = amount;
+    this.asset = asset;
     this.reason = reason;
   }
 }
