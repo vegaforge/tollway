@@ -13,6 +13,10 @@ coverage/
 playwright-report/
 test-results/
 
+# Mutation testing (Stryker temp and reports)
+.stryker-tmp/
+packages/*/reports/
+
 # Environment. Every .env variant stays local; only the example is shared.
 .env*
 !.env.example
@@ -31,6 +35,7 @@ pnpm-debug.log*
 # Misc
 *.tsbuildinfo
 .vercel
+temp/
 
 # Fumadocs generated source
 .source/

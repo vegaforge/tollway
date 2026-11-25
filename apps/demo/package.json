@@ -2,7 +2,7 @@
   "name": "@vegaforge/tollway-demo",
   "version": "0.0.0",
   "private": true,
-  "description": "End-to-end Tollway demo: one paid x402 request producing a canonical receipt",
+  "description": "End-to-end Tollway demo: x402 and MPP charge scenarios, from challenge to a verified receipt",
   "license": "Apache-2.0",
   "type": "module",
   "scripts": {

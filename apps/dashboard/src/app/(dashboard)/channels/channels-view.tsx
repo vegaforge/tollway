@@ -1,20 +1,16 @@
 "use client";
 
 import type { ChannelStatus } from "@vegaforge/tollway-channels";
+import Link from "next/link";
 import { useMemo } from "react";
 
+import { AssetTotals } from "@/components/ui/asset-totals";
 import { Panel } from "@/components/ui/panel";
 import { StatCard } from "@/components/ui/stat-card";
+import { StreamStatusBadge } from "@/components/ui/stream-status-badge";
 import type { OpenChannelRow } from "@/data/open-channels";
 import { useOpenChannels } from "@/data/use-open-channels";
-
-/**
- * Default precision used to render integer-string amounts. Stellar SACs (the
- * settlement target of @vegaforge/tollway-core) use 7 decimal places. When the
- * observability hub starts attaching per-asset metadata to rows, the data
- * layer can override this.
- */
-const DEFAULT_ASSET_DECIMALS = 7;
+import { formatAmount, sumByAsset } from "@/lib/amount";
 
 /**
  * Default drawdown fraction at which an open channel is flagged as nearing
@@ -37,30 +33,8 @@ function isNearingClose(row: OpenChannelRow, threshold: number): boolean {
   return row.status === "open" && drawdownRatio(row) >= threshold;
 }
 
-function formatAmount(amount: string, asset: string): string {
-  let units: bigint;
-  try {
-    units = BigInt(amount);
-  } catch {
-    return `${amount} ${asset}`;
-  }
-  const divisor = 10n ** BigInt(DEFAULT_ASSET_DECIMALS);
-  const whole = units / divisor;
-  const fraction = units % divisor;
-  const fractionStr = fraction.toString().padStart(DEFAULT_ASSET_DECIMALS, "0").slice(0, 2);
-  return `${whole.toLocaleString("en-US")}.${fractionStr} ${asset}`;
-}
-
 function formatPercent(ratio: number): string {
   return `${(ratio * 100).toFixed(1)}%`;
-}
-
-function sumAmounts(rows: OpenChannelRow[], pick: (row: OpenChannelRow) => string): bigint {
-  return rows.reduce((acc, row) => acc + BigInt(pick(row)), 0n);
-}
-
-function headlineAsset(rows: OpenChannelRow[]): string {
-  return rows[0]?.asset ?? "USDC";
 }
 
 export function ChannelsView({
@@ -78,17 +52,15 @@ export function ChannelsView({
     [rows],
   );
 
-  const totals = useMemo(() => {
-    if (rows.length === 0) {
-      return { deposit: "0", committed: "0", asset: "USDC", openCount: 0 };
-    }
-    return {
-      deposit: sumAmounts(rows, (r) => r.deposit).toString(),
-      committed: sumAmounts(rows, (r) => r.committed).toString(),
-      asset: headlineAsset(rows),
+  // Totals are per asset: a channel in XLM is never added to one in USDC.
+  const totals = useMemo(
+    () => ({
+      deposit: sumByAsset(rows, (r) => r.deposit),
+      committed: sumByAsset(rows, (r) => r.committed),
       openCount: rows.filter((r) => r.status === "open").length,
-    };
-  }, [rows]);
+    }),
+    [rows],
+  );
 
   return (
     <>
@@ -100,13 +72,13 @@ export function ChannelsView({
         />
         <StatCard
           label="Total deposited"
-          value={state.status === "ready" ? formatAmount(totals.deposit, totals.asset) : "-"}
-          hint="Cumulative across all tracked channels"
+          value={state.status === "ready" ? <AssetTotals entries={totals.deposit} /> : "-"}
+          hint="Per asset, across all tracked channels"
         />
         <StatCard
           label="Total committed"
-          value={state.status === "ready" ? formatAmount(totals.committed, totals.asset) : "-"}
-          hint="Off-chain commitments awaiting close"
+          value={state.status === "ready" ? <AssetTotals entries={totals.committed} /> : "-"}
+          hint="Per asset, off-chain commitments awaiting close"
         />
       </div>
 
@@ -114,6 +86,11 @@ export function ChannelsView({
         title="Open channels"
         description="Sorted by drawdown. Nearing-close rows are highlighted."
         className="mt-6"
+        action={
+          state.status === "ready" && state.stream ? (
+            <StreamStatusBadge status={state.stream} />
+          ) : undefined
+        }
       >
         {state.status === "loading" ? <ChannelsTableSkeleton /> : null}
         {state.status === "error" ? <ChannelsTableError error={state.error} /> : null}
@@ -181,13 +158,13 @@ function ChannelsTable({
                       </span>
                     ) : null}
                   </div>
-                  <a
-                    href={`#channel-row-${row.id}`}
+                  <Link
+                    href={`/channels/${encodeURIComponent(row.id)}`}
                     data-testid={`channel-link-${row.id}`}
                     className="font-mono text-xs text-muted underline-offset-2 hover:text-foreground hover:underline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-primary"
                   >
                     {row.id}
-                  </a>
+                  </Link>
                 </td>
                 <td className="px-3 py-3">
                   <DrawdownCell row={row} ratio={ratio} />
@@ -229,6 +206,7 @@ const STATUS_PILL_CLASSES: Record<ChannelStatus, string> = {
   closed: "bg-surface-2 text-muted",
   recovering: "bg-danger/15 text-foreground",
   recovered: "bg-success/15 text-foreground",
+  "settlement-mismatched": "bg-danger/15 text-foreground",
 };
 
 function StatusPill({ status }: { status: ChannelStatus }) {

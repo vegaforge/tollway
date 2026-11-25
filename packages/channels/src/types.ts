@@ -8,7 +8,19 @@
 
 import type { StellarNetwork } from "@vegaforge/tollway-core";
 
-export type ChannelStatus = "open" | "closing" | "closed" | "recovering" | "recovered";
+export type ChannelStatus =
+  | "open"
+  | "closing"
+  | "closed"
+  | "recovering"
+  | "recovered"
+  /**
+   * Issue #176: a terminal flag for a settlement that does not match the
+   * last commitment. A channel in this state never accepts further
+   * commits and is never reopened for the agent; the discrepancy is for
+   * the reconcile path to classify.
+   */
+  | "settlement-mismatched";
 
 export type OpenChannelInput = {
   counterparty: string;
@@ -42,6 +54,61 @@ export type Channel = {
   settlementTxHash?: string;
   /** Amount returned to the funder on close; set when the channel transitions to closed. */
   returnedRemainder?: string;
+  /**
+   * Issue #176: records a close attempt before the on-chain submission.
+   * After a crash, `resume()` reads this to decide what the chain should
+   * be asked about. Absent on a channel that has never tried to close.
+   */
+  closeAttempt?: {
+    /** A unique id per attempt (fresh on each `close()`). */
+    attemptId: string;
+    /** The ledger at which the attempt started (from the adapter). */
+    startedAtLedger: number;
+    /** ISO-8601 time the attempt started. */
+    startedAt: string;
+  };
+  /**
+   * Issue #176: set when the channel entered `settlement-mismatched`
+   * carries the expected vs observed amounts for the reconcile path.
+   */
+  settlementMismatch?: {
+    expectedAmount: string;
+    observedAmount: string;
+  };
+  /**
+   * Issue #38: ledger at which a funder-initiated close becomes effective.
+   * Recorded when `recover` starts the close so a later call knows whether a
+   * refund is permitted without guessing from wall-clock time.
+   */
+  closeEffectiveAtLedger?: number;
+  /** Issue #38: amount reclaimed by a completed funder refund, in base units. */
+  recoveredAmount?: string;
+  /** Issue #38: transaction hash of a completed funder refund. */
+  refundTxHash?: string;
+};
+
+/**
+ * Filters and paging for {@link CommitmentStore.listChannels} and
+ * {@link ChannelManager.listChannels}. Every filter is exact; there is no
+ * prefix or range matching.
+ */
+export type ChannelListFilter = {
+  status?: ChannelStatus;
+  counterparty?: string;
+  asset?: string;
+  network?: StellarNetwork;
+  /** `nextCursor` from a previous page. Opaque to the caller. */
+  cursor?: string;
+  /** Page size from 1 to 200. Defaults to 50. */
+  limit?: number;
+};
+
+/** One page of tracked channels, newest first. */
+export type ChannelPage = {
+  /** The channels in this page, ordered by `openedAt` and then id, both descending. */
+  channels: readonly Channel[];
+  /** Pass as `cursor` for the next page; absent when this is the last page. */
+  nextCursor?: string;
 };
 
 export type Commitment = {
@@ -83,7 +150,78 @@ export interface ChannelManager {
   get(channelId: string): Promise<Channel | undefined>;
   /** Read-only access to a channel's commitment stream, ordered by sequence. */
   list(channelId: string): Promise<readonly Commitment[]>;
+  /** Read-only, filtered, paginated view of every tracked channel. */
+  listChannels(filter?: ChannelListFilter): Promise<ChannelPage>;
   shouldClose(channelId: string): Promise<boolean>;
   close(channelId: string): Promise<CloseResult>;
+  /**
+   * Finishes a close that a crash or an unknown outcome left in `closing`
+   * (#176), deciding from the chain what happened:
+   *
+   * - no close on chain: the close is submitted again (`reclosed`);
+   * - closed with nothing left in the contract: the settlement is looked up
+   *   and recorded (`closed`), or `SettlementNotFoundError` is thrown and
+   *   the channel stays `closing`;
+   * - closed with funds left: a funder-started close or a dispute, handed to
+   *   recovery (#38) as `recovering`.
+   *
+   * A settlement that differs from the last commitment moves the channel to
+   * `settlement-mismatched` and throws `SettlementMismatchError`. A channel
+   * that is not `closing` is left alone (`no-change`).
+   *
+   * Calling it again after it finished changes nothing, and concurrent calls
+   * for one channel in one process share a single run, so at most one close
+   * is submitted. Two processes over a shared store can still both submit
+   * until the store offers compare-and-set (#175): run `resume` from one
+   * process at a time until then.
+   */
+  resume(channelId: string): Promise<ResumeOutcome>;
+  /**
+   * Resumes every channel in `closing` and reports each result, including
+   * the error for a channel that could not be resumed. One failure never
+   * stops the others.
+   */
+  resumeAll(): Promise<ResumeAllResult>;
+  /**
+   * Recovers uncommitted funds from a channel whose recipient stopped
+   * responding (#38). Works on an `open`, `closing` or `recovering` channel
+   * and reads the on-chain state first:
+   *
+   * - no close on chain: moves the channel to `recovering`, submits the
+   *   funder's `close_start` and records its effective ledger. The result's
+   *   `recoveredAmount` is `"0"` and `txHash` is the close_start;
+   * - a close with a balance left: records the channel as `recovering` with
+   *   that ledger if it was not already, then refunds once the current ledger
+   *   is past it and moves the channel to `recovered`;
+   * - close not yet effective: throws `RecoveryNotYetEffectiveError` and
+   *   leaves the channel in `recovering` for a later call;
+   * - recipient already settled (no balance): records the settlement and
+   *   moves the channel to `closed` without refunding.
+   *
+   * If `startClose` throws `CloseNotSubmittedError`, the channel goes back to
+   * the status it had. Any other failure leaves it in `recovering`, and the
+   * next call reads the chain to see whether the close landed.
+   *
+   * `closed`, `recovered` and `settlement-mismatched` channels are rejected
+   * with `ChannelAlreadyClosedError`, unknown ids with `ChannelNotFoundError`.
+   * Concurrent calls for one channel in one process share a single run, and
+   * the status moves by compare-and-set, so at most one refund is submitted.
+   */
   recover(channelId: string): Promise<RecoveryResult>;
 }
+
+/**
+ * What `resume` did (#176). `closed` recorded a settlement found on chain;
+ * `reclosed` submitted a close again because none had landed; `recovering`
+ * handed the channel to the recovery path (#38); `no-change` means the
+ * channel was not `closing`.
+ */
+export type ResumeOutcome =
+  | { kind: "closed"; channelId: string; settlementTxHash: string; returnedRemainder: string }
+  | { kind: "recovering"; channelId: string; closeEffectiveAtLedger: number }
+  | { kind: "reclosed"; channelId: string; settlementTxHash: string; returnedRemainder: string }
+  | { kind: "no-change"; channelId: string; status: ChannelStatus };
+
+export type ResumeAllResult = {
+  outcomes: ReadonlyArray<ResumeOutcome | { kind: "error"; channelId: string; error: Error }>;
+};

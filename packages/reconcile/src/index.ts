@@ -7,7 +7,82 @@
  * and matches its receipt. See docs/design.md, "Reconciliation".
  */
 
-import { type SignedReceipt, signedReceiptSchema } from "@vegaforge/tollway-core";
+import {
+  type SignedReceipt,
+  type StellarNetwork,
+  signedReceiptSchema,
+} from "@vegaforge/tollway-core";
+import {
+  type ChainReader,
+  type ChannelStateReader,
+  chainTransactionSchema,
+  describeReadFailure,
+  describeSchemaFailure,
+  onChainChannelStateSchema,
+} from "./chain.js";
+import { type ChargeDriftKind, confirmCharge } from "./charge.js";
+import {
+  type OpenChannelDriftKind,
+  type OpenChannelSnapshot,
+  reconcileOpenChannel,
+} from "./open-channel.js";
+
+export {
+  type AlertDeliveryReport,
+  type AlertEmitter,
+  type AlertEventInput,
+  createDriftAlertBridge,
+  createMemoryDriftAlertStore,
+  type DriftAlertBridge,
+  type DriftAlertBridgeOptions,
+  type DriftAlertPayload,
+  type DriftAlertRunSummary,
+  type DriftAlertStore,
+} from "./alerts.js";
+export {
+  type ChainReader,
+  type ChainTransaction,
+  type ChainTransfer,
+  type ChannelStateReader,
+  chainTransactionSchema,
+  chainTransferSchema,
+  type OnChainChannelState,
+  onChainChannelStateSchema,
+  STELLAR_NETWORK_PASSPHRASE,
+} from "./chain.js";
+export {
+  type ChargeConfirmation,
+  type ChargeDrift,
+  type ChargeDriftKind,
+  type ChargeReceipt,
+  confirmCharge,
+} from "./charge.js";
+export {
+  type OpenChannelDrift,
+  type OpenChannelDriftKind,
+  type OpenChannelSnapshot,
+  reconcileOpenChannel,
+} from "./open-channel.js";
+export {
+  type BuildReconciliationReportOptions,
+  buildReconciliationReport,
+  type CsvReportOptions,
+  DEFAULT_DRIFT_SEVERITY,
+  type DriftSeverity,
+  type ExportReportFormat,
+  exportReconciliationReport,
+  RECONCILIATION_CSV_COLUMNS,
+  RECONCILIATION_REPORT_VERSION,
+  type ReconciliationAmounts,
+  type ReconciliationReport,
+  type ReconciliationReportEntry,
+  type ReconciliationReportInput,
+  type ReconciliationReportTotals,
+  type ReportRange,
+  reconciliationReportToCsv,
+  reconciliationReportToJson,
+  resolveDriftSeverity,
+} from "./report.js";
 
 /** One stored cumulative commitment, as the channel manager recorded it. */
 export type CommitmentRecord = {
@@ -24,7 +99,7 @@ export type SettlementRecord = {
   txHash: string;
 };
 
-export type DriftKind =
+export type ChannelDriftKind =
   | "under-settled"
   | "over-settled"
   | "missing-commitment"
@@ -38,14 +113,45 @@ export type DriftKind =
   /** Two or more commitments share one sequence. */
   | "duplicate-sequence";
 
+export type DriftKind = ChannelDriftKind | ChargeDriftKind | OpenChannelDriftKind;
+
 export type Drift = {
   kind: DriftKind;
   detail: string;
 };
 
+/** What a reconciliation result is about: a channel, or a settlement transaction. */
+export type ReconciliationSubject =
+  | { kind: "channel"; channelId: string }
+  | { kind: "transaction"; txHash: string; network: StellarNetwork };
+
+/**
+ * The outcome of one reconciliation.
+ *
+ * - `ok`: checked and consistent.
+ * - `drift`: checked, and the records disagree with each other or the chain.
+ * - `unverifiable`: the chain no longer has the data, so it can neither
+ *   confirm nor contradict the record. Not drift.
+ * - `retryable`: the check could not run this time (an RPC error, a malformed
+ *   RPC response, a server that has not caught up). Run it again later.
+ *   Never ok, never drift.
+ *
+ * `ok` is `true` only for the `ok` status, so `if (result.ok)` still reads as
+ * "confirmed clean". Narrow on `status` before reading `drift`.
+ */
 export type ReconciliationResult =
-  | { ok: true; channelId: string }
-  | { ok: false; channelId: string; drift: Drift[] };
+  | { status: "ok"; ok: true; subject: ReconciliationSubject }
+  | { status: "drift"; ok: false; subject: ReconciliationSubject; drift: Drift[] }
+  | { status: "unverifiable"; ok: false; subject: ReconciliationSubject; reason: string }
+  | { status: "retryable"; ok: false; subject: ReconciliationSubject; reason: string };
+
+/**
+ * A stable string for a subject: the channel id or the transaction hash.
+ * Reports, alerts and quarantine keys use it.
+ */
+export function reconciliationSubjectId(subject: ReconciliationSubject): string {
+  return subject.kind === "channel" ? subject.channelId : subject.txHash;
+}
 
 export interface Reconciler {
   /** Reconciles a channel's commitment stream against its on-chain close. */
@@ -54,20 +160,38 @@ export interface Reconciler {
     settlement: SettlementRecord,
   ): Promise<ReconciliationResult>;
   /**
-   * Validates a single x402 or MPP charge receipt structurally.
-   * On-chain settlement confirmation requires chain access and is tracked
-   * separately.
+   * Validates an x402 or MPP charge receipt's structure and, when a
+   * `ChainReader` is configured, confirms its settlement transaction on chain
+   * (#211). Without a reader only the structure is checked.
    */
   reconcileCharge(receipt: SignedReceipt): Promise<ReconciliationResult>;
+  /**
+   * Reads an open channel's contract state through the configured
+   * `ChannelStateReader` and compares it with the snapshot (#212). Throws a
+   * `TypeError` when no reader is configured.
+   */
+  checkOpenChannel(snapshot: OpenChannelSnapshot): Promise<ReconciliationResult>;
 }
 
 export type ReconcilerOptions = {
   /**
    * Optional suppression hook. Return true to suppress a detected drift item.
    * Applied after all drift is collected; if all items are suppressed, the
-   * result is ok: true. Use to filter known-acceptable divergences.
+   * result is ok. Use to filter known-acceptable divergences.
    */
-  suppress?: (drift: Drift, channelId: string) => boolean;
+  suppress?: (drift: Drift, subject: ReconciliationSubject) => boolean;
+  /**
+   * Reads settlement transactions for charge confirmation (#211). The
+   * Stellar implementation is `createStellarChainReader` from
+   * `@vegaforge/tollway-reconcile/stellar`.
+   */
+  chain?: ChainReader;
+  /**
+   * Reads channel contract state for live channel checks (#212). The Stellar
+   * implementation is `createStellarChannelStateReader` from
+   * `@vegaforge/tollway-reconcile/stellar`.
+   */
+  channels?: ChannelStateReader;
 };
 
 /** Non-negative integer string as produced by the channel manager. */
@@ -90,14 +214,14 @@ function parseAmount(
 }
 
 function buildResult(
-  channelId: string,
-  drifts: Drift[],
+  subject: ReconciliationSubject,
+  drifts: readonly Drift[],
   suppress: ReconcilerOptions["suppress"],
 ): ReconciliationResult {
-  const active = suppress ? drifts.filter((d) => !suppress(d, channelId)) : drifts;
+  const active = suppress ? drifts.filter((d) => !suppress(d, subject)) : [...drifts];
 
-  if (active.length === 0) return { ok: true, channelId };
-  return { ok: false, channelId, drift: active };
+  if (active.length === 0) return { status: "ok", ok: true, subject };
+  return { status: "drift", ok: false, subject, drift: active };
 }
 
 export function createReconciler(options: ReconcilerOptions = {}): Reconciler {
@@ -109,19 +233,20 @@ export function createReconciler(options: ReconcilerOptions = {}): Reconciler {
       settlement: SettlementRecord,
     ): Promise<ReconciliationResult> {
       const { channelId, settledAmount, returnedRemainder } = settlement;
+      const subject: ReconciliationSubject = { kind: "channel", channelId };
       const drifts: Drift[] = [];
 
       const settledResult = parseAmount(settledAmount, "settledAmount");
       if (!settledResult.ok) {
         drifts.push(settledResult.drift);
-        return buildResult(channelId, drifts, suppress);
+        return buildResult(subject, drifts, suppress);
       }
       const settled = settledResult.amount;
 
       const remainderResult = parseAmount(returnedRemainder, "returnedRemainder");
       if (!remainderResult.ok) {
         drifts.push(remainderResult.drift);
-        return buildResult(channelId, drifts, suppress);
+        return buildResult(subject, drifts, suppress);
       }
       const remainder = remainderResult.amount;
 
@@ -147,7 +272,7 @@ export function createReconciler(options: ReconcilerOptions = {}): Reconciler {
             detail: `settlement settled ${settledAmount} but no commitment records found for channel ${channelId}`,
           });
         }
-        return buildResult(channelId, drifts, suppress);
+        return buildResult(subject, drifts, suppress);
       }
 
       // The highest amount committed at each sequence. Where duplicates
@@ -160,7 +285,7 @@ export function createReconciler(options: ReconcilerOptions = {}): Reconciler {
         );
         if (!parsedAmount.ok) {
           drifts.push(parsedAmount.drift);
-          return buildResult(channelId, drifts, suppress);
+          return buildResult(subject, drifts, suppress);
         }
         const seen = bySequence.get(entry.sequence);
         bySequence.set(entry.sequence, {
@@ -235,28 +360,150 @@ export function createReconciler(options: ReconcilerOptions = {}): Reconciler {
         });
       }
 
-      return buildResult(channelId, drifts, suppress);
+      return buildResult(subject, drifts, suppress);
     },
 
     async reconcileCharge(receipt: SignedReceipt): Promise<ReconciliationResult> {
+      // The subject comes from the input before it is validated, so even a
+      // malformed receipt is reported against the reference it carries.
       const ref = receipt.receipt.settlement;
-      const channelId = ref.kind === "channel-commitment" ? ref.channelId : ref.txHash;
+      const subject: ReconciliationSubject =
+        ref.kind === "channel-commitment"
+          ? { kind: "channel", channelId: ref.channelId }
+          : { kind: "transaction", txHash: ref.txHash, network: receipt.receipt.network };
 
-      const drifts: Drift[] = [];
-
-      // Structural validation only — on-chain settlement confirmation requires
-      // chain access and is out of scope here.
       const parsed = signedReceiptSchema.safeParse(receipt);
       if (!parsed.success) {
-        for (const issue of parsed.error.issues) {
-          drifts.push({
-            kind: "malformed-record",
-            detail: `receipt structural error at ${issue.path.join(".")}: ${issue.message}`,
-          });
-        }
+        const drifts: Drift[] = parsed.error.issues.map((issue) => ({
+          kind: "malformed-record",
+          detail: `receipt structural error at ${issue.path.join(".")}: ${issue.message}`,
+        }));
+        return buildResult(subject, drifts, suppress);
       }
 
-      return buildResult(channelId, drifts, suppress);
+      const body = parsed.data.receipt;
+      // A channel receipt settles through the channel, which reconcileChannel
+      // and checkOpenChannel cover; without a reader there is no chain check.
+      if (body.settlement.kind !== "transaction" || !options.chain) {
+        return buildResult(subject, [], suppress);
+      }
+      const txHash = body.settlement.txHash;
+
+      let assetContract: string;
+      try {
+        assetContract = options.chain.assetContractId(body.asset, body.network);
+      } catch (error) {
+        return buildResult(
+          subject,
+          [
+            {
+              kind: "malformed-record",
+              detail: `receipt asset "${body.asset}" has no token contract on ${body.network}: ${describeReadFailure(error)}`,
+            },
+          ],
+          suppress,
+        );
+      }
+
+      let raw: unknown;
+      try {
+        raw = await options.chain.getTransaction(txHash, body.network);
+      } catch (error) {
+        return {
+          status: "retryable",
+          ok: false,
+          subject,
+          reason: `could not read transaction ${txHash}: ${describeReadFailure(error)}`,
+        };
+      }
+      const tx = chainTransactionSchema.safeParse(raw);
+      if (!tx.success) {
+        return {
+          status: "retryable",
+          ok: false,
+          subject,
+          reason: `the chain reader returned a malformed transaction for ${txHash}: ${describeSchemaFailure(tx.error)}`,
+        };
+      }
+
+      const confirmation = confirmCharge({ ...body, txHash }, tx.data, assetContract);
+      switch (confirmation.status) {
+        case "confirmed":
+          return buildResult(subject, [], suppress);
+        case "drift":
+          return buildResult(subject, confirmation.drift, suppress);
+        case "unverifiable":
+          return { status: "unverifiable", ok: false, subject, reason: confirmation.reason };
+        case "retryable":
+          return { status: "retryable", ok: false, subject, reason: confirmation.reason };
+      }
+    },
+
+    async checkOpenChannel(snapshot: OpenChannelSnapshot): Promise<ReconciliationResult> {
+      if (!options.channels) {
+        throw new TypeError(
+          "checkOpenChannel needs a ChannelStateReader: pass `channels` to createReconciler",
+        );
+      }
+      const subject: ReconciliationSubject = { kind: "channel", channelId: snapshot.channelId };
+
+      let raw: unknown;
+      try {
+        raw = await options.channels.getChannelState(snapshot.channelId, snapshot.network);
+      } catch (error) {
+        return {
+          status: "retryable",
+          ok: false,
+          subject,
+          reason: `could not read channel ${snapshot.channelId}: ${describeReadFailure(error)}`,
+        };
+      }
+      const state = onChainChannelStateSchema.safeParse(raw);
+      if (!state.success) {
+        return {
+          status: "retryable",
+          ok: false,
+          subject,
+          reason: `the channel reader returned a malformed state for ${snapshot.channelId}: ${describeSchemaFailure(state.error)}`,
+        };
+      }
+
+      return buildResult(subject, reconcileOpenChannel(snapshot, state.data), suppress);
     },
   };
 }
+
+export {
+  createQuarantineEnforcer,
+  DEFAULT_DRIFT_ACTIONS,
+  type DriftAction,
+  type DriftQuarantineEvent,
+  type DriftWarnEvent,
+  type ProcessedDriftAction,
+  type ProcessReconciliationInput,
+  type ProcessReconciliationOutput,
+  type QuarantineEnforcerOptions,
+  type ReconciliationQuarantineEnforcer,
+} from "./quarantine.js";
+
+export {
+  type ChannelReconciliationInput,
+  type ChannelReconciliationSource,
+  type Cursor,
+  type CursorStore,
+  createMemoryChannelReconciliationSource,
+  createMemoryCursorStore,
+  createMemoryReceiptReconciliationSource,
+  createMemoryReconciliationResultStore,
+  createReconciliationRunner,
+  type Page,
+  type ReceiptReconciliationInput,
+  type ReceiptReconciliationSource,
+  type ReconciliationFailure,
+  type ReconciliationOutcome,
+  type ReconciliationResultStore,
+  type ReconciliationRunner,
+  type ReconciliationRunnerConfig,
+  type RetryConfig,
+  type RunSubject,
+} from "./runner.js";

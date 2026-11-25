@@ -4,6 +4,87 @@ A contributor guide for the Tollway observability dashboard (`apps/dashboard`). 
 
 See also `docs/design.md`, "Observability", which lists what the dashboard is supposed to show and the webhook event set it consumes.
 
+## Live event stream
+
+Dashboard views update without reloads via a server-sent event (SSE) stream. The service exposes the stream; a Next.js route handler proxies it so the API key never reaches the browser.
+
+### Endpoint: `GET /v1/events/stream` (service)
+
+Requires `Authorization: Bearer <SERVICE_API_KEY>` with the `read` scope.
+
+| Query parameter | Meaning |
+| --------------- | ------- |
+| `types` | Comma-separated list of event types to include. Omit for all. |
+
+**Response:** `Content-Type: text/event-stream`, chunked, long-lived.
+
+#### Stream event types
+
+| `event:` field | Zod schema | Meaning |
+| -------------- | ---------- | ------- |
+| `receipt.created` | `receiptCreatedDataSchema` | A new canonical signed receipt settled. |
+| `channel.opened` | `channelOpenedDataSchema` | An MPP channel was opened. |
+| `channel.closed` | `channelClosedDataSchema` | An MPP channel was closed and settled. |
+| `budget.warning` | `budgetWarningDataSchema` | A policy budget is nearing or over its limit. |
+| `anomaly.detected` | `anomalyDetectedDataSchema` | A spend spike or policy stop. |
+| `metrics.delta` | `metricsDeltaDataSchema` | Running totals (settled count, open channels, anomaly count, cumulative spend by asset). |
+| `reset` | `resetDataSchema` | Control event: client must refetch snapshots. |
+
+All schemas live in `apps/dashboard/src/lib/event-schemas.ts` and are mirrored in `apps/tollway-service/src/event-schemas.ts`.
+
+#### Event ids and ordering
+
+Every event carries an `id:` field — a monotonically increasing positive integer, 1-indexed, within one service process. With multiple service replicas the ids are not globally ordered (each replica has its own counter). A client reconnecting to a different replica receives a `reset` event. A Redis Streams–backed shared buffer would give globally ordered ids across replicas; that is deferred.
+
+#### Resume
+
+Send `Last-Event-ID: <n>` to replay events after id `n`. The service holds a bounded in-memory buffer (default 1 000 events). If `n` is older than the buffer's oldest retained event the service sends `reset` with `reason: "buffer-expired"` and the client refetches its snapshot. A fresh connection with no `Last-Event-ID` receives `reset` with `reason: "filter-changed"` so the client knows to treat state as fresh.
+
+#### Heartbeat
+
+A comment line (`: heartbeat`) is sent every 15 seconds to keep idle connections alive through proxies. Proxies that buffer SSE may need `X-Accel-Buffering: no` or equivalent.
+
+### SSE proxy: `GET /api/events/stream` (dashboard)
+
+The Next.js route handler at `apps/dashboard/src/app/api/events/stream/route.ts`:
+
+1. Validates the session cookie (same `authorizeRequest` path as every other route).
+2. Adds `Authorization: Bearer <SERVICE_API_KEY>` from the server environment.
+3. Forwards `Last-Event-ID` and the `?types=` parameter to the service.
+4. Streams the response body back unchanged with `Content-Type: text/event-stream`.
+
+The browser's `EventSource` connects to `/api/events/stream`; it never sees the service URL or the API key.
+
+### `useEventStream` hook
+
+`apps/dashboard/src/data/use-event-stream.ts` opens an `EventSource` to the proxy, handles reconnect status, and dispatches Zod-validated events to registered handlers.
+
+```ts
+const status = useEventStream({
+  types: ["receipt.created"],    // optional type filter
+  onReset: () => fetchReceipts(), // called on reset; refetch the snapshot
+  enabled: true,                  // set false to pause
+});
+// status: "connecting" | "live" | "reconnecting" | "paused"
+```
+
+Incoming events are coalesced via `requestAnimationFrame` (falls back to `setTimeout`) so a burst of receipts lands as one React render instead of one per event. The queue is capped at 500 events; oldest entries are dropped under sustained flood.
+
+**Registering handlers** is done via `registerSseHandler` from individual data hooks, not inside `useEventStream` itself, so multiple hooks can share one `EventSource` instance. Each call returns an unsubscribe function to call in a cleanup.
+
+### View-to-stream map
+
+| View | Event types consumed | On reset |
+| ---- | -------------------- | -------- |
+| Overview counters | `metrics.delta` | Revert to `"—"` until next delta |
+| Receipts | `receipt.created` | Refetch snapshot |
+| Channels | `channel.opened`, `channel.closed` | Refetch snapshot |
+| Anomalies | `anomaly.detected` | Clear rows |
+
+### `StreamStatusBadge`
+
+`apps/dashboard/src/components/ui/stream-status-badge.tsx` renders a small pill (`live`, `connecting`, `reconnecting`, `paused`) next to panel titles on views that consume the stream.
+
 ## The three UI primitives
 
 Every dashboard widget is composed from three primitives in `apps/dashboard/src/components/ui/`. The rule is that a view never renders bare content: a widget is always a `Panel`, the data-free state of a widget is always an `EmptyState`, and a headline number is always a `StatCard`. Following that rule keeps the surface uniform without a heavier component system.
@@ -46,7 +127,7 @@ The placeholder a widget shows when its data is unavailable. Every unwired widge
 
 ## The data-layer seam
 
-Wired views (currently Agents, Channels and Exports) follow one pattern, and unwired views (Overview model mix, Services, Receipts, Anomalies) follow another.
+Wired views (Overview, Agents, Services, Channels, Channel detail, Receipts, Anomalies and Exports) follow one pattern, and unwired views (Overview spend over time, Webhooks) follow another.
 
 ### Wired views: the `useXxx` / `fetchXxx` seam
 
@@ -78,13 +159,14 @@ A view that does not yet have a data hook renders an `EmptyState` directly insid
 
 | Route | View | Current source | Future source |
 | ----- | ---- | -------------- | ------------- |
-| `/` | Overview | `StatCard` placeholders plus `EmptyState`s for model mix, spend over time, recent receipts, anomalies | `@vegaforge/tollway-observability` (`summarize`, and `timeseries` for spend over time, wiring tracked in #232), `@vegaforge/tollway-core` (`SignedReceipt`), `anomaly.detected` events |
+| `/` | Overview | `useOverview` -> `fetchOverview` in `src/data/overview.ts`, with the anomalies strip from `useAnomalies` | `@vegaforge/tollway-observability` (`createObservabilityHub`, `record`, `summarize`); spend over time stays an `EmptyState` naming `timeseries()` |
 | `/agents` | Per-agent spend | `useAgentSpend` -> `fetchAgentSpend` stub in `src/data/agent-spend.ts` | `summarize({ payer })` per agent, or a future `byPayer` rollup on the hub |
 | `/agents/[agentId]` | One agent's spend, budget, and policy stops | `useAgentDetail` -> `fetchAgentDetail` stub in `src/data/agent-detail.ts` | #226 series filtered by payer, plus the #228 policy store per agent id |
-| `/services` | Per-service revenue | `EmptyState` with `summarize({ payee })` as the named source | `summarize({ payee })`, plus `timeseries({ payee, ... })` for the latency-per-model breakdown |
+| `/services` | Per-service revenue | `useServiceRevenue` -> `fetchServiceRevenue` in `src/data/service-revenue.ts`, over a hub filled with stub payments | The live hub: `summarizeAsync({ payee, asset })` and `queryMetrics({ payee, asset, outcome: "settled" })` |
 | `/channels` | Open MPP channels | `useOpenChannels` -> `fetchOpenChannels` stub in `src/data/open-channels.ts` | Observability hub rollup over `channel.opened` / `channel.closed`, or a direct `ChannelManager.list` iteration |
-| `/receipts` | Signed receipt archive | `EmptyState` with `@vegaforge/tollway-core · SignedReceipt` as the named source | Receipt archive backed by the observability hub's receipt stream |
-| `/anomalies` | Anomaly feed | `EmptyState` with `anomaly.detected` as the named source | `anomaly.detected` event stream, with the rule that fired |
+| `/channels/[channelId]` | One channel's commitment stream, drawdown and reconcile status | `useChannelDetail` -> `fetchChannelDetail` stub in `src/data/channel-detail.ts` | `ChannelManager.get` and `list`, served over HTTP by #227 |
+| `/receipts` | Signed receipt archive | `useReceipts` -> `fetchReceipts` stub in `src/data/receipts.ts`; `?payee=` limits it to one counterparty | Receipt archive backed by the observability hub's receipt stream |
+| `/anomalies` | Anomaly feed | `useAnomalies` -> `fetchAnomalies` stub in `src/data/anomalies.ts`; `?agent=` limits it to one agent | Live `anomaly.detected`, `budget.warning`, policy-stop and drift events (#238) |
 | `/exports` | Exports and webhooks | `useMetricsExport` -> `fetchMetricsExport` stub in `src/data/metrics-export.ts` for Exports; `EmptyState` for Webhooks | `@vegaforge/tollway-observability` `export()` for JSON and CSV, and the `WebhookEvent` set for outgoing webhooks |
 
 The nav order in `apps/dashboard/src/components/shell/nav.ts` matches this table. Add new entries there when you add a route.
@@ -127,6 +209,64 @@ The engine compares each asset's spend against the same single number, and the v
 ### Policy stops
 
 A `PolicyStop` is a stored `PolicyTrace` from `@vegaforge/tollway-core`. `stopFromTrace` parses it with `policyTraceSchema`, which rejects an unknown trace version or a summary that contradicts its entries, and refuses a trace that did not block. The stop shows the blocking entry's rule id and its `detail`. The stub produces its traces by running the real engine's `evaluate()` over the agent's history, so the wording is exactly what the engine writes. The panel links to `/anomalies?agent=<id>`, which shows the filter until the anomaly feed is wired.
+
+## Overview contract
+
+`/` reads `OverviewSnapshot` from `src/data/overview.ts` through `useOverview()`. The snapshot holds the period, a `SpendSummary` subset from `@vegaforge/tollway-observability`, the open-channel rows and the five newest receipts.
+
+| Figure | Rule |
+| ------ | ---- |
+| Settled spend | Per asset, from the hub's `byAsset`. Only `settled` payments add to it. Assets are never added together. |
+| Payments settled | `byOutcome.settled` |
+| Failure rate | `failed / (settled + failed)` in basis points. A skipped payment was never sent, so it is outside the denominator. With nothing attempted the card says "No payments", never 0% or NaN. |
+| Open channels | Count of rows with status `open`, and remaining budget (`deposit - committed`) per asset. |
+| Model mix | Each model's share of that asset's settled spend. A model with no spend shows 0.00%. |
+
+## Services contract
+
+`/services` reads `ServiceRevenueSnapshot` from `src/data/service-revenue.ts` through `useServiceRevenue()`. A service is a payee, the Stellar address a paid route settles to. `serviceRevenueFrom(hub, period, labels)` builds the snapshot from any object with the hub's `summarizeAsync` and `queryMetrics`; `fetchServiceRevenue()` calls it with a hub filled from deterministic stub payments. Wiring the live hub changes `fetchServiceRevenue` and nothing downstream.
+
+There is one row per payee and asset, from the hub's `byPayeeAsset`. A payee paid in two assets has two rows, because amounts in different assets are never added.
+
+| Figure | Rule |
+| ------ | ---- |
+| Revenue | Settled amount for the payee in the row's asset, an integer base-unit string. The view sorts and totals it as `BigInt` and formats it only for display. |
+| Payments | Settled payments behind the revenue. Failed and skipped payments are not counted. |
+| Model mix | Each model's share of the row's settled payments, in basis points. A model with no settled payment is left out of the chips. |
+| Avg latency per model | Mean `latencyMs` of the row's settled payments through each model, in whole milliseconds, read from `queryMetrics` page by page. A spend summary carries no latency. A model with none is left out. |
+| Headline cards | Total revenue per asset, settled payment count, and the number of distinct payees. |
+
+The table sorts by revenue (the default, descending) or by payment count. Only the active column carries `aria-sort`. With no rows the panel shows the shared `EmptyState`, naming `summarize({ payee })` as its source.
+
+## Channel detail contract
+
+`/channels/[channelId]` reads `ChannelDetail` from `src/data/channel-detail.ts` through `useChannelDetail(channelId)`. The hook's union is `loading | error | not-found | ready`. `not-found` means the source does not track the id, and it is not an error.
+
+| Field | Meaning |
+| ----- | ------- |
+| `channel` | The `Channel` record from `@vegaforge/tollway-channels` |
+| `commitments` | The whole stream, in sequence order. The page paginates 25 at a time. |
+| `reconciliation` | `never-reconciled`, `ok` (with a time), or `drift` (a list of `{ kind, detail }`). A channel never reconciled never reads as ok. |
+| `receipts` | Receipts whose settlement is this channel, newest first |
+
+`commitmentSteps` pairs each commitment with its change from the one before and flags a sequence gap or a falling total. The chart scales each amount with `scaleBasisPoints`, which divides in `bigint` and converts only the small ratio to a number, so amounts above `Number.MAX_SAFE_INTEGER` keep their place. The chart's accessible description and the stream table carry the same numbers as the drawing.
+
+The `DriftKind` list and `Drift` shape mirror `@vegaforge/tollway-reconcile`. The dashboard does not depend on that package, and adding the dependency changes `apps/dashboard/package.json`, which needs maintainer review. Keep the list in step with the reconcile package.
+
+## Anomalies contract
+
+`/anomalies` reads one page of `AnomalyEvent`s from `src/data/anomalies.ts` through `useAnomalies(query)`. The feed is newest first. Each variant maps to one real source:
+
+| `kind` | Source | Severity |
+| ------ | ------ | -------- |
+| `policy-stop` | A blocking entry in a policy trace (`PolicyRuleName` from `@vegaforge/tollway-core`) | high |
+| `spend-spike` | The `anomaly.detected` event (adaptive detection, #196) | medium |
+| `budget-warning` | The `budget.warning` event (thresholds, #195) | medium |
+| `reconciliation-drift` | A drift from `Reconciler.reconcileChannel` | high |
+
+The query filters by `kind`, `severity`, `counterparty` (the payee, or the counterparty for a drift) and `agentId`, then takes a page of `limit` events after `cursor`, the id of the last event on the previous page. An unknown cursor throws `RangeError`; it never restarts the feed.
+
+`describeAnomaly` in `src/lib/anomaly-copy.ts` writes the one-line explanation. `POLICY_RULE_COPY` and `DRIFT_COPY` are typed over the full rule and drift lists, so a new value without a sentence fails the typecheck, and a test checks the runtime lists too.
 
 ## Adding a new view
 

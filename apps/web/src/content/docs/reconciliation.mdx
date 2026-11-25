@@ -15,7 +15,124 @@ The second is an unexpected remainder. The contract returns the difference betwe
 
 The engine also checks the stream itself before it trusts it. Cumulative amounts never go down from one sequence to the next, every commitment belongs to the channel being reconciled, and each sequence appears once. A decrease, a commitment from another channel, or a duplicated sequence is flagged by name. The expected settlement is the highest amount ever committed, not whichever entry happens to be listed last.
 
-For x402 and MPP charge, reconciliation is simpler. Each settlement is its own transaction, so the check is "did the transaction land on chain and does it match the receipt." No commitment stream to walk, no drift to detect.
+For x402 and MPP charge, reconciliation is simpler. Each settlement is its own transaction, so the check is "did the transaction land on chain and does it match the receipt." There is no commitment stream to walk. See [Confirming charges on chain](#confirming-charges-on-chain).
+
+While a channel is open, the engine can also compare Tollway's record with the channel contract's live state. See [Live checks on open channels](#live-checks-on-open-channels).
+
+## Outcomes
+
+Every check returns a `ReconciliationResult`. Its `subject` says what was checked: `{ kind: "channel", channelId }` or `{ kind: "transaction", txHash, network }`. Its `status` is one of:
+
+- `ok`: checked, and consistent.
+- `drift`: checked, and the records disagree with each other or with the chain. `drift` lists each finding with its `kind` and a `detail` naming the expected and actual values.
+- `unverifiable`: the chain no longer has the data, so it can neither confirm nor contradict the record. This is not drift. `reason` says why.
+- `retryable`: the check could not run this time, for example an RPC error, a malformed RPC response, or a server that has not caught up with the receipt yet. Run it again later. It is never `ok` and never drift.
+
+`result.ok` is `true` only for the `ok` status. Narrow on `status` before reading `drift`:
+
+```ts
+const result = await reconciler.reconcileCharge(receipt);
+if (result.status === "drift") {
+  for (const item of result.drift) console.warn(item.kind, item.detail);
+} else if (result.status === "retryable") {
+  // Schedule another attempt.
+}
+```
+
+`reconciliationSubjectId(result.subject)` gives the channel id or transaction hash as a string, which reports, alerts and quarantine keys use.
+
+## Confirming charges on chain
+
+`reconcileCharge(receipt)` always validates the receipt's structure. When the reconciler has a `ChainReader`, it also reads the settlement transaction and confirms it:
+
+```ts
+import { createReconciler } from "@vegaforge/tollway-reconcile";
+import { createStellarChainReader } from "@vegaforge/tollway-reconcile/stellar";
+
+const reconciler = createReconciler({
+  chain: createStellarChainReader({
+    rpc: { testnet: "https://soroban-testnet.stellar.org" },
+  }),
+});
+
+const result = await reconciler.reconcileCharge(receipt);
+```
+
+The reader calls Soroban RPC `getTransaction` and `getNetwork`, parses the response with a schema, and decodes the transaction's SEP-41 `transfer` events. Both event data shapes are accepted: a bare `i128` amount, and the map carrying `amount` that CAP-67 introduced. A response that does not parse is a `retryable` outcome.
+
+What is checked, in order:
+
+| Check | Drift kind when it fails |
+| ----- | ------------------------ |
+| The RPC server is on the receipt's network (by network passphrase). | `network-mismatch` |
+| The transaction exists, if the receipt is inside the server's retention window. | `tx-not-found` |
+| The transaction succeeded. | `tx-failed` |
+| It moved at least one SEP-41 token. | `transfer-missing` |
+| A transfer from the receipt asset's token contract... | `asset-mismatch` |
+| ...moves exactly `receipt.amount`... | `amount-mismatch` |
+| ...from `receipt.payer`... | `payer-mismatch` |
+| ...to `receipt.payee`. | `payee-mismatch` |
+
+The asset is resolved to its token contract first: a `C...` address is used as is, `native` maps to the native asset's Stellar Asset Contract, and `CODE:ISSUER` maps to that asset's contract on the receipt's network. When no transfer matches, the drift describes the transfer that matched the most fields, one drift item per field it gets wrong.
+
+What is not checked, and why:
+
+- **The transaction's source account.** On the x402 exact scheme the facilitator submits the transaction and may sponsor its fee with a fee-bump envelope, so the payer appears in the transfer event, not as the source. Fee-bumped and sponsored transactions confirm normally.
+- **Transactions older than the RPC server keeps.** Soroban RPC retains a limited window of ledgers (`oldestLedgerCloseTime` on every response). A receipt issued before that window is `unverifiable`, not `tx-not-found`. Use an archive RPC or an indexer to confirm older receipts.
+- **A server that is behind.** A receipt issued after the server's latest ledger closed is `retryable`.
+- **The signature on the receipt.** Verifying the service's signature is the client's job (`verifier` on `createClient`); reconciliation checks what the receipt claims against the chain.
+- **Channel receipts.** An `mpp-channel` receipt settles through its channel, which `reconcileChannel` and `checkOpenChannel` cover.
+
+Without a `ChainReader`, `reconcileCharge` checks structure only and returns `ok` for a well-formed receipt.
+
+## Live checks on open channels
+
+`checkOpenChannel(snapshot)` reads a channel contract's state through a `ChannelStateReader` and compares it with what Tollway has on record. `reconcileOpenChannel(snapshot, state)` is the same comparison as a pure function, for callers that read the state themselves.
+
+```ts
+import { createReconciler } from "@vegaforge/tollway-reconcile";
+import {
+  createStellarChannelStateReader,
+  openChannelSnapshot,
+} from "@vegaforge/tollway-reconcile/stellar";
+
+const reconciler = createReconciler({
+  channels: createStellarChannelStateReader({
+    rpcUrl: { testnet: "https://soroban-testnet.stellar.org" },
+  }),
+});
+
+// `channel` is a record from the channel manager's store. The funder is not
+// stored on the record, so pass it from configuration to check it.
+const result = await reconciler.checkOpenChannel(
+  openChannelSnapshot(channel, { funder: agentAddress }),
+);
+```
+
+`createStellarChannelStateReader` reads the contract with `getChannelState` from `@stellar/mpp/channel/server`. `openChannelSnapshot` builds the snapshot from a channel record and resolves its asset to the token contract; the snapshot type is structural, so the reconcile package does not import `@vegaforge/tollway-channels`.
+
+| Check | Drift kind when it fails |
+| ----- | ------------------------ |
+| A channel open on record has no close pending on chain. The detail names `closeEffectiveAtLedger`, the current ledger and the ledgers left to settle. | `closed-on-chain` |
+| The contract's recipient is the channel's counterparty. | `recipient-mismatch` |
+| The contract's funder is the expected funder (only when one is given). | `funder-mismatch` |
+| The contract's token is the channel asset's token contract. | `token-mismatch` |
+| While no close is pending, the contract holds at least the deposit minus everything committed. | `balance-mismatch` |
+
+What on-chain state can and cannot prove before close:
+
+- **Off-chain commitments are invisible.** The chain does not see the commitments the agent signs, only the payouts the recipient claims with them. Comparing the commitment stream with the settlement happens at close, in `reconcileChannel`.
+- **A higher balance proves nothing.** The contract's `top_up` adds tokens without an event, and anyone can transfer tokens to the contract, so a balance above the deposit is not drift.
+- **A lower balance can prove drift.** Before a close takes effect, tokens leave the contract only through `settle` and `close`, which pay the recipient up to a cumulative amount the funder signed. If the balance is below the deposit minus everything committed, tokens left for a commitment Tollway did not record. A commitment signed but not yet written to the store can trigger this for a moment, so re-check before acting.
+- **After a close takes effect** the funder may refund the balance, so the balance rule is skipped once a close is pending.
+
+A read that fails or returns a malformed state is a `retryable` outcome. Each check costs several RPC simulations per channel; scheduling and batching checks across many channels is left to the caller.
+
+## Chain access and the `./stellar` subpath
+
+The main entry, `@vegaforge/tollway-reconcile`, does not import the Stellar SDK or `@stellar/mpp`. It reads the chain only through two interfaces, `ChainReader` and `ChannelStateReader`, and validates what they return with `chainTransactionSchema` and `onChainChannelStateSchema`. A caller with its own indexer or RPC client implements the interfaces and never loads the SDK.
+
+`@vegaforge/tollway-reconcile/stellar` holds the Stellar implementations: `createStellarChainReader`, `createStellarChannelStateReader`, `resolveAssetContractId`, `decodeTransferEvent`, and `openChannelSnapshot`. Without an RPC URL for a network, they use the public endpoints `@stellar/mpp` defaults to (`DEFAULT_STELLAR_RPC_URLS`).
 
 ## Why it gets property tests
 
@@ -25,11 +142,51 @@ The reconciliation engine therefore gets property tests against randomly generat
 
 ## What it does when drift fires
 
-A flagged drift event surfaces through the observability hub (`anomaly.detected`) so the operator sees it immediately, and the engine can block further commitments to a counterparty that is behaving inconsistently. Closing the channel and recovering what is reflected on chain becomes the next step.
+A flagged drift event surfaces through the observability hub (`anomaly.detected`) so the operator sees it immediately, and `createQuarantineEnforcer` in `@vegaforge/tollway-reconcile` maps each drift kind to an action (`quarantine`, `warn`, or `ignore`) against a `CounterpartyQuarantine` store.
+
+By default, proven counterparty cheating (`under-settled`, `recipient-mismatch`, and `token-mismatch`) triggers `quarantine`, while other drift kinds default to `warn`. Charge drift warns by default: a failed or mismatched settlement is as likely a facilitator or configuration fault as the counterparty's. Only `drift` results act; `unverifiable` and `retryable` results never quarantine or warn. The `onWarn` and `onQuarantine` hooks receive the result's `subject`.
+
+Once a counterparty is quarantined:
+
+- `ChannelManager.open` and `ChannelManager.commit` refuse new commitments with a `counterparty-quarantined` error (`CounterpartyQuarantinedError`).
+- `createDefaultRouter` excludes `mpp-channel` for that counterparty and records `reason: "quarantined"` (failing closed if quarantine lookup fails).
+- `TollwayClient` emits a `counterparty:quarantined` event so callers and monitoring pipelines can react.
+- A `pay()` call that names `model: "mpp-channel"` for a quarantined counterparty is refused with `counterparty-quarantined`, the same as the router's rule. An explicit model skips the router, so the client checks it itself.
+- `createQuarantineEnforcer` remembers the last 10000 processed results (`maxRememberedResults`) so a result processed twice acts once. A result older than that runs its actions again; quarantining an already active counterparty is a no-op, so the only cost is a repeated `onWarn` or `onQuarantine` call.
+
+## Operator workflow: inspect, close and recover, release
+
+Quarantine blocks future commitments without stranding funds already locked in open channels:
+
+1. **Inspect drift**: read the `QuarantineEntry` from `quarantine.lookup(counterparty)` or `quarantine.history(counterparty)` to review `drift.kind`, `drift.detail`, `drift.channelId` (set when the subject is a channel), `reason`, and `quarantinedAt`.
+2. **Close and recover**: `ChannelManager.close` stays allowed for quarantined counterparties so open channels can settle on chain and return any uncommitted remainder.
+3. **Release**: after verifying the root cause, explicitly lift the quarantine with `quarantine.release({ counterparty, releasedBy })`. Release is manual by default and audited with `releasedBy` and `releasedAt` (automatic expiry only runs if `autoReleaseAfterMs` is configured).
+
+Use `createDriftAlertBridge({ emitter, store, severity })` to forward `ReconciliationResult[]` into an `ObservabilityHub` (or any compatible `emit` target):
+
+- **Alert payload (`anomaly.detected`):** `{ source: "reconcile", subject, kind, detail, severity }`.
+- **Deduplication:** the same `(subject, kind, detail)` alerts once until it resolves or its `detail` changes. Back `store` with a persistent `DriftAlertStore` (or seed `createMemoryDriftAlertStore(previousResults)`) to preserve deduplication across restarts.
+- **Severity defaults:** `under-settled`, `unexpected-remainder`, `non-monotonic-cumulative`, `tx-failed`, `transfer-missing`, `amount-mismatch`, `payee-mismatch`, `payer-mismatch`, `asset-mismatch`, `recipient-mismatch`, `token-mismatch`, and `balance-mismatch` default to `critical`; `over-settled`, `missing-commitment`, `malformed-record`, `tx-not-found`, `network-mismatch`, `closed-on-chain`, and `funder-mismatch` default to `high`; `sequence-gap` and `duplicate-sequence` default to `medium`; `foreign-commitment` defaults to `low`. Override per kind via `severity`.
+- **Checks that could not run:** an `unverifiable` or `retryable` result neither raises nor resolves an alert, so one RPC error does not close a real alert.
+- **Failure isolation:** delivery failures reported in `DeliveryReport.failures` (or thrown by the emitter) are collected in the bridge run summary and never fail the reconciliation run. A failure the hub reports is the hub's to retry, so that drift counts as alerted. A drift whose `emit` threw never reached the hub, so it is not recorded and the next run alerts on it again.
+
+## Reports and exports
+
+`buildReconciliationReport(results, { generatedAt, range })` produces a versioned JSON report (`version: 1`) with `generatedAt`, optional `range` (`{ from, to }`), `totals` (`total`, `ok`, `drifted`, `unverifiable`, `retryable`, `driftItems`, `byDriftKind`, and optional `bigint`-summed `amounts` as integer strings), and per-subject `entries` (`subject`, `status`, `ok`, `drift`, `reason` for an unverifiable or retryable result, optional `amounts`).
+
+`reconciliationReportToCsv(report)` and `exportReconciliationReport(report, "csv")` emit RFC 4180 CSV with one row per drift item and columns:
+
+1. `generatedAt`
+2. `subject`
+3. `kind`
+4. `severity`
+5. `detail`
+
+Cells starting with `=`, `+`, `-`, `@`, a tab, or a carriage return are prefixed with a single quote (`'`) to neutralize spreadsheet formula injection.
 
 ## In the code
 
-The reconciliation engine lives in `packages/reconcile/src/`. The property test suite covers the random-commitment-stream invariant per `packages/reconcile/src/reconcile.property.test.ts`.
+The reconciliation engine lives in `packages/reconcile/src/`. The property test suite covers the random-commitment-stream invariant per `packages/reconcile/src/reconcile.property.test.ts`. Charge confirmation is `charge.ts`, live channel checks are `open-channel.ts`, the reader interfaces and schemas are `chain.ts`, and the Stellar readers are `stellar.ts`. `stellar.integration.test.ts` runs the readers against testnet when `TOLLWAY_RECONCILE_INTEGRATION=true`.
 
 ## Reference
 

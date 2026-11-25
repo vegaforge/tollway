@@ -1,14 +1,16 @@
-import { TollwayError } from "@vegaforge/tollway-core";
+import { type StellarNetwork, TollwayError } from "@vegaforge/tollway-core";
 import { createInMemorySettlementCache } from "./cache.js";
 import {
   createPaywallWithInFlight,
   type DynamicPriceFunction,
-  type Gate,
+  type GateOutcome,
   type InFlightSettlementResult,
   type PaywallConfig,
   type PaywallDeps,
+  type PaywallGate,
   type TollwayRequest,
 } from "./gate.js";
+import { gateRejection } from "./gate-errors.js";
 import { createInMemoryServicePolicyStore } from "./service-policy.js";
 
 const HTTP_METHODS = new Set([
@@ -29,7 +31,7 @@ interface CompiledRoute {
   pattern: string;
   segments: string[];
   config: PaywallConfig;
-  gate: Gate;
+  gate: PaywallGate;
   prefixLength: number;
   staticSegments: number;
 }
@@ -42,13 +44,26 @@ export interface RouteTableEntry {
   amount: string | DynamicPriceFunction;
   asset: string;
   payTo: string;
-  network: PaywallConfig["network"];
+  network: StellarNetwork;
   resource?: string;
+  /**
+   * Every payment option in preference order (#158). The top-level `amount`,
+   * `asset`, `payTo` and `network` are the first one.
+   */
+  accepts: readonly RouteTableOption[];
+}
+
+/** One payment option of a listed route. */
+export interface RouteTableOption {
+  amount: string | DynamicPriceFunction;
+  asset: string;
+  payTo: string;
+  network: StellarNetwork;
 }
 
 /** The gate for a matched request and the resource its receipt names. */
 export interface RouteTableMatch {
-  gate: Gate;
+  gate: PaywallGate;
   /** Canonical concrete path used as the default receipt resource. */
   resource: string;
 }
@@ -118,16 +133,27 @@ export function createRouteTable(
         (candidate) => candidate.method === canonicalMethod && matches(candidate, resource),
       );
       if (!entry) return undefined;
+      // Both entry points see the canonical resource, not the raw request URL.
+      const scoped = (request: TollwayRequest): TollwayRequest => ({
+        ...request,
+        url: entry.config.resource ?? resource,
+      });
+      const gate = (request: TollwayRequest) => entry.gate(scoped(request));
       return {
         resource,
-        gate: (request: TollwayRequest) =>
-          entry.gate({ ...request, url: entry.config.resource ?? resource }),
+        gate: Object.assign(gate, {
+          authorize: (request: TollwayRequest) => entry.gate.authorize(scoped(request)),
+        }),
       };
     },
     list() {
       return publicEntries.map((entry) => ({ ...entry }));
     },
   };
+}
+
+function notInitialized(): GateOutcome {
+  return gateRejection("handler-not-configured", "route table not initialized");
 }
 
 function compileEntry(key: string, config: PaywallConfig): CompiledRoute {
@@ -138,11 +164,13 @@ function compileEntry(key: string, config: PaywallConfig): CompiledRoute {
     throw new TollwayError("policy-blocked", `unknown method in route entry: ${key}`);
   }
   const pattern = normalizePattern(rawPattern, key);
-  if (typeof config.amount === "string" && !/^[0-9]+$/.test(config.amount)) {
-    throw new TollwayError(
-      "invalid-amount",
-      `invalid amount in route entry ${key}: ${config.amount}`,
-    );
+  for (const option of routeOptions(config)) {
+    if (typeof option.amount === "string" && !/^[0-9]+$/.test(option.amount)) {
+      throw new TollwayError(
+        "invalid-amount",
+        `invalid amount in route entry ${key}: ${option.amount}`,
+      );
+    }
   }
   const segments = pattern === "/" ? [] : pattern.slice(1).split("/");
   for (const segment of segments) {
@@ -163,7 +191,7 @@ function compileEntry(key: string, config: PaywallConfig): CompiledRoute {
     pattern,
     segments,
     config: { ...config, ...(config.models === undefined ? {} : { models: [...config.models] }) },
-    gate: async () => ({ kind: "rejected", status: 500, reason: "route table not initialized" }),
+    gate: Object.assign(async () => notInitialized(), { authorize: async () => notInitialized() }),
     prefixLength,
     staticSegments,
   };
@@ -226,15 +254,26 @@ function overlapsAmbiguously(first: CompiledRoute, second: CompiledRoute): boole
   );
 }
 
+function routeOptions(config: PaywallConfig): RouteTableOption[] {
+  const options = config.accepts ?? [
+    { amount: config.amount, asset: config.asset, payTo: config.payTo, network: config.network },
+  ];
+  return options.map(({ amount, asset, payTo, network }) => ({ amount, asset, payTo, network }));
+}
+
 function toPublicEntry(route: CompiledRoute): RouteTableEntry {
+  const accepts = routeOptions(route.config);
+  // createPaywall refused an empty list when the route compiled.
+  const primary = accepts[0] as RouteTableOption;
   return {
     key: route.key,
     method: route.method,
     pattern: route.pattern,
-    amount: route.config.amount,
-    asset: route.config.asset,
-    payTo: route.config.payTo,
-    network: route.config.network,
+    amount: primary.amount,
+    asset: primary.asset,
+    payTo: primary.payTo,
+    network: primary.network,
+    accepts,
     ...(route.config.resource === undefined ? {} : { resource: route.config.resource }),
   };
 }

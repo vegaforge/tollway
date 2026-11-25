@@ -5,6 +5,7 @@ import { bytesToBase64Url, TollwayError, utf8Bytes } from "@vegaforge/tollway-co
 import { Challenge, Credential, Errors } from "mppx";
 import { mockAccount, mockHex } from "./hash.js";
 import { mppSourceProofFailure } from "./mpp-payer.js";
+import { isNetworkFailure } from "./transport-errors.js";
 
 /**
  * MPP charge handler. Unlike x402, MPP charge does not use a facilitator.
@@ -75,6 +76,12 @@ export interface MppChargeHandler {
    */
   challenge?(input: MppChargeChallengeInput): Promise<MppChargeChallenge>;
   /**
+   * The nonce `verify` would return for this credential, derived locally
+   * with no network call. The gate uses it to find a settled payment in its
+   * cache and receipt archive before verifying again (#162).
+   */
+  idempotencyKey?(input: { payment: MppChargeVerifyInput["payment"] }): Promise<string | undefined>;
+  /**
    * Offline checks only: decoding, challenge provenance and binding to the
    * offer. Nothing is submitted, so the gate can dedupe before `settle`.
    */
@@ -90,6 +97,9 @@ export interface MppChargeHandler {
  */
 export function createMockMppChargeHandler(): MppChargeHandler {
   return {
+    async idempotencyKey({ payment }) {
+      return payment.payload ? mockHex(payment.payload, 32) : undefined;
+    },
     async verify({ payment }) {
       if (!payment.payload) {
         return { valid: false, reason: "empty mpp charge payload" };
@@ -209,6 +219,12 @@ export function createMppChargeHandler(options: MppChargeOptions): MppChargeHand
   }
 
   return {
+    async idempotencyKey({ payment }) {
+      // The same digest verify returns, so a cached or archived receipt is
+      // found under the key the settlement was recorded with.
+      return payment.payload ? deriveMppChargeNonce(payment.payload) : undefined;
+    },
+
     async challenge({ offer, request }) {
       const mismatch = offerMismatch(offer);
       if (mismatch) {
@@ -290,9 +306,12 @@ export function createMppChargeHandler(options: MppChargeOptions): MppChargeHand
         // a StellarMppError, or an SDK error on a malformed transaction) and
         // is a rejection of the payment.
         if (isTransportFailure(error)) {
+          // `facilitator-unavailable` is what the gate answers with a 503
+          // (#161). The cause lets it tell a refused connection apart.
           throw new TollwayError(
-            "payment-failed",
+            "facilitator-unavailable",
             `mpp charge settlement failed: ${errorMessage(error)}`,
+            { cause: error },
           );
         }
         return { settled: false, reason: `mpp charge rejected: ${rejectionMessage(error)}` };
@@ -311,30 +330,13 @@ function payerFromSource(source: string | undefined, network: string): string | 
   return STELLAR_ACCOUNT.test(account) ? account : null;
 }
 
-const TRANSPORT_ERROR_CODES = new Set([
-  "ECONNREFUSED",
-  "ECONNRESET",
-  "ENOTFOUND",
-  "EAI_AGAIN",
-  "ETIMEDOUT",
-  "EPIPE",
-  "UND_ERR_CONNECT_TIMEOUT",
-  "UND_ERR_SOCKET",
-]);
-
 /**
- * True for errors raised by the HTTP layer rather than by payment checks:
- * axios errors (stellar-sdk's RPC client), fetch's `TypeError`, aborts and
- * timeouts, and socket error codes.
+ * True for errors raised by the HTTP layer rather than by payment checks.
+ * mppx and @stellar/mpp judging a credential is never a transport failure.
  */
 function isTransportFailure(error: unknown): boolean {
-  if (!(error instanceof Error)) return false;
   if (error instanceof Errors.PaymentError || error instanceof StellarMppError) return false;
-  if ("isAxiosError" in error && error.isAxiosError === true) return true;
-  if (error.name === "AbortError" || error.name === "TimeoutError") return true;
-  if (error instanceof TypeError && error.message === "fetch failed") return true;
-  const code = "code" in error ? error.code : undefined;
-  return typeof code === "string" && TRANSPORT_ERROR_CODES.has(code);
+  return isNetworkFailure(error);
 }
 
 function rejectionMessage(error: unknown): string {

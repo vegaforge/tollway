@@ -15,9 +15,24 @@
   "types": "./dist/index.d.ts",
   "exports": {
     ".": {
-      "types": "./dist/index.d.ts",
-      "import": "./dist/index.js",
-      "require": "./dist/index.cjs"
+      "import": {
+        "types": "./dist/index.d.ts",
+        "default": "./dist/index.js"
+      },
+      "require": {
+        "types": "./dist/index.d.cts",
+        "default": "./dist/index.cjs"
+      }
+    },
+    "./sqlite": {
+      "import": {
+        "types": "./dist/sqlite.d.ts",
+        "default": "./dist/sqlite.js"
+      },
+      "require": {
+        "types": "./dist/sqlite.d.cts",
+        "default": "./dist/sqlite.cjs"
+      }
     }
   },
   "files": [
@@ -34,7 +49,8 @@
   },
   "devDependencies": {
     "@types/node": "^22.20.5",
-    "tsup": "^8.5.1",
+    "fast-check": "^4.10.3",
+    "tsup": "^9.0.0",
     "typescript": "^5.9.3",
     "vitest": "^4.1.12"
   },

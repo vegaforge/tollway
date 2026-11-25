@@ -3,7 +3,7 @@ title: Observability
 description: Payment metrics, spend summaries, time-series rollups with latency percentiles, exports, and webhooks
 ---
 
-The observability hub collects one `PaymentMetric` per measured payment and answers questions about them: how much was spent, on which model, in which asset, how often payments failed, and how long they took. It also delivers webhook events (`receipt.created`, `channel.opened`, `channel.closed`, `budget.warning`, `anomaly.detected`) to local handlers and HTTP subscribers.
+The observability hub collects one `PaymentMetric` per measured payment and answers questions about them: how much was spent, on which model, in which asset, how often payments failed, and how long they took. It also delivers webhook events (`receipt.created`, `channel.opened`, `channel.closed`, `budget.warning`, `anomaly.detected`, `sponsor.low_balance`) to local handlers and HTTP subscribers.
 
 ```ts
 import { createObservabilityHub } from "@vegaforge/tollway-observability";
@@ -24,6 +24,23 @@ hub.record({
 
 Metrics are held in memory by the hub. Every amount, in and out, is an integer string in the asset's smallest unit, added with `bigint`.
 
+## From the payment gate
+
+Pass the hub to `createPaywall` as `observer` and the gate records every payment it settles or fails:
+
+```ts
+import { createPaywall } from "@vegaforge/tollway-server";
+
+const gate = createPaywall(config, {
+  signer,
+  facilitator,
+  observer: hub,
+  onObserverError: (error) => log.warn({ error }, "payment observer failed"),
+});
+```
+
+A fresh settlement records a `settled` metric and emits `receipt.created` with the receipt id, resource, model and amount. A rejected verification or a failed or thrown settlement records a `failed` metric. Its `payer` is `""`, because no payer was verified; stores accept an empty payer only on a `failed` metric. `latencyMs` covers verify plus settle, measured with the gate's `clock`. A replay from the idempotency cache, or a request that shares another request's settlement of the same payment, records nothing, so one payment counts once. The gate does not wait for event delivery, and an observer that throws or rejects never changes the payment's outcome: the error goes to `onObserverError`. The observer type is structural, so `@vegaforge/tollway-server` does not depend on this package.
+
 ## Querying a time series
 
 `hub.timeseries` cuts a time range into buckets and returns, for each bucket, one row per model and asset:
@@ -34,7 +51,7 @@ const series = hub.timeseries({
   to: "2026-11-20T00:00:00Z",
   bucket: "1h", // "1m" | "5m" | "1h" | "1d"
   groupBy: "payee", // optional: "model" (default), "payee" or "payer"
-  model: "x402", // optional filters, as in summarize: payer, payee, model
+  model: "x402", // optional filters: payer, payee, model, asset, outcome
 });
 
 for (const bucket of series.buckets) {
@@ -82,17 +99,269 @@ The helper is exported as `nearestRankPercentile(sorted, p)` for callers that ne
 | ----- | -------------------- | ----------- |
 | In-memory hub (the only store today) | Computed in process | Exact nearest rank over every sample in the row |
 
-There is no SQL store in `@vegaforge/tollway-observability` yet; it is tracked in [#217](https://github.com/vegaforge/tollway/issues/217). When it lands, the plan is to push bucketing (`floor(epoch_ms / width) * width`) and the per-outcome counts and settled sums into `GROUP BY` queries, keep the half-open range and UTC alignment above, and either compute percentiles exactly in SQL where the database has a nearest-rank aggregate (PostgreSQL's `percentile_disc` is one) or fetch the row's latency samples and apply the same nearest-rank method in process (SQLite has no percentile aggregate). This table will then list the method each store uses.
+`timeseries` runs over the hub's in-memory metrics. With a metrics store (see "Storing metrics" below) the hub has no in-memory copy, so `timeseries` throws; computing time series from a store is tracked in [#223](https://github.com/vegaforge/tollway/issues/223). The plan there is to push bucketing (`floor(epoch_ms / width) * width`) and the per-outcome counts and settled sums into `GROUP BY` queries, keep the half-open range and UTC alignment above, and either compute percentiles exactly in SQL where the database has a nearest-rank aggregate (PostgreSQL's `percentile_disc` is one) or fetch the latency samples and apply the same nearest-rank method in process (SQLite has no percentile aggregate).
 
 ## Spend summaries
 
-`hub.summarize(query?)` returns one flat summary over the whole window. Use `byAsset` for amounts: it holds the amount per asset and never adds different assets together.
+`hub.summarize(query?)` returns totals over the whole window. The filters are `payer`, `payee`, `model`, `asset`, `outcome`, `from` and `to`.
 
-`totalAmount`, `byModel`, `byPayer` and `byPayee` are **deprecated**. They add amounts across assets, so they only make sense when the window holds a single asset, and like `byAsset` they include failed and skipped metrics. They keep their values for existing callers. For settled-only amounts, per-model or per-counterparty amounts in one asset, an outcome split, or latency, use `timeseries` and add up the rows you need.
+- `count` is every matched metric, whatever its outcome.
+- `byOutcome` splits those counts into `settled`, `failed` and `skipped`, so a failure rate is `failed / count`.
+- `byAsset` holds the settled amount per asset, and `byModelAsset`, `byPayerAsset` and `byPayeeAsset` hold the settled amount and the settled count per group, always keyed by asset.
+- Only settled metrics add to an amount. A failed or skipped payment moves no money, so it never inflates a spend total.
+- Amounts in different assets are never added together, and no cross-asset total is offered.
+
+`totalAmount`, `byModel`, `byPayer` and `byPayee` are **deprecated**. They add settled amounts across assets, so they only make sense when the window holds a single asset. They keep their shape for existing callers; new code should read `byAsset` and the per-asset breakdowns. For latency, use `timeseries`.
+
+## Storing metrics
+
+By default the hub keeps metrics in an in-memory array, which a restart loses and which each gate process holds separately. Pass a `store` to keep them durably and share them between processes:
+
+```ts
+import { createObservabilityHub, createPostgresMetricsStore, migratePostgresMetricsStore } from "@vegaforge/tollway-observability";
+import { createSqliteMetricsStore } from "@vegaforge/tollway-observability/sqlite";
+
+// One process, one file:
+const hub = createObservabilityHub({
+  store: createSqliteMetricsStore({ filename: "./metrics.db" }),
+  onStoreError: (error, metrics) => log.error({ error, lost: metrics.length }, "metrics write failed"),
+});
+
+// Several processes, one database. `pool` is a `pg` Pool or any client with `query(text, params)`.
+await migratePostgresMetricsStore(pool);
+const shared = createObservabilityHub({
+  store: createPostgresMetricsStore({ client: pool }),
+  onStoreError: (error, metrics) => log.error({ error, lost: metrics.length }, "metrics write failed"),
+});
+```
+
+| Store | Import | Survives a restart | Shared between processes | Notes |
+| --- | --- | --- | --- | --- |
+| Memory (`createMemoryMetricsStore`) | main entry | no | no | For tests. Validates like the durable stores. |
+| SQLite (`createSqliteMetricsStore`) | `@vegaforge/tollway-observability/sqlite` | yes | one host, one writer at a time | Built-in `node:sqlite`, Node 22.13 or later. No dependency. |
+| Postgres (`createPostgresMetricsStore`) | main entry | yes | yes | Takes your client; no driver is a dependency. |
+
+**Flush semantics.** `record` stays synchronous and cheap. With a store, it validates the metric (amounts must be integer strings in the asset's smallest unit, and a bad metric throws `InvalidMetricError` at once), adds it to a buffer, and returns. The buffer is written as one batch when it holds `storeBuffer.maxBatchSize` metrics (default 100) or every `storeBuffer.flushIntervalMs` (default 1000ms), whichever comes first. `await hub.flush()` writes what is buffered now, and `await hub.close()` flushes, stops the timer and closes the store; call it on shutdown, or the last second of metrics is lost. A batch the store fails to write goes to `onStoreError` with the metrics it held. The hub does not retry it, and `onStoreError` is required with a store so a failure is never silent.
+
+**Reading.** A store cannot answer synchronously, so with a store `summarize`, `export` and `timeseries` throw. Use `await hub.summarizeAsync(query)`, `await hub.exportAsync(format, query)` and `await hub.queryMetrics(query, { limit, cursor })`, which pages through metrics in recording order. Without a store these async methods read the in-memory metrics, so code can use them either way. Metrics still in the buffer are not visible until they are flushed.
+
+**Exactness and schema.** SQLite stores amounts as TEXT and sums them in TypeScript with `bigint`, because its `SUM` is not exact for large integers. Postgres stores them as `NUMERIC(78, 0)` and sums in one SQL statement. Timestamps keep the text you recorded, and filters compare instants, so `11:04:00+01:00` and `10:04:00Z` are the same time. Each store creates its tables through versioned migrations that are safe to run again, with indexes on time, payer, payee and model. With Postgres, run `migratePostgresMetricsStore` once at startup. Paging is consistent for rows already written; a row committed in the middle of a paged read may land before the cursor and be missed by that read.
+
+## Prometheus
+
+`createPrometheusExporter({ hub })` returns a framework-agnostic handler that renders the [text exposition format 0.0.4](https://prometheus.io/docs/instrumenting/exposition_formats/). Its counters are updated as the hub records metrics and finishes deliveries, so they only go up and do not depend on what a store keeps. They count from the moment the exporter is created.
+
+```ts
+import { createPrometheusExporter } from "@vegaforge/tollway-observability";
+
+const exporter = createPrometheusExporter({ hub, bearerToken: process.env.METRICS_TOKEN });
+
+// Express
+app.get("/metrics", (req, res) => {
+  const out = exporter.handle({ headers: req.headers });
+  res.status(out.status).set(out.headers).send(out.body);
+});
+
+// Hono
+app.get("/metrics", (c) => {
+  const out = exporter.handle({ headers: c.req.raw.headers });
+  return c.body(out.body, out.status as 200 | 401, out.headers);
+});
+```
+
+| Metric | Type | Labels | Meaning |
+| --- | --- | --- | --- |
+| `tollway_payments_total` | counter | `model`, `outcome`, `asset` | Payments recorded. |
+| `tollway_payment_amount_base_units_total` | counter | `model`, `asset` | Settled amount in the asset's smallest unit. Prometheus samples are 64-bit floats, exact only up to 2^53 (about 900 million USDC at 7 decimals); above that the value is approximate. Use it for dashboards and alerts, never for accounting. |
+| `tollway_payment_latency_seconds` | histogram | `model`, `outcome` | Payment latency. Buckets: 0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1, 2.5, 5 and 10 seconds; set `latencyBucketsSeconds` to change them. |
+| `tollway_webhook_deliveries_total` | counter | `result` (`delivered`, `failed`) | Webhook deliveries that finished, inline or through the outbox. |
+| `tollway_webhook_delivery_failures_total` | counter | `target_kind` (`handler`, `webhook`) | Deliveries that exhausted their attempts. |
+
+Payer and payee addresses are never labels by default: they are unbounded, and anyone who can scrape would see your counterparties. `labelAllowlist: { payee: ["G..."] }` adds a `payee` label to the two payment counters for a known, bounded set of services, and reports every other payee as `other`. With `bearerToken`, a scrape must send `Authorization: Bearer <token>`; the comparison takes the same time whatever is sent.
 
 ## Exports and webhooks
 
-`hub.export("json" | "csv", query?)` serializes the matching metrics. `hub.on(event, handler)` and `hub.addWebhook({ url, events? })` subscribe to webhook events, which `hub.emit(event)` delivers with retries and reports in a `DeliveryReport`.
+`hub.export("json" | "csv", query?)` serializes the matching metrics. `hub.on(event, handler)` and `hub.addWebhook({ url, events?, secret? })` subscribe to webhook events, which `hub.emit(event)` delivers with retries and reports in a `DeliveryReport`.
+
+Every event carries a stable `id` assigned at emit time. Each request includes `Tollway-Event-Id`, and a subscription with a `secret` also gets a `Tollway-Signature` header that covers the exact body. Export `verifyWebhookSignature` from the package to check it on the receiving side, rejecting forged bodies and replayed timestamps.
+
+### Channel webhooks
+
+`@vegaforge/tollway-channels` produces `channel.opened` and `channel.closed` through `toObservabilitySink(hub)` (see [Channels](/docs/channels#lifecycle-events)). Amounts are integer strings in the asset's smallest unit.
+
+```json
+{
+  "id": "0f8b6a1e-4c2d-4f57-9a0b-2f7f3c1d9e21",
+  "type": "channel.opened",
+  "at": "2026-11-24T10:00:00.000Z",
+  "data": {
+    "channelId": "CCHAN1",
+    "counterparty": "GSERVICE",
+    "asset": "CUSDC",
+    "network": "testnet",
+    "deposit": "10000000",
+    "openTxHash": "3b1f"
+  }
+}
+```
+
+```json
+{
+  "id": "6d2e9c4a-1b7f-4e3a-8c5d-9a1b2c3d4e5f",
+  "type": "channel.closed",
+  "at": "2026-11-24T11:00:00.000Z",
+  "data": {
+    "channelId": "CCHAN1",
+    "counterparty": "GSERVICE",
+    "asset": "CUSDC",
+    "network": "testnet",
+    "settlementTxHash": "9c2a",
+    "settledAmount": "2500000",
+    "returnedRemainder": "7500000"
+  }
+}
+```
+
+### Durable delivery
+
+Pass an `outbox` to `createObservabilityHub` to persist each delivery instead of POSTing inside `emit`. `createSqliteWebhookOutbox({ filename })` survives a restart; `createMemoryWebhookOutbox()` keeps rows in process for tests. Call `hub.startDispatcher()` to deliver with jittered exponential backoff under a lease, and `hub.stop()` to wait for in-flight attempts on shutdown. With an outbox, `emit` never rejects: a row that cannot be written is listed in the report's `failures`.
+
+Delivery is **at-least-once**, and ordering is not guaranteed. Receivers dedupe on `Tollway-Event-Id`. `Tollway-Delivery-Id` names the delivery row: it is the same across retries of that row and new only when the row is enqueued or replayed. A delivery that exhausts `maxAttempts` (16 by default, retried over about 2 to 4 hours) moves to a dead-letter state: list it with `outbox.listDeadLetters()` and re-enqueue it once with `outbox.replay(deliveryId)`, which resets attempts and issues a fresh delivery id. Delivered rows are purged after `dispatcher.deliveredRetentionMs` (24 hours by default). Rows store the subscription id, never the secret, so the same subscriptions must be registered again after a restart.
+
+The full workflow, including the header format, leases, retention and a receiver example, is in [`docs/webhook-delivery.md`](https://github.com/vegaforge/tollway/blob/dev/docs/webhook-delivery.md).
+
+## Fee-sponsor balances
+
+`createSponsorMonitor` from `@vegaforge/tollway-server` observes the native XLM
+balance of configured Stellar accounts. It never funds, tops up, transfers from,
+or signs for an account. The balance includes the account reserve; it is not an
+estimate of spendable funds or the number of payments remaining.
+
+```ts
+import { createSponsorMonitor } from "@vegaforge/tollway-server";
+import { createObservabilityHub, renderFeeSponsorMetrics } from "@vegaforge/tollway-observability";
+
+const hub = createObservabilityHub();
+const monitor = createSponsorMonitor({
+  network: "testnet",
+  accounts: [process.env.FEE_SPONSOR_ACCOUNT!], // the actual G... fee payer
+  thresholdStroops: "100000000", // 10 XLM
+  hysteresisStroops: "10000000", // re-arm strictly above 11 XLM
+  intervalMs: 60_000,
+  sink: hub,
+});
+
+hub.on("sponsor.low_balance", (event) => console.warn(event.data));
+await monitor.start(); // immediate reading, then an unref'd timer
+// When shutting down:
+await monitor.stop(); // waits for an in-flight read
+
+// A string in Prometheus text exposition format 0.0.4:
+const body = renderFeeSponsorMetrics(hub);
+```
+
+For a single reading without a timer, use `await monitor.poll()`. Concurrent
+calls share the current poll, and the next timer starts only after the entire
+poll completes. `start()` and `stop()` can be called repeatedly. Background
+discovery and sink errors go to `onError`, defaulting to `console.error`.
+Read failures become stale readings and polling continues.
+
+Horizon responses are schema-checked. Decimal XLM is converted to integer
+stroops without floating point (1 XLM = 10,000,000 stroops). All comparisons
+use `bigint`. A balance below the threshold emits one `sponsor.low_balance`
+event with `account`, `network`, `balanceStroops`, `thresholdStroops` and
+`hysteresisStroops`. It re-arms only after a successful reading strictly above
+threshold plus hysteresis. A read failure neither alerts nor re-arms.
+
+`hub.getSponsorReadings()` returns the latest attempt for each network/account.
+A failed attempt has `stale: true`, an `error`, and no current `balanceStroops`;
+it replaces any previous successful reading. Each reading has an ISO timestamp
+`at`. Staleness records the last attempt's outcome; readings do not automatically
+expire. Use `at` for an application-defined age check, including when a stopped
+monitor leaves the metrics endpoint running. Prometheus `up` detects a failed
+scrape of the service endpoint.
+
+### Account discovery and OpenZeppelin
+
+Omit `accounts` and pass `facilitator` to seed the list from its schema-checked
+`/supported` signers for `stellar:testnet` or `stellar:pubnet`. Discovery is
+frozen after the first successful lookup; recreate the monitor when accounts
+change. Explicit `accounts` always overrides discovery, and an empty explicit
+list disables observation. Duplicate accounts are read once.
+
+Signer addresses are not proof of who pays transaction fees. Confirm the actual
+fee payer with your facilitator operator before enabling discovery. OpenZeppelin
+Channels' testnet `/supported` endpoint returned HTTP 401 without credentials
+when checked for this change, so its signer-to-sponsor mapping was not verified.
+If the actual sponsor is absent, configure its
+G... account explicitly. Service-sponsored MPP charges also need their actual
+fee-payer account configured explicitly. Missing signers for the requested
+network is an error requesting explicit configuration, never a successful empty
+monitor.
+
+### Prometheus gauges
+
+The payment exporter tracked in [#218](https://github.com/vegaforge/tollway/issues/218)
+is separate work. `renderFeeSponsorMetrics(hub)` supplies the sponsor portion for
+that exporter, or can be mounted on its own in an authenticated metrics route:
+
+```ts
+app.get("/metrics", (_req, res) => {
+  res.setHeader("Content-Type", "text/plain; version=0.0.4");
+  res.send(renderFeeSponsorMetrics(hub));
+});
+```
+
+| Metric | Type | Labels | Meaning |
+| --- | --- | --- | --- |
+| `tollway_fee_sponsor_balance_stroops` | gauge | `account`, `network` | Latest native XLM balance; omitted when stale |
+| `tollway_fee_sponsor_balance_stale` | gauge | `account`, `network` | 1 when the last read failed, otherwise 0 |
+
+Account labels are bounded by the configured sponsor list and expose those
+addresses to scrapers. Protect the metrics route. The renderer preserves integer
+text, but Prometheus stores float64 samples and can round amounts above 2^53.
+Use these gauges for monitoring, never accounting.
+
+The demo prints one reading before serving in live mode. Set
+`FEE_SPONSOR_ACCOUNTS` to a comma-separated list of actual sponsor G... accounts
+when discovery is unsuitable. `FEE_SPONSOR_THRESHOLD_STROOPS` defaults to
+`10000000` (1 XLM); choose a threshold for your workload. Mock mode injects an
+offline fake reader and prints `1000000000` stroops. The demo does not start a
+background timer; library services should call `start()` and stop on shutdown.
+
+## Receipt archive
+
+A receipt archive keeps every signed receipt a service issued and lets you search them. `createMemoryReceiptArchive()` keeps them in process; `createSqliteReceiptArchive({ filename })` keeps them in a file through the built-in `node:sqlite` (Node 22.13 or later). Both pass the same conformance suite.
+
+```ts
+import { Ed25519Verifier } from "@vegaforge/tollway-core";
+import { createSqliteReceiptArchive } from "@vegaforge/tollway-observability";
+
+const archive = createSqliteReceiptArchive({
+  filename: "./receipts.db",
+  verifier: new Ed25519Verifier({ "service-key-2026": publicKey }),
+});
+
+await archive.append(signedReceipt); // "appended", or "duplicate" for a repeat
+
+let cursor: string | undefined;
+do {
+  const page = await archive.search(
+    { payee: "G...SERVICE", from: "2026-11-01T00:00:00Z" },
+    cursor === undefined ? { limit: 100 } : { limit: 100, cursor },
+  );
+  for (const receipt of page.items) console.log(receipt.receipt.id);
+  cursor = page.nextCursor ?? undefined;
+} while (cursor !== undefined);
+```
+
+- **Idempotent by id.** Appending the same receipt again returns `duplicate`. A different body under an id that is already stored throws `receipt-conflict`, and the stored receipt is kept.
+- **Checked on the way in and out.** Every receipt is parsed with `signedReceiptSchema` on append and again on read. With a `verifier`, a receipt whose signature does not verify is never stored (`invalid-receipt`). A stored row that no longer parses throws `corrupt-receipt`.
+- **Stored as given.** The archive keeps the canonical JSON of the receipt, so a later receipt version is stored exactly.
+- **Filters.** `payer`, `payee`, `model`, `network`, `asset`, `resource` (exact) or `resourcePrefix` (compared character by character), `from` and `to` on `issuedAt` (inclusive), `txHash`, and `channelId` with an optional `sequence`. SQLite indexes every one of them.
+- **Pages.** Results are newest first by `(issuedAt, id)`, up to 500 a page (50 by default). Pass `nextCursor` back as `cursor`. Paging is stable: receipts appended while you page never make you skip or repeat one that was already there. A cursor the archive did not produce is rejected with `invalid-cursor`.
+
+The archive never adds amounts together; spend totals come from the metrics store.
 
 ## Reference
 

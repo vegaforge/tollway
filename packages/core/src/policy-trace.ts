@@ -1,4 +1,5 @@
 import { z } from "zod";
+import { enumSchema } from "./enum-shape.js";
 import { TollwayError } from "./errors.js";
 import { settlementModels } from "./types.js";
 
@@ -33,8 +34,16 @@ export const policyRuleIds = [
   "per-model-disabled",
   "min-channel-deposit",
   "budget-daily",
+  "budget-weekly",
+  "budget-monthly",
+  "budget-rolling",
   "budget-total",
   "per-service",
+  "per-service-daily",
+  "per-service-window",
+  "per-resource",
+  "per-resource-daily",
+  "per-resource-window",
   "rate-limit",
   "anomaly",
   "anomaly-adaptive",
@@ -52,6 +61,11 @@ export const policyRuleNames = [
   "min-channel-deposit",
   "budget",
   "per-service",
+  "per-service-daily",
+  "per-service-window",
+  "per-resource",
+  "per-resource-daily",
+  "per-resource-window",
   "rate-limit",
   "anomaly",
   "anomaly-adaptive",
@@ -76,6 +90,21 @@ const integerString = z.string().regex(/^[0-9]+$/, "must be an integer string");
  */
 export const policyWindowSchema = z.discriminatedUnion("kind", [
   z.strictObject({ kind: z.literal("utc-day"), day: z.iso.date() }),
+  z.strictObject({
+    kind: z.literal("calendar-day"),
+    day: z.iso.date(),
+    timezone: z.string().min(1),
+  }),
+  z.strictObject({
+    kind: z.literal("calendar-week"),
+    weekStart: z.iso.date(),
+    timezone: z.string().min(1),
+  }),
+  z.strictObject({
+    kind: z.literal("calendar-month"),
+    month: z.string().regex(/^[0-9]{4}-[0-9]{2}$/),
+    timezone: z.string().min(1),
+  }),
   z.strictObject({ kind: z.literal("lifetime") }),
   z.strictObject({ kind: z.literal("sliding"), seconds: z.number().int().positive() }),
 ]);
@@ -84,11 +113,11 @@ export type PolicyWindow = z.infer<typeof policyWindowSchema>;
 
 /** One rule's line in a policy trace, with the numbers it compared. */
 export const policyTraceEntrySchema = z.strictObject({
-  id: z.enum(policyRuleIds),
-  rule: z.enum(policyRuleNames),
+  id: enumSchema(policyRuleIds),
+  rule: enumSchema(policyRuleNames),
   /** True when the policy sets this rule at all, whether or not it covers this intent. */
   configured: z.boolean(),
-  outcome: z.enum(policyOutcomes),
+  outcome: enumSchema(policyOutcomes),
   /** The configured limit, or null for a rule without one (a disabled model). */
   limit: integerString.nullable(),
   /** The counter before this payment, or null for a rule that keeps no counter. */
@@ -110,7 +139,7 @@ export type PolicyTraceEntry = z.infer<typeof policyTraceEntrySchema>;
 export const policyTraceSchema = z
   .strictObject({
     version: z.literal(POLICY_TRACE_VERSION),
-    mode: z.enum(policyModes),
+    mode: enumSchema(policyModes),
     evaluatedAt: z.iso.datetime(),
     // The intent fields only. Request bodies and headers never enter a trace.
     intent: z.strictObject({
@@ -118,14 +147,14 @@ export const policyTraceSchema = z
       resource: z.string().min(1),
       amount: integerString,
       asset: z.string().min(1),
-      model: z.enum(settlementModels),
+      model: enumSchema(settlementModels),
     }),
     /** The decision after the mode is applied. Always true in dry-run. */
     allowed: z.boolean(),
     /** True when at least one rule failed, whatever the mode. */
     wouldBlock: z.boolean(),
     /** The first failing rule in evaluation order, the one enforce mode reports. */
-    blockedBy: z.enum(policyRuleIds).nullable(),
+    blockedBy: enumSchema(policyRuleIds).nullable(),
     entries: z.array(policyTraceEntrySchema),
   })
   .superRefine((trace, ctx) => {

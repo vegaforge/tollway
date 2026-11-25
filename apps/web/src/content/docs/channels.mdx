@@ -15,9 +15,41 @@ The raw `@stellar/mpp` SDK gives you the primitive. Tollway runs the lifecycle.
 
 **Close.** Decide timing from heuristics: budget nearly drawn down, idle timeout reached, end-of-session signal received. Submit the single settlement, which transfers the latest committed amount to the recipient and returns the remainder to the funder.
 
+A close can be interrupted: the process dies, or the network call times out after the transaction went out. So before submitting, the manager records the attempt on the channel (an id, the ledger it started at, and the time) and moves the channel to `closing`. If the close fails in a way that may have reached the chain, the channel stays `closing`. It goes back to `open` only when the adapter reports that nothing was submitted, with `CloseNotSubmittedError`. A settlement that differs from the last commitment moves the channel to `settlement-mismatched`, which is terminal: the channel never takes another commit.
+
+`resume(channelId)` finishes a `closing` channel from what the chain says. If no close is on chain, it closes again. If the contract is closed and empty, it finds the settlement transaction and marks the channel `closed` with its hash and remainder. If the contract is closed with funds still in it, a funder-started close or a dispute, it hands the channel to recovery as `recovering`. When the chain says closed but no settlement can be found, or the RPC no longer keeps events back to the attempt, `resume` throws and the channel stays `closing` for an operator. `resumeAll()` does this for every `closing` channel, typically at startup, and reports each result without stopping at the first error.
+
+```ts
+const manager = createChannelManager({ adapter, store });
+for (const outcome of (await manager.resumeAll()).outcomes) {
+  if (outcome.kind === "error") console.error(`resume ${outcome.channelId} failed`, outcome.error);
+}
+```
+
+Repeated and concurrent calls in one process submit at most one close. Two processes resuming over a shared store can both submit until the store supports compare-and-set ([#175](https://github.com/vegaforge/tollway/issues/175)), so resume from one process until then.
+
 **Recover.** If the counterparty stops responding mid-channel, follow the contract's dispute or timeout path to get the committed funds back. This event is surfaced loudly: silent recovery is the worst failure mode for channel mode.
 
 Recovery is a first-class feature here, not an afterthought. The edge cases live in that path, and so do the tests.
+
+`recover(channelId)` works on an `open`, `closing` or `recovering` channel and reads the chain first. With no close on chain, it moves the channel to `recovering` and submits the funder's `close_start`, recording the ledger at which the close becomes effective. Once the current ledger is past that ledger, the next call submits the funder's `refund` and moves the channel to `recovered` with the refunded amount and transaction. Before then it throws `RecoveryNotYetEffectiveError`, which carries `closeEffectiveAtLedger` and `currentLedger`, so a caller knows when to retry. Ledger numbers decide this, never wall-clock time. If the recipient already closed the channel, nothing is left in the contract: `recover` records that settlement and moves the channel to `closed` without refunding.
+
+```ts
+import { RecoveryNotYetEffectiveError } from "@vegaforge/tollway-channels";
+
+try {
+  const result = await manager.recover(channelId);
+  log.info({ result }, "channel recovery advanced");
+} catch (error) {
+  if (error instanceof RecoveryNotYetEffectiveError) {
+    scheduleRetryAfterLedger(error.closeEffectiveAtLedger);
+  } else {
+    throw error;
+  }
+}
+```
+
+The status moves by compare-and-set, so a concurrent `close` or `recover` for the same channel cannot both act, and concurrent `recover` calls in one process share one run. If the adapter reports that `close_start` was not submitted (`CloseNotSubmittedError`), the channel goes back to the status it had.
 
 ## Why the order matters
 
@@ -25,7 +57,51 @@ Per the design notes, channel mode is naturally idempotent: a repeated commitmen
 
 ## In the code
 
-The lifecycle manager lives in `packages/channels/src/`. Open, commit, and close are implemented against an injected `MppChannelAdapter`. Recover throws `NotImplementedError` today ([#38](https://github.com/vegaforge/tollway/issues/38)), and no adapter backed by `@stellar/mpp/channel` ships yet ([#101](https://github.com/vegaforge/tollway/issues/101)). The relevant `@stellar/mpp` surface is the `channel` module (`@stellar/mpp/channel`), which exposes `open`, `commitment`, `close`, and `claim`. Recovery is `claim` gated by `closeEffectiveAtLedger` plus a `fundWaitingPeriod`.
+The lifecycle manager lives in `packages/channels/src/`. Open, commit, close, resume and recover are implemented against an injected `MppChannelAdapter`, and `createStellarMppChannelAdapter` backs it with `@stellar/mpp` 0.7.1. `@stellar/mpp/channel/server` exposes `close`, `getChannelState` and `watchChannel`; it has no `close_start` or `refund` helper. The Stellar adapter therefore reads recovery state with `getChannelState`, but its `startClose` and `refund` fail with a typed not-implemented error until the contract calls land in [#101](https://github.com/vegaforge/tollway/issues/101). A custom adapter can implement them today. The adapter finds a settlement in the channel contract's events: the transaction whose `close` event is effective at its own ledger, with its `withdraw` and `refund` amounts.
+
+## Receiving channel payments
+
+The phases above are the agent's side. A service that is paid through a channel runs the other half in `@vegaforge/tollway-server`:
+
+- `createMppChannelHandler` lets the gate accept vouchers. An agent names its channel in the `TOLLWAY-CHANNEL` header; the service checks the contract on chain (payout address, token, not closing, refund window) and reads the commitment key from the contract before it issues the MPP challenge. Each voucher must add exactly the price, and each receipt is anchored at `{ kind: "channel-commitment", channelId, sequence }`, with the sequence counting accepted vouchers.
+- `createChannelSettler` closes channels with the latest accepted voucher when a trigger fires (accrued amount, a fraction of the balance, idle time, channel age) or when asked. It freezes the channel before reading the voucher, so no voucher is lost during a close, and caps closes per fee payer.
+
+[docs/mpp-channels.md](https://github.com/vegaforge/tollway/blob/main/docs/mpp-channels.md) lists the rejection codes a client can act on, the store requirements for several processes, and what happens when a close fails.
+
+## Lifecycle events
+
+Opening a channel locks funds and closing it releases them, so the manager reports both. Pass `onEvent` to `createChannelManager`:
+
+```ts
+import { createChannelManager, toObservabilitySink } from "@vegaforge/tollway-channels";
+
+const bridge = toObservabilitySink(hub, {
+  onDeliveryError: (error, event) => log.warn({ error, event }, "channel webhook failed"),
+});
+const manager = createChannelManager({
+  adapter,
+  onEvent: bridge.onEvent,
+  onEventError: (error, event) => log.warn({ error, event }, "channel observer failed"),
+});
+
+// On shutdown, wait for webhook deliveries still in flight.
+await bridge.flush();
+```
+
+| Event | When | Fields besides `at`, `channelId`, `counterparty`, `asset`, `network` |
+| --- | --- | --- |
+| `channel:opened` | The open landed and the channel was stored. | `deposit`, `openTxHash` |
+| `channel:closing` | A close was recorded as started, before it is submitted. | `cumulativeAmount` |
+| `channel:closed` | The close settled and was stored. | `settlementTxHash`, `settledAmount`, `returnedRemainder` |
+| `channel:close-failed` | The close did not complete. | `status` (`open`, `closing` or `settlement-mismatched`), `error` |
+| `channel:recovering` | A funder close is on chain and the channel was stored as `recovering`. | `closeEffectiveAtLedger` |
+| `channel:recovered` | The funder's refund landed and the channel was stored as `recovered`. | `recoveredAmount`, `refundTxHash` |
+
+Each event is emitted only after its store write succeeds. `at` comes from the manager's `now`, and amounts are integer strings in the asset's smallest unit. The handler is not awaited: a handler that throws or rejects never changes the result of `open`, `close` or `recover`, and its error goes to `onEventError`.
+
+`toObservabilitySink(hub)` forwards `channel:opened` and `channel:closed` as the `channel.opened` and `channel.closed` webhooks; the other events are not webhooks. It takes any object with the hub's `emit`, so this package does not depend on `@vegaforge/tollway-observability`.
+
+A channel settler on the client side puts the same events on the client's `on()` stream through `ClientSettler.subscribe`.
 
 ## Reference
 

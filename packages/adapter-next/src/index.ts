@@ -11,20 +11,47 @@
  */
 
 import type { SignedReceipt } from "@vegaforge/tollway-core";
-import type { Gate, RouteTable } from "@vegaforge/tollway-server";
+import {
+  type AuthorizedPayment,
+  type AuthorizeOutcome,
+  type Gate,
+  type PaywallOptions,
+  type RouteTable,
+  readBodyStream,
+  readBodyWithin,
+  renderGateRejection,
+  responseTooLarge,
+  type SettleOutcome,
+  settlementTiming,
+  type TollwayRequest,
+  twoPhaseAuthorizer,
+} from "@vegaforge/tollway-server";
 
 /** Extra argument a paid handler receives: the verified receipt. */
 export type PaidContext = { receipt: SignedReceipt };
 
+/** The one body every adapter returns when the gate itself throws (#107). */
+const GATE_ERROR_BODY = { error: "payment backend unavailable" } as const;
+
 /** A route handler that only runs after payment has settled. */
 export type PaidHandler = (request: Request, context: PaidContext) => Response | Promise<Response>;
+
+/**
+ * A route handler for `settlement: "after-handler"`. It runs before the
+ * payment settles, so there is no receipt yet, except for a replay of a
+ * payment that already settled.
+ */
+export type AfterHandlerPaidHandler = (
+  request: Request,
+  context: { receipt?: SignedReceipt },
+) => Response | Promise<Response>;
 
 /**
  * Wraps a gate around an App Router route handler. The wrapped handler runs
  * only on a settled payment, receives the verified receipt via the second
  * argument, and has the PAYMENT-RESPONSE and TOLLWAY-RECEIPT headers added to its response.
  * Otherwise the wrapper answers the request itself (402 with the challenge,
- * or the rejection status with `{ error: reason }`).
+ * or the rejection status with `{ error: { code, message } }`).
  *
  * Usage:
  *
@@ -36,17 +63,56 @@ export type PaidHandler = (request: Request, context: PaidContext) => Response |
  *   return Response.json({ quote: 42, receiptId: receipt.receipt.id });
  * });
  * ```
+ *
+ * With `{ settlement: "after-handler" }` the payment is verified and locked,
+ * the handler runs, and its response is read (up to the gate's limit) before
+ * the payment settles. A handler that throws, or answers with a status the
+ * gate treats as failure (any 5xx by default), is never charged: a throw is
+ * rethrown, a failure response is returned as it is. If settlement fails,
+ * the client gets the rejection instead of the handler's response.
  */
 export function withPaywall(
   gate: Gate,
   handler: PaidHandler,
+  options?: PaywallOptions & { settlement?: "before-handler" },
+): (request: Request) => Promise<Response>;
+/**
+ * The form for `{ settlement: "after-handler" }`, or for a handler that works
+ * with or without a receipt. See the first overload for the behaviour.
+ */
+export function withPaywall(
+  gate: Gate,
+  handler: AfterHandlerPaidHandler,
+  options?: PaywallOptions,
+): (request: Request) => Promise<Response>;
+export function withPaywall(
+  gate: Gate,
+  handler: PaidHandler | AfterHandlerPaidHandler,
+  options?: PaywallOptions,
 ): (request: Request) => Promise<Response> {
+  const authorize = twoPhaseAuthorizer(gate, options);
   return async (request: Request): Promise<Response> => {
-    const outcome = await gate({
+    const tollwayRequest: TollwayRequest = {
       method: request.method,
       url: requestUrl(request),
       headers: requestHeaders(request),
-    });
+      // Read from a clone, only for a route with bindBody, so the handler
+      // still reads the original body unchanged.
+      body: { read: (maxBytes) => readBodyStream(request.clone().body, maxBytes) },
+    };
+    let outcome: AuthorizeOutcome;
+    try {
+      outcome = authorize ? await authorize(tollwayRequest) : await gate(tollwayRequest);
+    } catch {
+      return jsonResponse(GATE_ERROR_BODY, 502);
+    }
+
+    if (outcome.kind === "authorized") {
+      // The overloads only accept "after-handler" with a handler whose
+      // receipt is optional, so it can run before there is one.
+      const afterHandler = handler as AfterHandlerPaidHandler;
+      return settleAfterHandler(outcome, () => afterHandler(request, {}));
+    }
 
     if (outcome.kind === "settled") {
       const response = await handler(request, { receipt: outcome.receipt });
@@ -57,7 +123,10 @@ export function withPaywall(
       return jsonResponse(outcome.challenge, outcome.status, outcome.headers);
     }
 
-    return jsonResponse({ error: outcome.reason }, outcome.status, outcome.headers);
+    // The body and headers come from the server's one renderer, so every
+    // adapter answers each error code the same way (#161).
+    const rejection = renderGateRejection(outcome);
+    return jsonResponse(rejection.body, rejection.status, rejection.headers);
   };
 }
 
@@ -65,13 +134,79 @@ export function withPaywall(
 export function withRouteTable(
   table: RouteTable,
   handler: (request: Request, context: { receipt?: SignedReceipt }) => Response | Promise<Response>,
+  options?: PaywallOptions,
 ): (request: Request) => Promise<Response> {
+  // Checked once here, so a bad option fails at startup, not per request.
+  settlementTiming(options);
   return async (request) => {
     const url = requestUrl(request);
     const match = table.match(request.method, url);
-    if (match) return withPaywall(match.gate, handler)(request);
+    if (match) return withPaywall(match.gate, handler, options)(request);
     return handler(request, {});
   };
+}
+
+/**
+ * Runs the handler, then settles or abandons the authorized payment. A
+ * handler error, thrown or from its body stream, abandons the payment and is
+ * rethrown. A gate failure while settling is answered like any gate failure
+ * (#107): 502 with the fixed body.
+ */
+async function settleAfterHandler(
+  payment: AuthorizedPayment,
+  run: () => Response | Promise<Response>,
+): Promise<Response> {
+  let response: Response;
+  try {
+    response = await run();
+  } catch (error) {
+    await payment.abandon("handler-threw");
+    throw error;
+  }
+
+  let body: Awaited<ReturnType<typeof readBodyWithin>>;
+  try {
+    body = await readBodyWithin(response.body, payment.maxResponseBytes);
+  } catch (error) {
+    await payment.abandon("handler-threw");
+    throw error;
+  }
+  if (!body.ok) {
+    await payment.abandon("response-too-large");
+    const rejection = renderGateRejection(responseTooLarge(payment.maxResponseBytes));
+    return jsonResponse(rejection.body, rejection.status, rejection.headers);
+  }
+  if (payment.isFailure(response.status)) {
+    await payment.abandon("handler-failed");
+    return rebuild(response, body.bytes, {});
+  }
+  let settled: SettleOutcome;
+  try {
+    settled = await payment.settle();
+  } catch {
+    return jsonResponse(GATE_ERROR_BODY, 502);
+  }
+  if (settled.kind === "settled") {
+    return rebuild(response, body.bytes, settled.headers);
+  }
+  const rejection = renderGateRejection(settled);
+  return jsonResponse(rejection.body, rejection.status, rejection.headers);
+}
+
+function rebuild(
+  response: Response,
+  body: Uint8Array<ArrayBuffer>,
+  extraHeaders: Record<string, string>,
+): Response {
+  const headers = new Headers(response.headers);
+  for (const [name, value] of Object.entries(extraHeaders)) {
+    headers.set(name, value);
+  }
+  return new Response(body.byteLength === 0 ? null : body, {
+    status: response.status,
+    statusText: response.statusText,
+    headers,
+  });
 }
 
 function requestUrl(request: Request): string {

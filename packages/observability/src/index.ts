@@ -6,7 +6,24 @@
  * up. See docs/design.md, "Observability".
  */
 
-import type { SettlementModel } from "@vegaforge/tollway-core";
+import type { SponsorBalanceReading } from "@vegaforge/tollway-core";
+import { TollwayError } from "@vegaforge/tollway-core";
+import { createWebhookDispatcher, type WebhookDispatcherTuning } from "./dispatcher.js";
+import type { TollwayEvent, TollwayEventInput, WebhookEvent } from "./events.js";
+import type { MetricsQuery, PaymentMetric, SpendSummary } from "./metrics.js";
+import {
+  assertValidMetric,
+  closedStoreError,
+  copyMetric,
+  decodeCursor,
+  encodeCursor,
+  type MetricsPage,
+  type MetricsPageRequest,
+  type MetricsStore,
+  resolvePageLimit,
+} from "./metrics-store.js";
+import type { WebhookOutbox } from "./outbox.js";
+import { summarizeMetrics } from "./summary.js";
 import {
   assertTimeseriesLimits,
   computeTimeseries,
@@ -15,7 +32,70 @@ import {
   type TimeseriesQuery,
   type TimeseriesResult,
 } from "./timeseries.js";
+import { assertWebhookSecret, buildWebhookRequest, postWebhook } from "./webhook-http.js";
 
+export {
+  createWebhookDispatcher,
+  type WebhookDispatcher,
+  type WebhookDispatcherOptions,
+  type WebhookDispatcherTuning,
+  WebhookLeaseLostError,
+} from "./dispatcher.js";
+export {
+  isWebhookEvent,
+  type TollwayEvent,
+  type TollwayEventInput,
+  WEBHOOK_DELIVERY_ID_HEADER,
+  WEBHOOK_EVENT_ID_HEADER,
+  type WebhookEvent,
+  webhookEvents,
+} from "./events.js";
+export { createMemoryMetricsStore } from "./memory-metrics-store.js";
+export type {
+  MetricsQuery,
+  ModelAssetSpend,
+  PayeeAssetSpend,
+  PayerAssetSpend,
+  PaymentMetric,
+  SpendOutcomeCounts,
+  SpendSummary,
+} from "./metrics.js";
+export {
+  assertValidMetric,
+  DEFAULT_METRICS_PAGE_LIMIT,
+  InvalidMetricError,
+  MAX_METRICS_PAGE_LIMIT,
+  type MetricsPage,
+  type MetricsPageRequest,
+  type MetricsStore,
+} from "./metrics-store.js";
+export {
+  createMemoryWebhookOutbox,
+  createSqliteWebhookOutbox,
+  type NewWebhookDelivery,
+  type SqliteWebhookOutbox,
+  type SqliteWebhookOutboxOptions,
+  type WebhookDelivery,
+  type WebhookDeliveryStatus,
+  type WebhookLease,
+  type WebhookOutbox,
+} from "./outbox.js";
+export {
+  createPostgresMetricsStore,
+  migratePostgresMetricsStore,
+  POSTGRES_INSERT_CHUNK,
+  type PostgresLikeClient,
+  type PostgresMetricsStoreOptions,
+} from "./postgres-metrics-store.js";
+export {
+  createPrometheusExporter,
+  DEFAULT_LATENCY_BUCKETS_SECONDS,
+  type PrometheusExporter,
+  type PrometheusExporterOptions,
+  type PrometheusRequest,
+  type PrometheusResponse,
+} from "./prometheus.js";
+export { renderFeeSponsorMetrics, type SponsorReadingSource } from "./sponsor.js";
 export {
   DEFAULT_MAX_TIMESERIES_BUCKETS,
   DEFAULT_MAX_TIMESERIES_ROWS,
@@ -31,84 +111,13 @@ export {
   type TimeseriesRow,
   timeseriesBuckets,
 } from "./timeseries.js";
-
-/** Webhook event names, matching docs/design.md, "Observability". */
-export const webhookEvents = [
-  "receipt.created",
-  "channel.opened",
-  "channel.closed",
-  "budget.warning",
-  "anomaly.detected",
-] as const;
-
-export type WebhookEvent = (typeof webhookEvents)[number];
-
-export type TollwayEvent = {
-  type: WebhookEvent;
-  /** ISO 8601 timestamp. */
-  at: string;
-  /** Event-specific fields; shape depends on the event type. */
-  data: Record<string, unknown>;
-};
-
-/** A single measured payment, the unit metrics roll up from. */
-export type PaymentMetric = {
-  payer: string;
-  payee: string;
-  model: SettlementModel;
-  amount: string;
-  asset: string;
-  latencyMs: number;
-  outcome: "settled" | "failed" | "skipped";
-  at: string;
-};
-
-export type MetricsQuery = {
-  payer?: string;
-  payee?: string;
-  model?: SettlementModel;
-  /** Inclusive ISO 8601 bounds. */
-  from?: string;
-  to?: string;
-};
-
-/**
- * Aggregated spend over a query window. Amounts are integer strings in the
- * asset's smallest unit (same convention as `PaymentMetric.amount` and the
- * canonical receipt). Every amount field counts metrics of every outcome
- * (settled, failed and skipped); `count` is the number of matched metrics.
- * Keys for `byPayer` / `byPayee` are the payer / payee addresses exactly as
- * they appear on the recorded metrics. For settled-only amounts, an outcome
- * split and latency, use `ObservabilityHub.timeseries`.
- */
-export type SpendSummary = {
-  /**
-   * @deprecated Adds amounts across assets, so it is only meaningful when the
-   * window holds a single asset. Use `byAsset`.
-   */
-  totalAmount: string;
-  count: number;
-  /**
-   * Amount per asset, keyed by `PaymentMetric.asset`. Amounts in different
-   * assets are never added together.
-   */
-  byAsset: Record<string, string>;
-  /**
-   * @deprecated Adds amounts across assets. Use `timeseries`, whose rows are
-   * keyed by model and asset.
-   */
-  byModel: Partial<Record<SettlementModel, string>>;
-  /**
-   * @deprecated Adds amounts across assets. Use `timeseries` with
-   * `groupBy: "payer"`.
-   */
-  byPayer: Record<string, string>;
-  /**
-   * @deprecated Adds amounts across assets. Use `timeseries` with
-   * `groupBy: "payee"`.
-   */
-  byPayee: Record<string, string>;
-};
+export {
+  type SignatureFailureReason,
+  type SignatureVerification,
+  signWebhookPayload,
+  verifyWebhookSignature,
+  WEBHOOK_SIGNATURE_HEADER,
+} from "./webhook-signature.js";
 
 export type ExportFormat = "json" | "csv";
 
@@ -120,10 +129,21 @@ export type WebhookHandler = (event: TollwayEvent) => void | Promise<void>;
  * the listed event types are POSTed to `url`.
  */
 export type WebhookSubscription = {
+  /**
+   * Stable id stored on outbox rows. Defaults to `url`, so give an explicit
+   * id when the same URL is subscribed more than once.
+   */
+  id?: string;
   url: string;
   events?: WebhookEvent[];
   /** Additional headers to merge into the request. */
   headers?: Record<string, string>;
+  /**
+   * When set, every attempt carries a `Tollway-Signature` header over the
+   * exact body sent. The secret stays in memory and is never written to an
+   * outbox row. An empty string is refused: omit the field to send unsigned.
+   */
+  secret?: string;
 };
 
 /** Retry policy applied per target (handler or webhook URL). */
@@ -189,9 +209,69 @@ export type ObservabilityHubOptions = {
    * 200000.
    */
   maxTimeseriesRows?: number;
+  /**
+   * When set, `emit` persists one delivery row per matching webhook instead
+   * of POSTing inline, and deliveries need a dispatcher
+   * ({@link ObservabilityHub.startDispatcher}). Local handlers keep the
+   * inline behaviour either way. With an outbox, `requestTimeoutMs` must be
+   * at least 1 and shorter than the dispatcher's `leaseMs`.
+   */
+  outbox?: WebhookOutbox;
+  /**
+   * Outbox dispatcher settings; ignored without an `outbox`. The outbox does
+   * not inherit `retry`: that policy is sized for retries inside one `emit`
+   * call, and the dispatcher's defaults are sized for an outage (see
+   * {@link WebhookDispatcherTuning}).
+   */
+  dispatcher?: Partial<WebhookDispatcherTuning>;
+  /**
+   * Durable storage for payment metrics (#217). Without one, metrics stay in
+   * an in-memory array exactly as before. With one, `record` validates each
+   * metric and buffers it, and the buffer is written to the store in
+   * batches. Read stored metrics back with `queryMetrics`,
+   * `summarizeAsync` and `exportAsync`; the synchronous `summarize`,
+   * `timeseries` and `export` throw, because a store cannot answer
+   * synchronously.
+   */
+  store?: MetricsStore;
+  /**
+   * Called with every batch the store failed to write, and the error.
+   * Required with a `store`, so a write failure is never silently dropped.
+   * The hub does not retry the batch.
+   */
+  onStoreError?: (error: Error, metrics: readonly PaymentMetric[]) => void;
+  /** How the hub batches writes to the store. Ignored without a `store`. */
+  storeBuffer?: Partial<MetricsBufferTuning>;
+};
+
+export type MetricsBufferTuning = {
+  /** Metrics per write. A full buffer is flushed at once. Default 100, at most 1000. */
+  maxBatchSize: number;
+  /** How often a partly full buffer is flushed. Default 1000ms. */
+  flushIntervalMs: number;
+};
+
+/** What a webhook or handler delivery came to, for exporters. */
+export type DeliveryOutcome = {
+  result: "delivered" | "failed";
+  targetKind: "handler" | "webhook";
+};
+
+/**
+ * Receives every metric the hub records and every delivery outcome, as they
+ * happen. Exporters keep counters this way, so the counters do not depend
+ * on how much history a store keeps.
+ */
+export type HubObserver = {
+  onMetric?: (metric: PaymentMetric) => void;
+  onDelivery?: (outcome: DeliveryOutcome) => void;
 };
 
 export interface ObservabilityHub {
+  /** Store the latest attempt for this (network, account), replacing any previous value. */
+  recordSponsorBalance(reading: SponsorBalanceReading): void;
+  /** Copies of the latest sponsor readings, including stale/error status. */
+  getSponsorReadings(): SponsorBalanceReading[];
   /** Collect a payment metric for rollups. Implementation tracked in #31. */
   record(metric: PaymentMetric): void;
   /**
@@ -199,13 +279,27 @@ export interface ObservabilityHub {
    * Resolves with a {@link DeliveryReport} describing which targets succeeded
    * and which exhausted their retry budget; the promise itself does not
    * reject so callers can record full delivery telemetry rather than the
-   * first failure that bubbles up.
+   * first failure that bubbles up. With an outbox, a webhook delivery that
+   * could not be written to it (for example `database is locked` after the
+   * SQLite busy timeout) is listed in `failures` with `attempts: 0` instead
+   * of rejecting. The hub assigns the event id when the input does not carry
+   * one.
    */
-  emit(event: TollwayEvent): Promise<DeliveryReport>;
-  /** Register a local handler invoked synchronously during {@link emit}. */
+  emit(event: TollwayEventInput): Promise<DeliveryReport>;
+  /** Register a local handler invoked synchronously during {@link ObservabilityHub.emit}. */
   on(event: WebhookEvent, handler: WebhookHandler): void;
   /** Register an HTTP webhook subscription after construction. */
   addWebhook(subscription: WebhookSubscription): void;
+  /**
+   * Starts delivering outbox rows on a timer. Throws when the hub was built
+   * without an `outbox`.
+   */
+  startDispatcher(): void;
+  /**
+   * Stops the dispatcher and waits for in-flight deliveries, up to the
+   * configured `stopTimeoutMs`. A no-op when the dispatcher was not started.
+   */
+  stop(): Promise<void>;
   /** Roll payment metrics into a spend summary. Implementation tracked in #31. */
   summarize(query?: MetricsQuery): SpendSummary;
   /**
@@ -227,6 +321,51 @@ export interface ObservabilityHub {
    * not read back byte for byte. JSON output is never altered.
    */
   export(format: ExportFormat, query?: MetricsQuery): string;
+  /**
+   * Matching metrics, one page at a time, in recording order. Reads the
+   * store when there is one, otherwise the in-memory metrics. Metrics still
+   * in the write buffer are not included: call {@link ObservabilityHub.flush} first.
+   */
+  queryMetrics(query?: MetricsQuery, page?: MetricsPageRequest): Promise<MetricsPage>;
+  /** {@link ObservabilityHub.summarize}, answered by the store when there is one. */
+  summarizeAsync(query?: MetricsQuery): Promise<SpendSummary>;
+  /** {@link ObservabilityHub.export}, read from the store when there is one. */
+  exportAsync(format: ExportFormat, query?: MetricsQuery): Promise<string>;
+  /**
+   * Writes every buffered metric to the store and waits for the writes. A
+   * failed batch goes to `onStoreError`; `flush` itself does not reject.
+   * Resolves at once without a store.
+   */
+  flush(): Promise<void>;
+  /**
+   * Flushes the buffer, stops the flush timer and closes the store. Later
+   * calls to `record` throw. Does not stop the webhook dispatcher: call
+   * {@link ObservabilityHub.stop} for that.
+   */
+  close(): Promise<void>;
+  /** Adds an observer. Returns a function that removes it. */
+  observe(observer: HubObserver): () => void;
+}
+
+const DEFAULT_BUFFER: MetricsBufferTuning = { maxBatchSize: 100, flushIntervalMs: 1000 };
+
+function resolveBuffer(tuning: Partial<MetricsBufferTuning> | undefined): MetricsBufferTuning {
+  const buffer = { ...DEFAULT_BUFFER, ...tuning };
+  if (
+    !Number.isSafeInteger(buffer.maxBatchSize) ||
+    buffer.maxBatchSize < 1 ||
+    buffer.maxBatchSize > 1000
+  ) {
+    throw new RangeError(
+      `storeBuffer.maxBatchSize must be a whole number from 1 to 1000, got ${buffer.maxBatchSize}`,
+    );
+  }
+  if (!Number.isSafeInteger(buffer.flushIntervalMs) || buffer.flushIntervalMs < 1) {
+    throw new RangeError(
+      `storeBuffer.flushIntervalMs must be a whole number of at least 1, got ${buffer.flushIntervalMs}`,
+    );
+  }
+  return buffer;
 }
 
 const DEFAULT_RETRY: RetryPolicy = {
@@ -247,29 +386,21 @@ function normalizeError(value: unknown): Error {
   return new Error(typeof value === "string" ? value : JSON.stringify(value));
 }
 
-function filterMetrics(metrics: PaymentMetric[], query?: MetricsQuery): PaymentMetric[] {
-  if (!query) return metrics.slice();
-  return metrics.filter((m) => {
-    if (query.payer !== undefined && m.payer !== query.payer) return false;
-    if (query.payee !== undefined && m.payee !== query.payee) return false;
-    if (query.model !== undefined && m.model !== query.model) return false;
-    // `at` is ISO 8601; string comparison is order-preserving for that grammar.
-    if (query.from !== undefined && m.at < query.from) return false;
-    if (query.to !== undefined && m.at > query.to) return false;
-    return true;
-  });
+function matchesQuery(m: PaymentMetric, query?: MetricsQuery): boolean {
+  if (!query) return true;
+  if (query.payer !== undefined && m.payer !== query.payer) return false;
+  if (query.payee !== undefined && m.payee !== query.payee) return false;
+  if (query.model !== undefined && m.model !== query.model) return false;
+  if (query.asset !== undefined && m.asset !== query.asset) return false;
+  if (query.outcome !== undefined && m.outcome !== query.outcome) return false;
+  // `at` is ISO 8601; string comparison is order-preserving for that grammar.
+  if (query.from !== undefined && m.at < query.from) return false;
+  if (query.to !== undefined && m.at > query.to) return false;
+  return true;
 }
 
-function stringifyBigintMap<K extends string>(
-  source: Partial<Record<K, bigint>> | Record<K, bigint>,
-): Record<K, string> {
-  const out = {} as Record<K, string>;
-  for (const [key, value] of Object.entries(source) as Array<[K, bigint | undefined]>) {
-    if (value !== undefined) {
-      out[key] = value.toString();
-    }
-  }
-  return out;
+function filterMetrics(metrics: PaymentMetric[], query?: MetricsQuery): PaymentMetric[] {
+  return metrics.filter((m) => matchesQuery(m, query));
 }
 
 const FORMULA_PREFIX = /^[=+\-@\t\r]/;
@@ -355,39 +486,12 @@ async function deliverWebhook(
   event: TollwayEvent,
   timeoutMs: number,
 ): Promise<void> {
-  const controller = typeof AbortController !== "undefined" ? new AbortController() : null;
-  const timer =
-    controller && timeoutMs > 0
-      ? setTimeout(() => {
-          controller.abort();
-        }, timeoutMs)
-      : null;
+  const request = await buildWebhookRequest({ subscription, event });
+  await postWebhook({ fetcher, url: subscription.url, request, timeoutMs });
+}
 
-  let response: Response;
-  try {
-    response = await fetcher(subscription.url, {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        ...(subscription.headers ?? {}),
-      },
-      body: JSON.stringify(event),
-      signal: controller?.signal,
-    });
-  } catch (cause) {
-    if (controller?.signal.aborted) {
-      throw new Error(`webhook ${subscription.url} timed out after ${timeoutMs}ms`);
-    }
-    throw cause;
-  } finally {
-    if (timer) clearTimeout(timer);
-  }
-
-  if (!response.ok) {
-    throw new Error(
-      `webhook ${subscription.url} responded with ${response.status} ${response.statusText}`.trim(),
-    );
-  }
+function subscriptionKey(subscription: WebhookSubscription): string {
+  return subscription.id ?? subscription.url;
 }
 
 /**
@@ -402,6 +506,12 @@ async function deliverWebhook(
  * returned {@link DeliveryReport} and the optional `onDeliveryFailure`
  * callback rather than being swallowed.
  *
+ * With an `outbox`, webhook deliveries are persisted instead: `emit` writes
+ * one row per matching subscription and resolves, and
+ * {@link ObservabilityHub.startDispatcher} delivers rows with backoff across
+ * restarts. The secret is resolved from the in-memory subscription at send
+ * time, so it is signed fresh on every attempt and never persisted.
+ *
  * Metric collection (`record`, `summarize`, `timeseries`, `export`) keeps an in-memory
  * array of `PaymentMetric` values. The hub holds the rollup primitives a
  * service-side dashboard or exporter actually consumes; the storage is
@@ -413,9 +523,11 @@ export function createObservabilityHub(options: ObservabilityHubOptions = {}): O
   const handlers = new Map<WebhookEvent, WebhookHandler[]>();
   const subscriptions: WebhookSubscription[] = [];
   const metrics: PaymentMetric[] = [];
+  const sponsors = new Map<string, SponsorBalanceReading>();
 
   if (options.webhooks) {
     for (const sub of options.webhooks) {
+      assertWebhookSecret(sub.secret);
       subscriptions.push({ ...sub, events: sub.events ? [...sub.events] : undefined });
     }
   }
@@ -436,48 +548,172 @@ export function createObservabilityHub(options: ObservabilityHubOptions = {}): O
   // Checked here so a bad limit fails at startup, not on the first query.
   assertTimeseriesLimits(timeseriesLimits);
 
-  return {
-    record(metric) {
-      metrics.push({ ...metric });
-    },
-    summarize(query) {
-      const matched = filterMetrics(metrics, query);
-      let totalAmount = 0n;
-      const byAsset: Record<string, bigint> = {};
-      const byModel: Partial<Record<SettlementModel, bigint>> = {};
-      const byPayer: Record<string, bigint> = {};
-      const byPayee: Record<string, bigint> = {};
+  const observers = new Set<HubObserver>();
+  const notifyMetric = (metric: PaymentMetric) => {
+    for (const observer of observers) observer.onMetric?.(metric);
+  };
+  const notifyDelivery = (outcome: DeliveryOutcome) => {
+    for (const observer of observers) observer.onDelivery?.(outcome);
+  };
 
-      for (const m of matched) {
-        let amount: bigint;
-        try {
-          amount = BigInt(m.amount);
-        } catch {
-          // A non-integer amount cannot be summed safely; skip it rather
-          // than poison the rollups for the whole window. The metric is
-          // still visible via export().
-          continue;
-        }
-        totalAmount += amount;
-        byAsset[m.asset] = (byAsset[m.asset] ?? 0n) + amount;
-        byModel[m.model] = (byModel[m.model] ?? 0n) + amount;
-        byPayer[m.payer] = (byPayer[m.payer] ?? 0n) + amount;
-        byPayee[m.payee] = (byPayee[m.payee] ?? 0n) + amount;
+  const store = options.store;
+  const onStoreError = options.onStoreError;
+  if (store && !onStoreError) {
+    throw new TypeError(
+      "a metrics store needs onStoreError, so a failed write is reported instead of lost",
+    );
+  }
+  const buffer = resolveBuffer(options.storeBuffer);
+  let pending: PaymentMetric[] = [];
+  let writing: Promise<void> = Promise.resolve();
+  let flushTimer: ReturnType<typeof setInterval> | null = null;
+  let storeClosed = false;
+
+  /** Hands the buffer to the store. Writes run one after another, in order. */
+  function flushBuffer(): Promise<void> {
+    if (!store || pending.length === 0) return writing;
+    const batch = pending;
+    pending = [];
+    writing = writing.then(async () => {
+      try {
+        await store.append(batch);
+      } catch (cause) {
+        onStoreError?.(normalizeError(cause), batch);
       }
+    });
+    return writing;
+  }
 
-      return {
-        totalAmount: totalAmount.toString(),
-        count: matched.length,
-        byAsset: stringifyBigintMap(byAsset),
-        byModel: stringifyBigintMap(byModel) as Partial<Record<SettlementModel, string>>,
-        byPayer: stringifyBigintMap(byPayer),
-        byPayee: stringifyBigintMap(byPayee),
+  function ensureFlushTimer(): void {
+    if (flushTimer !== null) return;
+    flushTimer = setInterval(() => {
+      void flushBuffer();
+    }, buffer.flushIntervalMs);
+    // A pending flush must not keep a finished process alive; close() drains it.
+    if (typeof flushTimer === "object" && "unref" in flushTimer) flushTimer.unref();
+  }
+
+  function requireNoStore(method: string, instead: string): void {
+    if (store) {
+      throw new TollwayError(
+        "invalid-metrics-query",
+        `${method} cannot read a metrics store synchronously; use ${instead}`,
+      );
+    }
+  }
+
+  const outbox = options.outbox;
+  const dispatcher = outbox
+    ? createWebhookDispatcher({
+        ...options.dispatcher,
+        outbox,
+        resolveSubscription: (subscriptionId) =>
+          subscriptions.find((sub) => subscriptionKey(sub) === subscriptionId),
+        fetch: fetcher,
+        requestTimeoutMs,
+        onDelivered: () => notifyDelivery({ result: "delivered", targetKind: "webhook" }),
+        onDeliveryFailure: (failure) => {
+          notifyDelivery({ result: "failed", targetKind: "webhook" });
+          onDeliveryFailure?.({
+            // A row whose subscription is gone has no URL left; name it by
+            // the subscription id so the failure is still identifiable.
+            target: { kind: "webhook", url: failure.url ?? failure.subscriptionId },
+            event: failure.delivery.event,
+            error: failure.error,
+            attempts: failure.attempts,
+          });
+        },
+      })
+    : null;
+
+  return {
+    recordSponsorBalance(reading) {
+      sponsors.set(`${reading.network}:${reading.account}`, { ...reading });
+    },
+    getSponsorReadings() {
+      return [...sponsors.values()].map((reading) => ({ ...reading }));
+    },
+    record(metric) {
+      if (!store) {
+        metrics.push({ ...metric });
+        notifyMetric(metric);
+        return;
+      }
+      if (storeClosed) throw closedStoreError();
+      // A durable store refuses a malformed metric, so refuse it here, where
+      // the caller can still see the error, rather than in a later batch.
+      assertValidMetric(metric);
+      pending.push(copyMetric(metric));
+      notifyMetric(metric);
+      if (pending.length >= buffer.maxBatchSize) {
+        void flushBuffer();
+      } else {
+        ensureFlushTimer();
+      }
+    },
+    async queryMetrics(query, page) {
+      if (store) return store.query(query, page);
+      const limit = resolvePageLimit(page);
+      const after = decodeCursor(page?.cursor);
+      // Positions are 1-based indexes into the in-memory array, like the
+      // row positions a store uses.
+      const found: PaymentMetric[] = [];
+      for (let index = after; index < metrics.length; index += 1) {
+        const metric = metrics[index] as PaymentMetric;
+        if (!matchesQuery(metric, query)) continue;
+        if (found.length === limit) {
+          return { metrics: found, nextCursor: encodeCursor(index) };
+        }
+        found.push(copyMetric(metric));
+      }
+      const result: MetricsPage = { metrics: found };
+      return result;
+    },
+    async summarizeAsync(query) {
+      if (store) return store.summarize(query);
+      return this.summarize(query);
+    },
+    async exportAsync(format, query) {
+      if (!store) return this.export(format, query);
+      if (format !== "json" && format !== "csv") {
+        throw new Error(`unsupported export format: ${format as string}`);
+      }
+      const all: PaymentMetric[] = [];
+      let cursor: string | undefined;
+      do {
+        const page = await store.query(query, cursor === undefined ? {} : { cursor });
+        all.push(...page.metrics);
+        cursor = page.nextCursor;
+      } while (cursor !== undefined);
+      return format === "json" ? JSON.stringify(all) : toCsv(all);
+    },
+    async flush() {
+      await flushBuffer();
+    },
+    async close() {
+      if (storeClosed) return;
+      storeClosed = true;
+      if (flushTimer !== null) clearInterval(flushTimer);
+      flushTimer = null;
+      await flushBuffer();
+      await store?.close();
+    },
+    observe(observer) {
+      observers.add(observer);
+      return () => {
+        observers.delete(observer);
       };
     },
+    summarize(query) {
+      requireNoStore("summarize", "summarizeAsync");
+      return summarizeMetrics(filterMetrics(metrics, query));
+    },
     timeseries(query) {
+      requireNoStore("timeseries", "queryMetrics");
       return computeTimeseries(metrics, query, timeseriesLimits);
     },
     export(format, query) {
+      requireNoStore("export", "exportAsync");
       const matched = filterMetrics(metrics, query);
       if (format === "json") {
         return JSON.stringify(matched);
@@ -499,12 +735,26 @@ export function createObservabilityHub(options: ObservabilityHubOptions = {}): O
       }
     },
     addWebhook(subscription) {
+      assertWebhookSecret(subscription.secret);
       subscriptions.push({
         ...subscription,
         events: subscription.events ? [...subscription.events] : undefined,
       });
     },
-    async emit(event) {
+    startDispatcher() {
+      if (!dispatcher) {
+        throw new Error("startDispatcher requires an outbox");
+      }
+      dispatcher.start();
+    },
+    async stop() {
+      if (dispatcher) await dispatcher.stop();
+    },
+    async emit(input) {
+      const event: TollwayEvent = {
+        ...input,
+        id: input.id ?? globalThis.crypto.randomUUID(),
+      };
       const failures: DeliveryFailure[] = [];
 
       const matchingHandlers = handlers.get(event.type) ?? [];
@@ -515,6 +765,7 @@ export function createObservabilityHub(options: ObservabilityHubOptions = {}): O
       );
 
       for (const { result, index } of handlerResults) {
+        notifyDelivery({ result: result.ok ? "delivered" : "failed", targetKind: "handler" });
         if (!result.ok) {
           const failure: DeliveryFailure = {
             target: { kind: "handler", index },
@@ -529,8 +780,47 @@ export function createObservabilityHub(options: ObservabilityHubOptions = {}): O
 
       const matchingSubs = subscriptions.filter((sub) => subscriptionMatches(sub, event.type));
 
+      if (outbox) {
+        const deliveries = matchingSubs.map((sub) => ({
+          subscriptionId: subscriptionKey(sub),
+          event,
+        }));
+        try {
+          await outbox.enqueue(deliveries);
+        } catch (cause) {
+          // The rows were not written, so nothing will deliver them. Report
+          // each one instead of rejecting: emit never rejects, and a caller
+          // that does not await it would otherwise crash the process.
+          const error = normalizeError(cause);
+          for (const sub of matchingSubs) {
+            notifyDelivery({ result: "failed", targetKind: "webhook" });
+            const failure: DeliveryFailure = {
+              target: { kind: "webhook", url: sub.url },
+              event,
+              error,
+              attempts: 0,
+            };
+            failures.push(failure);
+            onDeliveryFailure?.(failure);
+          }
+          return {
+            event,
+            handlersDispatched: matchingHandlers.length,
+            webhooksDispatched: 0,
+            failures,
+          };
+        }
+        return {
+          event,
+          handlersDispatched: matchingHandlers.length,
+          webhooksDispatched: deliveries.length,
+          failures,
+        };
+      }
+
       if (!fetcher && matchingSubs.length > 0) {
         for (const sub of matchingSubs) {
+          notifyDelivery({ result: "failed", targetKind: "webhook" });
           const failure: DeliveryFailure = {
             target: { kind: "webhook", url: sub.url },
             event,
@@ -565,6 +855,7 @@ export function createObservabilityHub(options: ObservabilityHubOptions = {}): O
         : [];
 
       for (const { result, url } of webhookResults) {
+        notifyDelivery({ result: result.ok ? "delivered" : "failed", targetKind: "webhook" });
         if (!result.ok) {
           const failure: DeliveryFailure = {
             target: { kind: "webhook", url },
@@ -586,3 +877,27 @@ export function createObservabilityHub(options: ObservabilityHubOptions = {}): O
     },
   };
 }
+
+export {
+  type AppendOutcome,
+  type ArchiveSearchOptions,
+  type ArchiveSearchResult,
+  createMemoryReceiptArchive,
+  DEFAULT_ARCHIVE_PAGE_SIZE,
+  MAX_ARCHIVE_PAGE_SIZE,
+  type ReceiptArchive,
+  type ReceiptArchiveOptions,
+  type ReceiptFilter,
+} from "./receipt-archive.js";
+export {
+  createSqliteReceiptArchive,
+  type SqliteReceiptArchive,
+  type SqliteReceiptArchiveOptions,
+} from "./receipt-archive-sqlite.js";
+export {
+  type JsonlReceiptLogRepair,
+  type JsonlReceiptLogStore,
+  type JsonlReceiptLogStoreOptions,
+  openJsonlReceiptLogStore,
+  repairJsonlReceiptLog,
+} from "./receipt-log-file.js";

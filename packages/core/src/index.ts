@@ -6,15 +6,42 @@
  * schema. The architecture this implements is described in docs/design.md.
  */
 
+export { BODY_DIGEST_SEPARATOR, bindBodyToResource, bodyDigest } from "./body-binding.js";
 export { base64UrlToBytes, bytesToBase64Url, utf8Bytes } from "./encoding.js";
-export { NotImplementedError, TollwayError, type TollwayErrorCode } from "./errors.js";
+export { type EnumShape, enumSchema } from "./enum-shape.js";
+export {
+  ChannelOpenFailedError,
+  type ChannelOpenSubmission,
+  NotImplementedError,
+  TollwayError,
+  type TollwayErrorCode,
+} from "./errors.js";
 export {
   type AdaptiveAnomalyEvent,
+  type ChannelOpenDecision,
+  type ChannelOpenIntent,
+  type ChannelOpenRule,
   createPolicyEngine,
   type PaymentIntent,
-  type Policy,
   type PolicyEngine,
+  type PolicyHeadroom,
+  type PolicyReservation,
+  type PolicyReservationAttempt,
+  PolicyReservationError,
 } from "./policy.js";
+export {
+  formatPolicyIssues,
+  POLICY_SCHEMA_ID,
+  POLICY_VERSION,
+  type Policy,
+  type PolicyInput,
+  type PolicyIssue,
+  type PolicyParseResult,
+  PolicyValidationError,
+  parsePolicy,
+  policyJsonSchema,
+  policySchema,
+} from "./policy-schema.js";
 export {
   comparePolicyTraces,
   decisionFromTrace,
@@ -37,18 +64,84 @@ export {
   policyTraceSchema,
   policyWindowSchema,
 } from "./policy-trace.js";
+export {
+  type CounterpartyQuarantine,
+  type CreateMemoryQuarantineOptions,
+  createMemoryQuarantine,
+  type QuarantineDrift,
+  type QuarantineEntry,
+  type QuarantineInput,
+  type ReleaseQuarantineInput,
+} from "./quarantine.js";
 export { canonicalBytes, canonicalJson, type JsonValue } from "./receipt/canonical.js";
+export {
+  derToP1363,
+  ECDSA_P256_ALG,
+  EcdsaP256Signer,
+  EcdsaP256Verifier,
+  normaliseLowS,
+  type P256PublicJwk,
+  p1363ToBase64Url,
+} from "./receipt/ecdsa.js";
+export {
+  createKeySetVerifier,
+  ed25519KeyEntrySchema,
+  type KeySetDocument,
+  type KeySetEntry,
+  type KeySetFetcher,
+  type KeySetVerifier,
+  type KeySetVerifierOptions,
+  keySetDocumentSchema,
+  keySetEntrySchema,
+  p256KeyEntrySchema,
+  parseKeySetDocument,
+  RECEIPT_ALGORITHMS,
+  type ReceiptAlgorithm,
+} from "./receipt/key-set.js";
 export {
   type BuildReceiptInput,
   buildReceipt,
+  hashOffer,
   type ReceiptVerification,
   signReceipt,
+  type VerifyReceiptOptions,
   verifyReceipt,
 } from "./receipt/receipt.js";
 export {
+  assertExtendsHead,
+  assertReadRange,
+  computeReceiptLogEntryHash,
+  createMemoryReceiptLogStore,
+  createReceiptLog,
+  RECEIPT_LOG_CHECKPOINT_TYPE,
+  RECEIPT_LOG_GENESIS_HASH,
+  type ReceiptLog,
+  type ReceiptLogCheckpoint,
+  type ReceiptLogCheckpointSchedule,
+  type ReceiptLogCheckpointVerification,
+  type ReceiptLogEntry,
+  type ReceiptLogFailureKind,
+  type ReceiptLogHead,
+  type ReceiptLogOptions,
+  type ReceiptLogStore,
+  type ReceiptLogVerification,
+  receiptLogCheckpointSchema,
+  receiptLogEntrySchema,
+  type SignedReceiptLogCheckpoint,
+  signedReceiptLogCheckpointSchema,
+  signReceiptLogCheckpoint,
+  type VerifyReceiptLogOptions,
+  verifyReceiptLog,
+  verifyReceiptLogCheckpoint,
+} from "./receipt/receipt-log.js";
+export {
   type ReceiptBody,
+  type ReceiptBodyV1,
+  type ReceiptBodyV2,
   type ReceiptSignature,
   receiptBodySchema,
+  receiptBodyV1Schema,
+  receiptBodyV2Schema,
   receiptSignatureSchema,
   type SettlementRef,
   type SignedReceipt,
@@ -58,11 +151,17 @@ export {
 export {
   Ed25519Signer,
   Ed25519Verifier,
+  type PublicJwk,
   type ReceiptSigner,
   type ReceiptVerifier,
+  type SignatureCheck,
+  type SignatureInput,
 } from "./receipt/signer.js";
+export { RollingSum, type RollingSumOptions } from "./rolling-sum.js";
 export {
+  type ChannelThreshold,
   createDefaultRouter,
+  type DefaultRouterOptions,
   type ModelRouter,
   type RouteDecision,
   type RouteInput,
@@ -81,6 +180,7 @@ export {
   type SmartAccountPolicyReader,
   type SmartAccountResidual,
 } from "./smart-account-policy.js";
+export type { SponsorBalanceReading, SponsorLowBalanceEvent } from "./sponsor.js";
 export {
   type MppChannelPayment,
   type MppChargePayment,

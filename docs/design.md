@@ -84,6 +84,8 @@ SHARED OPTIONAL SERVICE
   - Receipt archive
 ```
 
+The shared service is `packages/service` (`@vegaforge/tollway-service`), which an operator runs themselves. It holds no key that signs receipts or moves funds and calls nothing Tollway operates. See [the service docs](../apps/web/src/content/docs/service.mdx) for the trust boundary, configuration and API-key model.
+
 ### The model router
 
 The router is the conceptual core of the project. Per interaction or per counterparty, it decides which settlement model to use.
@@ -96,13 +98,15 @@ The router reads four kinds of input: declared hints in the offer (such as `mppS
 
 For channel mode, the manager runs the full lifecycle the raw SDK leaves to the integrator.
 
-Open: deposit into the one-way channel contract, sized from the agent's budget and predicted demand. Commit: for each paid interaction, produce and store the next cumulative commitment, advancing the off-chain counter with no on-chain transaction. Close: decide timing from heuristics (budget nearly drawn down, idle timeout, end of session) and submit the single settlement, returning the remainder to the funder. Recover: if a counterparty stops responding mid-channel, follow the contract's dispute or timeout path to get committed funds back, and surface the event loudly.
+Open: deposit into the one-way channel contract, sized from the agent's budget and predicted demand. `sizeDeposit` (`packages/channels/src/sizing.ts`) does the sizing: predicted demand over a horizon, times a safety factor, clamped to the policy's minimum deposit and to the tighter of the caller's maximum and the headroom from `PolicyEngine.headroom`. It returns no deposit when there is no predicted demand or the headroom is below the minimum. The policy check for an open is `PolicyEngine.evaluateChannelOpen`, and it records no spend. Commit: for each paid interaction, produce and store the next cumulative commitment, advancing the off-chain counter with no on-chain transaction. Close: decide timing from heuristics (budget nearly drawn down, idle timeout, end of session) and submit the single settlement, returning the remainder to the funder. Recover: if a counterparty stops responding mid-channel, follow the contract's dispute or timeout path to get committed funds back, and surface the event loudly.
+
+The commitment stream and the channel record sit behind the `CommitmentStore` contract. Every write that depends on state is a compare-and-set, so two processes sharing a store cannot both advance one channel. The memory store is process-local. The PostgreSQL and Redis stores are shared, and their setup, isolation and failure modes are in `docs/channel-commitment-stores.md`.
 
 Recovery is a first-class feature here, not an afterthought. The edge cases live in that path, and so do the tests.
 
 ### Policy and budgets
 
-Policy is data, not code: a small declarative schema covering per-agent daily and total budgets, per-service caps, per-model constraints, rate limits, and anomaly stops for sudden spend spikes. Enforcement applies across all three models.
+Policy is data, not code: a small declarative schema covering per-agent daily and total budgets, per-service caps, per-model constraints, rate limits, and anomaly stops for sudden spend spikes. Enforcement applies across all three models. A channel's deposit is checked against the same budgets at open time through `headroom` and `evaluateChannelOpen`. A deposit is not spend, so an open records none, but sizing against headroom keeps an agent from locking more than the policy lets it spend with a payee.
 
 Where the agent uses an OpenZeppelin smart account, Tollway maps as many constraints as possible down to the on-chain smart-account policy, so the chain itself backs the limit. Where it does not, Tollway enforces at the application layer. Defense in depth, with the honest caveat that application-layer enforcement is only as strong as the process running it.
 
@@ -128,7 +132,7 @@ This engine is the safety net that catches a counterparty who under-settles rela
 
 ### Observability
 
-A dashboard and an exporter. Per-agent and per-service spend over time, model mix, latency per model, failure and retry rates, open channels and their remaining budget, and anomaly events. Machine-readable exports in JSON and CSV, and webhooks (`receipt.created`, `channel.opened`, `channel.closed`, `budget.warning`, `anomaly.detected`) for whatever you want to wire up.
+A dashboard and an exporter. Per-agent and per-service spend over time, model mix, latency per model, failure and retry rates, open channels and their remaining budget, and anomaly events. Machine-readable exports in JSON and CSV, and webhooks (`receipt.created`, `channel.opened`, `channel.closed`, `budget.warning`, `anomaly.detected`, `sponsor.low_balance`) for whatever you want to wire up.
 
 For how the dashboard views actually consume this data, including the three UI primitives every widget composes from and the data-layer seam each wired view holds with its source, see `docs/dashboard-data-contracts.md`.
 
@@ -140,11 +144,11 @@ A few decisions worth recording, since each one came up early and will come up a
 
 The gating molecule. On the service side, Tollway is the small block between request and response. The middleware checks for a valid payment or commitment; if present and valid, it proceeds; if not, it returns a 402 with the right challenge for the chosen model. Switching a route from x402 to MPP charge to MPP channel is a configuration change in this block, not a rewrite. That property is the point, and we preserve it.
 
-Duplicate protection. Facilitators are known to be vulnerable to duplicate `/settle` submissions, so Tollway keeps a short-lived settlement cache keyed by the authorization nonce or commitment sequence, evicted after a window tuned to Stellar's ledger close time. A duplicate is treated as idempotent, not as a second charge. Channel mode is naturally idempotent because a repeated commitment at the same sequence is a no-op, and Tollway enforces that.
+Duplicate protection. Facilitators are known to be vulnerable to duplicate `/settle` submissions, so Tollway keeps a short-lived settlement cache keyed by the authorization nonce or commitment sequence, evicted after a window tuned to Stellar's ledger close time. A duplicate is treated as idempotent, not as a second charge. When an x402 payment carries the `payment-identifier` extension, which every 402 declares, the gate also keys the settlement on that id scoped to the payer `/verify` returned, so a client that re-signs the same payment as a new envelope after a timeout gets its first receipt back instead of paying twice. The id is client-chosen, so it is only looked up after `/verify`, and a receipt is still only returned for the offer it was issued against (#153). Channel mode is naturally idempotent because a repeated commitment at the same sequence is a no-op, and Tollway enforces that.
 
 Fee sponsorship. We assume sponsorship via the OpenZeppelin relayer path so agents never need to hold XLM, and we surface the sponsoring account's balance as an operational metric. Tollway configures and observes sponsorship; it does not implement it.
 
-Failure semantics. Every model has explicit failure handling. x402 retries with a fresh auth entry on expiry or nonce reuse. Channel open failure falls back to per-request. Budget exhaustion halts with a typed error rather than a silent skip. The client emits events (`payment`, `skip`, `error`, `budget:warning`, `channel:opened`, `channel:closed`) so none of this is invisible.
+Failure semantics. Every model has explicit failure handling. The per-failure behaviour of the gate, its status, whether the payer may have been charged, and the operator action are listed in [failure-modes.md](failure-modes.md). x402 retries with a fresh auth entry on expiry or nonce reuse. Channel open failure falls back to per-request. Budget exhaustion halts with a typed error rather than a silent skip. By default the gate settles a payment before the route runs, so a route that then fails has already charged the payer. A paywall can instead settle after the route (#152): the payment is verified and locked, the route runs with its response held, and the payment settles only if the route did not fail; otherwise it is abandoned and never reaches `/settle`. Choose it for routes that can fail after payment, at the cost of a held response and the settlement's latency added to the route's. See [two-phase-settlement.md](two-phase-settlement.md). The client emits events (`payment`, `skip`, `error`, `budget:warning`, `channel:opened`, `channel:closed`) so none of this is invisible.
 
 ## Stack
 
@@ -171,6 +175,7 @@ tollway/
     channels/             # MPP channel lifecycle manager
     reconcile/            # reconciliation engine (TS; Go variant later)
     observability/        # metrics, exports, webhooks
+    service/              # optional self-hosted shared service (Hono, API keys, OpenAPI)
     theme/                # shared design tokens
   apps/
     dashboard/            # Next.js observability UI
@@ -208,11 +213,11 @@ Unit tests on the router, the policy engine, and the receipt format. Integration
 
 These are genuinely open. If you have answers or partial answers, open an issue.
 
-1. ~~What exactly does the `@stellar/mpp` channel API expose for the recovery and dispute path, and what timeouts does the one-way-channel contract enforce?~~ Answered against `@stellar/mpp@0.6.0`: the `channel` module (`@stellar/mpp/channel`) exposes `open`, `commitment`, `close`, and `claim`, and the recovery path is `claim` gated by `closeEffectiveAtLedger` plus a `fundWaitingPeriod`. Recovery work tracks under the channel issues.
+1. ~~What exactly does the `@stellar/mpp` channel API expose for the recovery and dispute path, and what timeouts does the one-way-channel contract enforce?~~ Answered against `@stellar/mpp@0.7.1` and the stellar-experimental/one-way-channel contract it closes. `@stellar/mpp/channel/server` exports `channel`, `close`, `getChannelState`, `watchChannel` and `stellar`; there is no `claim`, `close_start` or `refund` helper. `getChannelState` reports the balance, the `refundWaitingPeriod`, the token, the funder, the recipient, `closeEffectiveAtLedger` (set once `close_start` or `close` has run) and the current ledger. The contract's own functions include `settle` and `close` for the recipient and `close_start` and `refund` for the funder. Its events are `open`, `close { effective_at_ledger }`, `withdraw { to, amount }` and `refund { from, amount }`: `close` pays the recipient (`withdraw`), marks the close effective at the current ledger (`close`), and returns the rest to the funder (`refund`), all in one transaction, while `close_start` emits `close` with a ledger `refundWaitingPeriod` ahead, after which the funder may `refund`. `ChannelManager.resume` (#176) reads this: a channel that is closed on chain and empty is settled, and its settlement is the transaction with a `close` event effective at its own ledger. One that is closed with funds still in it went through `close_start`. `ChannelManager.recover` (#38) now reads `getState`, starts a funder close when none is in progress, waits by ledger number (never wall-clock time) and refunds once the close is effective; a channel with no balance left is recorded as settled instead. The funder-side contract transactions behind the adapter's `startClose` and `refund` are the follow-up #101.
 2. ~~Which OpenZeppelin smart-account policy constraints can be expressed on chain today, and which must Tollway enforce at the application layer?~~ Answered 2026-11-20 against the current OpenZeppelin Stellar spending-limit policy: a token-scoped rolling ledger-window amount limit can back a Tollway per-asset daily budget when the operator supplies the ledger period. UTC-day resets, lifetime totals, per-payee caps, request counts, and adaptive anomaly rules remain application-layer residuals. Tollway's planner emits unsigned install descriptions and its checker consumes read-only simulation results; it never signs or submits account policy transactions. See `apps/web/src/content/docs/smart-account-policies.mdx`.
-3. What is the x402 V2 service-discovery format, and should Tollway consume it for routing hints?
+3. ~~What is the x402 V2 service-discovery format, and should Tollway consume it for routing hints?~~ Answered against `@x402/extensions@2.31.0`. The format is the Bazaar extension: `PaymentRequired.extensions.bazaar` holds an `info` (input kind, method, examples) and a JSON `schema`, built by `declareDiscoveryExtension` and enriched with the method and route template by `bazaarResourceServerExtension`. The client echoes it into the payment payload, and a cataloguing facilitator reads it at settle time with `extractDiscoveryInfo`; `withBazaar` adds `listResources` and `search` over `<facilitator>/discovery/resources`. Tollway publishes a route only when its paywall has a `discovery` block, and publishes the declared path-parameter example rather than the payer's own path values (#154). The router does not consume discovery data yet: an entry is the service's own claim relayed by a facilitator, and nothing binds it to the offer the service makes at 402 time, so routing stays on the live offer and the agent's policy.
 4. Should Tollway ship a hosted shared service in v1, or stay library-only, given the trust and operational implications?
-5. What is the right default threshold (requests per minute, over what window) for the router to move a counterparty into channel mode?
+5. What is the right default threshold (requests per minute, over what window) for the router to move a counterparty into channel mode? `createDefaultRouter({ channelThreshold })` (#105) makes the threshold configurable and keeps traffic promotion off until an operator supplies one; picking the values that pay off in production is still open.
 
 ## References
 

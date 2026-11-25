@@ -1,16 +1,18 @@
 import { describe, expect, it, vi } from "vitest";
 import {
+  createMemoryWebhookOutbox,
   createObservabilityHub,
   type DeliveryFailure,
   type PaymentMetric,
   type TollwayEvent,
+  verifyWebhookSignature,
   type WebhookEvent,
   type WebhookHandler,
   webhookEvents,
 } from "./index.js";
 
 function makeEvent(type: WebhookEvent, data: Record<string, unknown> = {}): TollwayEvent {
-  return { type, at: "2026-06-26T10:00:00.000Z", data };
+  return { id: "evt-test", type, at: "2026-06-26T10:00:00.000Z", data };
 }
 
 function noSleep() {
@@ -21,7 +23,8 @@ describe("observability webhook events catalogue", () => {
   it("lists the webhook events from the design document", () => {
     expect(webhookEvents).toContain("receipt.created");
     expect(webhookEvents).toContain("anomaly.detected");
-    expect(webhookEvents).toHaveLength(5);
+    expect(webhookEvents).toContain("sponsor.low_balance");
+    expect(webhookEvents).toHaveLength(6);
   });
 });
 
@@ -42,7 +45,7 @@ describe("observability hub: handler registration", () => {
     expect(report.failures).toEqual([]);
   });
 
-  it("invokes handlers for all five documented event types", async () => {
+  it("invokes handlers for all documented event types", async () => {
     const hub = createObservabilityHub({ sleep: noSleep });
     const calls: WebhookEvent[] = [];
     for (const eventType of webhookEvents) {
@@ -150,6 +153,7 @@ describe("observability hub: external webhook delivery", () => {
     expect(fetcher.mock.calls[0]?.[1]?.headers).toEqual({
       "Content-Type": "application/json",
       Authorization: "Bearer abc",
+      "Tollway-Event-Id": "evt-test",
     });
   });
 
@@ -371,10 +375,14 @@ describe("observability hub: record + summarize", () => {
     expect(summary).toEqual({
       totalAmount: "0",
       count: 0,
+      byOutcome: { settled: 0, failed: 0, skipped: 0 },
       byAsset: {},
       byModel: {},
       byPayer: {},
       byPayee: {},
+      byModelAsset: [],
+      byPayerAsset: [],
+      byPayeeAsset: [],
     });
   });
 
@@ -592,5 +600,283 @@ describe("observability hub: export", () => {
 
     const csv = hub.export("csv", { model: "mpp-channel" });
     expect(csv.split("\r\n")).toHaveLength(2);
+  });
+});
+
+describe("observability hub: durable webhook outbox", () => {
+  function okResponse(): Response {
+    return new Response(null, { status: 204 });
+  }
+
+  it("assigns a stable event id when the input has none", async () => {
+    const hub = createObservabilityHub({ sleep: noSleep });
+    const seen: TollwayEvent[] = [];
+    hub.on("receipt.created", (event) => {
+      seen.push(event);
+    });
+
+    const report = await hub.emit({
+      type: "receipt.created",
+      at: "2026-06-26T10:00:00.000Z",
+      data: { receiptId: "r-1" },
+    });
+
+    expect(report.event.id).toMatch(/^[0-9a-f-]{36}$/);
+    expect(seen[0]?.id).toBe(report.event.id);
+  });
+
+  it("keeps a caller-supplied event id", async () => {
+    const hub = createObservabilityHub({ sleep: noSleep });
+    const report = await hub.emit(makeEvent("receipt.created"));
+    expect(report.event.id).toBe("evt-test");
+  });
+
+  it("enqueues one row per matching subscription without calling fetch", async () => {
+    const outbox = createMemoryWebhookOutbox();
+    const fetcher = vi.fn();
+    const hub = createObservabilityHub({
+      sleep: noSleep,
+      fetch: fetcher,
+      outbox,
+      webhooks: [
+        { id: "sub-a", url: "https://a.test/hook" },
+        { id: "sub-b", url: "https://b.test/hook", events: ["anomaly.detected"] },
+      ],
+    });
+
+    const report = await hub.emit(makeEvent("receipt.created"));
+
+    expect(fetcher).not.toHaveBeenCalled();
+    expect(report.webhooksDispatched).toBe(1);
+    expect(report.failures).toEqual([]);
+    const rows = await outbox.claim(10, 1_000);
+    expect(rows).toHaveLength(1);
+    expect(rows[0]?.subscriptionId).toBe("sub-a");
+    expect(rows[0]?.event.id).toBe("evt-test");
+  });
+
+  it("keeps local handlers inline when an outbox is configured", async () => {
+    const outbox = createMemoryWebhookOutbox();
+    const handler = vi.fn();
+    const hub = createObservabilityHub({ sleep: noSleep, outbox });
+    hub.on("channel.opened", handler);
+
+    const report = await hub.emit(makeEvent("channel.opened"));
+
+    expect(handler).toHaveBeenCalledTimes(1);
+    expect(report.handlersDispatched).toBe(1);
+  });
+
+  it("never writes the subscription secret or headers into a row", async () => {
+    const outbox = createMemoryWebhookOutbox();
+    const hub = createObservabilityHub({
+      sleep: noSleep,
+      outbox,
+      webhooks: [
+        {
+          id: "sub-a",
+          url: "https://a.test/hook",
+          secret: "whsec_row_secret",
+          headers: { Authorization: "Bearer row_token" },
+        },
+      ],
+    });
+
+    await hub.emit(makeEvent("receipt.created"));
+
+    const serialized = JSON.stringify(await outbox.claim(10, 1_000));
+    expect(serialized).not.toContain("whsec_row_secret");
+    expect(serialized).not.toContain("Bearer row_token");
+  });
+
+  it("delivers enqueued rows once the dispatcher is started", async () => {
+    const outbox = createMemoryWebhookOutbox();
+    const fetcher = vi.fn().mockResolvedValue(okResponse());
+    const hub = createObservabilityHub({
+      sleep: noSleep,
+      fetch: fetcher,
+      outbox,
+      webhooks: [{ id: "sub-a", url: "https://a.test/hook" }],
+    });
+
+    await hub.emit(makeEvent("receipt.created"));
+    hub.startDispatcher();
+    await vi.waitFor(() => expect(fetcher).toHaveBeenCalledTimes(1));
+    await hub.stop();
+
+    expect(await outbox.claim(10, 1_000, Date.now() + 60_000)).toHaveLength(0);
+  });
+
+  it("refuses to start a dispatcher without an outbox", () => {
+    const hub = createObservabilityHub({ sleep: noSleep });
+    expect(() => hub.startDispatcher()).toThrow(/requires an outbox/);
+  });
+
+  it("stops cleanly when no dispatcher was started", async () => {
+    const hub = createObservabilityHub({ sleep: noSleep });
+    await expect(hub.stop()).resolves.toBeUndefined();
+  });
+
+  it("signs inline deliveries when the subscription has a secret", async () => {
+    const fetcher = vi.fn().mockResolvedValue(okResponse());
+    const hub = createObservabilityHub({
+      sleep: noSleep,
+      fetch: fetcher,
+      webhooks: [{ url: "https://a.test/hook", secret: "whsec_inline" }],
+    });
+
+    await hub.emit(makeEvent("receipt.created"));
+
+    const [, init] = fetcher.mock.calls[0] ?? [];
+    const headers = (init?.headers ?? {}) as Record<string, string>;
+    await expect(
+      verifyWebhookSignature({
+        payload: init?.body as string,
+        header: headers["Tollway-Signature"] ?? "",
+        secret: "whsec_inline",
+      }),
+    ).resolves.toEqual({ valid: true });
+  });
+
+  it("sends no signature header for a subscription without a secret", async () => {
+    const fetcher = vi.fn().mockResolvedValue(okResponse());
+    const hub = createObservabilityHub({
+      sleep: noSleep,
+      fetch: fetcher,
+      webhooks: [{ url: "https://a.test/hook" }],
+    });
+
+    await hub.emit(makeEvent("receipt.created"));
+
+    const [, init] = fetcher.mock.calls[0] ?? [];
+    const headers = (init?.headers ?? {}) as Record<string, string>;
+    expect(Object.keys(headers).map((name) => name.toLowerCase())).not.toContain(
+      "tollway-signature",
+    );
+  });
+
+  it("signs each inline retry with a fresh timestamp over the same body", async () => {
+    vi.useFakeTimers({ toFake: ["Date"] });
+    try {
+      vi.setSystemTime(1_800_000_000_000);
+      const fetcher = vi
+        .fn()
+        .mockResolvedValueOnce(new Response(null, { status: 500 }))
+        .mockResolvedValueOnce(okResponse());
+      const hub = createObservabilityHub({
+        // Each backoff moves the clock on by ten seconds.
+        sleep: async () => {
+          vi.setSystemTime(Date.now() + 10_000);
+        },
+        fetch: fetcher,
+        webhooks: [{ url: "https://a.test/hook", secret: "whsec_inline" }],
+      });
+
+      await hub.emit(makeEvent("receipt.created"));
+
+      expect(fetcher).toHaveBeenCalledTimes(2);
+      const sent = fetcher.mock.calls.map(([, init]) => ({
+        body: init?.body as string,
+        header: ((init?.headers ?? {}) as Record<string, string>)["Tollway-Signature"] ?? "",
+      }));
+      const stamps = sent.map(({ header }) => Number(/^t=(\d+),/.exec(header)?.[1]));
+      expect(stamps[1]).toBe((stamps[0] ?? 0) + 10);
+      expect(sent[1]?.body).toBe(sent[0]?.body);
+      for (const { body, header } of sent.slice(1)) {
+        await expect(
+          verifyWebhookSignature({ payload: body, header, secret: "whsec_inline" }),
+        ).resolves.toEqual({ valid: true });
+      }
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("keeps the secret out of a delivery failure", async () => {
+    const onDeliveryFailure = vi.fn();
+    const hub = createObservabilityHub({
+      sleep: noSleep,
+      fetch: vi.fn().mockResolvedValue(new Response("nope", { status: 500 })),
+      onDeliveryFailure,
+      webhooks: [{ url: "https://a.test/hook", secret: "whsec_never_logged" }],
+    });
+
+    const report = await hub.emit(makeEvent("receipt.created"));
+
+    expect(report.failures).toHaveLength(1);
+    expect(onDeliveryFailure).toHaveBeenCalledTimes(1);
+    const failure = report.failures[0];
+    const exposed = JSON.stringify({
+      failure,
+      message: failure?.error.message,
+      stack: failure?.error.stack,
+      reported: onDeliveryFailure.mock.calls,
+    });
+    expect(exposed).not.toContain("whsec_never_logged");
+  });
+});
+
+describe("observability hub: outbox failure handling", () => {
+  it("reports an outbox write failure in the report instead of rejecting", async () => {
+    const outbox = createMemoryWebhookOutbox();
+    vi.spyOn(outbox, "enqueue").mockRejectedValue(new Error("database is locked"));
+    const onDeliveryFailure = vi.fn();
+    const hub = createObservabilityHub({
+      sleep: noSleep,
+      outbox,
+      onDeliveryFailure,
+      webhooks: [
+        { id: "sub-a", url: "https://a.test/hook" },
+        { id: "sub-b", url: "https://b.test/hook" },
+      ],
+    });
+
+    const report = await hub.emit(makeEvent("receipt.created"));
+
+    expect(report.webhooksDispatched).toBe(0);
+    expect(report.failures.map((failure) => failure.target)).toEqual([
+      { kind: "webhook", url: "https://a.test/hook" },
+      { kind: "webhook", url: "https://b.test/hook" },
+    ]);
+    expect(report.failures[0]?.error.message).toBe("database is locked");
+    expect(report.failures[0]?.attempts).toBe(0);
+    expect(onDeliveryFailure).toHaveBeenCalledTimes(2);
+  });
+
+  it("does not give the outbox the inline retry policy", async () => {
+    // retry is sized for retries inside one emit call. With it inherited, a
+    // receiver that is down for one attempt would dead-letter at once.
+    const outbox = createMemoryWebhookOutbox();
+    const fetcher = vi.fn().mockRejectedValue(new Error("connection refused"));
+    const hub = createObservabilityHub({
+      sleep: noSleep,
+      fetch: fetcher,
+      outbox,
+      retry: { maxAttempts: 1 },
+      webhooks: [{ id: "sub-a", url: "https://a.test/hook" }],
+    });
+
+    await hub.emit(makeEvent("receipt.created"));
+    hub.startDispatcher();
+    await vi.waitFor(() => expect(fetcher).toHaveBeenCalledTimes(1));
+    await hub.stop();
+
+    expect(await outbox.listDeadLetters()).toHaveLength(0);
+  });
+
+  it("refuses an outbox without a request timeout", () => {
+    expect(() =>
+      createObservabilityHub({ outbox: createMemoryWebhookOutbox(), requestTimeoutMs: 0 }),
+    ).toThrow(/requestTimeoutMs/);
+  });
+
+  it("refuses an empty webhook secret, at construction and when added later", () => {
+    expect(() =>
+      createObservabilityHub({ webhooks: [{ url: "https://a.test/hook", secret: "" }] }),
+    ).toThrow(/must not be empty/);
+    const hub = createObservabilityHub();
+    expect(() => hub.addWebhook({ url: "https://a.test/hook", secret: "" })).toThrow(
+      /must not be empty/,
+    );
   });
 });

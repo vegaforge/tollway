@@ -40,6 +40,11 @@ export type ReceiptRow = SignedReceipt;
 export type ReceiptsSnapshot = {
   rows: ReceiptRow[];
   trustedKeys: Record<string, Uint8Array>;
+  /**
+   * The archive's cursor for the next page (#222), or null when there is
+   * none. The stub holds every receipt on one page, so it is always null.
+   */
+  nextCursor: string | null;
 };
 
 /**
@@ -82,6 +87,26 @@ async function buildStub(): Promise<ReceiptsSnapshot> {
         txHash: "ad21ce4f9e1f3b2a8e7c0d1f2a3b4c5d6e7f8091a2b3c4d5e6f70819a2b3c4d5",
       },
       network: "testnet",
+    },
+    {
+      // A v2 receipt (Issue #166): it also binds the offer the payer
+      // accepted (`offerHash`), the HTTP method, and an expiry.
+      id: "rcpt-x402-v2-stripe-02",
+      issuedAt: "2026-06-29T13:57:40.000Z",
+      payer: "GAGENTRESEARCHXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX",
+      payee: "GCSTRIPEXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX",
+      amount: "120000",
+      asset: ISSUER_PREFIX,
+      resource: "/quotes/latest",
+      model: "x402",
+      settlement: {
+        kind: "transaction",
+        txHash: "c4e1a0b2d3f4e5a6b7c8d9e0f1a2b3c4d5e6f7a8b9c0d1e2f3a4b5c6d7e8f9a0",
+      },
+      network: "testnet",
+      offerHash: "Yp2N0cP8dQe3m4L6vK1sT9wR7uX5zA0bC2dE4fG6hI8",
+      method: "GET",
+      expiresAt: "2026-06-30T13:57:40.000Z",
     },
     {
       id: "rcpt-mppcharge-anthropic-01",
@@ -131,5 +156,6 @@ async function buildStub(): Promise<ReceiptsSnapshot> {
   return {
     rows,
     trustedKeys: { [signer.keyId]: signer.publicKey },
+    nextCursor: null,
   };
 }

@@ -148,7 +148,7 @@ describe("ReceiptsView", () => {
     screen.getByTestId("receipt-row-rcpt-channel").click();
 
     const link = await screen.findByTestId("receipt-channel-link");
-    expect(link).toHaveAttribute("href", "/channels#channel-row-ch-openai-03");
+    expect(link).toHaveAttribute("href", "/channels/ch-openai-03");
     expect(link).toHaveTextContent("ch-openai-03");
   });
 
@@ -177,5 +177,34 @@ describe("ReceiptsView", () => {
     // batching of the toggle state update.
     expect(await screen.findByText(/select a row to expand/i)).toBeInTheDocument();
     expect(screen.queryByTestId("receipt-detail-rcpt-toggle")).not.toBeInTheDocument();
+  });
+
+  it("shows the v2 fields of a v2 receipt", async () => {
+    const receipt = await signReceipt(
+      buildReceipt({
+        id: "rcpt-v2",
+        issuedAt: "2026-06-29T12:00:00.000Z",
+        payer: "GPAYER0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZAAAAAAAAAAAA",
+        payee: "GPAYEE0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZAAAAAAAAAAAA",
+        amount: "10000",
+        asset: "USDC:GA5Z",
+        resource: "/quotes/latest",
+        model: "x402",
+        settlement: { kind: "transaction", txHash: "abc123" },
+        network: "testnet",
+        offerHash: "offer-hash-value",
+        method: "POST",
+      }),
+      signer,
+    );
+    useReceiptsMock.mockReturnValue({ status: "ready", rows: [receipt], trustedKeys });
+
+    render(<ReceiptsView />);
+    screen.getByTestId("receipt-row-rcpt-v2").click();
+
+    const detail = await screen.findByTestId("receipt-detail-rcpt-v2");
+    expect(within(detail).getByText("offer-hash-value")).toBeInTheDocument();
+    expect(within(detail).getByText("POST")).toBeInTheDocument();
+    expect(within(detail).getByText("Never")).toBeInTheDocument();
   });
 });
