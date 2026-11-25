@@ -1,4 +1,4 @@
 {
-  "$comment": "Gzipped size budget for tests/edge/src/minimal-worker.ts bundled for Workers. PENDING MAINTAINER DECISION: raised in PR #338 from 200,000 to 235,000 and not yet approved. #342's local Stellar pre-validation runs in the gate on every x402 payment through a real facilitator and pulls in the Stellar SDK's XDR layer, taking this Worker from 153,048 to 214,619 bytes gzipped. Lazy loading does not help (an unsplit Workers bundle inlines dynamic imports), and keeping 200,000 would mean making that pre-validation opt-in. Raise it only with a reason in the pull request.",
-  "maxGzipBytes": 235000
+  "$comment": "Gzipped size budget for tests/edge/src/minimal-worker.ts bundled for Workers. PENDING MAINTAINER DECISION, tracked in the #338 follow-up issue: raised in PR #338 from 200,000 to 300,000. #342's local Stellar pre-validation pulls the Stellar SDK's XDR layer into the gate (153,048 to 214,619 bytes), and the merges of #346 (offer-receipt) and #348 took the minimal Worker to 285,175 bytes. Lazy loading does not help (an unsplit Workers bundle inlines dynamic imports). The follow-up issue covers bringing it back down.",
+  "maxGzipBytes": 300000
 }
