@@ -196,6 +196,13 @@ pnpm --filter @vegaforge/tollway-demo start
 
 If a setting is missing or invalid, the demo lists every problem and exits with code 1. `FACILITATOR_URL` overrides the facilitator. `STELLAR_NETWORK=mainnet` switches to mainnet and then also needs `STELLAR_RPC_URL`.
 
+Run the budget-capped agent demo, which shows a policy budget stop, an anomaly stop, and channel drift being reconciled:
+
+```bash
+MOCK_MODE=true pnpm --filter @vegaforge/tollway-demo start:budget-capped
+```
+
+See [apps/demo/README.md](apps/demo/README.md) for the phases and the policy JSON each one uses.
 The demo also runs named scenarios. With no argument it runs the x402 demo above:
 
 ```bash
