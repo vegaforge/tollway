@@ -49,6 +49,8 @@ challenge, fixes its request, or stops.
 | `handler-not-configured` | 500 | no | | The route accepts a model whose handler is missing, or a route table is not ready. |
 | `model-not-supported` | 501 | no | | The router chose a settlement model this gate does not implement. |
 | `work-failed` | 424 | yes | | Only from `createPaidCall`, such as a paid MCP tool: the paid work failed after the payment was verified, so nothing was settled or cached. The same payment may be sent again. |
+| `channel-refused` | 402 | no | | The MPP channel named in `TOLLWAY-CHANNEL` failed its on-chain checks, or is settling or closed (#173). The message starts with a channel code from [mpp-channels.md](mpp-channels.md). |
+| `channel-rate-limited` | 429 | yes, after `Retry-After` | `Retry-After` | Too many channel registrations, or the fee payer's close budget is spent (#173, #174). |
 
 `GATE_ERRORS` exports this table (status, retry guidance and headers per code)
 and `GATE_ERROR_CODES` lists the codes, so services and clients can read it
@@ -62,6 +64,7 @@ instead of copying it.
 | `facilitator-unavailable` | 1 second | `PaywallDeps.retryAfterSeconds.facilitatorUnavailable` |
 | `settlement-unknown` | the hold, `ambiguousSettlementHoldMs` rounded up to seconds | `PaywallDeps.ambiguousSettlementHoldMs` |
 | `service-policy:*` | the time left in the policy window | the policy's `windowSeconds` |
+| `channel-rate-limited` | the time left in the registration window, or 1 second for closes | `MppChannelOptions.registrationLimit` |
 
 A settlement normally finishes in a few seconds, well inside the lock TTL, so a
 one-second wait for `settlement-in-progress` keeps the agent close behind the

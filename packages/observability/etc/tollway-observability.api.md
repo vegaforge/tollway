@@ -4,6 +4,7 @@
 
 ```ts
 
+import { ReceiptLogStore } from '@vegaforge/tollway-core';
 import { ReceiptVerifier } from '@vegaforge/tollway-core';
 import { SettlementModel } from '@vegaforge/tollway-core';
 import { SignedReceipt } from '@vegaforge/tollway-core';
@@ -117,6 +118,22 @@ export class InvalidMetricError extends TollwayError {
 
 // @public
 export function isWebhookEvent(value: unknown): value is WebhookEvent;
+
+// @public
+export type JsonlReceiptLogRepair = {
+    removedBytes: number;
+};
+
+// @public
+export type JsonlReceiptLogStore = ReceiptLogStore & {
+    readonly path: string;
+    close(): Promise<void>;
+};
+
+// @public
+export type JsonlReceiptLogStoreOptions = {
+    path: string;
+};
 
 // @public
 export type LatencyPercentiles = {
@@ -238,6 +255,9 @@ export type ObservabilityHubOptions = {
 };
 
 // @public
+export function openJsonlReceiptLogStore(options: JsonlReceiptLogStoreOptions): Promise<JsonlReceiptLogStore>;
+
+// @public
 export function parseIsoTimestamp(value: string): number | null;
 
 // @public
@@ -345,6 +365,9 @@ export type ReceiptFilter = {
 
 // @public
 export function renderFeeSponsorMetrics(source: SponsorReadingSource): string;
+
+// @public
+export function repairJsonlReceiptLog(path: string): Promise<JsonlReceiptLogRepair>;
 
 // @public
 export type RetryPolicy = {

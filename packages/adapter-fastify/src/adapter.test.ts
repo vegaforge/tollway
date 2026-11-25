@@ -7,6 +7,7 @@ import {
   createRouteTable,
   decodePaymentRequiredHeader,
   encodePaymentSignatureHeader,
+  type MppChannelHandler,
   type MppChargeHandler,
   PAYMENT_REQUIRED_HEADER,
   PAYMENT_SIGNATURE_HEADER,
@@ -119,8 +120,9 @@ describe("fastifyPaywall", () => {
   });
 
   it("answers the rejection status when the gate rejects the payment", async () => {
-    // Force a rejected outcome by routing to a non-x402 model the gate has
-    // not implemented yet; the gate returns kind="rejected" with status 501.
+    // Force a rejected outcome by routing an x402 payment to mpp-channel,
+    // which only accepts an Authorization: Payment credential; the gate
+    // returns kind="rejected" with status 400.
     const signer = await Ed25519Signer.generate("test-key-reject");
     const gate = createPaywall(config, {
       signer,
@@ -145,10 +147,10 @@ describe("fastifyPaywall", () => {
         headers: { [PAYMENT_SIGNATURE_HEADER]: paymentHeader() },
       });
 
-      expect(response.statusCode).toBe(501);
+      expect(response.statusCode).toBe(400);
       const body = response.json<{ error?: { code: string; message: string }; quote?: number }>();
       expect(body.quote).toBeUndefined();
-      expect(body.error?.code).toBe("model-not-supported");
+      expect(body.error?.code).toBe("payment-malformed");
       expect(body.error?.message).toMatch(/mpp-channel/);
     } finally {
       await app.close();
@@ -367,6 +369,150 @@ describe("fastifyPaywall with a service policy", () => {
       expect(response.headers["retry-after"]).toBe("60");
       expect(response.json()).toEqual({
         error: { code: "service-policy:spend-exceeded", message: "service-policy:spend-exceeded" },
+      });
+    } finally {
+      await app.close();
+    }
+  });
+});
+
+// MPP channel through the adapter: a request naming its channel gets the
+// channel challenge on the 402, a refused channel and a refused voucher come
+// back as 402 rejections, and a valid voucher settles with a receipt.
+const CHANNEL = "CDLZFC3SYJYDZT7K67VZ75HPJVIEUVNIXF47ZG2FB2RMQQVU2HHGCYSC";
+
+/** An mppx-format channel credential, built by hand so the adapter needs no mppx dependency. */
+function channelCredential(amount: string): string {
+  const b64 = (value: unknown) => Buffer.from(JSON.stringify(value)).toString("base64url");
+  const challenge = {
+    id: "chan",
+    realm: "tollway",
+    method: "stellar",
+    intent: "channel",
+    request: b64({ amount: config.amount, channel: CHANNEL }),
+  };
+  return `Payment ${b64({ challenge, payload: { action: "voucher", amount, signature: "ab".repeat(64) } })}`;
+}
+
+async function channelGate() {
+  const signer = await Ed25519Signer.generate("test-key-channel");
+  const handler: MppChannelHandler = {
+    async idempotencyKey({ payment }) {
+      return `${payment.channelId}:${payment.cumulativeAmount}`;
+    },
+    async challenge({ channelId }) {
+      return channelId === CHANNEL
+        ? { ok: true, headers: { "www-authenticate": 'Payment id="chan", intent="channel"' } }
+        : {
+            ok: false,
+            code: "channel-refused",
+            reason: "channel-recipient-mismatch: wrong payout address",
+          };
+    },
+    async verify({ payment }) {
+      return payment.cumulativeAmount === config.amount
+        ? {
+            valid: true,
+            payer: "GFUNDER",
+            nonce: `${payment.channelId}:${payment.cumulativeAmount}`,
+          }
+        : { valid: false, reason: "wrong-increment: the voucher adds 5, the offer costs 10000" };
+    },
+    async settle({ payment }) {
+      return {
+        settled: true,
+        settlement: { kind: "channel-commitment", channelId: payment.channelId, sequence: 1 },
+      };
+    },
+    async reconcile() {
+      return { outcome: "nothing-pending" };
+    },
+  };
+  return createPaywall(
+    { ...config, models: ["x402", "mpp-channel"] },
+    { signer, facilitator: createMockFacilitator(), mppChannelHandler: handler },
+  );
+}
+
+describe("fastifyPaywall with mpp-channel", () => {
+  async function build() {
+    const gate = await channelGate();
+    const app = Fastify();
+    app.get("/quotes/latest", { preHandler: fastifyPaywall(gate) }, async (request) => ({
+      settlement: request[RECEIPT_REQUEST_KEY]?.receipt.settlement,
+    }));
+    await app.ready();
+    return app;
+  }
+
+  it("sends the channel challenge when the request names its channel", async () => {
+    const app = await build();
+    try {
+      const response = await app.inject({
+        method: "GET",
+        url: "/quotes/latest",
+        headers: { "tollway-channel": CHANNEL },
+      });
+      expect(response.statusCode).toBe(402);
+      expect(response.headers["www-authenticate"]).toContain('intent="channel"');
+    } finally {
+      await app.close();
+    }
+  });
+
+  it("refuses a channel that fails its on-chain checks", async () => {
+    const app = await build();
+    try {
+      const response = await app.inject({
+        method: "GET",
+        url: "/quotes/latest",
+        headers: { "tollway-channel": "COTHER" },
+      });
+      expect(response.statusCode).toBe(402);
+      expect(response.json()).toEqual({
+        error: {
+          code: "channel-refused",
+          message: "channel-recipient-mismatch: wrong payout address",
+        },
+      });
+    } finally {
+      await app.close();
+    }
+  });
+
+  it("settles a voucher with a channel-commitment receipt", async () => {
+    const app = await build();
+    try {
+      const response = await app.inject({
+        method: "GET",
+        url: "/quotes/latest",
+        headers: { authorization: channelCredential("10000") },
+      });
+      expect(response.statusCode).toBe(200);
+      expect(response.headers["tollway-receipt"]).toBeTruthy();
+      expect(response.json()).toEqual({
+        settlement: { kind: "channel-commitment", channelId: CHANNEL, sequence: 1 },
+      });
+    } finally {
+      await app.close();
+    }
+  });
+
+  it("answers a refused voucher with 402", async () => {
+    const app = await build();
+    try {
+      const response = await app.inject({
+        method: "GET",
+        url: "/quotes/latest",
+        headers: { authorization: channelCredential("5") },
+      });
+      expect(response.statusCode).toBe(402);
+      expect(response.json()).toEqual({
+        error: {
+          code: "payment-invalid",
+          message: "the payment was refused",
+          upstreamReason: "wrong-increment: the voucher adds 5, the offer costs 10000",
+        },
       });
     } finally {
       await app.close();
