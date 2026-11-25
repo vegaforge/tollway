@@ -32,6 +32,11 @@ export type GateErrorCode =
   | "handler-not-configured"
   /** The router chose a settlement model this gate does not implement. */
   | "model-not-supported"
+  /**
+   * A paid call's work (an MCP tool, say) failed after the payment was
+   * verified, so the payment was not settled and may be sent again (#206).
+   */
+  | "work-failed"
   /** The body is larger than the route's `bindBody.maxBytes` (#164). */
   | "body-too-large"
   /** The route binds the body and does not accept its content type or encoding. */
@@ -81,6 +86,7 @@ export const GATE_ERRORS: Readonly<Record<GateErrorCode, GateErrorSpec>> = {
   "price-unavailable": { status: 500, retrySamePayment: false, headers: [] },
   "handler-not-configured": { status: 500, retrySamePayment: false, headers: [] },
   "model-not-supported": { status: 501, retrySamePayment: false, headers: [] },
+  "work-failed": { status: 424, retrySamePayment: true, headers: [] },
   "body-too-large": { status: 413, retrySamePayment: false, headers: [] },
   "body-not-supported": { status: 415, retrySamePayment: false, headers: [] },
   "body-not-provided": { status: 500, retrySamePayment: false, headers: [] },

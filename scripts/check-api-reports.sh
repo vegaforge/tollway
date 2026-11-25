@@ -35,6 +35,7 @@ PUBLISHABLE=(
   packages/channels
   packages/cli
   packages/client
+  packages/mcp
   packages/core
   packages/observability
   packages/reconcile

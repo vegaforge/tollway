@@ -48,6 +48,7 @@ challenge, fixes its request, or stops.
 | `price-unavailable` | 500 | no | | The route's dynamic price function threw or returned an invalid price. Nothing was charged. |
 | `handler-not-configured` | 500 | no | | The route accepts a model whose handler is missing, or a route table is not ready. |
 | `model-not-supported` | 501 | no | | The router chose a settlement model this gate does not implement. |
+| `work-failed` | 424 | yes | | Only from `createPaidCall`, such as a paid MCP tool: the paid work failed after the payment was verified, so nothing was settled or cached. The same payment may be sent again. |
 
 `GATE_ERRORS` exports this table (status, retry guidance and headers per code)
 and `GATE_ERROR_CODES` lists the codes, so services and clients can read it

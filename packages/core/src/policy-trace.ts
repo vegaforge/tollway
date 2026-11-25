@@ -34,6 +34,9 @@ export const policyRuleIds = [
   "per-model-disabled",
   "min-channel-deposit",
   "budget-daily",
+  "budget-weekly",
+  "budget-monthly",
+  "budget-rolling",
   "budget-total",
   "per-service",
   "per-service-daily",
@@ -87,6 +90,21 @@ const integerString = z.string().regex(/^[0-9]+$/, "must be an integer string");
  */
 export const policyWindowSchema = z.discriminatedUnion("kind", [
   z.strictObject({ kind: z.literal("utc-day"), day: z.iso.date() }),
+  z.strictObject({
+    kind: z.literal("calendar-day"),
+    day: z.iso.date(),
+    timezone: z.string().min(1),
+  }),
+  z.strictObject({
+    kind: z.literal("calendar-week"),
+    weekStart: z.iso.date(),
+    timezone: z.string().min(1),
+  }),
+  z.strictObject({
+    kind: z.literal("calendar-month"),
+    month: z.string().regex(/^[0-9]{4}-[0-9]{2}$/),
+    timezone: z.string().min(1),
+  }),
   z.strictObject({ kind: z.literal("lifetime") }),
   z.strictObject({ kind: z.literal("sliding"), seconds: z.number().int().positive() }),
 ]);

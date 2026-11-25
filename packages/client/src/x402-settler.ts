@@ -26,10 +26,12 @@ import { decodePaymentRequiredHeader, encodePaymentSignatureHeader } from "@x402
 import type { PaymentPayload, PaymentRequired, PaymentRequirements } from "@x402/core/types";
 import type { ClientStellarSigner } from "@x402/stellar";
 import { ExactStellarScheme } from "@x402/stellar/exact/client";
-import type { ClientSettler, SettleRequest } from "./index.js";
+import { type PaidExchange, replayInit } from "./exchange.js";
+import type { ClientSettler, ExchangeSettleRequest, SettleRequest } from "./index.js";
 import { type OfferChecks, passesAllowlists, validateOfferChecks } from "./offer-checks.js";
 import { messageOf, readReceiptHeader } from "./receipt-header.js";
 import { SettlementOutcomeError, type SignedTerms } from "./retry.js";
+import { type AgentSigner, isAgentSigner, requireX402Capability } from "./signer.js";
 
 export { TOLLWAY_RECEIPT_HEADER } from "./receipt-header.js";
 export const PAYMENT_REQUIRED_HEADER = "PAYMENT-REQUIRED";
@@ -37,11 +39,12 @@ export const PAYMENT_SIGNATURE_HEADER = "PAYMENT-SIGNATURE";
 
 export type X402SettlerOptions = {
   /**
-   * Signs the Soroban auth entry. Build it with
-   * `createEd25519Signer("S...", "stellar:testnet")` from @x402/stellar; the
-   * settler never sees the secret.
+   * Signs the Soroban auth entry: an `AgentSigner` with the `x402`
+   * capability (#205), or a bare `ClientStellarSigner` built with
+   * `createEd25519Signer("S...", "stellar:testnet")` from @x402/stellar. The
+   * settler never sees a secret.
    */
-  signer: ClientStellarSigner;
+  signer: AgentSigner | ClientStellarSigner;
   network: StellarNetwork;
   /** Defaults to the global `fetch`. Inject one in tests. */
   fetch?: typeof globalThis.fetch;
@@ -70,7 +73,9 @@ const CONTRACT_ADDRESS = /^C[A-Z2-7]{55}$/;
 /**
  * Creates a `ClientSettler` for x402 on Stellar. For each settlement it
  * requests the resource, reads the 402, signs the payment for the Stellar
- * `exact` option, retries with the payment, and returns the receipt.
+ * `exact` option, retries with the payment, and returns the receipt. Through
+ * `settleExchange` it answers a 402 the caller already received and replays
+ * the caller's own request instead (#201).
  *
  * It only pays what the client already approved: the 402's amount and payee
  * must match the offer the policy engine checked, or nothing is signed.
@@ -81,153 +86,189 @@ export function createX402Settler(options: X402SettlerOptions): ClientSettler {
   const method = options.method ?? "GET";
   if (options.offerChecks) validateOfferChecks(options.offerChecks, options.network);
   const offerChecks = options.offerChecks;
+  // A signer without the x402 capability is refused here, before any request.
+  const stellarSigner = isAgentSigner(options.signer)
+    ? requireX402Capability(options.signer, options.network)
+    : options.signer;
   const scheme = new ExactStellarScheme(
-    options.signer,
+    stellarSigner,
     options.rpcUrl ? { url: options.rpcUrl } : undefined,
   );
 
+  /**
+   * Answers one 402 and sends the signed payment with `send`. `send` makes
+   * the paid request; `exchange` says whether a second 402 should be handed
+   * back to the client as the next challenge.
+   */
+  async function pay(
+    { resource, offer, model, pinned }: SettleRequest,
+    challenge: Response,
+    send: (headers: Record<string, string>) => Promise<Response>,
+    exchange: boolean,
+  ): Promise<PaidExchange> {
+    if (model !== "x402") {
+      throw new TollwayError("payment-failed", `the x402 settler cannot settle model "${model}"`);
+    }
+    if (challenge.status !== 402) {
+      throw new TollwayError(
+        "payment-failed",
+        `expected a 402 challenge from ${resource}, got ${challenge.status}`,
+      );
+    }
+    const paymentRequired = readPaymentRequired(challenge, resource);
+
+    // Options outside the allowlists are never candidates, even when they
+    // come first in the challenge.
+    const requirements = paymentRequired.accepts.find(
+      (option) =>
+        option.scheme === "exact" &&
+        option.network === network &&
+        passesAllowlists(option, offerChecks),
+    );
+    if (!requirements) {
+      throw new TollwayError(
+        "payment-failed",
+        `the 402 from ${resource} has no Stellar exact option for ${network}${offerChecks ? " within the offer-check allowlists" : ""}`,
+      );
+    }
+    assertMatchesOffer(requirements, offer, resource);
+    if (pinned) assertMatchesPinned(requirements, pinned, resource);
+    const signedTerms: SignedTerms = {
+      amount: requirements.amount,
+      asset: requirements.asset,
+      payTo: requirements.payTo,
+    };
+
+    // A client per settlement, so the spend cap belongs to this offer
+    // alone and two concurrent settlements cannot see each other's cap.
+    const client = x402Client.fromConfig({
+      schemes: [{ network, client: scheme }],
+      spendControls: {
+        allowedAssets: [{ network, asset: requirements.asset, maxAmountPerPayment: offer.amount }],
+      },
+    });
+    // The x402Client sees the whole challenge. The first policy drops
+    // every option outside the allowlists (#209); the second keeps only the
+    // option checked against the approved offer above, so what is signed is
+    // exactly what was checked.
+    if (offerChecks) {
+      client.registerPolicy((_version, candidates) =>
+        candidates.filter((option) => passesAllowlists(option, offerChecks)),
+      );
+    }
+    client.registerPolicy((_version, candidates) =>
+      candidates.filter((option) => sameOption(option, requirements)),
+    );
+    let payload: PaymentPayload;
+    try {
+      payload = await client.createPaymentPayload(paymentRequired);
+    } catch (error) {
+      throw new TollwayError(
+        "payment-failed",
+        `could not sign the x402 payment for ${resource}: ${messageOf(error)}`,
+      );
+    }
+
+    const paymentHeader = encodePaymentSignatureHeader(payload);
+
+    /**
+     * Sends the signed payment and classifies the answer. A 409 that the
+     * service marks as in progress returns `resend`, which calls this
+     * again with the identical header: the same payment, never a new one.
+     */
+    const submit = async (): Promise<PaidExchange> => {
+      let paid: Response;
+      try {
+        paid = await send({ [PAYMENT_SIGNATURE_HEADER]: paymentHeader });
+      } catch (networkError) {
+        // The signed request may have reached the service and settled,
+        // with only the answer lost.
+        throw new SettlementOutcomeError({
+          kind: "ambiguous",
+          reason: `the paid request to ${resource} failed after it was sent: ${messageOf(networkError)}`,
+          cause: networkError,
+        });
+      }
+      if (paid.status === 402) {
+        // The service challenged the signed payment again instead of
+        // settling it, typically an expired authorization or a used
+        // nonce. Nothing settled, so the client may sign afresh.
+        throw new SettlementOutcomeError({
+          kind: "retryable-with-fresh-auth",
+          reason: `${resource} answered the signed payment with another 402`,
+          signedTerms,
+          ...(exchange ? { challenge: paid } : {}),
+        });
+      }
+      if (paid.status === 409) {
+        // The gate answers 409 for two cases: this payment is being
+        // settled right now (with Retry-After), or it already settled for
+        // a different offer (without). Only the first may be resent. The
+        // second, and any 409 this client cannot read, may mean the money
+        // moved, so it is never retried. Machine-readable codes are #161.
+        const retryAfterMs = parseRetryAfterMs(paid.headers.get("retry-after"));
+        if (retryAfterMs === undefined) {
+          throw new SettlementOutcomeError({
+            kind: "ambiguous",
+            reason: `${resource} answered the signed payment with 409 and no Retry-After; the payment may already have settled`,
+          });
+        }
+        throw new SettlementOutcomeError({
+          kind: "settlement-in-progress",
+          reason: `${resource} is already settling this payment`,
+          retryAfterMs,
+          // A plain settle hands back the receipt alone; an exchange the
+          // receipt and the paid response, like the first send.
+          resend: exchange ? submit : async () => (await submit()).receipt,
+        });
+      }
+      if (paid.status >= 500) {
+        // A settle failure is 502 today. The transaction may have landed
+        // and only the answer failed.
+        throw new SettlementOutcomeError({
+          kind: "ambiguous",
+          reason: `${resource} answered the signed payment with ${paid.status}`,
+        });
+      }
+      if (!paid.ok) {
+        throw new SettlementOutcomeError({
+          kind: "fatal",
+          reason: `${resource} answered the signed payment with ${paid.status}`,
+        });
+      }
+      return { receipt: readReceiptHeader(paid, resource), response: paid };
+    };
+
+    return submit();
+  }
+
   return {
     // The client requires the receipt's payer to be the account that signed.
-    payer: options.signer.address,
-    async settle({ resource, offer, model, pinned }: SettleRequest): Promise<SignedReceipt> {
-      if (model !== "x402") {
-        throw new TollwayError("payment-failed", `the x402 settler cannot settle model "${model}"`);
-      }
-
-      const challenge = await doFetch(resource, { method });
-      if (challenge.status !== 402) {
+    payer: stellarSigner.address,
+    async settle(request: SettleRequest): Promise<SignedReceipt> {
+      if (request.model !== "x402") {
         throw new TollwayError(
           "payment-failed",
-          `expected a 402 challenge from ${resource}, got ${challenge.status}`,
+          `the x402 settler cannot settle model "${request.model}"`,
         );
       }
-      const paymentRequired = readPaymentRequired(challenge, resource);
-
-      // Options outside the allowlists are never candidates, even when they
-      // come first in the challenge.
-      const requirements = paymentRequired.accepts.find(
-        (option) =>
-          option.scheme === "exact" &&
-          option.network === network &&
-          passesAllowlists(option, offerChecks),
+      const challenge = await doFetch(request.resource, { method });
+      const paid = await pay(
+        request,
+        challenge,
+        (headers) => doFetch(request.resource, { method, headers }),
+        false,
       );
-      if (!requirements) {
-        throw new TollwayError(
-          "payment-failed",
-          `the 402 from ${resource} has no Stellar exact option for ${network}${offerChecks ? " within the offer-check allowlists" : ""}`,
-        );
-      }
-      assertMatchesOffer(requirements, offer, resource);
-      if (pinned) assertMatchesPinned(requirements, pinned, resource);
-      const signedTerms: SignedTerms = {
-        amount: requirements.amount,
-        asset: requirements.asset,
-        payTo: requirements.payTo,
-      };
-
-      // A client per settlement, so the spend cap belongs to this offer
-      // alone and two concurrent settlements cannot see each other's cap.
-      const client = x402Client.fromConfig({
-        schemes: [{ network, client: scheme }],
-        spendControls: {
-          allowedAssets: [
-            { network, asset: requirements.asset, maxAmountPerPayment: offer.amount },
-          ],
-        },
-      });
-      // The x402Client sees the whole challenge. The first policy drops
-      // every option outside the allowlists (#209); the second keeps only the
-      // option checked against the approved offer above, so what is signed is
-      // exactly what was checked.
-      if (offerChecks) {
-        client.registerPolicy((_version, candidates) =>
-          candidates.filter((option) => passesAllowlists(option, offerChecks)),
-        );
-      }
-      client.registerPolicy((_version, candidates) =>
-        candidates.filter((option) => sameOption(option, requirements)),
+      return paid.receipt;
+    },
+    async settleExchange(request: ExchangeSettleRequest): Promise<PaidExchange> {
+      const replay = request.exchange.request;
+      return pay(
+        request,
+        request.exchange.challenge,
+        (headers) => doFetch(replay.url, replayInit(replay, headers)),
+        true,
       );
-      let payload: PaymentPayload;
-      try {
-        payload = await client.createPaymentPayload(paymentRequired);
-      } catch (error) {
-        throw new TollwayError(
-          "payment-failed",
-          `could not sign the x402 payment for ${resource}: ${messageOf(error)}`,
-        );
-      }
-
-      const paymentHeader = encodePaymentSignatureHeader(payload);
-
-      /**
-       * Sends the signed payment and classifies the answer. A 409 that the
-       * service marks as in progress returns `resend`, which calls this
-       * again with the identical header: the same payment, never a new one.
-       */
-      const submit = async (): Promise<SignedReceipt> => {
-        let paid: Response;
-        try {
-          paid = await doFetch(resource, {
-            method,
-            headers: { [PAYMENT_SIGNATURE_HEADER]: paymentHeader },
-          });
-        } catch (networkError) {
-          // The signed request may have reached the service and settled,
-          // with only the answer lost.
-          throw new SettlementOutcomeError({
-            kind: "ambiguous",
-            reason: `the paid request to ${resource} failed after it was sent: ${messageOf(networkError)}`,
-            cause: networkError,
-          });
-        }
-        if (paid.status === 402) {
-          // The service challenged the signed payment again instead of
-          // settling it, typically an expired authorization or a used
-          // nonce. Nothing settled, so the client may sign afresh.
-          throw new SettlementOutcomeError({
-            kind: "retryable-with-fresh-auth",
-            reason: `${resource} answered the signed payment with another 402`,
-            signedTerms,
-          });
-        }
-        if (paid.status === 409) {
-          // The gate answers 409 for two cases: this payment is being
-          // settled right now (with Retry-After), or it already settled for
-          // a different offer (without). Only the first may be resent. The
-          // second, and any 409 this client cannot read, may mean the money
-          // moved, so it is never retried. Machine-readable codes are #161.
-          const retryAfterMs = parseRetryAfterMs(paid.headers.get("retry-after"));
-          if (retryAfterMs === undefined) {
-            throw new SettlementOutcomeError({
-              kind: "ambiguous",
-              reason: `${resource} answered the signed payment with 409 and no Retry-After; the payment may already have settled`,
-            });
-          }
-          throw new SettlementOutcomeError({
-            kind: "settlement-in-progress",
-            reason: `${resource} is already settling this payment`,
-            retryAfterMs,
-            resend: submit,
-          });
-        }
-        if (paid.status >= 500) {
-          // A settle failure is 502 today. The transaction may have landed
-          // and only the answer failed.
-          throw new SettlementOutcomeError({
-            kind: "ambiguous",
-            reason: `${resource} answered the signed payment with ${paid.status}`,
-          });
-        }
-        if (!paid.ok) {
-          throw new SettlementOutcomeError({
-            kind: "fatal",
-            reason: `${resource} answered the signed payment with ${paid.status}`,
-          });
-        }
-        return readReceiptHeader(paid, resource);
-      };
-
-      return submit();
     },
   };
 }

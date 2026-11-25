@@ -17,6 +17,7 @@ import { ModelRouter } from '@vegaforge/tollway-core';
 import { MppChargePayment } from '@vegaforge/tollway-core';
 import { Network } from '@x402/core/types';
 import { PaymentOffer } from '@vegaforge/tollway-core';
+import { PaymentPayload } from '@x402/core/types';
 import { PaymentRequired } from '@x402/core/types';
 import { PaymentRequirements } from '@x402/core/types';
 import { ReceiptSigner } from '@vegaforge/tollway-core';
@@ -169,6 +170,9 @@ export function createMockMppChargeHandler(): MppChargeHandler;
 
 // @public
 export function createMppChargeHandler(options: MppChargeOptions): MppChargeHandler;
+
+// @public
+export function createPaidCall(config: PaidCallConfig, deps: PaidCallDeps): PaidCall;
 
 // @public
 export function createPaywall(config: PaywallConfig, deps: PaywallDeps): Gate;
@@ -392,6 +396,11 @@ export type GateErrorCode =
 | "handler-not-configured"
 /** The router chose a settlement model this gate does not implement. */
 | "model-not-supported"
+/**
+* A paid call's work (an MCP tool, say) failed after the payment was
+* verified, so the payment was not settled and may be sent again (#206).
+*/
+| "work-failed"
 /** The body is larger than the route's `bindBody.maxBytes` (#164). */
 | "body-too-large"
 /** The route binds the body and does not accept its content type or encoding. */
@@ -568,6 +577,40 @@ export type MppChargeVerifyResult = {
 } | {
     valid: false;
     reason: string;
+};
+
+// @public
+export type PaidCall = {
+    readonly offer: PaymentOffer;
+    paymentRequired(error?: string): PaymentRequired;
+    settle(input: PaidCallSettleInput): Promise<GateOutcome>;
+};
+
+// @public
+export type PaidCallConfig = {
+    amount: string;
+    asset: string;
+    payTo: string;
+    network: StellarNetwork;
+    resource: string;
+    models?: SettlementModel[];
+    facilitatorUrl?: string;
+    maxTimeoutSeconds?: number;
+    extra?: Record<string, unknown>;
+    description?: string;
+    mimeType?: string;
+};
+
+// @public
+export type PaidCallDeps = Omit<PaywallDeps, "mppChargeHandler" | "router" | "onPriceError" | "facilitator" | "paymentPrevalidation"> & {
+    facilitator: FacilitatorClient;
+};
+
+// @public
+export type PaidCallSettleInput = {
+    payment: PaymentPayload;
+    method: string;
+    beforeSettle?: () => Promise<boolean>;
 };
 
 // @public
@@ -1074,7 +1117,7 @@ export type X402Terms = {
 
 // Warnings were encountered during analysis:
 //
-// dist/discovery-DstsH7VL.d.ts:504:9 - (ae-forgotten-export) The symbol "StellarSigner" needs to be exported by the entry point index.d.ts
+// dist/discovery-B5HbgwgY.d.ts:509:9 - (ae-forgotten-export) The symbol "StellarSigner" needs to be exported by the entry point index.d.ts
 // dist/index.d.ts:45:9 - (ae-forgotten-export) The symbol "WatchtowerEvent" needs to be exported by the entry point index.d.ts
 // dist/index.d.ts:49:5 - (ae-forgotten-export) The symbol "ChannelState" needs to be exported by the entry point index.d.ts
 // dist/index.d.ts:87:5 - (ae-forgotten-export) The symbol "WatchtowerCursorStore" needs to be exported by the entry point index.d.ts
