@@ -34,7 +34,7 @@ challenge, fixes its request, or stops.
 
 | Code | Status | Retry the same payment | Headers | When |
 | ---- | ------ | ---------------------- | ------- | ---- |
-| `payment-malformed` | 400 | no | | `PAYMENT-SIGNATURE` is not a base64 x402 V2 payload, has another `x402Version`, or an MPP payment arrived in it. |
+| `payment-malformed` | 400 | no | | `PAYMENT-SIGNATURE` is not a base64 x402 V2 payload, has another `x402Version`, or an MPP payment arrived in it. Also a malformed `payment-identifier` extension or id, or a missing id on a route that requires one (#153). |
 | `payment-invalid` | 402 | no | `PAYMENT-REQUIRED` | The payment was refused: by the local pre-validator (#159), by `/verify`, or by the MPP handler. The fresh challenge lets the agent sign again without another unpaid request. |
 | `service-policy:not-allowed` | 403 | no | | The service policy does not serve this payer (allowlist miss or denylist hit; the answer does not say which). |
 | `service-policy:rate-limited` | 429 | yes, after `Retry-After` | `Retry-After` | The payer made too many requests in the current window. |
@@ -49,6 +49,9 @@ challenge, fixes its request, or stops.
 | `handler-not-configured` | 500 | no | | The route accepts a model whose handler is missing, or a route table is not ready. |
 | `model-not-supported` | 501 | no | | The router chose a settlement model this gate does not implement. |
 | `work-failed` | 424 | yes | | Only from `createPaidCall`, such as a paid MCP tool: the paid work failed after the payment was verified, so nothing was settled or cached. The same payment may be sent again. |
+| `payment-not-settled` | 503 | yes, after `Retry-After` | `Retry-After` | Two-phase settlement (#152): the payment was verified but not settled, because the route failed or the settlement lock lapsed while it ran. A request that waited on that payment gets this; the payment is still unspent. |
+| `handler-timeout` | 504 | no | | Two-phase settlement: the route ran longer than the payment's validity window (`maxTimeoutSeconds`), so the payment was not settled. |
+| `response-too-large` | 500 | no | | Two-phase settlement: the route's response was larger than `twoPhase.maxResponseBytes`, so it was discarded and the payment was not settled. |
 | `channel-refused` | 402 | no | | The MPP channel named in `TOLLWAY-CHANNEL` failed its on-chain checks, or is settling or closed (#173). The message starts with a channel code from [mpp-channels.md](mpp-channels.md). |
 | `channel-rate-limited` | 429 | yes, after `Retry-After` | `Retry-After` | Too many channel registrations, or the fee payer's close budget is spent (#173, #174). |
 

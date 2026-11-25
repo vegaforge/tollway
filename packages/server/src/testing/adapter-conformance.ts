@@ -10,18 +10,23 @@
 import assert from "node:assert/strict";
 import { Ed25519Signer, type SignedReceipt } from "@vegaforge/tollway-core";
 import {
+  createInMemorySettlementCache,
   createMockFacilitator,
   createPaywall,
   encodePaymentSignatureHeader,
+  type FacilitatorClient,
   GATE_ERROR_CODES,
   GATE_ERRORS,
   type Gate,
+  type GateErrorCode,
   type GateRejection,
   PAYMENT_REQUIRED_HEADER,
   PAYMENT_RESPONSE_HEADER,
   PAYMENT_SIGNATURE_HEADER,
   type PaywallConfig,
+  type PaywallGate,
   renderGateRejection,
+  type SettlementCache,
   TOLLWAY_RECEIPT_HEADER,
 } from "../index.js";
 
@@ -45,6 +50,14 @@ export type ConformanceApp = {
   close(): Promise<void>;
 };
 
+/**
+ * What the route behind a two-phase adapter does (#152): answer `status`
+ * with a plain-text `body` after `delayMs`, or throw.
+ */
+export type ConformanceRoute =
+  | { status: number; body: string; delayMs?: number }
+  | { throws: true };
+
 /** What an adapter driver must supply. */
 export type AdapterDriver = {
   create(options: {
@@ -52,6 +65,12 @@ export type AdapterDriver = {
     /** Called once by the paid handler with the receipt the adapter exposed. */
     onPaid(receipt: SignedReceipt): void;
   }): Promise<ConformanceApp>;
+  /**
+   * Mounts the adapter with `{ settlement: "after-handler" }` in front of a
+   * route that does what `route` says. A thrown route error must reach the
+   * client the way the framework answers one by default (a 500).
+   */
+  createAfterHandler(options: { gate: Gate; route: ConformanceRoute }): Promise<ConformanceApp>;
 };
 
 /** The test-runner hooks, injected so this package needs no test dependency. */
@@ -117,6 +136,83 @@ function paymentHeader(transaction = "conformance-payment"): string {
 async function realGate(): Promise<Gate> {
   const signer = await Ed25519Signer.generate("adapter-conformance");
   return createPaywall(config, { signer, facilitator: createMockFacilitator() });
+}
+
+/**
+ * A two-phase gate over the mock facilitator that counts `/settle` calls.
+ * `refuse` makes every settlement fail; `cache` replaces the default one.
+ */
+async function countingGate(
+  options: {
+    refuse?: boolean;
+    maxTimeoutSeconds?: number;
+    cache?: SettlementCache;
+    settlementLockTtlMs?: number;
+  } = {},
+): Promise<{ gate: PaywallGate; settles(): number }> {
+  const signer = await Ed25519Signer.generate("adapter-conformance-two-phase");
+  const inner = createMockFacilitator();
+  let settles = 0;
+  const facilitator: FacilitatorClient = {
+    ...inner,
+    async settle(input) {
+      settles += 1;
+      return options.refuse
+        ? { settled: false, reason: "refused by the facilitator" }
+        : inner.settle(input);
+    },
+  };
+  const gate = createPaywall(
+    {
+      ...config,
+      ...(options.maxTimeoutSeconds === undefined
+        ? {}
+        : { maxTimeoutSeconds: options.maxTimeoutSeconds }),
+      twoPhase: { maxResponseBytes: 64 },
+    },
+    {
+      signer,
+      facilitator,
+      cache: options.cache ?? createInMemorySettlementCache(),
+      ...(options.settlementLockTtlMs === undefined
+        ? {}
+        : { settlementLockTtlMs: options.settlementLockTtlMs }),
+    },
+  );
+  return { gate, settles: () => settles };
+}
+
+/** A lock store whose every renewal reports the lock gone, as after a takeover. */
+function lockLosingCache(): SettlementCache {
+  const inner = createInMemorySettlementCache();
+  const tokens = new Map<string, string>();
+  return {
+    ...inner,
+    async acquire(key) {
+      const token = crypto.randomUUID();
+      tokens.set(key, token);
+      return { token };
+    },
+    async renew() {
+      return false;
+    },
+    async release(key, lock) {
+      return tokens.get(key) === lock.token;
+    },
+  };
+}
+
+/** Asserts a response is the rendered rejection for `code`, with no payment headers. */
+async function assertRendered(response: ConformanceResponse, code: GateErrorCode): Promise<void> {
+  const spec = GATE_ERRORS[code];
+  assert.equal(response.status, spec.status, `status for ${code}`);
+  const body = (await jsonBody(response)) as { error?: { code?: string } };
+  assert.equal(body.error?.code, code);
+  for (const header of spec.headers) {
+    assert.ok(response.header(header), `${code} must carry ${header}`);
+  }
+  assert.equal(response.header(PAYMENT_RESPONSE_HEADER) ?? null, null);
+  assert.equal(response.header(TOLLWAY_RECEIPT_HEADER) ?? null, null);
 }
 
 async function jsonBody(response: ConformanceResponse): Promise<Record<string, unknown>> {
@@ -251,6 +347,146 @@ export function runAdapterConformance(driver: AdapterDriver, runner: Conformance
       const app = await driver.create({ gate, onPaid: () => {} });
       try {
         const response = await app.send({ path: PATH });
+        assert.equal(response.status, 502);
+        const body = await response.text();
+        assert.ok(!body.includes(secret), `the internal error leaked: ${body}`);
+        assert.deepEqual(JSON.parse(body), GATE_UNAVAILABLE_BODY);
+      } finally {
+        await app.close();
+      }
+    });
+  });
+
+  describe("adapter conformance: settlement after the handler (#152)", () => {
+    const paid = (transaction: string): ConformanceRequest => ({
+      path: PATH,
+      headers: { [PAYMENT_SIGNATURE_HEADER]: paymentHeader(transaction) },
+    });
+
+    it("settles after a successful route and sends its body with the payment headers", async () => {
+      const { gate, settles } = await countingGate();
+      const app = await driver.createAfterHandler({ gate, route: { status: 200, body: "ok" } });
+      try {
+        const response = await app.send(paid("two-phase-ok"));
+        assert.equal(response.status, 200);
+        assert.equal(await response.text(), "ok");
+        assert.ok(response.header(PAYMENT_RESPONSE_HEADER), "PAYMENT-RESPONSE is missing");
+        assert.ok(response.header(TOLLWAY_RECEIPT_HEADER), "the receipt header is missing");
+        assert.equal(settles(), 1);
+      } finally {
+        await app.close();
+      }
+    });
+
+    it("passes a failing route's 500 through and never settles", async () => {
+      const { gate, settles } = await countingGate();
+      const app = await driver.createAfterHandler({ gate, route: { status: 500, body: "down" } });
+      try {
+        const response = await app.send(paid("two-phase-500"));
+        assert.equal(response.status, 500);
+        assert.equal(await response.text(), "down");
+        assert.equal(response.header(PAYMENT_RESPONSE_HEADER) ?? null, null);
+        assert.equal(settles(), 0);
+      } finally {
+        await app.close();
+      }
+    });
+
+    it("never settles when the route throws", async () => {
+      const { gate, settles } = await countingGate();
+      const app = await driver.createAfterHandler({ gate, route: { throws: true } });
+      try {
+        const response = await app.send(paid("two-phase-throw"));
+        assert.equal(response.status, 500);
+        assert.equal(response.header(PAYMENT_RESPONSE_HEADER) ?? null, null);
+        assert.equal(settles(), 0);
+      } finally {
+        await app.close();
+      }
+    });
+
+    it("answers a refused settlement with the rendered settlement-failed", async () => {
+      const { gate, settles } = await countingGate({ refuse: true });
+      const app = await driver.createAfterHandler({ gate, route: { status: 200, body: "ok" } });
+      try {
+        await assertRendered(await app.send(paid("two-phase-refused")), "settlement-failed");
+        assert.equal(settles(), 1);
+      } finally {
+        await app.close();
+      }
+    });
+
+    it("answers an oversized response with the rendered response-too-large", async () => {
+      const { gate, settles } = await countingGate();
+      const app = await driver.createAfterHandler({
+        gate,
+        route: { status: 200, body: "x".repeat(65) },
+      });
+      try {
+        await assertRendered(await app.send(paid("two-phase-large")), "response-too-large");
+        assert.equal(settles(), 0);
+      } finally {
+        await app.close();
+      }
+    });
+
+    it("answers a route that outlives the validity window with the rendered handler-timeout", async () => {
+      const { gate, settles } = await countingGate({ maxTimeoutSeconds: 1 });
+      const app = await driver.createAfterHandler({
+        gate,
+        route: { status: 200, body: "late", delayMs: 1_100 },
+      });
+      try {
+        const request = paid("two-phase-slow");
+        // The payment must name the paywall's own validity window.
+        request.headers = {
+          [PAYMENT_SIGNATURE_HEADER]: encodePaymentSignatureHeader({
+            x402Version: 2,
+            accepted: {
+              scheme: "exact",
+              network: "stellar:testnet",
+              asset: config.asset,
+              amount: config.amount,
+              payTo: config.payTo,
+              maxTimeoutSeconds: 1,
+              extra: {},
+            },
+            payload: { transaction: "two-phase-slow" },
+          }),
+        };
+        await assertRendered(await app.send(request), "handler-timeout");
+        assert.equal(settles(), 0);
+      } finally {
+        await app.close();
+      }
+    });
+
+    it("answers a lock lost during the route with the rendered payment-not-settled", async () => {
+      const { gate, settles } = await countingGate({
+        cache: lockLosingCache(),
+        settlementLockTtlMs: 30,
+      });
+      const app = await driver.createAfterHandler({
+        gate,
+        route: { status: 200, body: "ok", delayMs: 80 },
+      });
+      try {
+        await assertRendered(await app.send(paid("two-phase-lock")), "payment-not-settled");
+        assert.equal(settles(), 0);
+      } finally {
+        await app.close();
+      }
+    });
+
+    it("answers a thrown authorize with 502 and no internal message", async () => {
+      const secret = "internal facilitator token: def456";
+      const fail = async (): Promise<never> => {
+        throw new Error(secret);
+      };
+      const gate: PaywallGate = Object.assign(fail, { authorize: fail });
+      const app = await driver.createAfterHandler({ gate, route: { status: 200, body: "ok" } });
+      try {
+        const response = await app.send(paid("two-phase-gate-throws"));
         assert.equal(response.status, 502);
         const body = await response.text();
         assert.ok(!body.includes(secret), `the internal error leaked: ${body}`);

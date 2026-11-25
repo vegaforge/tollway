@@ -24,7 +24,12 @@ import type {
   PaymentRequirements,
   PaymentPayload as X402Payload,
 } from "@x402/core/types";
-import type { SettlementCache, SettlementEntry, SettlementLock } from "./cache.js";
+import type {
+  LockingSettlementCache,
+  SettlementCache,
+  SettlementEntry,
+  SettlementLock,
+} from "./cache.js";
 import {
   checkDiscoveryDeclaration,
   type DiscoveryDeclaration,
@@ -70,6 +75,12 @@ import {
   type OfferReceiptIssuer,
   type OfferReceiptOptions,
 } from "./offer-receipt.js";
+import {
+  paymentIdentifierExtensions,
+  paymentIdentifierKey,
+  readPaymentIdentifier,
+} from "./payment-identifier.js";
+
 import {
   matchAcceptedOption,
   type ResolvedPaymentOption,
@@ -201,6 +212,37 @@ type PaywallCommon = {
    * See `OfferReceiptOptions` and docs/receipt-format.md.
    */
   offerReceipt?: boolean | OfferReceiptOptions;
+  /**
+   * The x402 `payment-identifier` extension (#153). Every 402 declares it.
+   * When a payment carries an id, the gate also keys the settlement on that
+   * id scoped to the verified payer, so a client that re-signs the same
+   * payment as a new envelope gets its first receipt back instead of paying
+   * twice. With `required: true` a payment without an id is rejected with
+   * 400. Defaults to `{ required: false }`.
+   */
+  paymentIdentifier?: { required?: boolean };
+  /**
+   * Two-phase settlement (#152), used when an adapter runs with
+   * `settlement: "after-handler"` (or a caller uses `gate.authorize`): the
+   * payment is verified and locked, the route handler runs with its response
+   * held, and the payment settles only if the handler succeeded.
+   */
+  twoPhase?: TwoPhaseConfig;
+};
+
+/** How two-phase settlement judges and holds a handler's response. */
+export type TwoPhaseConfig = {
+  /**
+   * True when a response status means the handler failed, so the payment is
+   * abandoned instead of settled. Defaults to any 5xx.
+   */
+  isFailureStatus?: (status: number) => boolean;
+  /**
+   * Largest response body held while the payment settles, in bytes. A
+   * larger (or streamed past this) response abandons the payment and the
+   * client gets a 500 `response-too-large` instead. Defaults to 1 MiB.
+   */
+  maxResponseBytes?: number;
 };
 
 /** A paywall with one payment option, set with the top-level fields. */
@@ -322,6 +364,55 @@ export type PrevalidationRejection = {
 
 /** A payment gate for one paid resource, built by {@link createPaywall}. */
 export type Gate = (request: TollwayRequest) => Promise<GateOutcome>;
+
+/** Why a two-phase payment was let go without settling. */
+export type AbandonReason =
+  | "handler-threw"
+  | "handler-failed"
+  | "response-too-large"
+  | "client-closed";
+
+/** What `settle()` resolves to: the receipt, or why the payment did not settle. */
+export type SettleOutcome = Extract<GateOutcome, { kind: "settled" | "rejected" }>;
+
+/**
+ * A verified payment, locked against duplicates, that has not settled. The
+ * caller runs the route handler with its response held, then calls exactly
+ * one of `settle()` or `abandon()`. See docs/two-phase-settlement.md.
+ */
+export type AuthorizedPayment = {
+  kind: "authorized";
+  /** Largest response body the caller may hold before abandoning, in bytes. */
+  maxResponseBytes: number;
+  /** True when the handler's status means it failed; then call `abandon`. */
+  isFailure(status: number): boolean;
+  /**
+   * Settles the payment. Resolves to the settled outcome, whose headers go on
+   * the held response, or to a rejection: the facilitator refused, the
+   * handler outlived the payment's validity window, or the settlement lock
+   * was lost. On a rejection discard the held response and send the
+   * rejection instead. Throws a TypeError when called a second time or after
+   * `abandon()`.
+   */
+  settle(): Promise<SettleOutcome>;
+  /**
+   * Lets the payment go without settling and releases its lock. Idempotent,
+   * and a no-op after `settle()`: a settlement cannot be undone.
+   */
+  abandon(reason: AbandonReason): Promise<void>;
+};
+
+/**
+ * What `gate.authorize` decided. A replay of a payment that already settled
+ * comes back as `settled`, as from the single-shot gate: the handler runs,
+ * and nothing settles a second time.
+ */
+export type AuthorizeOutcome = GateOutcome | AuthorizedPayment;
+
+/** A gate that can also settle after the route handler (#152). */
+export type PaywallGate = Gate & {
+  authorize(request: TollwayRequest): Promise<AuthorizeOutcome>;
+};
 
 /**
  * The one payment measurement the gate reports to an observer. Structurally
@@ -807,6 +898,9 @@ type SettlementContext = {
  */
 const DEFAULT_SETTLEMENT_LOCK_TTL_MS = 30_000;
 
+/** Largest response a two-phase caller holds when the config sets none. */
+const DEFAULT_MAX_RESPONSE_BYTES = 1_048_576;
+
 /** Deadline for one facilitator call when the caller sets none. */
 const DEFAULT_FACILITATOR_TIMEOUT_MS = 15_000;
 
@@ -1080,14 +1174,22 @@ async function readArchive(
  * is returned for `cacheError` and every one goes to `onCacheError`.
  */
 async function recordSettlement(
-  key: string,
+  keys: readonly string[],
   entry: SettlementEntry,
   context: SettlementContext,
 ): Promise<Error | undefined> {
+  const key = primaryKey(keys);
+  const { cache, archive } = context;
   let firstError: Error | undefined;
   for (const [store, write] of [
-    ["settlement cache", context.cache && (() => context.cache?.set(key, entry))],
-    ["receipt archive", context.archive && (() => context.archive?.put(key, entry))],
+    ["settlement cache", cache && (() => recordEntry(cache, keys, entry))],
+    [
+      "receipt archive",
+      archive &&
+        (async () => {
+          for (const archived of keys) await archive.put(archived, entry);
+        }),
+    ],
   ] as const) {
     if (!write) continue;
     try {
@@ -1101,6 +1203,78 @@ async function recordSettlement(
   return firstError;
 }
 
+/** The two-phase caller's decision: settle, or stop with this rejection. */
+type PhaseDecision = { settle: true } | { settle: false; outcome: RejectedOutcome };
+
+/**
+ * One request's two-phase handshake. The settlement path calls `ready()` once
+ * the payment is verified, admitted and locked, which hands the payment to
+ * the caller and starts the handler's deadline, and then waits for
+ * `decision`.
+ */
+type SettlementPhase = {
+  ready(validityMs: number): void;
+  decision: Promise<PhaseDecision>;
+};
+
+/** A two-phase request's handshake and the payment's validity window. */
+type TwoPhaseStep = { phase: SettlementPhase; validityMs: number };
+
+/**
+ * A two-phase payment that was not settled. The payment is still unspent,
+ * so a duplicate that waited on it is told to send it again.
+ */
+function notSettled(reason: AbandonReason | "lock-lost", detail: string): RejectedOutcome {
+  return gateRejection("payment-not-settled", `${reason}: ${detail}`, {
+    headers: { "retry-after": "1" },
+  });
+}
+
+const ABANDONED_DETAIL: Record<AbandonReason, string> = {
+  "handler-threw": "the route handler threw, so the payment was not settled",
+  "handler-failed":
+    "the route handler answered with a failure status, so the payment was not settled",
+  "response-too-large":
+    "the route's response was larger than the gate holds, so the payment was not settled",
+  "client-closed":
+    "the client went away before the response was ready, so the payment was not settled",
+};
+
+/**
+ * The handler outlived the payment's validity window. Settling now would
+ * likely fail on chain, and settling late is what the window forbids.
+ */
+function handlerTimeout(validityMs: number): RejectedOutcome {
+  return gateRejection(
+    "handler-timeout",
+    `the route handler ran longer than the payment's ${Math.round(validityMs / 1000)}s validity window, so the payment was not settled`,
+  );
+}
+
+/**
+ * Hands the payment to a two-phase caller and waits for its decision. Returns
+ * the rejection to answer with when the payment must not settle, or
+ * undefined to settle. A lock that lapsed while the handler ran means
+ * another process may already settle this payment, so it is never settled
+ * here.
+ */
+async function awaitPhase(
+  twoPhase: TwoPhaseStep | undefined,
+  keeper: LockKeeper | undefined,
+): Promise<RejectedOutcome | undefined> {
+  if (!twoPhase) return undefined;
+  twoPhase.phase.ready(twoPhase.validityMs);
+  const decision = await twoPhase.phase.decision;
+  if (!decision.settle) return decision.outcome;
+  if (keeper?.lost()) {
+    return notSettled(
+      "lock-lost",
+      "the settlement lock lapsed while the route handler ran, so the payment was not settled",
+    );
+  }
+  return undefined;
+}
+
 /** What the request-level code hands the settlement path besides the payment. */
 type SettlementSteps = {
   /** The headers of a fresh 402, for a refused payment to carry. */
@@ -1109,6 +1283,13 @@ type SettlementSteps = {
   replayOnly?: () => Promise<GateOutcome>;
   /** Local checks before `/verify`: a rejection, or undefined to go on. */
   prevalidate?: () => Promise<RejectedOutcome | undefined>;
+  /**
+   * The client's x402 payment identifier (#153), already validated. Looked
+   * up only after `/verify`, scoped to the verified payer.
+   */
+  paymentId?: string;
+  /** Set for `gate.authorize`: settle only after the caller decides (#152). */
+  twoPhase?: TwoPhaseStep;
   /** The paid work, run just before `/settle`; see {@link BeforeSettle}. */
   beforeSettle?: BeforeSettle;
   /** Told the outcome of the attempt this request owns, for the observer (#106). */
@@ -1124,7 +1305,15 @@ async function settleWithHandler<TPayment>(
   context: SettlementContext,
   steps: SettlementSteps,
 ): Promise<GateOutcome> {
-  const { freshChallengeHeaders, replayOnly, prevalidate, beforeSettle, report } = steps;
+  const {
+    freshChallengeHeaders,
+    replayOnly,
+    prevalidate,
+    beforeSettle,
+    report,
+    paymentId,
+    twoPhase,
+  } = steps;
   // A payment that already settled is answered from the cache before it is
   // verified again: on chain its authorization nonce is spent, so a second
   // verify fails and the retry would get a 402 instead of its receipt (#284).
@@ -1213,15 +1402,23 @@ async function settleWithHandler<TPayment>(
   }
 
   // The model is part of the key because two models can derive the same
-  // nonce from the same header value.
+  // nonce from the same header value. A payment identifier adds a second key
+  // (#153), scoped to the verified payer: a re-signed envelope has a new
+  // digest but the same id, and both keys lead to the same settlement.
   const key = `${model}:${verification.nonce}`;
+  const keys =
+    paymentId === undefined
+      ? [key]
+      : [key, paymentIdentifierKey(model, verification.payer, paymentId)];
 
   // A request that arrives while the same payment is being settled waits for
   // that settlement instead of starting a second one. The map is read and
   // written with no await in between, so two requests cannot both miss it.
-  const pending = context.inFlight.get(key);
-  if (pending) {
-    return toOutcome(await awaitPending(pending), offer, model, method, true, context);
+  for (const candidate of keys) {
+    const pending = context.inFlight.get(candidate);
+    if (pending) {
+      return toOutcome(await awaitPending(pending), offer, model, method, true, context);
+    }
   }
 
   // The in-flight slot is claimed before anything awaits, so a second copy
@@ -1235,11 +1432,12 @@ async function settleWithHandler<TPayment>(
     method,
     handler,
     verification,
-    key,
+    keys,
     context,
+    twoPhase,
     beforeSettle,
   );
-  context.inFlight.set(key, attempt);
+  for (const claimed of keys) context.inFlight.set(claimed, attempt);
   // While the outcome of /settle is unknown the slot stays taken, so every
   // retry in this process shares the held attempt instead of settling again.
   let hold: SettlementHold | undefined;
@@ -1260,7 +1458,9 @@ async function settleWithHandler<TPayment>(
     throw unwrapFailure(error);
   } finally {
     const clear = (): void => {
-      if (context.inFlight.get(key) === attempt) context.inFlight.delete(key);
+      for (const claimed of keys) {
+        if (context.inFlight.get(claimed) === attempt) context.inFlight.delete(claimed);
+      }
     };
     if (hold) {
       void hold.done.then(clear);
@@ -1283,13 +1483,25 @@ async function admitAndSettle<TPayment>(
   method: string,
   handler: Handler<TPayment>,
   verification: { payer: string; nonce: string },
-  key: string,
+  keys: readonly string[],
   context: SettlementContext,
+  twoPhase?: TwoPhaseStep,
   beforeSettle?: BeforeSettle,
 ): Promise<SettlementResult> {
   const servicePolicy = context.servicePolicy;
   const settle = (): Promise<SettlementResult> =>
-    settleOnce(payment, offer, model, method, handler, verification, key, context, beforeSettle);
+    settleOnce(
+      payment,
+      offer,
+      model,
+      method,
+      handler,
+      verification,
+      keys,
+      context,
+      twoPhase,
+      beforeSettle,
+    );
   if (!servicePolicy) {
     return settle();
   }
@@ -1417,11 +1629,13 @@ async function settleOnce<TPayment>(
   method: string,
   handler: Handler<TPayment>,
   verification: { payer: string; nonce: string },
-  key: string,
+  keys: readonly string[],
   context: SettlementContext,
+  twoPhase?: TwoPhaseStep,
   beforeSettle?: BeforeSettle,
 ): Promise<SettlementResult> {
   const { cache } = context;
+  const key = primaryKey(keys);
   const record = (): Promise<SettlementResult> =>
     settleAndRecord(
       payment,
@@ -1430,43 +1644,40 @@ async function settleOnce<TPayment>(
       method,
       handler,
       verification,
-      key,
+      keys,
       context,
       beforeSettle,
     );
 
-  const cached = await cache?.get(key);
+  const cached = await settledEntry(keys, context);
   if (cached) {
-    return { ok: true, receipt: cached.receipt, method: cached.method, replayed: true };
+    return replayFor(cached, verification.payer);
   }
 
   if (!cache?.acquire || !cache.release || !cache.renew) {
+    const stop = await awaitPhase(twoPhase, undefined);
+    if (stop) return { ok: false, outcome: stop };
     return record();
   }
 
-  const lock = await cache.acquire(key, context.lockTtlMs);
-  if (!lock) {
+  const held = await acquireAll(cache as LockingSettlementCache, keys, context.lockTtlMs);
+  if (!held) {
     return { ok: false, outcome: context.settlementInProgress };
   }
-  const release = (): Promise<boolean> => cache.release?.(key, lock) ?? Promise.resolve(false);
-
-  // A slow facilitator can outlive the lock TTL, and an expired lock lets a
-  // second process settle the same payment. Renew it while we work.
-  const keeper = keepLockAlive(cache.renew.bind(cache), key, lock, context.lockTtlMs);
+  const { keeper, release } = held;
 
   let result: SettlementResult;
   try {
     // Another process may have settled and released between our miss and
     // our lock, so look again now that we hold it.
-    const settledElsewhere = await cache.get(key);
-    result = settledElsewhere
-      ? {
-          ok: true,
-          receipt: settledElsewhere.receipt,
-          method: settledElsewhere.method,
-          replayed: true,
-        }
-      : await record();
+    const settledElsewhere = await settledEntry(keys, context);
+    if (settledElsewhere) {
+      result = replayFor(settledElsewhere, verification.payer);
+    } else {
+      // Two-phase: the lock is held and renewed while the route handler runs.
+      const stop = await awaitPhase(twoPhase, keeper);
+      result = stop ? { ok: false, outcome: stop } : await record();
+    }
   } catch (error) {
     if (error instanceof AmbiguousSettlementFailure) {
       holdLock(error.hold, keeper, release, key, context);
@@ -1506,6 +1717,115 @@ async function settleOnce<TPayment>(
     return { ...result, lockLost: true, cacheError: result.cacheError ?? lostError };
   }
   return result;
+}
+
+/** The key errors are reported under: the envelope digest, which every payment has. */
+function primaryKey(keys: readonly string[]): string {
+  const [first] = keys;
+  if (first === undefined) throw new TypeError("a settlement needs at least one key");
+  return first;
+}
+
+/**
+ * The settlement already recorded for this payment, found after `/verify`.
+ * Every key is read from the cache. A payment-identifier key is also read
+ * from the archive, because a re-signed envelope's new digest was never
+ * looked up there before `/verify`; the digest key already was.
+ */
+async function settledEntry(
+  keys: readonly string[],
+  context: SettlementContext,
+): Promise<SettlementEntry | undefined> {
+  for (const key of keys) {
+    const entry = await context.cache?.get(key);
+    if (entry) return entry;
+  }
+  for (const key of keys.slice(1)) {
+    const entry = await readArchive(key, context);
+    if (entry) return entry;
+  }
+  return undefined;
+}
+
+/**
+ * A recorded settlement found after `/verify`. Every key embeds the payer
+ * (the digest through the signed envelope, a payment id explicitly), so a
+ * receipt naming anyone else means the store returned an entry this payment
+ * does not own. It is refused, never replayed.
+ */
+function replayFor(entry: SettlementEntry, payer: string): SettlementResult {
+  if (entry.receipt.receipt.payer !== payer) {
+    return { ok: false, outcome: OFFER_MISMATCH };
+  }
+  return { ok: true, receipt: entry.receipt, method: entry.method, replayed: true };
+}
+
+/**
+ * Writes the entry under every key, atomically when the cache can. A single
+ * key is a plain `set`, as it was before payment identifiers.
+ */
+async function recordEntry(
+  cache: SettlementCache,
+  keys: readonly string[],
+  entry: SettlementEntry,
+): Promise<void> {
+  if (keys.length > 1 && cache.setMany) {
+    await cache.setMany(keys, entry);
+    return;
+  }
+  for (const key of keys) await cache.set(key, entry);
+}
+
+/**
+ * Takes the settlement lock on every key, each renewed while held. If any
+ * key is already held, the ones taken are released and the payment is in
+ * progress elsewhere. The returned keeper and release cover all of them.
+ */
+async function acquireAll(
+  cache: LockingSettlementCache,
+  keys: readonly string[],
+  ttlMs: number,
+): Promise<{ keeper: LockKeeper; release: () => Promise<boolean> } | false> {
+  const held: Array<{ key: string; lock: SettlementLock }> = [];
+  const releaseHeld = async (): Promise<boolean> => {
+    let all = true;
+    let failure: unknown;
+    let failed = false;
+    for (const { key, lock } of held) {
+      try {
+        if (!(await cache.release(key, lock))) all = false;
+      } catch (releaseFailure) {
+        // Keep releasing the others, then report the first failure.
+        if (!failed) failure = releaseFailure;
+        failed = true;
+      }
+    }
+    if (failed) throw failure;
+    return all;
+  };
+
+  for (const key of keys) {
+    const lock = await cache.acquire(key, ttlMs);
+    if (!lock) {
+      await releaseHeld();
+      return false;
+    }
+    held.push({ key, lock });
+  }
+
+  const keepers = held.map(({ key, lock }) =>
+    keepLockAlive(cache.renew.bind(cache), key, lock, ttlMs),
+  );
+  return {
+    keeper: {
+      stop: () => {
+        for (const keeper of keepers) keeper.stop();
+      },
+      lost: () => keepers.some((keeper) => keeper.lost()),
+      error: () => keepers.find((keeper) => keeper.error())?.error(),
+    },
+    release: releaseHeld,
+  };
 }
 
 /**
@@ -1623,7 +1943,7 @@ async function settleAndRecord<TPayment>(
   method: string,
   handler: Handler<TPayment>,
   verification: { payer: string; nonce: string },
-  key: string,
+  keys: readonly string[],
   context: SettlementContext,
   beforeSettle?: BeforeSettle,
 ): Promise<SettlementResult> {
@@ -1648,7 +1968,7 @@ async function settleAndRecord<TPayment>(
       "settle",
       context.facilitatorTimeoutMs,
       (late) => {
-        void settleLateAnswer(late, hold, offer, model, method, verification, key, context);
+        void settleLateAnswer(late, hold, offer, model, method, verification, keys, context);
       },
     );
   } catch (error) {
@@ -1710,7 +2030,7 @@ async function settleAndRecord<TPayment>(
 
   // The payment has settled, so a failed write must not cost the payer the
   // receipt. The error goes on the outcome and to onCacheError instead.
-  const cacheError = await recordSettlement(key, { receipt, method }, context);
+  const cacheError = await recordSettlement(keys, { receipt, method }, context);
   return cacheError
     ? { ok: true, receipt, method, replayed: false, cacheError }
     : { ok: true, receipt, method, replayed: false };
@@ -1772,9 +2092,11 @@ async function settleLateAnswer(
   model: SettlementModel,
   method: string,
   verification: { payer: string },
-  key: string,
+  keys: readonly string[],
   context: SettlementContext,
 ): Promise<void> {
+  const key = primaryKey(keys);
+  const { cache, archive } = context;
   if (!late.ok) {
     if (isPreSendFailure(late.error)) hold.end();
     return;
@@ -1800,10 +2122,13 @@ async function settleLateAnswer(
     const findable = context.cache ? "settlement cache" : "receipt archive";
     let recorded = true;
     for (const [store, write] of [
-      ["settlement cache", context.cache && (() => context.cache?.set(key, { receipt, method }))],
+      ["settlement cache", cache && (() => recordEntry(cache, keys, { receipt, method }))],
       [
         "receipt archive",
-        context.archive && (() => context.archive?.put(key, { receipt, method })),
+        archive &&
+          (async () => {
+            for (const archived of keys) await archive.put(archived, { receipt, method });
+          }),
       ],
     ] as const) {
       if (!write) continue;
@@ -1894,8 +2219,10 @@ async function paymentRequired(
     // Every option, in the service's preference order (#158).
     accepts: offered.map((option) => option.requirements),
   };
-  // Only a route that opts in publishes anything (#154, #172).
+  // Every route declares payment-identifier (#153); bazaar discovery (#154)
+  // and offer-receipt (#172) are published only when a route opts in.
   const extensions: Record<string, unknown> = {
+    ...paymentIdentifierExtensions(config.paymentIdentifier?.required ?? false),
     ...(config.discovery ? discoveryExtensions(config.discovery, request) : {}),
   };
   // Offers are signed only for requirements the gate settles itself.
@@ -1906,9 +2233,7 @@ async function paymentRequired(
       context.clock(),
     );
   }
-  if (Object.keys(extensions).length > 0) {
-    challenge.extensions = extensions;
-  }
+  challenge.extensions = extensions;
   const headers: Record<string, string> = {
     [PAYMENT_REQUIRED_HEADER]: encodePaymentRequiredHeader(challenge),
   };
@@ -2390,7 +2715,7 @@ export function createPaidCall(config: PaidCallConfig, deps: PaidCallDeps): Paid
  * mpp-charge, and mpp-channel vouchers. See docs/design.md, "Build plan",
  * Phases 1 and 2.
  */
-export function createPaywall(config: PaywallConfig, deps: PaywallDeps): Gate {
+export function createPaywall(config: PaywallConfig, deps: PaywallDeps): PaywallGate {
   return createPaywallWithInFlight(config, deps, new Map());
 }
 
@@ -2408,8 +2733,14 @@ export function createPaywallWithInFlight(
   config: PaywallConfig,
   deps: PaywallDeps,
   inFlight: Map<string, Promise<InFlightSettlementResult>>,
-): Gate {
+): PaywallGate {
   validateDynamicPriceConfig(config);
+  const maxResponseBytes = config.twoPhase?.maxResponseBytes ?? DEFAULT_MAX_RESPONSE_BYTES;
+  if (!Number.isSafeInteger(maxResponseBytes) || maxResponseBytes <= 0) {
+    throw new TypeError("twoPhase.maxResponseBytes must be a positive integer number of bytes");
+  }
+  const isFailureStatus =
+    config.twoPhase?.isFailureStatus ?? ((status: number) => status >= 500 && status <= 599);
   if (config.discovery) checkDiscoveryDeclaration(config.discovery);
   if (config.bindBody) checkBodyBinding(config.bindBody);
   const acceptedModels = config.models ?? ["x402"];
@@ -2452,7 +2783,7 @@ export function createPaywallWithInFlight(
 
   const settleObserved = attemptObserver(deps, clock);
 
-  return async function gate(request): Promise<GateOutcome> {
+  const run = async (request: TollwayRequest, phase?: SettlementPhase): Promise<GateOutcome> => {
     const method = request.method.toUpperCase();
 
     // Read and bind the body first: an oversized or unbindable body is
@@ -2493,6 +2824,15 @@ export function createPaywallWithInFlight(
           `unsupported x402Version ${String(x402Payment.x402Version)}; this gate speaks x402 version ${x402Version}`,
         );
       }
+    }
+
+    // The id is only read here; it is looked up after /verify, because it is
+    // client-chosen and must never stand in for a verified payment.
+    let paymentId: string | undefined;
+    if (x402Payment) {
+      const read = readPaymentIdentifier(x402Payment, config.paymentIdentifier?.required ?? false);
+      if (!read.ok) return gateRejection("payment-malformed", read.reason);
+      paymentId = read.id;
     }
 
     const resource = boundResource ?? config.resource ?? request.url;
@@ -2607,6 +2947,7 @@ export function createPaywallWithInFlight(
           settleWithHandler(payment, primary.offer, "mpp-charge", method, handler, context, {
             freshChallengeHeaders: challengeHeaders,
             ...(report ? { report } : {}),
+            ...(phase ? { twoPhase: { phase, validityMs: validityMs(primary.requirements) } } : {}),
           }),
         primary.offer,
         "mpp-charge",
@@ -2694,6 +3035,8 @@ export function createPaywallWithInFlight(
             ...(quoteExpired ? { replayOnly: freshChallenge } : {}),
             ...(prevalidates ? { prevalidate } : {}),
             ...(report ? { report } : {}),
+            ...(paymentId === undefined ? {} : { paymentId }),
+            ...(phase ? { twoPhase: { phase, validityMs: validityMs(chosen.requirements) } } : {}),
           }),
         offer,
         "x402",
@@ -2706,4 +3049,111 @@ export function createPaywallWithInFlight(
       `${decision.model} payments carry an Authorization: Payment credential, not PAYMENT-SIGNATURE`,
     );
   };
+
+  const gate = (request: TollwayRequest): Promise<GateOutcome> => run(request);
+
+  async function authorize(request: TollwayRequest): Promise<AuthorizeOutcome> {
+    const control = createPhaseControl();
+    // Settled into a value so it never rejects unhandled: settle() rethrows
+    // a failure, and any other failure goes to onCacheError below.
+    const finished = run(request, control.phase).then(
+      (outcome) => ({ ok: true, outcome }) as const,
+      (error: unknown) => ({ ok: false, error }) as const,
+    );
+    const first = await Promise.race([control.authorized.then(() => undefined), finished]);
+    if (first !== undefined) {
+      if (!first.ok) throw first.error;
+      return first.outcome;
+    }
+
+    let called: "settle" | "abandon" | undefined;
+    void finished.then((result) => {
+      // A failure after abandonment (or a deadline) has no request left to
+      // answer, typically a lock release that failed. Tell the operator.
+      if (!result.ok && called !== "settle") {
+        report(
+          deps.onCacheError,
+          asError(result.error, "two-phase settlement cleanup failed"),
+          `${request.method.toUpperCase()} ${request.url}`,
+        );
+      }
+    });
+
+    return {
+      kind: "authorized",
+      maxResponseBytes,
+      isFailure: (status) => isFailureStatus(status),
+      async settle() {
+        if (called !== undefined) {
+          throw new TypeError(
+            called === "settle"
+              ? "settle() was already called for this payment"
+              : "settle() was called after abandon(); an abandoned payment cannot settle",
+          );
+        }
+        called = "settle";
+        control.decide({ settle: true });
+        const result = await finished;
+        if (!result.ok) throw result.error;
+        const outcome = result.outcome;
+        if (outcome.kind === "settled" || outcome.kind === "rejected") return outcome;
+        throw new TypeError(`a two-phase settlement ended in a ${outcome.kind} outcome`);
+      },
+      async abandon(reason) {
+        if (called === "settle") return;
+        if (called === undefined) {
+          called = "abandon";
+          control.decide({ settle: false, outcome: notSettled(reason, ABANDONED_DETAIL[reason]) });
+        }
+        // Wait for the lock release, so a retry right after finds it free.
+        await finished;
+      },
+    };
+  }
+
+  return Object.assign(gate, { authorize });
+}
+
+/** How long a payment stays valid, from the terms it was paid against. */
+function validityMs(requirements: PaymentRequirements): number {
+  return requirements.maxTimeoutSeconds * 1000;
+}
+
+/**
+ * The two-phase handshake for one request. `authorized` resolves when the
+ * settlement path hands the payment over; from then the handler has the
+ * payment's validity window to finish before the payment is abandoned on its
+ * behalf. `decide` takes the first decision and ignores the rest.
+ */
+function createPhaseControl() {
+  let markAuthorized: () => void = () => {};
+  const authorized = new Promise<void>((resolve) => {
+    markAuthorized = resolve;
+  });
+  let resolveDecision: (decision: PhaseDecision) => void = () => {};
+  const decision = new Promise<PhaseDecision>((resolve) => {
+    resolveDecision = resolve;
+  });
+  let decided = false;
+  let timer: ReturnType<typeof setTimeout> | undefined;
+
+  const decide = (next: PhaseDecision): void => {
+    if (decided) return;
+    decided = true;
+    if (timer !== undefined) clearTimeout(timer);
+    resolveDecision(next);
+  };
+
+  const phase: SettlementPhase = {
+    ready(validity) {
+      markAuthorized();
+      timer = setTimeout(
+        () => decide({ settle: false, outcome: handlerTimeout(validity) }),
+        validity,
+      );
+      unrefTimer(timer);
+    },
+    decision,
+  };
+  return { phase, authorized, decide };
 }

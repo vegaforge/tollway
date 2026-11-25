@@ -93,6 +93,21 @@ not be released during the hold is reported through `onCacheError`.
 | the store is slower than the lock TTL | the lock can expire while `/settle` runs; `lockLost` is reported with the receipt | yes | Treat as an alert: a second process that received the same payment in that gap could have settled it too. Keep store latency well under a third of `settlementLockTtlMs`, or raise the TTL. |
 | a foreign or corrupt value under the settlement key | treated as a miss; the payment settles once and the entry is overwritten | yes | Check for another tenant or a manual write sharing the key prefix. |
 
+## Two-phase settlement
+
+With `settlement: "after-handler"` the route runs between authorization and
+settlement. See [two-phase-settlement.md](two-phase-settlement.md) for the
+whole contract; the failure rows are:
+
+| Failure | Gate outcome | Payer may have been charged | Operator action |
+| ------- | ------------ | --------------------------- | --------------- |
+| the route throws or answers a failure status (5xx by default) | the payment is abandoned; the route's own response goes out with no payment headers | no | Fix the route; the agent may send the same payment again. |
+| the route's response passes `maxResponseBytes` | rejected, 500, code `response-too-large`; the payment is abandoned | no | Raise `twoPhase.maxResponseBytes`, or keep the route single-shot. |
+| the route outlives `maxTimeoutSeconds` | rejected, 504, code `handler-timeout`; the payment is abandoned | no | Speed up the route or lengthen the validity window. |
+| the lock is lost while the route runs | rejected, 503, code `payment-not-settled`, `Retry-After: 1` | no | Check store latency against `settlementLockTtlMs`. |
+| `/settle` refuses after the route succeeded | rejected, 502, code `settlement-failed`, the facilitator's reason in `upstreamReason`; the route's response is discarded | no | As for any refused settlement. |
+| releasing the lock fails after an abandonment | the client already has its answer; the failure goes to `onCacheError` | no | The lock expires at its TTL. Check Redis. |
+
 ## Multi-process deployments
 
 Everything in this page assumes the lock methods are implemented. A cache
