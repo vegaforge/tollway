@@ -485,3 +485,25 @@ export {
   type QuarantineEnforcerOptions,
   type ReconciliationQuarantineEnforcer,
 } from "./quarantine.js";
+
+export {
+  type ChannelReconciliationInput,
+  type ChannelReconciliationSource,
+  type Cursor,
+  type CursorStore,
+  createMemoryChannelReconciliationSource,
+  createMemoryCursorStore,
+  createMemoryReceiptReconciliationSource,
+  createMemoryReconciliationResultStore,
+  createReconciliationRunner,
+  type Page,
+  type ReceiptReconciliationInput,
+  type ReceiptReconciliationSource,
+  type ReconciliationFailure,
+  type ReconciliationOutcome,
+  type ReconciliationResultStore,
+  type ReconciliationRunner,
+  type ReconciliationRunnerConfig,
+  type RetryConfig,
+  type RunSubject,
+} from "./runner.js";
