@@ -90,6 +90,13 @@ export type ChannelEventSink = {
     }): Promise<unknown>;
 };
 
+// @public
+export type ChannelLease = {
+    readonly id: number;
+    readonly channelId: string;
+    readonly expiresAt: number;
+};
+
 // @public (undocumented)
 export type ChannelLifecycleEvent = ChannelOpenedEvent | ChannelClosingEvent | ChannelClosedEvent | ChannelCloseFailedEvent | ChannelRecoveringEvent | ChannelRecoveredEvent;
 
@@ -148,6 +155,35 @@ export type ChannelOpenedEvent = ChannelEventBase & {
 export type ChannelPage = {
     channels: readonly Channel[];
     nextCursor?: string;
+};
+
+// @public (undocumented)
+export type ChannelPool = {
+    acquire(request: PoolAcquireRequest): Promise<ChannelLease>;
+    release(lease: ChannelLease): Promise<void>;
+};
+
+// @public
+export class ChannelPoolExhaustedError extends TollwayError {
+    constructor(counterparty: string, asset: string);
+    // (undocumented)
+    readonly asset: string;
+    // (undocumented)
+    readonly counterparty: string;
+}
+
+// @public (undocumented)
+export type ChannelPoolOptions = {
+    manager: ChannelManager;
+    network: StellarNetwork;
+    deposit: string;
+    rotateBelow: string;
+    maxChannelsPerKey: number;
+    maxLockedDeposit: string;
+    selection?: PoolSelection;
+    acquireTimeoutMs?: number;
+    leaseTimeoutMs?: number;
+    onFailure?: (failure: PoolFailure) => void;
 };
 
 // @public
@@ -296,6 +332,9 @@ export type CreateChannelManagerOptions = {
 };
 
 // @public (undocumented)
+export function createChannelPool(options: ChannelPoolOptions): ChannelPool;
+
+// @public (undocumented)
 export function createMemoryCommitmentStore(): CommitmentStore;
 
 // @public
@@ -385,6 +424,37 @@ export type OpenChannelInput = {
     deposit: string;
     network: StellarNetwork;
 };
+
+// @public (undocumented)
+export type PoolAcquireRequest = {
+    counterparty: string;
+    asset: string;
+    amount: string;
+};
+
+// @public
+export type PoolFailure = {
+    kind: "open-failed";
+    counterparty: string;
+    asset: string;
+    error: unknown;
+} | {
+    kind: "channel-closed";
+    channelId: string;
+    status: Channel["status"] | "missing";
+}
+/**
+* The channel's remaining deposit is below `rotateBelow` and a replacement
+* is open. The pool no longer leases it. The caller closes it (#180).
+*/
+| {
+    kind: "retired";
+    channelId: string;
+    remaining: string;
+};
+
+// @public
+export type PoolSelection = "least-drawn" | "round-robin";
 
 // @public
 export interface PostgresClient extends PostgresQueryable {
@@ -578,7 +648,7 @@ export function toObservabilitySink(sink: ChannelEventSink, options?: {
 
 // Warnings were encountered during analysis:
 //
-// dist/index.d.ts:897:5 - (ae-forgotten-export) The symbol "Row" needs to be exported by the entry point index.d.ts
+// dist/index.d.ts:980:5 - (ae-forgotten-export) The symbol "Row" needs to be exported by the entry point index.d.ts
 
 // (No @packageDocumentation comment for this package)
 

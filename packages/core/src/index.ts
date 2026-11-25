@@ -25,6 +25,9 @@ export {
   type PaymentIntent,
   type PolicyEngine,
   type PolicyHeadroom,
+  type PolicyReservation,
+  type PolicyReservationAttempt,
+  PolicyReservationError,
 } from "./policy.js";
 export {
   formatPolicyIssues,

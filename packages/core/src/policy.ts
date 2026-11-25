@@ -83,6 +83,37 @@ export type PolicyHeadroom = {
 };
 
 /**
+ * A payment's spend, held against every budget and window until it is
+ * committed or released (#189). Only the engine that issued it can settle it.
+ */
+export type PolicyReservation = {
+  /** Names the reservation in logs and errors. */
+  readonly id: string;
+  /** When the hold lapses if nobody commits or releases it, as ISO 8601. */
+  readonly expiresAt: string;
+};
+
+/** What {@link PolicyEngine.reserve} decided, and the hold when the trace allows the payment. */
+export type PolicyReservationAttempt = {
+  trace: PolicyTrace;
+  reservation?: PolicyReservation;
+};
+
+/**
+ * A reservation cannot be committed or released: it was not issued by this
+ * engine, or it is already in the other final state.
+ */
+export class PolicyReservationError extends TollwayError {
+  readonly reservationId: string;
+
+  constructor(reservationId: string, detail: string) {
+    super("policy-reservation", `policy reservation ${reservationId} ${detail}`);
+    this.name = "PolicyReservationError";
+    this.reservationId = reservationId;
+  }
+}
+
+/**
  * Spending rules an agent applies before it pays. {@link createPolicyEngine}
  * builds one from a policy.
  */
@@ -126,6 +157,26 @@ export interface PolicyEngine {
    * Optional, like `headroom`.
    */
   evaluateChannelOpen?(open: ChannelOpenIntent): Promise<ChannelOpenDecision>;
+  /**
+   * Evaluates the intent as `admit` does and, when the trace allows the
+   * payment, also holds its spend against every budget and window (#189).
+   * The hold lasts until `commit` or `release`, so payments in flight at the
+   * same time cannot all pass the same budget. Optional, so engines written
+   * earlier still satisfy the interface.
+   */
+  reserve?(intent: PaymentIntent): Promise<PolicyReservationAttempt>;
+  /**
+   * Makes a reserved payment's spend final. Idempotent. Throws for a released
+   * or foreign reservation. Call it once the payment has settled, even when a
+   * later check fails, because the money has moved.
+   */
+  commit?(reservation: PolicyReservation): Promise<void>;
+  /**
+   * Gives a reserved payment's spend back. Idempotent. Throws for a committed
+   * or foreign reservation. Call it only when the payment provably did not
+   * settle.
+   */
+  release?(reservation: PolicyReservation): Promise<void>;
 }
 
 export type AdaptiveAnomalyEvent = {
@@ -135,6 +186,8 @@ export type AdaptiveAnomalyEvent = {
 };
 
 const WINDOW_MS = 60_000;
+/** How long a reservation holds spend if nobody commits or releases it (#189). */
+const DEFAULT_RESERVATION_TTL_MS = 300_000;
 const MINUTE_WINDOW: PolicyWindow = { kind: "sliding", seconds: WINDOW_MS / 1000 };
 const LIFETIME: PolicyWindow = { kind: "lifetime" };
 
@@ -165,6 +218,14 @@ type SpendCeilingLimit = {
 };
 
 /** Spend and request history the stateful rules read. */
+/** One reservation's hold. `undo` gives back exactly the spend it added. */
+type ReservationRecord = {
+  intent: PaymentIntent;
+  deadline: number;
+  undo: () => void;
+  state: "held" | "committed" | "released" | "expired";
+};
+
 type EngineState = {
   day: string;
   /**
@@ -911,6 +972,13 @@ export function createPolicyEngine(
   opts?: {
     clock?: () => number;
     onAnomalyDetected?: (event: AdaptiveAnomalyEvent) => void | Promise<void>;
+    /** How long an uncommitted reservation holds spend. Defaults to five minutes. */
+    reservationTtlMs?: number;
+    /**
+     * Called once for each reservation that lapsed without a commit or a release,
+     * after its spend has been given back. Lets the caller see the expiry.
+     */
+    onReservationExpired?: (reservation: PolicyReservation, intent: PaymentIntent) => void;
   },
 ): PolicyEngine {
   const parsed = parsePolicy(input);
@@ -940,6 +1008,33 @@ export function createPolicyEngine(
     anomalySamples: [],
     adaptive: new Map(),
   };
+
+  const reservationTtlMs = opts?.reservationTtlMs ?? DEFAULT_RESERVATION_TTL_MS;
+  let reservationCount = 0;
+  /** Every reservation this engine issued, with its state. A handle the caller drops is collected. */
+  const reservations = new WeakMap<PolicyReservation, ReservationRecord>();
+  /** The reservations still holding spend, so expiry visits only those. */
+  const held = new Set<PolicyReservation>();
+
+  function recordOf(reservation: PolicyReservation): ReservationRecord {
+    const record = reservations.get(reservation);
+    if (record === undefined) {
+      throw new PolicyReservationError(reservation.id, "was not issued by this engine");
+    }
+    return record;
+  }
+
+  /** Gives back the spend of every hold that has lapsed, before any decision reads the budgets. */
+  function expireReservations(now: number): void {
+    for (const reservation of held) {
+      const record = reservations.get(reservation);
+      if (record === undefined || record.deadline > now) continue;
+      held.delete(reservation);
+      record.undo();
+      record.state = "expired";
+      opts?.onReservationExpired?.(reservation, record.intent);
+    }
+  }
 
   function resetDailyIfNeeded(now = clock()): void {
     const today = utcDate(() => now);
@@ -974,35 +1069,71 @@ export function createPolicyEngine(
     }
   }
 
-  function applyRecord(intent: PaymentIntent): void {
-    const now = clock();
+  /** Adds `amount` to a lifetime map, and returns the step that takes it back. */
+  function addToMap(map: Map<string, bigint>, key: string, amount: bigint): () => void {
+    map.set(key, (map.get(key) ?? 0n) + amount);
+    return () => {
+      map.set(key, (map.get(key) ?? 0n) - amount);
+    };
+  }
+
+  /**
+   * Adds `amount` to a rolling sum at `at`, and returns the step that takes it
+   * back. The step writes only while the bucket it went into still counts
+   * toward the window. Once that bucket has drained, the amount is already
+   * gone, and a negative entry would lower the total wrongly.
+   */
+  function addToRolling(accumulator: RollingSum, at: number, amount: bigint): () => void {
+    accumulator.add(at, amount);
+    return () => {
+      const bucketEnd = (Math.floor(at / accumulator.bucketMs) + 1) * accumulator.bucketMs;
+      if (clock() < bucketEnd + accumulator.windowMs) accumulator.add(at, -amount);
+    };
+  }
+
+  /**
+   * Applies one payment to every ledger and returns the step that undoes
+   * exactly what it changed (#189). `record` keeps the change. A reservation
+   * keeps the step, so a release or an expiry can give the amount back.
+   */
+  function applyRecord(intent: PaymentIntent, now: number): () => void {
     resetDailyIfNeeded(now);
+    const day = state.day;
     const amount = parseAmount(intent.amount);
-    const { totalSpend, serviceSpend } = state;
+    const { asset } = intent;
+    const undo: Array<() => void> = [];
 
     // Every calendar ledger advances, configured or not, so the headroom
-    // and trace of a budget added later read the same history.
-    state.dailyBudget.add(now, intent.asset, amount);
-    state.weeklyBudget.add(now, intent.asset, amount);
-    state.monthlyBudget.add(now, intent.asset, amount);
+    // and trace of a budget added later read the same history. The undo names
+    // the period the spend was counted in, so a reservation held across
+    // midnight gives back to the period it came from.
+    for (const ledger of [state.dailyBudget, state.weeklyBudget, state.monthlyBudget]) {
+      const period = ledger.period(now);
+      ledger.add(now, asset, amount);
+      undo.push(() => ledger.addInPeriod(period, asset, -amount));
+    }
     if (policy.budgets?.rolling != null) {
-      let accumulator = state.rollingBudgetSpend.get(intent.asset);
+      let accumulator = state.rollingBudgetSpend.get(asset);
       if (!accumulator) {
         accumulator = new RollingSum({ windowMs: policy.budgets.rolling.windowSeconds * 1_000 });
-        state.rollingBudgetSpend.set(intent.asset, accumulator);
+        state.rollingBudgetSpend.set(asset, accumulator);
       }
-      accumulator.add(now, amount);
+      undo.push(addToRolling(accumulator, now, amount));
     }
-    totalSpend.set(intent.asset, (totalSpend.get(intent.asset) ?? 0n) + amount);
-    const svcKey = serviceKey(intent.payee, intent.asset);
-    serviceSpend.set(svcKey, (serviceSpend.get(svcKey) ?? 0n) + amount);
+    undo.push(addToMap(state.totalSpend, asset, amount));
+    const svcKey = serviceKey(intent.payee, asset);
+    undo.push(addToMap(state.serviceSpend, svcKey, amount));
 
     // Issue #192: record into the per-service daily and rolling-window
     // accumulators when the policy declares them. The rolling-window
     // RollingSum is created lazily (one per unique service+asset key)
-    // and evicted below once its window drains.
+    // and evicted below once its window drains. A daily map is cleared at
+    // midnight, so its undo applies only on the same day.
     if (policy.perService?.[intent.payee]?.dailyCap != null) {
-      state.serviceDailySpend.set(svcKey, (state.serviceDailySpend.get(svcKey) ?? 0n) + amount);
+      const restore = addToMap(state.serviceDailySpend, svcKey, amount);
+      undo.push(() => {
+        if (state.day === day) restore();
+      });
     }
     const serviceWindow = policy.perService?.[intent.payee]?.window;
     if (serviceWindow != null) {
@@ -1012,7 +1143,7 @@ export function createPolicyEngine(
         accumulator = new RollingSum({ windowMs: windowSeconds * 1_000 });
         state.serviceWindowSpend.set(svcKey, accumulator);
       }
-      accumulator.add(now, amount);
+      undo.push(addToRolling(accumulator, now, amount));
     }
 
     // Issue #192: charge every perResource entry that matches, the same
@@ -1022,12 +1153,15 @@ export function createPolicyEngine(
       ? matchResourceEntries(policy.perResource, intent.resource)
       : [];
     for (const { key, entry } of resourceMatches) {
-      const rKey = resourceKey(key, intent.asset);
+      const rKey = resourceKey(key, asset);
       if (entry.cap != null) {
-        state.resourceSpend.set(rKey, (state.resourceSpend.get(rKey) ?? 0n) + amount);
+        undo.push(addToMap(state.resourceSpend, rKey, amount));
       }
       if (entry.dailyCap != null) {
-        state.resourceDailySpend.set(rKey, (state.resourceDailySpend.get(rKey) ?? 0n) + amount);
+        const restore = addToMap(state.resourceDailySpend, rKey, amount);
+        undo.push(() => {
+          if (state.day === day) restore();
+        });
       }
       if (entry.window != null) {
         let accumulator = state.resourceWindowSpend.get(rKey);
@@ -1035,7 +1169,7 @@ export function createPolicyEngine(
           accumulator = new RollingSum({ windowMs: entry.window.windowSeconds * 1_000 });
           state.resourceWindowSpend.set(rKey, accumulator);
         }
-        accumulator.add(now, amount);
+        undo.push(addToRolling(accumulator, now, amount));
       }
     }
 
@@ -1053,9 +1187,30 @@ export function createPolicyEngine(
       };
       detector.bucketSpend += amount;
       state.adaptive.set(key, detector);
+      // Once the bucket has closed, its spend is already in the baseline.
+      undo.push(() => {
+        if (detector.bucketStart === bucketStart) detector.bucketSpend -= amount;
+      });
     }
+    const sample = { amount, asset, ts: now };
+    state.anomalySamples.push(sample);
+    undo.push(() => {
+      const index = state.anomalySamples.indexOf(sample);
+      if (index >= 0) state.anomalySamples.splice(index, 1);
+    });
+
+    return () => {
+      for (const step of undo.reverse()) step();
+    };
+  }
+
+  /**
+   * Counts a settled payment toward the rate limit when the limit counts
+   * settlements. Kept apart from `applyRecord`: a reservation that is released
+   * never settled, so it must not count.
+   */
+  function recordSettlement(intent: PaymentIntent, now: number): void {
     if (state.rateLimiter?.count === "settlements") state.rateLimiter.record(intent.payee, now);
-    state.anomalySamples.push({ amount, asset: intent.asset, ts: now });
   }
 
   /**
@@ -1087,6 +1242,7 @@ export function createPolicyEngine(
     const now = clock();
     pruneWindow(now);
     pruneRollingSums(now);
+    expireReservations(now);
     rollAdaptive(now);
 
     const input: RuleInput = { policy, intent, amount, now, state };
@@ -1291,10 +1447,66 @@ export function createPolicyEngine(
     },
 
     async record(intent: PaymentIntent): Promise<void> {
-      applyRecord(intent);
       const now = clock();
+      applyRecord(intent, now);
+      recordSettlement(intent, now);
       pruneWindow(now);
       pruneRollingSums(now);
+    },
+
+    async reserve(intent: PaymentIntent): Promise<PolicyReservationAttempt> {
+      // Evaluating, counting the attempt and holding the spend happen with no
+      // await between them, so concurrent payments see each other's holds.
+      const trace = evaluateNow(intent);
+      if (trace.allowed) countAttempt(intent);
+      if (!trace.allowed) return { trace };
+      const now = clock();
+      reservationCount += 1;
+      const reservation: PolicyReservation = {
+        id: `reservation-${reservationCount}`,
+        expiresAt: new Date(now + reservationTtlMs).toISOString(),
+      };
+      reservations.set(reservation, {
+        intent,
+        deadline: now + reservationTtlMs,
+        undo: applyRecord(intent, now),
+        state: "held",
+      });
+      held.add(reservation);
+      return { trace, reservation };
+    },
+
+    async commit(reservation: PolicyReservation): Promise<void> {
+      const record = recordOf(reservation);
+      if (record.state === "committed") return;
+      if (record.state === "released") {
+        throw new PolicyReservationError(reservation.id, "was released, so it cannot be committed");
+      }
+      const now = clock();
+      if (record.state === "held") {
+        held.delete(reservation);
+      } else {
+        // The hold lapsed, but the payment may already have settled. Its spend
+        // counts again, so money that moved is never dropped from the budget.
+        record.undo = applyRecord(record.intent, now);
+      }
+      record.state = "committed";
+      recordSettlement(record.intent, now);
+    },
+
+    async release(reservation: PolicyReservation): Promise<void> {
+      const record = recordOf(reservation);
+      if (record.state === "committed") {
+        throw new PolicyReservationError(
+          reservation.id,
+          "was committed, so its spend is final and cannot be released",
+        );
+      }
+      // Released or lapsed already: the spend is back, so releasing again does nothing.
+      if (record.state !== "held") return;
+      held.delete(reservation);
+      record.undo();
+      record.state = "released";
     },
 
     async headroom(asset: string, payee: string): Promise<PolicyHeadroom> {

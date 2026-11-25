@@ -55,6 +55,16 @@ export {
 } from "./events.js";
 export { type CreateChannelManagerOptions, createChannelManager } from "./manager.js";
 export {
+  type ChannelLease,
+  type ChannelPool,
+  ChannelPoolExhaustedError,
+  type ChannelPoolOptions,
+  createChannelPool,
+  type PoolAcquireRequest,
+  type PoolFailure,
+  type PoolSelection,
+} from "./pool.js";
+export {
   RATE_PRECISION,
   type SizeDepositDecision,
   type SizeDepositInput,
