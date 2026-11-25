@@ -118,9 +118,21 @@ importers:
       '@vegaforge/tollway-adapter-express':
         specifier: workspace:*
         version: link:../../packages/adapter-express
+      '@vegaforge/tollway-channels':
+        specifier: workspace:*
+        version: link:../../packages/channels
+      '@vegaforge/tollway-client':
+        specifier: workspace:*
+        version: link:../../packages/client
       '@vegaforge/tollway-core':
         specifier: workspace:*
         version: link:../../packages/core
+      '@vegaforge/tollway-observability':
+        specifier: workspace:*
+        version: link:../../packages/observability
+      '@vegaforge/tollway-reconcile':
+        specifier: workspace:*
+        version: link:../../packages/reconcile
       '@vegaforge/tollway-server':
         specifier: workspace:*
         version: link:../../packages/server

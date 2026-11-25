@@ -7,13 +7,18 @@
   "type": "module",
   "scripts": {
     "start": "tsx src/main.ts",
+    "start:budget-capped": "tsx src/scenarios/budget-capped-main.ts",
     "test": "vitest run",
     "typecheck": "tsc --noEmit"
   },
   "dependencies": {
     "@stellar/stellar-sdk": "^16.4.1",
     "@vegaforge/tollway-adapter-express": "workspace:*",
+    "@vegaforge/tollway-channels": "workspace:*",
+    "@vegaforge/tollway-client": "workspace:*",
     "@vegaforge/tollway-core": "workspace:*",
+    "@vegaforge/tollway-observability": "workspace:*",
+    "@vegaforge/tollway-reconcile": "workspace:*",
     "@vegaforge/tollway-server": "workspace:*",
     "@x402/core": "^2.31.0",
     "@x402/stellar": "^2.31.0",
