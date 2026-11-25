@@ -327,11 +327,16 @@ describe("gate error codes", () => {
     );
   });
 
-  it("codes a router choice the gate cannot settle as model-not-supported", async () => {
-    const gate = gateWith(createMockFacilitator(), {
-      router: { decide: async () => ({ model: "mpp-channel", reason: "override" }) },
-    });
-    expectRejection(await gate(paid()), "model-not-supported");
+  it("codes an x402 payment the router sends to an MPP model as payment-malformed", async () => {
+    // Both MPP models are settled by the gate, from an Authorization: Payment
+    // credential, so an x402 payment routed to one is malformed, not a model
+    // the gate lacks.
+    for (const model of ["mpp-charge", "mpp-channel"] as const) {
+      const gate = gateWith(createMockFacilitator(), {
+        router: { decide: async () => ({ model, reason: "override" }) },
+      });
+      expectRejection(await gate(paid()), "payment-malformed");
+    }
   });
 
   it("codes service policy denials with their policy codes", async () => {

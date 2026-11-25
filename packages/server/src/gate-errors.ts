@@ -36,7 +36,11 @@ export type GateErrorCode =
    * A paid call's work (an MCP tool, say) failed after the payment was
    * verified, so the payment was not settled and may be sent again (#206).
    */
-  | "work-failed";
+  | "work-failed"
+  /** The MPP channel named in TOLLWAY-CHANNEL failed its on-chain checks or no longer takes vouchers (#173). */
+  | "channel-refused"
+  /** Too many channel registrations or channel closes; try again after Retry-After (#173, #174). */
+  | "channel-rate-limited";
 
 /** What a client may do after a rejection, and what the response carries. */
 export type GateErrorSpec = {
@@ -81,6 +85,8 @@ export const GATE_ERRORS: Readonly<Record<GateErrorCode, GateErrorSpec>> = {
   "handler-not-configured": { status: 500, retrySamePayment: false, headers: [] },
   "model-not-supported": { status: 501, retrySamePayment: false, headers: [] },
   "work-failed": { status: 424, retrySamePayment: true, headers: [] },
+  "channel-refused": { status: 402, retrySamePayment: false, headers: [] },
+  "channel-rate-limited": { status: 429, retrySamePayment: true, headers: ["retry-after"] },
 };
 
 /** Every code, in the order the docs list them. */

@@ -356,7 +356,7 @@ Implemented and tested:
 Open work:
 
 - The funder-side `close_start` and `refund` contract calls in the Stellar channel adapter ([#101](https://github.com/vegaforge/tollway/issues/101)). `ChannelManager.recover` drives them through the adapter, and the Stellar adapter throws a typed not-implemented error until then.
-- The gate answers `501` if a router selects `mpp-channel`. Traffic promotion in `createDefaultRouter` is opt-in through `channelThreshold`.
+- Traffic promotion to `mpp-channel` in `createDefaultRouter` is opt-in through `channelThreshold`. The gate accepts mpp-channel vouchers when the agent sends them ([docs/mpp-channels.md](docs/mpp-channels.md)); an x402 payment routed to `mpp-channel` gets a 400 `payment-malformed`.
 - x402 V2 wire compatibility for the gate's headers ([#43](https://github.com/vegaforge/tollway/issues/43)).
 - Signing webhook deliveries ([#104](https://github.com/vegaforge/tollway/issues/104)).
 - Dashboard services and exports views ([#108](https://github.com/vegaforge/tollway/issues/108), [#109](https://github.com/vegaforge/tollway/issues/109)). The overview and anomalies pages are placeholders.
