@@ -74,11 +74,25 @@ export type UseEventStreamOptions = {
   maxQueueSize?: number;
 };
 
+/**
+ * Live updates are opt-in: the stream proxy answers 503 until a live service
+ * is configured (SERVICE_URL and SERVICE_API_KEY), so the hooks only open
+ * it when NEXT_PUBLIC_LIVE_UPDATES is "true". Otherwise they stay paused and
+ * show the polled data.
+ */
+const LIVE_UPDATES_ENABLED = process.env.NEXT_PUBLIC_LIVE_UPDATES === "true";
+
 /** Maximum events queued between animation frames. Prevents OOM under floods. */
 const DEFAULT_MAX_QUEUE = 500;
 
 export function useEventStream(options: UseEventStreamOptions): StreamStatus {
-  const { handlersRef, types, onReset, enabled = true, maxQueueSize = DEFAULT_MAX_QUEUE } = options;
+  const {
+    handlersRef,
+    types,
+    onReset,
+    enabled = LIVE_UPDATES_ENABLED,
+    maxQueueSize = DEFAULT_MAX_QUEUE,
+  } = options;
 
   const [status, setStatus] = useState<StreamStatus>("connecting");
   // Queue for coalescing bursts.

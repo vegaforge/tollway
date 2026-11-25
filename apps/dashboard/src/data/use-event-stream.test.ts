@@ -12,6 +12,12 @@ import { useRef } from "react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { createHandlerMap, useEventStream } from "./use-event-stream";
 
+// Live updates are opt-in (NEXT_PUBLIC_LIVE_UPDATES); these tests exercise
+// the stream, so they switch it on before the hook module loads.
+vi.hoisted(() => {
+  process.env.NEXT_PUBLIC_LIVE_UPDATES = "true";
+});
+
 // ---------------------------------------------------------------------------
 // Fake EventSource
 // ---------------------------------------------------------------------------
