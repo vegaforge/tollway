@@ -71,7 +71,7 @@ The route handler always receives the full, unchanged body.
   app.post("/infer", expressPaywall(gate), handler);
   ```
 
-- **Fastify**: Fastify parses the body before `preHandler`, so register `fastifyRawBody` as a `preParsing` hook to keep the raw bytes. It answers 413 as soon as its own `maxBytes` is passed, and hands Fastify's parser an identical stream, so `request.body` is unchanged. Set its `maxBytes` to at least the largest `bindBody.maxBytes` it covers.
+- **Fastify**: Fastify parses the body before `preHandler`, so register `fastifyRawBody` as a `preParsing` hook to keep the raw bytes. It answers 413 as soon as its own `maxBytes` is passed, and hands Fastify's parser an identical stream, so `request.body` is unchanged. Set its `maxBytes` to at least the largest `bindBody.maxBytes` it covers. Without the hook, a body-bound route that receives a body fails closed with 500 `body-not-provided`.
 
   ```ts
   app.addHook("preParsing", fastifyRawBody({ maxBytes: 64 * 1024 }));

@@ -88,6 +88,12 @@ export type ChannelOpenRule = "min-channel-deposit" | "budget-daily" | "budget-t
 // @public
 export type ChannelOpenSubmission = "not-submitted" | "failed" | "ambiguous";
 
+// @public
+export type ChannelThreshold = {
+    requestsPerMinute: number;
+    minWindowSeconds: number;
+};
+
 // @public (undocumented)
 export function checkSmartAccountPolicy(plan: SmartAccountPlan, reader: SmartAccountPolicyReader): Promise<readonly SmartAccountCheck[]>;
 
@@ -131,6 +137,7 @@ export function decisionFromTrace(trace: PolicyTrace): PolicyDecision;
 // @public (undocumented)
 export type DefaultRouterOptions = {
     quarantine?: CounterpartyQuarantine;
+    channelThreshold?: ChannelThreshold;
 };
 
 // @public
@@ -1102,7 +1109,7 @@ export class TollwayError extends Error {
 }
 
 // @public
-export type TollwayErrorCode = "not-implemented" | "no-viable-model" | "invalid-receipt" | "invalid-signing-key" | "signer-failed" | "body-too-large" | "invalid-amount" | "invalid-quote" | "invalid-discovery" | "invalid-policy" | "canonicalization-failed" | "invalid-signature-encoding" | "invalid-key-set" | "key-set-unavailable" | "budget-exceeded" | "payment-failed" | "outcome-unknown" | "facilitator-unsupported" | "facilitator-unavailable" | "facilitator-invalid-response" | "policy-blocked" | "offer-rejected" | "receipt-verification-failed" | "receipt-offer-mismatch" | "offer-network-mismatch" | "channel-not-found" | "channel-not-open" | "channel-already-closed" | "commitment-conflict" | "invalid-store-config" | "corrupt-channel-record" | "commitment-exceeds-deposit" | "settlement-mismatch" | "counterparty-quarantined" | "channel-open-failed" | "invalid-metrics-query" | "invalid-metric" | "metrics-query-too-large" | "invalid-receipt-query" | "invalid-cursor" | "corrupt-receipt" | "receipt-conflict";
+export type TollwayErrorCode = "not-implemented" | "no-viable-model" | "invalid-receipt" | "invalid-signing-key" | "signer-failed" | "body-too-large" | "invalid-amount" | "invalid-quote" | "invalid-discovery" | "invalid-policy" | "canonicalization-failed" | "invalid-signature-encoding" | "invalid-key-set" | "key-set-unavailable" | "budget-exceeded" | "payment-failed" | "outcome-unknown" | "facilitator-unsupported" | "facilitator-unavailable" | "facilitator-invalid-response" | "policy-blocked" | "offer-rejected" | "receipt-verification-failed" | "receipt-offer-mismatch" | "offer-network-mismatch" | "channel-not-found" | "channel-not-open" | "channel-already-closed" | "commitment-conflict" | "invalid-store-config" | "corrupt-channel-record" | "commitment-exceeds-deposit" | "settlement-mismatch" | "recovery-not-effective" | "counterparty-quarantined" | "channel-open-failed" | "invalid-metrics-query" | "invalid-metric" | "metrics-query-too-large" | "invalid-receipt-query" | "invalid-cursor" | "corrupt-receipt" | "receipt-conflict";
 
 // @public
 export type TrafficSnapshot = {

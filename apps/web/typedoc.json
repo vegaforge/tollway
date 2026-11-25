@@ -6,6 +6,7 @@
     "../../packages/core/src/index.ts",
     "../../packages/server/src/index.ts",
     "../../packages/client/src/index.ts",
+    "../../packages/ai-sdk/src/index.ts",
     "../../packages/adapter-express/src/index.ts",
     "../../packages/adapter-fastify/src/index.ts",
     "../../packages/adapter-next/src/index.ts",

@@ -64,13 +64,15 @@ describe("buildReconciliationReport", () => {
   it("produces a versioned JSON snapshot for mixed ok and drifted results", () => {
     const results: ReconciliationReportInput[] = [
       {
+        status: "ok",
         ok: true,
-        channelId: "ch-ok",
+        subject: { kind: "channel", channelId: "ch-ok" },
         amounts: { expected: "10000000", settled: "10000000", remainder: "0" },
       },
       {
+        status: "drift" as const,
         ok: false,
-        channelId: "ch-drift",
+        subject: { kind: "channel" as const, channelId: "ch-drift" },
         drift: [
           {
             kind: "under-settled",
@@ -101,6 +103,7 @@ describe("buildReconciliationReport", () => {
             },
             "drift": [],
             "ok": true,
+            "status": "ok",
             "subject": "ch-ok",
           },
           {
@@ -120,6 +123,7 @@ describe("buildReconciliationReport", () => {
               },
             ],
             "ok": false,
+            "status": "drift",
             "subject": "ch-drift",
           },
         ],
@@ -135,20 +139,35 @@ describe("buildReconciliationReport", () => {
             "settled": "15000000",
           },
           "byDriftKind": {
+            "amount-mismatch": 0,
+            "asset-mismatch": 0,
+            "balance-mismatch": 0,
+            "closed-on-chain": 0,
             "duplicate-sequence": 0,
             "foreign-commitment": 0,
+            "funder-mismatch": 0,
             "malformed-record": 0,
             "missing-commitment": 0,
+            "network-mismatch": 0,
             "non-monotonic-cumulative": 0,
             "over-settled": 0,
+            "payee-mismatch": 0,
+            "payer-mismatch": 0,
+            "recipient-mismatch": 0,
             "sequence-gap": 1,
+            "token-mismatch": 0,
+            "transfer-missing": 0,
+            "tx-failed": 0,
+            "tx-not-found": 0,
             "under-settled": 1,
             "unexpected-remainder": 0,
           },
           "driftItems": 2,
           "drifted": 1,
           "ok": 1,
+          "retryable": 0,
           "total": 2,
+          "unverifiable": 0,
         },
         "version": 1,
       }
@@ -159,8 +178,18 @@ describe("buildReconciliationReport", () => {
   it("sums large integer-string amounts with bigint precision", () => {
     const report = buildReconciliationReport(
       [
-        { ok: true, channelId: "ch-1", amounts: { expected: "9007199254740993" } },
-        { ok: true, channelId: "ch-2", amounts: { expected: "2" } },
+        {
+          status: "ok",
+          ok: true,
+          subject: { kind: "channel", channelId: "ch-1" },
+          amounts: { expected: "9007199254740993" },
+        },
+        {
+          status: "ok",
+          ok: true,
+          subject: { kind: "channel", channelId: "ch-2" },
+          amounts: { expected: "2" },
+        },
       ],
       { generatedAt: "2026-11-24T00:00:00.000Z" },
     );
@@ -170,10 +199,24 @@ describe("buildReconciliationReport", () => {
 
   it("rejects non-integer amounts", () => {
     expect(() =>
-      buildReconciliationReport([{ ok: true, channelId: "ch-1", amounts: { settled: "12.34" } }]),
+      buildReconciliationReport([
+        {
+          status: "ok",
+          ok: true,
+          subject: { kind: "channel", channelId: "ch-1" },
+          amounts: { settled: "12.34" },
+        },
+      ]),
     ).toThrow(/not a valid non-negative integer string/);
     expect(() =>
-      buildReconciliationReport([{ ok: true, channelId: "ch-1", amounts: { expected: "-1" } }]),
+      buildReconciliationReport([
+        {
+          status: "ok",
+          ok: true,
+          subject: { kind: "channel", channelId: "ch-1" },
+          amounts: { expected: "-1" },
+        },
+      ]),
     ).toThrow(expect.objectContaining({ code: "invalid-amount" }));
   });
 });
@@ -182,10 +225,11 @@ describe("reconciliationReportToCsv", () => {
   it("round-trips RFC 4180 CSV with commas, quotes, and newlines", () => {
     const report = buildReconciliationReport(
       [
-        { ok: true, channelId: "ch-ok" },
+        { status: "ok", ok: true, subject: { kind: "channel", channelId: "ch-ok" } },
         {
+          status: "drift" as const,
           ok: false,
-          channelId: 'ch,"quoted"',
+          subject: { kind: "channel" as const, channelId: 'ch,"quoted"' },
           drift: [
             {
               kind: "over-settled",
@@ -213,9 +257,12 @@ describe("reconciliationReportToCsv", () => {
   });
 
   it("outputs only the header row when there are no drift items", () => {
-    const report = buildReconciliationReport([{ ok: true, channelId: "ch-1" }], {
-      generatedAt: "2026-11-24T00:00:00.000Z",
-    });
+    const report = buildReconciliationReport(
+      [{ status: "ok", ok: true, subject: { kind: "channel", channelId: "ch-1" } }],
+      {
+        generatedAt: "2026-11-24T00:00:00.000Z",
+      },
+    );
     expect(reconciliationReportToCsv(report)).toBe(RECONCILIATION_CSV_COLUMNS.join(","));
   });
 
@@ -230,8 +277,9 @@ describe("reconciliationReportToCsv", () => {
     const report = buildReconciliationReport(
       [
         {
+          status: "drift" as const,
           ok: false,
-          channelId: payload,
+          subject: { kind: "channel" as const, channelId: payload },
           drift: [{ kind: "malformed-record", detail: payload }],
         },
       ],
@@ -244,14 +292,59 @@ describe("reconciliationReportToCsv", () => {
   });
 
   it("supports exportReconciliationReport for json and csv", () => {
-    const report = buildReconciliationReport([{ ok: true, channelId: "ch-1" }], {
-      generatedAt: "2026-11-24T00:00:00.000Z",
-    });
+    const report = buildReconciliationReport(
+      [{ status: "ok", ok: true, subject: { kind: "channel", channelId: "ch-1" } }],
+      {
+        generatedAt: "2026-11-24T00:00:00.000Z",
+      },
+    );
 
     const json = exportReconciliationReport(report, "json");
     expect(JSON.parse(json)).toEqual(report);
 
     const csv = exportReconciliationReport(report, "csv");
     expect(csv).toBe(RECONCILIATION_CSV_COLUMNS.join(","));
+  });
+});
+
+describe("buildReconciliationReport with checks that could not run", () => {
+  it("counts unverifiable and retryable results apart from drift and keeps their reason", () => {
+    const report = buildReconciliationReport(
+      [
+        {
+          status: "unverifiable",
+          ok: false,
+          subject: { kind: "transaction", txHash: "tx-old", network: "testnet" },
+          reason: "older than the RPC retention window",
+        },
+        {
+          status: "retryable",
+          ok: false,
+          subject: { kind: "channel", channelId: "ch-1" },
+          reason: "RPC timed out",
+        },
+      ],
+      { generatedAt: "2026-11-24T00:00:00.000Z" },
+    );
+    expect(report.totals).toMatchObject({
+      total: 2,
+      ok: 0,
+      drifted: 0,
+      unverifiable: 1,
+      retryable: 1,
+      driftItems: 0,
+    });
+    expect(report.entries).toEqual([
+      {
+        subject: "tx-old",
+        status: "unverifiable",
+        ok: false,
+        drift: [],
+        reason: "older than the RPC retention window",
+      },
+      { subject: "ch-1", status: "retryable", ok: false, drift: [], reason: "RPC timed out" },
+    ]);
+    // No drift rows for results that were not checked.
+    expect(reconciliationReportToCsv(report)).toBe(RECONCILIATION_CSV_COLUMNS.join(","));
   });
 });

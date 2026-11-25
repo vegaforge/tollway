@@ -34,6 +34,9 @@ export type Channel = {
         expectedAmount: string;
         observedAmount: string;
     };
+    closeEffectiveAtLedger?: number;
+    recoveredAmount?: string;
+    refundTxHash?: string;
 };
 
 // @public
@@ -88,7 +91,7 @@ export type ChannelEventSink = {
 };
 
 // @public (undocumented)
-export type ChannelLifecycleEvent = ChannelOpenedEvent | ChannelClosingEvent | ChannelClosedEvent | ChannelCloseFailedEvent;
+export type ChannelLifecycleEvent = ChannelOpenedEvent | ChannelClosingEvent | ChannelClosedEvent | ChannelCloseFailedEvent | ChannelRecoveringEvent | ChannelRecoveredEvent;
 
 // @public
 export type ChannelListFilter = {
@@ -111,7 +114,6 @@ export interface ChannelManager {
     listChannels(filter?: ChannelListFilter): Promise<ChannelPage>;
     // (undocumented)
     open(input: OpenChannelInput): Promise<Channel>;
-    // (undocumented)
     recover(channelId: string): Promise<RecoveryResult>;
     resume(channelId: string): Promise<ResumeOutcome>;
     resumeAll(): Promise<ResumeAllResult>;
@@ -146,6 +148,24 @@ export type ChannelOpenedEvent = ChannelEventBase & {
 export type ChannelPage = {
     channels: readonly Channel[];
     nextCursor?: string;
+};
+
+// @public
+export type ChannelRecoveredEvent = ChannelEventBase & {
+    type: "channel:recovered";
+    recoveredAmount: string;
+    refundTxHash: string;
+};
+
+// @public
+export type ChannelRecoveringEvent = ChannelEventBase & {
+    type: "channel:recovering";
+    closeEffectiveAtLedger: number;
+};
+
+// @public
+export type ChannelState = ChannelChainState & {
+    refundWaitingPeriod: number;
 };
 
 // @public
@@ -321,9 +341,21 @@ export interface MppChannelAdapter {
         channelId: string;
         network: StellarNetwork;
     }): Promise<ChannelChainState>;
+    getState(input: {
+        channelId: string;
+        network: StellarNetwork;
+    }): Promise<ChannelState>;
     // (undocumented)
     openChannel(input: OpenAdapterInput): Promise<OpenAdapterResult>;
+    refund(input: {
+        channelId: string;
+        network: StellarNetwork;
+    }): Promise<RefundResult>;
     signCommitment(input: SignCommitmentInput): Promise<SignedCommitment>;
+    startClose(input: {
+        channelId: string;
+        network: StellarNetwork;
+    }): Promise<StartCloseResult>;
 }
 
 // @public (undocumented)
@@ -387,6 +419,17 @@ export type PostgresQueryResult = {
 // @public
 export const RATE_PRECISION = 1000000;
 
+// @public
+export class RecoveryNotYetEffectiveError extends TollwayError {
+    constructor(channelId: string, closeEffectiveAtLedger: number, currentLedger: number);
+    // (undocumented)
+    readonly channelId: string;
+    // (undocumented)
+    readonly closeEffectiveAtLedger: number;
+    // (undocumented)
+    readonly currentLedger: number;
+}
+
 // @public (undocumented)
 export type RecoveryResult = {
     channelId: string;
@@ -415,6 +458,12 @@ export interface RedisLikeClient {
     // (undocumented)
     zrange(key: string, start: number, stop: number): Promise<string[]>;
 }
+
+// @public
+export type RefundResult = {
+    txHash: string;
+    refundedAmount: string;
+};
 
 // @public (undocumented)
 export type ResumeAllResult = {
@@ -503,6 +552,12 @@ export type SizeDepositInput = {
 };
 
 // @public
+export type StartCloseResult = {
+    txHash: string;
+    closeEffectiveAtLedger: number;
+};
+
+// @public
 export type StellarMppChannelAdapterOptions = {
     channelContract: string;
     openTxHash: string;
@@ -523,7 +578,7 @@ export function toObservabilitySink(sink: ChannelEventSink, options?: {
 
 // Warnings were encountered during analysis:
 //
-// dist/index.d.ts:781:5 - (ae-forgotten-export) The symbol "Row" needs to be exported by the entry point index.d.ts
+// dist/index.d.ts:897:5 - (ae-forgotten-export) The symbol "Row" needs to be exported by the entry point index.d.ts
 
 // (No @packageDocumentation comment for this package)
 

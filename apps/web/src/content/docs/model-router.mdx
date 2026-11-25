@@ -30,11 +30,19 @@ Routing is overridable per route and per agent. A heuristic that cannot be overr
 
 ## In the code
 
-The interface and the default implementation live in `packages/core/src/router.ts`. The default router picks the first model that both the offer and the policy accept, and honors overrides. It does not yet promote a counterparty to channel mode based on traffic; that is tracked in [#105](https://github.com/vegaforge/tollway/issues/105).
+The interface and the default implementation live in `packages/core/src/router.ts`. The default router picks the first model that both the offer and the policy accept, and honors overrides.
+
+Promotion to channel mode is opt-in. Pass `channelThreshold` and the router returns `mpp-channel` with reason `traffic` when the request's traffic snapshot meets both values, the offer (or, with no offer, the policy) lists `mpp-channel`, the policy allows it, and the counterparty is not quarantined. An explicit override still wins. Both values must be positive integers, or `createDefaultRouter` throws a `TollwayError`. The router does not count traffic itself: the caller passes the snapshot.
 
 ```ts
-import type { ModelRouter, RouteDecision } from "@vegaforge/tollway-core";
+import { createDefaultRouter } from "@vegaforge/tollway-core";
+
+const router = createDefaultRouter({
+  channelThreshold: { requestsPerMinute: 120, minWindowSeconds: 300 },
+});
 ```
+
+Without `channelThreshold` the router never promotes on traffic. The right production values are still open; see `docs/design.md`, "Open questions", item 5.
 
 ## Reference
 

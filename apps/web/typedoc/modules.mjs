@@ -27,6 +27,12 @@ export const modules = [
     description: "The agent-side client that pays 402 challenges.",
   },
   {
+    module: "ai-sdk/src",
+    slug: "ai-sdk",
+    importPath: "@vegaforge/tollway-ai-sdk",
+    description: "A Vercel AI SDK tool that fetches paid URLs within a Tollway budget.",
+  },
+  {
     module: "adapter-express/src",
     slug: "adapter-express",
     importPath: "@vegaforge/tollway-adapter-express",

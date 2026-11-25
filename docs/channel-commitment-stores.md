@@ -43,21 +43,25 @@ const pool = new Pool({ connectionString: process.env.DATABASE_URL });
 const store = createPostgresCommitmentStore({ client: pool, schema: "tollway" });
 ```
 
-**Setup.** Apply `packages/channels/migrations/0001_commitment_store.sql` once,
-to an empty schema, with `search_path` set to that schema:
+**Setup.** Apply the migrations in `packages/channels/migrations/` in order,
+each once, with `search_path` set to the schema. `0001_commitment_store.sql`
+creates the tables in an empty schema. `0002_channel_recovery.sql` adds the
+columns `recover` writes (#38): `close_effective_at_ledger`,
+`recovered_amount` and `refund_tx_hash`.
 
 ```sql
 CREATE SCHEMA tollway;
 SET search_path TO tollway;
 -- then run packages/channels/migrations/0001_commitment_store.sql
+-- then run packages/channels/migrations/0002_channel_recovery.sql
 ```
 
 Pass the same name as `schema`. The store qualifies every table with it. Omit
 `schema` to use the connection's `search_path`. The schema name must be a plain
 identifier, or the store refuses it with `invalid-store-config`.
 
-The migration is not part of the npm package. Copy it from the repository. Later
-migrations will be numbered in order, and each applies once.
+The migrations are not part of the npm package. Copy them from the repository.
+They are numbered in order, and each applies once.
 
 **Amounts.** Stored as `NUMERIC(39, 0)`, which holds every value up to `2^127 - 1`
 exactly, and read back as the integer string. A `CHECK` keeps `committed` from

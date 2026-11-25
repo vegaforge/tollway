@@ -76,6 +76,16 @@ function deterministicAdapter() {
       async findChannelSettlement() {
         return null;
       },
+      // Tenant isolation never recovers a channel; these fail loudly if it does.
+      async getState() {
+        throw new Error("the isolation tests do not read recovery state");
+      },
+      async startClose() {
+        throw new Error("the isolation tests do not start a funder close");
+      },
+      async refund() {
+        throw new Error("the isolation tests do not refund");
+      },
     };
   };
 
@@ -244,17 +254,18 @@ async function seedTenantB(harness: Awaited<ReturnType<typeof buildHarness>>) {
     network: "testnet",
   });
 
-  for (const [expectedVersion, daily] of [
-    [null, "50000"],
-    [1, "90000"],
+  for (const [ifMatch, daily] of [
+    [undefined, "50000"],
+    ['"v1"', "90000"],
   ] as const) {
     const putPolicy = await app.request("/v1/agents/agent-bravo/policy", {
       method: "PUT",
-      headers: { ...bearer(KEY_B), "Content-Type": "application/json" },
-      body: JSON.stringify({
-        policy: { policyVersion: 1, budgets: { daily } },
-        expectedVersion,
-      }),
+      headers: {
+        ...bearer(KEY_B),
+        "Content-Type": "application/json",
+        ...(ifMatch === undefined ? {} : { "If-Match": ifMatch }),
+      },
+      body: JSON.stringify({ policyVersion: 1, budgets: { daily } }),
     });
     expect(putPolicy.status).toBe(200);
   }
@@ -288,7 +299,7 @@ async function seedTenantB(harness: Awaited<ReturnType<typeof buildHarness>>) {
 describe("table-driven cross-tenant route isolation", () => {
   type DirectCrossTenantCase = {
     name: string;
-    method: "GET" | "POST" | "PUT";
+    method: "GET" | "POST" | "PUT" | "DELETE";
     path: (seeded: Awaited<ReturnType<typeof seedTenantB>>) => string;
     body?: (
       seeded: Awaited<ReturnType<typeof seedTenantB>>,
@@ -360,6 +371,18 @@ describe("table-driven cross-tenant route isolation", () => {
       name: "GET /v1/agents/{agentId}/policy/versions for tenant B's agent",
       method: "GET",
       path: (s) => `/v1/agents/${s.agentId}/policy/versions`,
+      expectedStatus: 404,
+    },
+    {
+      name: "GET /v1/agents/{agentId}/policy/versions/{version} for tenant B's agent",
+      method: "GET",
+      path: (s) => `/v1/agents/${s.agentId}/policy/versions/2`,
+      expectedStatus: 404,
+    },
+    {
+      name: "DELETE /v1/agents/{agentId}/policy on tenant B's agent",
+      method: "DELETE",
+      path: (s) => `/v1/agents/${s.agentId}/policy`,
       expectedStatus: 404,
     },
     {
@@ -572,7 +595,7 @@ describe("table-driven cross-tenant route isolation", () => {
       await harness.app.request(`/v1/agents/${agentId}/policy`, {
         method: "PUT",
         headers: { ...bearer(KEY_A), "Content-Type": "application/json" },
-        body: JSON.stringify({ policy: { policyVersion: 1, budgets: { daily: "100" } } }),
+        body: JSON.stringify({ policyVersion: 1, budgets: { daily: "100" } }),
       });
     }
 
@@ -647,29 +670,22 @@ describe("table-driven cross-tenant route isolation", () => {
       scopes: ["read", "ingest", "admin"],
     });
 
-    // Attempting to inject orgId in the policy body fails strict schema validation (400).
+    // Injecting orgId into the policy document fails the strict policy schema (422).
     const injectedOrg = await harness.app.request(`/v1/agents/${seeded.agentId}/policy`, {
       method: "PUT",
-      headers: { ...bearer(KEY_A), "Content-Type": "application/json" },
-      body: JSON.stringify({
-        orgId: TENANT_B.orgId,
-        policy: { policyVersion: 1 },
-        expectedVersion: 2,
-      }),
+      headers: { ...bearer(KEY_A), "Content-Type": "application/json", "If-Match": '"v2"' },
+      body: JSON.stringify({ orgId: TENANT_B.orgId, policyVersion: 1 }),
     });
-    expect(injectedOrg.status).toBe(400);
+    expect(injectedOrg.status).toBe(422);
 
-    // Targeting tenant B's current version (2) under tenant A's key fails optimistic concurrency (409)
+    // Naming tenant B's current version (2) under tenant A's key fails the compare-and-set (412)
     // because tenant A has no policy for agent-bravo, and leaves tenant B's policy intact.
     const crossVersionAttempt = await harness.app.request(`/v1/agents/${seeded.agentId}/policy`, {
       method: "PUT",
-      headers: { ...bearer(KEY_A), "Content-Type": "application/json" },
-      body: JSON.stringify({
-        policy: { policyVersion: 1, budgets: { daily: "1" } },
-        expectedVersion: 2,
-      }),
+      headers: { ...bearer(KEY_A), "Content-Type": "application/json", "If-Match": '"v2"' },
+      body: JSON.stringify({ policyVersion: 1, budgets: { daily: "1" } }),
     });
-    expect(crossVersionAttempt.status).toBe(409);
+    expect(crossVersionAttempt.status).toBe(412);
 
     const intactB = await (
       await harness.app.request(`/v1/agents/${seeded.agentId}/policy`, { headers: bearer(KEY_B) })
@@ -688,9 +704,11 @@ describe("table-driven cross-tenant route isolation", () => {
       .sort();
 
     expect(allV1Operations).toEqual([
+      "DELETE /v1/agents/{agentId}/policy",
       "GET /v1/admin/tenants",
       "GET /v1/agents/{agentId}/policy",
       "GET /v1/agents/{agentId}/policy/versions",
+      "GET /v1/agents/{agentId}/policy/versions/{version}",
       "GET /v1/audit",
       "GET /v1/channels",
       "GET /v1/channels/{id}",
@@ -853,10 +871,7 @@ describe("id collisions across orgs and projects", () => {
       const res = await app.request("/v1/agents/shared-agent/policy", {
         method: "PUT",
         headers: { ...bearer(key), "Content-Type": "application/json" },
-        body: JSON.stringify({
-          policy: { policyVersion: 1, budgets: { daily } },
-          expectedVersion: null,
-        }),
+        body: JSON.stringify({ policyVersion: 1, budgets: { daily } }),
       });
       expect(res.status).toBe(200);
       expect(await res.json()).toMatchObject({ version: 1, policy: { budgets: { daily } } });

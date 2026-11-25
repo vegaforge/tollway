@@ -17,6 +17,7 @@ PUBLISHABLE=(
   packages/adapter-fastify
   packages/adapter-hono
   packages/adapter-next
+  packages/ai-sdk
   packages/channels
   packages/cli
   packages/client

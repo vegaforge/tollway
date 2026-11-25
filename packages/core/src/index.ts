@@ -129,6 +129,7 @@ export {
 } from "./receipt/signer.js";
 export { RollingSum, type RollingSumOptions } from "./rolling-sum.js";
 export {
+  type ChannelThreshold,
   createDefaultRouter,
   type DefaultRouterOptions,
   type ModelRouter,

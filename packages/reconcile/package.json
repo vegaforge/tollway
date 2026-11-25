@@ -23,6 +23,16 @@
         "types": "./dist/index.d.cts",
         "default": "./dist/index.cjs"
       }
+    },
+    "./stellar": {
+      "import": {
+        "types": "./dist/stellar.d.ts",
+        "default": "./dist/stellar.js"
+      },
+      "require": {
+        "types": "./dist/stellar.d.cts",
+        "default": "./dist/stellar.cjs"
+      }
     }
   },
   "files": [
@@ -35,9 +45,14 @@
     "typecheck": "tsc --noEmit"
   },
   "dependencies": {
-    "@vegaforge/tollway-core": "workspace:*"
+    "@stellar/mpp": "0.7.1",
+    "@stellar/stellar-sdk": "16.4.1",
+    "@vegaforge/tollway-core": "workspace:*",
+    "mppx": "0.8.19",
+    "zod": "^4.6.7"
   },
   "devDependencies": {
+    "@types/node": "^22.20.5",
     "fast-check": "^4.10.3",
     "tsup": "^9.0.0",
     "typescript": "^5.9.3",

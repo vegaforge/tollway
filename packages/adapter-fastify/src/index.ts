@@ -31,6 +31,9 @@ type SettledReceipt = Extract<GateOutcome, { kind: "settled" }>["receipt"];
 /** Where the verified receipt is stashed on the Fastify request for downstream handlers. */
 export const RECEIPT_REQUEST_KEY = "tollwayReceipt";
 
+/** The one body every adapter returns when the gate itself throws (#107). */
+const GATE_ERROR_BODY = { error: "payment backend unavailable" } as const;
+
 declare module "fastify" {
   interface FastifyRequest {
     tollwayReceipt?: SettledReceipt;
@@ -133,17 +136,21 @@ function hasBody(request: FastifyRequest): boolean {
   );
 }
 
-function fastifyBody(request: FastifyRequest): RequestBodySource {
+/**
+ * The body source for the gate. When the request carried a body but
+ * `fastifyRawBody` did not keep its bytes (the hook is not registered), it
+ * returns undefined: a route with `bindBody` then fails closed with
+ * `body-not-provided` (500), and a route without it never reads the body.
+ * Register `fastifyRawBody()` as a preParsing hook for body-bound routes.
+ */
+function fastifyBody(request: FastifyRequest): RequestBodySource | undefined {
+  const bytes = request.tollwayRawBody;
+  if (bytes === undefined) {
+    // Fastify does not run preParsing for a request without a body.
+    return hasBody(request) ? undefined : { read: async () => new Uint8Array(0) };
+  }
   return {
     async read(maxBytes) {
-      const bytes = request.tollwayRawBody;
-      if (bytes === undefined) {
-        // Fastify does not run preParsing for a request without a body.
-        if (!hasBody(request)) return new Uint8Array(0);
-        throw new Error(
-          "this route binds the request body; register fastifyRawBody() as a preParsing hook so the raw bytes are kept",
-        );
-      }
       if (bytes.byteLength > maxBytes) throw new BodyTooLargeError(maxBytes);
       return bytes;
     },
@@ -159,7 +166,11 @@ function fastifyBody(request: FastifyRequest): RequestBodySource {
  */
 export function fastifyPaywall(gate: Gate): preHandlerHookHandler {
   return async function preHandler(request: FastifyRequest, reply: FastifyReply): Promise<void> {
-    await runGate(gate, request, reply);
+    try {
+      await runGate(gate, request, reply);
+    } catch {
+      if (!reply.sent) await reply.status(502).send(GATE_ERROR_BODY);
+    }
   };
 }
 
@@ -168,7 +179,11 @@ export function fastifyRouteTable(table: RouteTable): preHandlerHookHandler {
   return async function preHandler(request: FastifyRequest, reply: FastifyReply): Promise<void> {
     const match = table.match(request.method, request.url);
     if (!match) return;
-    await runGate(match.gate, request, reply);
+    try {
+      await runGate(match.gate, request, reply);
+    } catch {
+      if (!reply.sent) await reply.status(502).send(GATE_ERROR_BODY);
+    }
   };
 }
 

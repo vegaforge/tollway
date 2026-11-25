@@ -105,8 +105,12 @@ describe("Fastify: body binding (#164)", () => {
   });
 
   it("fails closed when fastifyRawBody is not registered", async () => {
-    const { post } = await build({ capture: false });
-    expect((await post(PROMPT_A)).statusCode).toBe(500);
+    const { post, calls } = await build({ capture: false });
+    const response = await post(PROMPT_A);
+    // A server misconfiguration, not an unavailable payment backend.
+    expect(response.statusCode).toBe(500);
+    expect(response.json()).toMatchObject({ error: { code: "body-not-provided" } });
+    expect(calls()).toBe(0);
   });
 });
 
